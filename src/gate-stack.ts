@@ -59,9 +59,10 @@
 // warning threshold, and `step.timeoutMs` stays the one bound this module has.
 // Each real step also snapshots its target container's cgroup-v2 memory peak
 // and cgroup/Podman OOM-kill evidence (#141). Container generations record the
-// same facts immediately before replacement or final pod teardown; the teardown callback
-// turns those records into events even when initial bringup never returns a
-// stack handle. Missing delegation is absence, not zero, and none of these
+// same facts immediately before replacement or final pod teardown; the step's
+// duration clock stops before that snapshot begins. The teardown callback turns
+// those records into events even when initial bringup never returns a stack
+// handle. Missing delegation is absence, not zero, and none of these
 // measurements changes the gate verdict.
 //
 // A step that exceeds its bound is a gate RED, not a HARD-ERROR — same
@@ -2251,11 +2252,12 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
       );
     } catch (err) {
       if (err instanceof ContainerBringupError) {
+        const durationMs = tIssue();
         const resources = await ctx.resourceReader(err.containerName);
         steps.push({
           name: `container:${err.containerName}`,
           ok: false,
-          durationMs: tIssue(),
+          durationMs,
           ...resources,
         });
         return withContainerLogs(
@@ -2308,11 +2310,12 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     steps.push({ name: "containers:attempt", ok: true, durationMs: tAttempt() });
   } catch (err) {
     if (err instanceof ContainerBringupError) {
+      const durationMs = tAttempt();
       const resources = await ctx.resourceReader(err.containerName);
       steps.push({
         name: `container:${err.containerName}`,
         ok: false,
-        durationMs: tAttempt(),
+        durationMs,
         ...resources,
       });
       return withContainerLogs(
@@ -2354,11 +2357,12 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
       step.timeoutMs,
       ctx.onStepOutput,
     );
+    const durationMs = tStep();
     const resources = await ctx.resourceReader(containerName);
     steps.push({
       name: step.name,
       ok: boundedOk(r),
-      durationMs: tStep(),
+      durationMs,
       ...resources,
     });
     if (boundedOk(r)) {

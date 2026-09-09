@@ -180,10 +180,18 @@ describe.runIf(available)("gate stack against real podman", () => {
         onTestFinished,
       );
       const teardowns: ContainerTeardown[] = [];
-      const containerResources = vi.fn(async () => ({
-        peakMemoryBytes: 4096,
-        oomKilled: false,
-      }));
+      let firstResourceReadMs: number | undefined;
+      const containerResources = vi.fn(async () => {
+        if (firstResourceReadMs === undefined) {
+          const started = Date.now();
+          await new Promise((resolve) => setTimeout(resolve, 3_000));
+          firstResourceReadMs = Date.now() - started;
+        }
+        return {
+          peakMemoryBytes: 4096,
+          oomKilled: false,
+        };
+      });
 
       const stack = hold(
         await startStack({
@@ -243,6 +251,9 @@ describe.runIf(available)("gate stack against real podman", () => {
         peakMemoryBytes: 4096,
         oomKilled: false,
       });
+      expect(firstResourceReadMs).toBeDefined();
+      expect(green.steps.find((x) => x.name === "read-marker")!.durationMs)
+        .toBeLessThan(firstResourceReadMs!);
       // The whole run is at least as long as any one phase of it, and the
       // phases do not sum past it either — a cheap check that all six are on
       // the same clock.

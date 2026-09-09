@@ -222,11 +222,15 @@
 // and byte-verbatim stdout/stderr capture before judgement. The shared end
 // classification lives in agent-run-end.ts; the lifecycles stay different.
 // A held `sleep infinity` pid 1 keeps the cgroup live while the fresh agent runs
-// through `podman exec`. After a successful start, ending the Podman client
-// does not end that exec, so Sandbar explicitly signals every non-PID-1 process
-// in this fresh container and waits for that bounded reaper before it reads
-// memory.peak/memory.events and removes the container (#141). This is not the
-// issue sandbox's resumable conversation: only the resource lifetime is held.
+// through `podman exec`. A successful start immediately registers its removal
+// with the signal-cleanup registry. Ending the Podman client does not end that
+// exec, so ordinary teardown explicitly signals every non-PID-1 process in
+// this fresh container and waits for that bounded reaper before it reads
+// memory.peak/memory.events, removes the container and withdraws the cleanup
+// entry (#141). This is not the issue sandbox's resumable conversation: only
+// the resource lifetime is held. Once the agent exec has been captured, that
+// result remains authoritative; reaping, measurement and removal failures are
+// cleanup complaints rather than landing decisions.
 // `captureAgentRun` keeps both raw streams for the byte-verbatim attempt log,
 // then `parseCapturedAgentRun` puts only parsed agent speech in the output
 // register that the resolve promise parser may read. It answers with the exit
@@ -329,11 +333,12 @@ import {
   readContainerResources,
   systemContainerResourceDeps,
 } from "./container-resources.js";
-import { reportCleanupNotice } from "./cleanup.js";
+import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
 import {
   boundedRuntime,
   boundedRuntimeOk,
   type BoundedRuntime,
+  type BoundedRuntimeResult,
   RUNTIME,
 } from "./runtime.js";
 import { fetchIssueText } from "./issue-anchor.js";
@@ -2259,10 +2264,12 @@ export type RealAdapterDeps = {
   // merge phase, so a single bringup covers every branch in the cycle.
   readonly runStackGate: () => Promise<GateResult>;
   // Process seams for the resolve container lifecycle. Production uses the
-  // shared bounded runtime and byte-verbatim capture; tests inject both to pin
-  // inspect-before-remove ordering without pretending a stopped cgroup lives.
+  // shared bounded runtime, byte-verbatim capture and disposable registry;
+  // tests inject them to pin inspect/removal and signal-cleanup ordering
+  // without pretending a stopped cgroup lives.
   readonly podman?: BoundedRuntime;
   readonly captureResolveProcess?: typeof captureAgentRun;
+  readonly registerResolveCleanup?: typeof registerDisposable;
 };
 
 type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" | "peakContext" | "rateLimit" | "cause" | "verdict">;
@@ -2559,6 +2566,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const cwd = deps.cwd;
   const podman = deps.podman ?? boundedRuntime;
   const captureResolveProcess = deps.captureResolveProcess ?? captureAgentRun;
+  const registerResolveCleanup = deps.registerResolveCleanup ?? registerDisposable;
   // No resume semantics: every resolve attempt is a fresh container whose
   // prompt carries the complete state.
   const agentProvider = buildAgentProvider(deps.mergerAgent, deps.mergerModelId, {
@@ -2750,6 +2758,12 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         botEmail: deps.botEmail,
       });
       let containerStarted = false;
+      let removePromise: Promise<BoundedRuntimeResult> | undefined;
+      let disposeContainer: (() => void) | undefined;
+      const removeContainer = (): Promise<BoundedRuntimeResult> => {
+        removePromise ??= podman(CONTAINER_RM_ARGS(container), CONTROL_TIMEOUT_MS);
+        return removePromise;
+      };
       const processResult = await Promise.resolve().then(async () => {
         const started = await captureResolveProcess(RUNTIME, args, "", {
           container,
@@ -2757,6 +2771,15 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         });
         if (started.exitCode !== 0 || started.end !== "exit") return started;
         containerStarted = true;
+        disposeContainer = registerResolveCleanup(async () => {
+          const removed = await removeContainer();
+          if (!boundedRuntimeOk(removed)) {
+            throw new SandbarError(
+              `merger: failed to remove resolve container '${container}': ` +
+                (removed.timedOut ? "podman rm timed out" : removed.errorMessage),
+            );
+          }
+        });
         return captureResolveProcess(
           RUNTIME,
           buildResolveExecArgv(container, command.command),
@@ -2789,8 +2812,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         readContainerResources(container, systemContainerResourceDeps(podman)),
       ]);
       const removal = await Promise.allSettled([
-        podman(CONTAINER_RM_ARGS(container), CONTROL_TIMEOUT_MS),
+        removeContainer(),
       ]);
+      disposeContainer?.();
       const removed = removal[0];
       const removalFailure = removed?.status === "rejected"
         ? removed.reason
@@ -2828,21 +2852,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       ].filter((failure): failure is { readonly message: string; readonly cause: unknown } =>
         failure !== undefined,
       );
-      const startFailed = "run" in processResult && !containerStarted;
-      const primaryFailure = "failure" in processResult
-        ? processResult.failure
-        : startFailed
-          ? undefined
-          : cleanupFailures[0]?.cause;
-      const secondaryFailures = primaryFailure === undefined
-        ? cleanupFailures
-        : "failure" in processResult
-          ? cleanupFailures
-          : cleanupFailures.slice(1);
-      for (const failure of secondaryFailures) {
+      for (const failure of cleanupFailures) {
         await reportCleanupNotice("cleanup-failure", failure.message, failure.cause);
       }
-      if (primaryFailure !== undefined) throw primaryFailure;
       if ("failure" in processResult) throw processResult.failure;
       const resources = measurement?.status === "fulfilled" ? measurement.value : {};
       return parseCapturedAgentRun({ ...processResult.run, ...resources }, agentProvider);
