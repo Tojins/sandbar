@@ -390,6 +390,10 @@ export type StackOptions = {
   // Test seam for #141's host-side cgroup/inspect read. Production keeps all
   // Podman calls on this module's bounded seam.
   readonly containerResources?: (containerName: string) => Promise<ContainerResources>;
+  // Test seam for teardown failure arbitration. Production uses the same
+  // bounded Podman call as every other control-plane operation; injection lets
+  // a test perform the removals and independently classify one result as red.
+  readonly teardownPodman?: typeof boundedPodman;
   readonly onContainerTeardown?: (
     record: ContainerTeardown,
   ) => void | Promise<void>;
@@ -975,8 +979,9 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // list stays empty, and sandbar reports a clean teardown of a pod that is
     // still running.
     const failures: string[] = [];
+    const teardownPodman = opts.teardownPodman ?? boundedPodman;
     const attempt = async (args: string[]): Promise<void> => {
-      const r = await boundedPodman(args, CONTROL_TIMEOUT_MS);
+      const r = await teardownPodman(args, CONTROL_TIMEOUT_MS);
       if (boundedOk(r)) return;
       failures.push(
         `  ${RUNTIME} ${args.join(" ")}\n    ${

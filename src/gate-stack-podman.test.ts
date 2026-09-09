@@ -24,7 +24,6 @@ import {
 } from "./gate-stack-podman.test-util.js";
 import {
   networkNameFor,
-  podNameFor,
   scopedResourcePrefix,
   stackContainerNameFor,
 } from "./naming.js";
@@ -93,7 +92,7 @@ describe.runIf(available)("gate stack against real podman", () => {
       const reported: string[] = [];
       const eventFailures: Error[] = [];
       const notices: Array<{ message: string; cause: unknown }> = [];
-      let removedPod = false;
+      let removalFailureInjected = false;
       const stack = hold(await startStack({
         stackId,
         scope: SCOPE,
@@ -114,13 +113,22 @@ describe.runIf(available)("gate stack against real podman", () => {
         }),
         containerResources: async (name) => {
           if (name.endsWith("-runner")) {
-            await exec(RUNTIME, [
-              "pod", "rm", "-f", "-t", "0", podNameFor(SCOPE, stackId),
-            ]);
-            removedPod = true;
             throw measurementFailure;
           }
           return { peakMemoryBytes: 1024 };
+        },
+        teardownPodman: async (args) => {
+          const removed = await exec(RUNTIME, [...args]);
+          const injectedFailure = args[0] === "pod";
+          if (injectedFailure) removalFailureInjected = true;
+          return {
+            stdout: removed.stdout,
+            stderr: removed.stderr,
+            exitCode: injectedFailure ? 125 : 0,
+            timedOut: false,
+            maxBufferExceeded: false,
+            errorMessage: injectedFailure ? "injected pod removal failure" : "",
+          };
         },
         onContainerTeardown: async (record) => {
           reported.push(record.name);
@@ -142,7 +150,7 @@ describe.runIf(available)("gate stack against real podman", () => {
       } finally {
         restoreReporter();
       }
-      expect(removedPod).toBe(true);
+      expect(removalFailureInjected).toBe(true);
       expect(failure).toBeInstanceOf(Error);
       expect((failure as Error).message).toMatch(/failed, leaking podman resources/);
       expect(failure).not.toBe(measurementFailure);
