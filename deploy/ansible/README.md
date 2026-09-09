@@ -67,10 +67,11 @@ The role, `roles/sandbar`, provides:
     killed at once, leaving the ten-minute lease dangling and the next start
     refused.
 - a second **systemd user unit**, `sandbar-ui.service`, running the standalone
-  `sandbar ui` reader on loopback. It starts after the daemon's refresh and is
-  part of the daemon for explicit stops and restarts, but it stays up when the
-  daemon crashes so the report can show that crash. It has no install step and
-  no automatic restart;
+  `sandbar ui` reader on loopback. It starts after the daemon's refresh, a
+  daemon start pulls it in (a `Wants=` drop-in on the daemon unit, installed
+  with the UI feature), and it is part of the daemon for explicit stops and
+  restarts, but it stays up when the daemon crashes so the report can show
+  that crash. It has no install step and no automatic restart;
 - **Caddy**, enabled as a system service, serving plain HTTP on
   `sandbar_ui_http_port` (default 80) and proxying to the standalone reader on
   `127.0.0.1:sandbar_ui_port` (default 7332). Set `sandbar_ui_port: 0` to
@@ -130,7 +131,7 @@ readable by every developer there, which is the opposite of the point.
 All as the service user:
 
 ```sh
-systemctl --user start sandbar sandbar-ui  # first start, and after a deliberate stop
+systemctl --user start sandbar        # first start, and after a deliberate stop; pulls sandbar-ui in
 systemctl --user stop sandbar         # SIGTERM: sandbar's own cleanup, up to sandbar_stop_timeout_sec
 systemctl --user status sandbar sandbar-ui
 journalctl --user -u sandbar -u sandbar-ui -f

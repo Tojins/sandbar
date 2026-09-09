@@ -171,6 +171,16 @@ describe("deploy/ansible standalone UI templates", () => {
     );
   });
 
+  it("makes a daemon start pull the reader in, from the UI feature's side", () => {
+    // PartOf= carries stops and restarts only; without this a start after a
+    // deliberate stop left Caddy answering 502. The drop-in lives in ui.yml so
+    // a host with the UI disabled never names a unit it does not have.
+    expect(UI_TASKS).toMatch(
+      /- name: Make a daemon start pull the standalone UI in\n  ansible\.builtin\.copy:\n    dest: "\{\{ sandbar_home \}\}\/\.config\/systemd\/user\/\{\{ sandbar_service_name \}\}\.service\.d\/ui\.conf"\n    content: \|\n      \[Unit\]\n      Wants=sandbar-ui\.service\n/,
+    );
+    expect(render(DAEMON_TEMPLATE, VARS)).not.toMatch(/Wants=/);
+  });
+
   it("installs and starts Caddy, reloading it when its config changes", () => {
     expect(UI_TASKS).toMatch(
       /- name: Install Caddy\n  ansible\.builtin\.apt:\n    name: caddy\n    state: present/,

@@ -12,6 +12,29 @@
     group: "{{ sandbar_user }}"
     mode: "0644"
 
+# PartOf= in the reader's unit carries only stops and restarts across; a
+# daemon START does not pull the reader in, so `systemctl --user start sandbar`
+# after a stop left Caddy answering 502 (2026-09-09). A drop-in on the daemon
+# unit, owned by the UI feature so a host with sandbar_ui_port 0 never names a
+# unit it lacks, makes the daemon want the reader on every start.
+- name: Create the daemon unit's drop-in directory
+  ansible.builtin.file:
+    path: "{{ sandbar_home }}/.config/systemd/user/{{ sandbar_service_name }}.service.d"
+    state: directory
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0755"
+
+- name: Make a daemon start pull the standalone UI in
+  ansible.builtin.copy:
+    dest: "{{ sandbar_home }}/.config/systemd/user/{{ sandbar_service_name }}.service.d/ui.conf"
+    content: |
+      [Unit]
+      Wants=sandbar-ui.service
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0644"
+
 - name: Enable the standalone UI unit at boot
   ansible.builtin.systemd_service:
     name: sandbar-ui.service
