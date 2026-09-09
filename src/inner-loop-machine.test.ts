@@ -325,7 +325,10 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
     expect(third.attempt).toBe(3);
     expect(third.failureTrace).toBe("trace B");
     expect(third.extraReprompt).toBeNull();
-    expect(third.latestReviewerProse).toBe("discarded");
+    expect(third.latestReviewerFeedback).toEqual({
+      disposition: "APPROVED-CORRECTNESS-SKIPPED",
+      prose: "discarded",
+    });
 
     expect(verdict).toEqual({ type: "DONE" });
   });
@@ -341,7 +344,10 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
     );
     expect(rejected.state.qualityFailures).toBe(1);
     expect(rejected.state.gateFailures).toBe(1);
-    expect(asImpl(rejected.action).latestReviewerProse).toBe("keep me");
+    expect(asImpl(rejected.action).latestReviewerFeedback).toEqual({
+      disposition: "CHANGES-REQUESTED",
+      prose: "keep me",
+    });
     expect(asImpl(rejected.action).failureTrace).toBe("trace X");
   });
 
@@ -368,12 +374,15 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
       impl(complete),
       judged(gate1Ok, approved()),
     ]);
-    expect(asImpl(actions[4]!).latestReviewerProse).toBe("quality approved");
+    expect(asImpl(actions[4]!).latestReviewerFeedback).toEqual({
+      disposition: "APPROVED-CORRECTNESS-SKIPPED",
+      prose: "quality approved",
+    });
   });
 });
 
 describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
-  it("one impl + CHANGES-REQUESTED → next impl carries latestReviewerProse + clears trace", () => {
+  it("one impl + CHANGES-REQUESTED → next impl carries typed feedback + clears trace", () => {
     const { actions, verdict } = drive(defaultOpts, [
       impl(complete),
       judged(gate1Ok, changes("- naming nit in foo.ts")),
@@ -392,7 +401,7 @@ describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
       { kind: "run-implementer" }
     >;
     expect(secondImpl.attempt).toBe(2);
-    expect(secondImpl.latestReviewerProse).toBe("- naming nit in foo.ts");
+    expect(secondImpl.latestReviewerFeedback?.prose).toBe("- naming nit in foo.ts");
     expect(secondImpl.failureTrace).toBe("");
     expect(secondImpl.extraReprompt).toBeNull();
 
@@ -442,7 +451,10 @@ describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
     >;
     expect(implAfterGateRed.attempt).toBe(3);
     expect(implAfterGateRed.failureTrace).toBe("trace X");
-    expect(implAfterGateRed.latestReviewerProse).toBe("red-round quality approved");
+    expect(implAfterGateRed.latestReviewerFeedback).toEqual({
+      disposition: "APPROVED-CORRECTNESS-SKIPPED",
+      prose: "red-round quality approved",
+    });
   });
 
   it("latest reviewer prose replaces an older one on a subsequent CHANGES-REQUESTED", () => {
@@ -458,7 +470,7 @@ describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
       LoopAction,
       { kind: "run-implementer" }
     >;
-    expect(finalImpl.latestReviewerProse).toBe("new prose");
+    expect(finalImpl.latestReviewerFeedback?.prose).toBe("new prose");
   });
 });
 
@@ -576,7 +588,7 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
     expect(next.extraReprompt).toBe(reviewerHarnessFailedReprompt(true));
     // The whole of #41: the harness's error text is not reviewer feedback, and
     // an implementer must not be handed one as the other.
-    expect(next.latestReviewerProse).toBeNull();
+    expect(next.latestReviewerFeedback).toBeNull();
     expect(next.extraReprompt).not.toContain("podman");
     expect(next.extraReprompt).not.toContain("idle 600s");
   });
@@ -591,19 +603,36 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
       judged(gate1Ok, approved()),
     ]);
     const next = asImpl(actions[4]!);
-    expect(next.latestReviewerProse).toBe("round 1: rename the thing");
-    expect(next.latestReviewerProse).not.toContain("emitted nothing");
+    expect(next.latestReviewerFeedback?.prose).toBe("round 1: rename the thing");
+    expect(next.latestReviewerFeedback?.prose).not.toContain("emitted nothing");
 
-    // And the note rendered beside it must not contradict it. `prompt.ts`
-    // renders that prose under "## Previous reviewer feedback
-    // (CHANGES-REQUESTED)" with "Address the reviewer's concerns" beneath it,
-    // so a note claiming there is no reviewer feedback above would be false in
-    // exactly the case this issue is about — an implementer told something
-    // untrue about what the reviewer said.
-    expect(next.extraReprompt).toBe(reviewerHarnessFailedReprompt(true));
+    // And the note rendered beside it must not contradict either disposition
+    // of retained reviewer prose.
+    expect(next.extraReprompt).toBe(
+      reviewerHarnessFailedReprompt(true, "CHANGES-REQUESTED"),
+    );
     expect(next.extraReprompt).not.toContain("there is none");
-    expect(next.extraReprompt).toContain("Previous reviewer feedback");
-    expect(next.extraReprompt).toContain("earlier round's");
+    expect(next.extraReprompt).toContain("retained CHANGES-REQUESTED report");
+    expect(next.extraReprompt).toContain("concerns still stand");
+  });
+
+  it("describes a retained red-round approval as informational after a harness failure", () => {
+    const { actions } = drive(defaultOpts, [
+      impl(complete),
+      judged(gate1Red("red"), approved("quality approved")),
+      impl(complete),
+      judged(gate1Ok, harnessFailed("reviewer unavailable")),
+      impl(complete),
+      judged(gate1Ok, approved()),
+    ]);
+    const next = asImpl(actions[4]!);
+    expect(next.latestReviewerFeedback).toEqual({
+      disposition: "APPROVED-CORRECTNESS-SKIPPED",
+      prose: "quality approved",
+    });
+    expect(next.extraReprompt).toContain("retained quality approval");
+    expect(next.extraReprompt).toContain("informational");
+    expect(next.extraReprompt).not.toContain("what to address");
   });
 
   it("carries no gate trace forward — gate-1 was green to reach the reviewer", () => {
@@ -632,6 +661,40 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
       failureTrace: "second",
       latestReviewerProse: null,
       budgetExhausted: null,
+      strandedHead: null,
+    });
+  });
+
+  it("a second harness failure under red carries both failure traces", () => {
+    const { verdict } = drive(defaultOpts, [
+      impl(complete),
+      judged(gate1Ok, harnessFailed("first harness failure")),
+      impl(complete),
+      judged(gate1Red("tests failed"), harnessFailed("second harness failure")),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "reviewer-harness-failed",
+      failureTrace:
+        "Gate-1 failure:\ntests failed\n\n" +
+        "Reviewer harness failure:\nsecond harness failure",
+      latestReviewerProse: null,
+      budgetExhausted: null,
+      strandedHead: null,
+    });
+  });
+
+  it("a first harness failure under the exhausting red gate parks on the gate budget", () => {
+    const { verdict } = drive({ ...defaultOpts, maxGateRounds: 1 }, [
+      impl(complete),
+      judged(gate1Red("only red"), harnessFailed("reviewer timed out")),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "gate-red",
+      failureTrace: "only red",
+      latestReviewerProse: null,
+      budgetExhausted: { budget: "gate", roundsUsed: 1 },
       strandedHead: null,
     });
   });
@@ -769,7 +832,10 @@ describe("inner-loop-machine — review-round budget exhaustion", () => {
     );
     expect(result.action).toMatchObject({
       kind: "run-implementer",
-      latestReviewerProse: "add the missing standards test",
+      latestReviewerFeedback: {
+        disposition: "CHANGES-REQUESTED",
+        prose: "add the missing standards test",
+      },
     });
   });
 });
@@ -812,6 +878,34 @@ describe("inner-loop-machine — NO-SIGNAL re-prompting", () => {
 });
 
 describe("inner-loop-machine — quality and gate budget exhaustion", () => {
+  it("red plus quality rejection exhausts the staggered gate budget", () => {
+    const { verdict } = drive(
+      { ...defaultOpts, maxGateRounds: 1, maxQualityRounds: 2 },
+      [impl(complete), judged(gate1Red("red"), qualityChanges("reject"))],
+    );
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "gate-red",
+      failureTrace: "red",
+      latestReviewerProse: "reject",
+      budgetExhausted: { budget: "gate", roundsUsed: 1 },
+      strandedHead: null,
+    });
+  });
+
+  it("red plus quality rejection exhausts the staggered quality budget", () => {
+    const { verdict } = drive(
+      { ...defaultOpts, maxGateRounds: 2, maxQualityRounds: 1 },
+      [impl(complete), judged(gate1Red("red"), qualityChanges("reject"))],
+    );
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN-REVIEW",
+      cause: "quality-budget-exhausted",
+      roundsUsed: 1,
+      latestReviewerProse: "reject",
+    });
+  });
+
   it("repeated gate-1 red exhausts the gate budget with the last trace and review", () => {
     const { verdict } = drive(defaultOpts, [
       impl(complete),
@@ -1340,7 +1434,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
       expect([
         result.action.extraReprompt,
         result.action.failureTrace,
-        result.action.latestReviewerProse,
+        result.action.latestReviewerFeedback?.prose,
       ].join("\n")).toContain(routeContext);
       expect(result.state.lastOffBranch).toBe(false);
     },

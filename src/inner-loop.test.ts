@@ -388,7 +388,7 @@ describe("silent implementer attempt policy (#116)", () => {
         attempt: 1,
         failureTrace: null,
         extraReprompt: null,
-        latestReviewerProse: null,
+        latestReviewerFeedback: null,
       },
       ctx,
     );

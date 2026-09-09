@@ -1,8 +1,9 @@
 // Prompt assembly for the inner-loop roles:
 // project anchor (shared verbatim by both agents), issue anchor
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
-// branch diff, sandbox-stack report #44, gate trace, reviewer prose, and the
-// same coding standards the reviewer applies plus a live
+// branch diff, sandbox-stack report #44, gate trace, typed reviewer feedback
+// (including an approved quality pass whose correctness pass was skipped), and
+// the same coding standards the reviewer applies plus a live
 // pre-promise diff checklist (#78); reviewer: diff + commits, split into a
 // self-sufficient quality pass (tests and standards) and the correctness pass
 // gated on it (#19, #121), plus every earlier successful review round (#88).
@@ -41,6 +42,7 @@ import { promisify } from "node:util";
 import { SandbarError, isErrno, isExitCode } from "./errors.js";
 import type { PromptExtension } from "./config.js";
 import type { IssueBranchBase } from "./git-ops.js";
+import type { ReviewerFeedback } from "./inner-loop-machine.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
@@ -62,6 +64,7 @@ const IMPLEMENTER_TPL = loadTemplate("implementer");
 const UI_CHECK_TPL = loadTemplate("ui-check");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
+const IMPLEMENTER_APPROVED_QUALITY_TPL = loadTemplate("implementer-approved-quality");
 const IMPLEMENTER_ESCALATION_TPL = loadTemplate("implementer-escalation");
 const IMPLEMENTER_SANDBOX_STACK_TPL = loadTemplate("implementer-sandbox-stack");
 const IMPLEMENTER_CHUNK_BASE_TPL = loadTemplate("implementer-chunk-base");
@@ -177,7 +180,7 @@ export type PromptInputs = {
   // Project history still comes from `ProjectAnchorOptions.sourceBranch`.
   readonly base: IssueBranchBase;
   readonly extraReprompt?: string;
-  readonly latestReviewerProse?: string;
+  readonly latestReviewerFeedback?: ReviewerFeedback;
   // Host addition to this role's prompt. A path is probed in `worktreePath`,
   // because a branch may add the file it asks the implementer to follow.
   readonly promptExtension?: PromptExtension;
@@ -445,7 +448,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     base,
     lastFailureTrace,
     extraReprompt,
-    latestReviewerProse,
+    latestReviewerFeedback,
     diff,
   } = inputs;
 
@@ -467,8 +470,13 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     ? render(IMPLEMENTER_GATE_FAILURE_TPL, { trace: lastFailureTrace })
     : "";
 
-  const reviewerFeedback = latestReviewerProse
-    ? render(IMPLEMENTER_REVIEWER_FEEDBACK_TPL, { prose: latestReviewerProse })
+  const reviewerFeedback = latestReviewerFeedback
+    ? render(
+        latestReviewerFeedback.disposition === "CHANGES-REQUESTED"
+          ? IMPLEMENTER_REVIEWER_FEEDBACK_TPL
+          : IMPLEMENTER_APPROVED_QUALITY_TPL,
+        { prose: latestReviewerFeedback.prose },
+      )
     : "";
 
   const sandboxStack = renderSandboxStackSlot(inputs.sandboxStack ?? []);

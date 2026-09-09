@@ -1372,8 +1372,8 @@ export async function runImplementer(
       base: ctx.base,
       promptExtension: config.promptExtensions?.implementer,
       ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
-      ...(action.latestReviewerProse !== null
-        ? { latestReviewerProse: action.latestReviewerProse }
+      ...(action.latestReviewerFeedback !== null
+        ? { latestReviewerFeedback: action.latestReviewerFeedback }
         : {}),
       sandboxStack: ctx.sandboxStatuses,
     },

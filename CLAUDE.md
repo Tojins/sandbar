@@ -105,9 +105,10 @@ default is unlimited, so existing hosts keep their prior concurrency.
    issue with the managed clone preserved. After a clean, on-branch
    COMPLETE, gate-1 and the quality reviewer run concurrently against the same
    commit (#123, #143). A reviewer write always parks; otherwise a red gate
-   keeps the quality verdict and its history, re-prompts with any rejection plus
-   the gate trace, and prevents correctness from being dispatched. A declared
-   specification gap remains run evidence (#108).
+   keeps the quality verdict and its history, re-prompts with the gate trace and
+   the retained report labelled as approval or rejection, and prevents
+   correctness from being dispatched. A declared specification gap remains run
+   evidence (#108).
    One review round
    is up to two sequential COLD calls (#19, #121): tests/standards first on
    `reviewerQualityAgent`/`reviewerQualityModelId`, then — only after its

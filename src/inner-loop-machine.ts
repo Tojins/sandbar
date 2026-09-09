@@ -37,7 +37,7 @@
 //
 // A reviewer that produced NO review is not a verdict (#41); that judgment is
 // reviewer-run.ts's. `reviewer-harness-failed` consumes no review round,
-// leaves `latestReviewerProse` untouched, and names itself in exhaustion
+// leaves retained reviewer feedback untouched, and names itself in exhaustion
 // rather than a rejection. The next implementer attempt is dispatched anyway
 // — unreviewed work must not read as DONE — with an orchestrator note,
 // not a finding. The SECOND harness failure anywhere in this inner loop
@@ -53,6 +53,13 @@ import type { UiCheckResult } from "./ui-check-parser.js";
 
 export const HARD_ERROR_MAX_RETRIES = 2;
 export const REVIEWER_HARNESS_FAILURE_LIMIT = 2;
+
+export type ReviewerFeedback = {
+  readonly disposition:
+    | "CHANGES-REQUESTED"
+    | "APPROVED-CORRECTNESS-SKIPPED";
+  readonly prose: string;
+};
 
 export type LoopPhase =
   | "needs-ui-check"
@@ -71,7 +78,9 @@ export type LoopState = {
   readonly correctnessFailures: number;
   readonly lastFailureTrace: string;
   readonly extraReprompt: string | null;
-  readonly latestReviewerProse: string | null;
+  // Includes disposition because paid-for quality prose under a red gate can
+  // be an approval even though correctness was deliberately skipped (#143).
+  readonly latestReviewerFeedback: ReviewerFeedback | null;
   // The dirty set that sent the PREVIOUS attempt back to commit its work, or
   // null if the last attempt didn't end that way. Only used to detect that an
   // attempt changed nothing — see onImplementerResult.
@@ -195,7 +204,7 @@ export type LoopAction =
       readonly attempt: number;
       readonly failureTrace: string;
       readonly extraReprompt: string | null;
-      readonly latestReviewerProse: string | null;
+      readonly latestReviewerFeedback: ReviewerFeedback | null;
     }
   | {
       readonly kind: "run-gate-and-reviewer";
@@ -325,7 +334,7 @@ export function initialState(opts: InitialStateOptions): LoopState {
     correctnessFailures: 0,
     lastFailureTrace: "",
     extraReprompt: null,
-    latestReviewerProse: null,
+    latestReviewerFeedback: null,
     lastDirtyPaths: null,
     lastOffBranch: false,
     reviewerHarnessFailures: 0,
@@ -340,7 +349,7 @@ export function initialAction(state: LoopState): LoopAction {
     attempt: state.attempt,
     failureTrace: state.lastFailureTrace,
     extraReprompt: state.extraReprompt,
-    latestReviewerProse: state.latestReviewerProse,
+    latestReviewerFeedback: state.latestReviewerFeedback,
   };
 }
 
@@ -505,7 +514,10 @@ function joinOrchestratorNotes(
 // from inside its sandbox, and an agent handed a failure it cannot fix will
 // try anyway. That text goes to the run log and, if this recurs, to the human
 // handoff, which are the two places someone can do something with it.
-export function reviewerHarnessFailedReprompt(gateOk: boolean): string {
+export function reviewerHarnessFailedReprompt(
+  gateOk: boolean,
+  priorDisposition: ReviewerFeedback["disposition"] | null = null,
+): string {
   return [
     "The code reviewer could not be run this round: every invocation returned",
     "no review at all. That is a fault in the orchestrator's harness, not a",
@@ -518,9 +530,19 @@ export function reviewerHarnessFailedReprompt(gateOk: boolean): string {
     gateOk
       ? "or revert anything on the strength of this note. There is no NEW reviewer"
       : "infer any additional code finding from this harness fault. There is no NEW reviewer",
-    "feedback: if a \"Previous reviewer feedback\" section appears above, it is an",
-    "earlier round's, it still stands, and it is still what to address. If none",
-    "appears, no reviewer has said anything about this branch at all.",
+    ...(priorDisposition === "CHANGES-REQUESTED"
+      ? [
+          "feedback. The retained CHANGES-REQUESTED report above is from an earlier",
+          "round; its concerns still stand and are still what to address.",
+        ]
+      : priorDisposition === "APPROVED-CORRECTNESS-SKIPPED"
+        ? [
+            "feedback. The retained quality approval above is from an earlier red-gate",
+            "round; it is informational, and correctness was not run in that round.",
+          ]
+        : [
+            "feedback. No reviewer has said anything about this branch at all.",
+          ]),
     "",
     "Use this attempt for whatever you already knew was outstanding. If the work",
     "is genuinely finished, confirm the worktree is clean and every commit is on",
@@ -596,7 +618,7 @@ function onImplementerResult(
       type: "NEEDS-HUMAN",
       cause: "off-branch-head",
       failureTrace: trace,
-      latestReviewerProse: state.latestReviewerProse,
+      latestReviewerProse: reviewerProse(state),
       budgetExhausted: null,
       strandedHead: offBranch,
     };
@@ -609,7 +631,7 @@ function onImplementerResult(
             // handoff names where the commits went rather than a gate that never ran.
             failureTrace: trace,
             extraReprompt: trace,
-            latestReviewerProse: state.latestReviewerProse,
+            latestReviewerFeedback: state.latestReviewerFeedback,
             offBranch: true,
           },
       exhausted,
@@ -639,7 +661,7 @@ function onImplementerResult(
           type: "NEEDS-HUMAN",
           cause: "uncommittable-worktree",
           failureTrace: trace,
-          latestReviewerProse: state.latestReviewerProse,
+          latestReviewerProse: reviewerProse(state),
           budgetExhausted: null,
           strandedHead: null,
         };
@@ -653,7 +675,7 @@ function onImplementerResult(
           // gate" for a run in which the gate never executed.
           failureTrace: trace,
           extraReprompt: joinOrchestratorNotes(fastForwardedNote, trace),
-          latestReviewerProse: state.latestReviewerProse,
+          latestReviewerFeedback: state.latestReviewerFeedback,
           dirtyPaths,
         },
         // Built from the dirty trace, not from state.lastFailureTrace: the gate
@@ -700,7 +722,7 @@ function onImplementerResult(
     {
       failureTrace: state.lastFailureTrace,
       extraReprompt: joinOrchestratorNotes(fastForwardedNote, signal.reprompt),
-      latestReviewerProse: state.latestReviewerProse,
+      latestReviewerFeedback: state.latestReviewerFeedback,
     },
     {
       type: "NEEDS-HUMAN",
@@ -763,10 +785,13 @@ function onRedGateReviewerResult(
   }
 
   if (reviewer.verdict === "CHANGES-REQUESTED") {
-    const reviewedState = {
+    const reviewedState: LoopState = {
       ...state,
       qualityFailures: state.qualityFailures + 1,
-      latestReviewerProse: reviewer.prose,
+      latestReviewerFeedback: {
+        disposition: "CHANGES-REQUESTED",
+        prose: reviewer.prose,
+      },
     };
     if (reviewedState.gateFailures >= reviewedState.maxGateRounds) {
       return terminate(
@@ -785,14 +810,20 @@ function onRedGateReviewerResult(
     return advanceAttempt(reviewedState, {
       failureTrace: state.lastFailureTrace,
       extraReprompt: state.extraReprompt,
-      latestReviewerProse: reviewer.prose,
+      latestReviewerFeedback: reviewedState.latestReviewerFeedback,
     });
   }
 
   // Quality approved but the red gate prevented a completed reviewer verdict:
   // preserve the quality streak, skip correctness, spend only the gate streak,
   // and keep the paid-for quality prose for the implementer and history.
-  const reviewedState = { ...state, latestReviewerProse: reviewer.prose };
+  const reviewedState: LoopState = {
+    ...state,
+    latestReviewerFeedback: {
+      disposition: "APPROVED-CORRECTNESS-SKIPPED",
+      prose: reviewer.prose,
+    },
+  };
   if (reviewedState.gateFailures >= reviewedState.maxGateRounds) {
     return terminate(
       reviewedState,
@@ -802,7 +833,7 @@ function onRedGateReviewerResult(
   return advanceAttempt(reviewedState, {
     failureTrace: reviewedState.lastFailureTrace,
     extraReprompt: reviewedState.extraReprompt,
-    latestReviewerProse: reviewer.prose,
+    latestReviewerFeedback: reviewedState.latestReviewerFeedback,
   });
 }
 
@@ -814,9 +845,12 @@ function onReviewerResult(
     return terminate({ ...state, qualityFailures: 0 }, { type: "DONE" });
   }
   if (reviewer.rejectingPass === "quality") {
-    const reviewingState = {
+    const reviewingState: LoopState = {
       ...state,
-      latestReviewerProse: reviewer.prose,
+      latestReviewerFeedback: {
+        disposition: "CHANGES-REQUESTED",
+        prose: reviewer.prose,
+      },
       lastFailureTrace: "",
     };
     return transitionAfterQualityFailure(
@@ -824,7 +858,7 @@ function onReviewerResult(
       {
         failureTrace: "",
         extraReprompt: state.extraReprompt,
-        latestReviewerProse: reviewer.prose,
+        latestReviewerFeedback: reviewingState.latestReviewerFeedback,
       },
       {
         type: "NEEDS-HUMAN-REVIEW",
@@ -836,11 +870,14 @@ function onReviewerResult(
   }
 
   const correctnessFailures = state.correctnessFailures + 1;
-  const reviewedState = {
+  const reviewedState: LoopState = {
     ...state,
     qualityFailures: 0,
     correctnessFailures,
-    latestReviewerProse: reviewer.prose,
+    latestReviewerFeedback: {
+      disposition: "CHANGES-REQUESTED",
+      prose: reviewer.prose,
+    },
     lastFailureTrace: "",
   };
   if (correctnessFailures >= state.maxReviewRounds) {
@@ -856,15 +893,15 @@ function onReviewerResult(
     {
       failureTrace: "",
       extraReprompt: state.extraReprompt,
-      latestReviewerProse: reviewer.prose,
+      latestReviewerFeedback: reviewedState.latestReviewerFeedback,
     },
   );
 }
 
 // The reviewer produced no review at all (#41/#143). No convergence budget is
 // charged by that fault; a red gate still increments its own streak and a green
-// gate still resets it. `latestReviewerProse` keeps whatever an earlier round
-// actually said.
+// gate still resets it. `latestReviewerFeedback` keeps whatever an earlier
+// round actually said, including its disposition.
 //
 // The attempt number still advances so one more implementer run can do real
 // work and re-reach the reviewer through a fresh gate. The per-loop total below
@@ -884,7 +921,7 @@ function onReviewerHarnessFailed(
       : `Gate-1 failure:\n${gate.failureTrace}\n\nReviewer harness failure:\n${detail}`,
     // An earlier round's real report, if there was one. Never `detail` — the
     // handoff renders this as the reviewer speaking.
-    latestReviewerProse: state.latestReviewerProse,
+    latestReviewerProse: reviewerProse(state),
     budgetExhausted: null,
     strandedHead: null,
   };
@@ -894,7 +931,7 @@ function onReviewerHarnessFailed(
   if (!gate.ok && failedState.gateFailures >= failedState.maxGateRounds) {
     return terminate(
       failedState,
-      gateRedExhaustion(failedState, failedState.latestReviewerProse),
+      gateRedExhaustion(failedState, reviewerProse(failedState)),
     );
   }
   return advanceAttempt(
@@ -903,9 +940,12 @@ function onReviewerHarnessFailed(
       failureTrace: gate.failureTrace,
       extraReprompt: joinOrchestratorNotes(
         state.extraReprompt,
-        reviewerHarnessFailedReprompt(gate.ok),
+        reviewerHarnessFailedReprompt(
+          gate.ok,
+          state.latestReviewerFeedback?.disposition ?? null,
+        ),
       ),
-      latestReviewerProse: state.latestReviewerProse,
+      latestReviewerFeedback: state.latestReviewerFeedback,
     },
   );
 }
@@ -963,7 +1003,7 @@ function advanceAttempt(
   next: {
     readonly failureTrace: string;
     readonly extraReprompt: string | null;
-    readonly latestReviewerProse: string | null;
+    readonly latestReviewerFeedback: ReviewerFeedback | null;
     // Carried only by the COMPLETE-over-a-dirty-tree route, so the next
     // attempt can tell "still dirty in a new way" from "changed nothing".
     // Every other route clears it.
@@ -979,7 +1019,7 @@ function advanceAttempt(
     attempt: newAttempt,
     phase: "needs-implementer",
     extraReprompt: next.extraReprompt,
-    latestReviewerProse: next.latestReviewerProse,
+    latestReviewerFeedback: next.latestReviewerFeedback,
     lastDirtyPaths: next.dirtyPaths ?? null,
     lastOffBranch: next.offBranch ?? false,
   };
@@ -990,9 +1030,13 @@ function advanceAttempt(
       attempt: newAttempt,
       failureTrace: next.failureTrace,
       extraReprompt: next.extraReprompt,
-      latestReviewerProse: next.latestReviewerProse,
+      latestReviewerFeedback: ns.latestReviewerFeedback,
     },
   };
+}
+
+function reviewerProse(state: LoopState): string | null {
+  return state.latestReviewerFeedback?.prose ?? null;
 }
 
 function terminate(state: LoopState, verdict: Verdict): StepResult {

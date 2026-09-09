@@ -49,6 +49,37 @@ describe("renderAttemptSlot — unbounded attempt sequence (#129)", () => {
   });
 });
 
+describe("renderAttemptSlot — retained reviewer disposition (#143)", () => {
+  it("renders a rejection as feedback to address", () => {
+    const slot = renderAttemptSlot({
+      ...implementerInputs,
+      latestReviewerFeedback: {
+        disposition: "CHANGES-REQUESTED",
+        prose: "Add the missing test.",
+      },
+    });
+    expect(slot).toContain("Previous reviewer feedback (CHANGES-REQUESTED)");
+    expect(slot).toContain("Add the missing test.");
+    expect(slot).toContain("Address the concerns above");
+  });
+
+  it("does not mislabel an approved red-round quality report as rejection feedback", () => {
+    const slot = renderAttemptSlot({
+      ...implementerInputs,
+      lastFailureTrace: "gate failed",
+      latestReviewerFeedback: {
+        disposition: "APPROVED-CORRECTNESS-SKIPPED",
+        prose: "Quality checks look sound.",
+      },
+    });
+    expect(slot).toContain("Latest quality review (APPROVED; correctness skipped)");
+    expect(slot).toContain("Quality checks look sound.");
+    expect(slot).toContain("requested no changes");
+    expect(slot).not.toContain("Previous reviewer feedback (CHANGES-REQUESTED)");
+    expect(slot).not.toContain("Address the concerns above");
+  });
+});
+
 describe("UI-prototype prompt contracts (#126)", () => {
   const slot = renderAttemptSlot(implementerInputs);
   const uiCheck = loadTemplate("ui-check");
