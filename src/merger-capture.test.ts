@@ -18,9 +18,11 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { buildAgentProvider } from "./agent-providers.js";
+import { setCleanupReporter } from "./cleanup.js";
 import {
   buildResolveRunArgv,
   buildResolveExecArgv,
+  buildResolveReapArgv,
   captureAgentRun,
   parseCapturedAgentRun,
   realAdapter,
@@ -417,6 +419,9 @@ describe("resolve provider invocation (#74)", () => {
     expect(buildResolveExecArgv("resolve-1", "agent --print")).toEqual([
       "exec", "-i", "resolve-1", "/bin/sh", "-c", "agent --print",
     ]);
+    expect(buildResolveReapArgv("resolve-1")).toEqual([
+      "exec", "resolve-1", "/bin/sh", "-c", expect.stringContaining("kill"),
+    ]);
   });
 
   it("mounts the shared Codex credential read-write without putting it in env", () => {
@@ -490,9 +495,10 @@ describe("resolve provider invocation (#74)", () => {
       expect(argv).toContain("CODEX_HOME=/var/lib/codex");
       expect(argv?.join(" ")).not.toContain("CODEX_AUTH_JSON=");
       expect(calls.map((args) => args[0])).toEqual([
-        "run", "exec", "inspect", "stats", "rm",
+        "run", "exec", "exec", "inspect", "stats", "rm",
       ]);
-      expect(run).toMatchObject({ peakMemoryBytes: 2048, oomKilled: false });
+      expect(run).toMatchObject({ peakMemoryBytes: 2048 });
+      expect(run).not.toHaveProperty("oomKilled");
     } finally {
       if (originalPath === undefined) delete process.env["PATH"];
       else process.env["PATH"] = originalPath;
@@ -570,7 +576,7 @@ describe("resolve provider invocation (#74)", () => {
 
       const run = await adapter.runResolveAgent("resolve this", 1);
       expect(run).toMatchObject({ peakMemoryBytes: 8192, oomKilled: true });
-      expect(order).toEqual(["run", "exec", "inspect", "stats", "rm"]);
+      expect(order).toEqual(["run", "exec", "exec", "inspect", "stats", "rm"]);
       expect(order.indexOf("inspect")).toBeLessThan(order.indexOf("rm"));
     },
   );
@@ -622,6 +628,66 @@ describe("resolve provider invocation (#74)", () => {
     });
 
     await expect(adapter.runResolveAgent("resolve this", 1)).rejects.toBe(primary);
-    expect(order).toEqual(["run", "exec", "inspect", "stats", "rm"]);
+    expect(order).toEqual(["run", "exec", "exec", "inspect", "stats", "rm"]);
+  });
+
+  it("preserves capture failure while reporting every combined cleanup failure", async () => {
+    const primary = new Error("capture failed");
+    const reaping = new Error("reaping failed");
+    const measurement = new Error("measurement failed");
+    const removal = new Error("removal failed");
+    const order: string[] = [];
+    const notices: Array<{ message: string; cause: unknown }> = [];
+    const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+      notices.push({ message, cause });
+    });
+    const captureResolveProcess = vi.fn(async (
+      _file: string,
+      args: readonly string[],
+    ) => {
+      order.push(`capture:${args[0]}`);
+      if (args[0] === "exec") throw primary;
+      return {
+        stdout: "container-id\n", stderr: "", end: "exit" as const,
+        exitCode: 0, signal: null, durationMs: 1, container: "resolve-test",
+      };
+    });
+    const podman = vi.fn(async (args: readonly string[]) => {
+      order.push(`podman:${args[0]}`);
+      if (args[0] === "exec") throw reaping;
+      if (args[0] === "inspect") throw measurement;
+      throw removal;
+    });
+    const adapter = realAdapter({
+      cwd: "/worktree",
+      cacheDir: "/cache.git",
+      scope: runScope("/worktree"),
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "sandbox-image",
+      env: () => undefined,
+      runStackGate: async () => { throw new Error("not called"); },
+      podman,
+      captureResolveProcess,
+    });
+
+    try {
+      await expect(adapter.runResolveAgent("resolve this", 1)).rejects.toBe(primary);
+    } finally {
+      restoreReporter();
+    }
+    expect(order).toEqual([
+      "capture:run", "capture:exec", "podman:exec", "podman:inspect", "podman:rm",
+    ]);
+    expect(notices).toEqual([
+      expect.objectContaining({ cause: reaping }),
+      expect.objectContaining({ cause: measurement }),
+      expect.objectContaining({ cause: removal }),
+    ]);
   });
 });

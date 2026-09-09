@@ -222,9 +222,11 @@
 // and byte-verbatim stdout/stderr capture before judgement. The shared end
 // classification lives in agent-run-end.ts; the lifecycles stay different.
 // A held `sleep infinity` pid 1 keeps the cgroup live while the fresh agent runs
-// through `podman exec`; after that exec ends Sandbar inspects memory.peak and
-// OOMKilled, then explicitly removes the container (#141). This is not the
-// issue sandbox's resumable conversation: only the resource lifetime is held.
+// through `podman exec`. Ending the Podman client does not end that exec, so
+// Sandbar explicitly signals every non-PID-1 process in this fresh container
+// and waits for that bounded reaper before it reads memory.peak/memory.events
+// and removes the container (#141). This is not the issue sandbox's resumable
+// conversation: only the resource lifetime is held.
 // `captureAgentRun` keeps both raw streams for the byte-verbatim attempt log,
 // then `parseCapturedAgentRun` puts only parsed agent speech in the output
 // register that the resolve promise parser may read. It answers with the exit
@@ -2514,6 +2516,27 @@ export function buildResolveExecArgv(
   return ["exec", "-i", container, "/bin/sh", "-c", command];
 }
 
+// A resolve container is fresh and owns exactly two process families: its held
+// `sleep infinity` PID 1 and one agent exec. The local Podman client can exit
+// while the latter survives (#26), so teardown runs this second exec and kills
+// every process except those two helpers. TERM gives the CLI a brief graceful
+// exit; KILL makes completion final before the cgroup files are read.
+const RESOLVE_REAP_SCRIPT = [
+  "self=$$",
+  "for signal in TERM KILL; do",
+  "  for path in /proc/[0-9]*; do",
+  "    pid=${path##*/}",
+  "    case \"$pid\" in 1|\"$self\") continue ;; esac",
+  "    kill -\"$signal\" \"$pid\" 2>/dev/null || true",
+  "  done",
+  "  sleep 1",
+  "done",
+].join("\n");
+
+export function buildResolveReapArgv(container: string): readonly string[] {
+  return ["exec", container, "/bin/sh", "-c", RESOLVE_REAP_SCRIPT];
+}
+
 export function resolveAgentCredentials(
   provider: AgentProviderName,
   env: EnvReader,
@@ -2745,6 +2768,21 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         (failure: unknown) => ({ failure }) as const,
       );
 
+      const reaped = await Promise.allSettled([
+        podman(buildResolveReapArgv(container), CONTROL_TIMEOUT_MS),
+      ]);
+      const reapResult = reaped[0];
+      const reapingFailure = reapResult?.status === "rejected"
+        ? reapResult.reason
+        : reapResult !== undefined && !boundedRuntimeOk(reapResult.value)
+          ? new SandbarError(
+              `merger: failed to stop processes in resolve container '${container}': ` +
+                (reapResult.value.timedOut
+                  ? "resolve process reaping timed out"
+                  : reapResult.value.errorMessage),
+            )
+          : undefined;
+
       const measured = await Promise.allSettled([
         readContainerResources(container, systemContainerResourceDeps(podman)),
       ]);
@@ -2768,6 +2806,13 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         : undefined;
 
       if ("failure" in processResult) {
+        if (reapingFailure !== undefined) {
+          await reportCleanupNotice(
+            "cleanup-failure",
+            `Resolve container '${container}' process reaping also failed`,
+            reapingFailure,
+          );
+        }
         if (measurementFailure !== undefined) {
           await reportCleanupNotice(
             "cleanup-failure",
@@ -2783,6 +2828,23 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           );
         }
         throw processResult.failure;
+      }
+      if (reapingFailure !== undefined) {
+        if (measurementFailure !== undefined) {
+          await reportCleanupNotice(
+            "cleanup-failure",
+            `Resolve container '${container}' resource measurement also failed`,
+            measurementFailure,
+          );
+        }
+        if (removalFailure !== undefined) {
+          await reportCleanupNotice(
+            "cleanup-failure",
+            `Resolve container '${container}' cleanup also failed`,
+            removalFailure,
+          );
+        }
+        throw reapingFailure;
       }
       if (removalFailure !== undefined) {
         if (measurementFailure !== undefined) {
