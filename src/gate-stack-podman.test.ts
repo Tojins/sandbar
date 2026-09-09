@@ -586,13 +586,18 @@ describe.runIf(available)("gate stack against real podman", () => {
         task.id,
         onTestFinished,
       );
-      let failedResourceReadMs: number | undefined;
+      let attemptPhaseStartedAt: number | undefined;
+      let failedResourceReadStartedAt: number | undefined;
 
       const stack = hold(
         await startStack({
           stackId: stackId,
           scope: SCOPE,
           worktreePath: repo,
+          images: async () => {
+            attemptPhaseStartedAt = performance.now();
+            return new Map();
+          },
           spec: resolveGateStack({
             containers: [
               {
@@ -620,9 +625,8 @@ describe.runIf(available)("gate stack against real podman", () => {
           }),
           containerResources: async (name) => {
             if (name === cName("broken")) {
-              const started = Date.now();
+              failedResourceReadStartedAt = performance.now();
               await new Promise((resolve) => setTimeout(resolve, 3_000));
-              failedResourceReadMs = Date.now() - started;
             }
             return {};
           },
@@ -632,8 +636,17 @@ describe.runIf(available)("gate stack against real podman", () => {
       const red = await stack.runGate();
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe(`container:${cName("broken")}`);
-      expect(failedResourceReadMs).toBeDefined();
-      expect(red.steps.at(-1)!.durationMs).toBeLessThan(failedResourceReadMs!);
+      expect(attemptPhaseStartedAt).toBeDefined();
+      expect(failedResourceReadStartedAt).toBeDefined();
+      const durationBeforeResourceRead = Math.round(
+        failedResourceReadStartedAt! - attemptPhaseStartedAt!,
+      );
+      expect(red.steps.at(-1)!.durationMs).toBeGreaterThan(
+        durationBeforeResourceRead - 500,
+      );
+      expect(red.steps.at(-1)!.durationMs).toBeLessThan(
+        durationBeforeResourceRead + 500,
+      );
       // The container's own log is the trace — without it the agent is told
       // only that something failed to start.
       expect(red.containerLogs).toContain("bootstrap-failed");
