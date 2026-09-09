@@ -1,7 +1,8 @@
-## Latest quality review (APPROVED; correctness skipped)
+## Retained quality review (APPROVED; correctness skipped in that round)
 
 {{prose}}
 
-This quality pass requested no changes. Gate-1 was red, so the correctness and
-issue-spec pass did not run. Address the independent gate failure above; do not
-treat this approved report as rejection feedback.
+This earlier quality pass requested no changes. Correctness and issue-spec did
+not run in that review round. This report is retained as context only, not as
+rejection feedback; follow the current gate trace and orchestrator note, if any,
+for what this attempt needs.

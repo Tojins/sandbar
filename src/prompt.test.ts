@@ -5,6 +5,7 @@ import {
   NO_PROTOTYPE_NEEDED_PHRASE,
 } from "./finalize.js";
 import { sourceBranchBase } from "./git-ops.js";
+import { reviewerHarnessFailedReprompt } from "./inner-loop-machine.js";
 import {
   type PriorReviewRound,
   qualityReviewContext,
@@ -63,7 +64,7 @@ describe("renderAttemptSlot — retained reviewer disposition (#143)", () => {
     expect(slot).toContain("Address the concerns above");
   });
 
-  it("does not mislabel an approved red-round quality report as rejection feedback", () => {
+  it("renders an approved red-round quality report as retained context", () => {
     const slot = renderAttemptSlot({
       ...implementerInputs,
       lastFailureTrace: "gate failed",
@@ -72,11 +73,33 @@ describe("renderAttemptSlot — retained reviewer disposition (#143)", () => {
         prose: "Quality checks look sound.",
       },
     });
-    expect(slot).toContain("Latest quality review (APPROVED; correctness skipped)");
+    expect(slot).toContain(
+      "Retained quality review (APPROVED; correctness skipped in that round)",
+    );
     expect(slot).toContain("Quality checks look sound.");
     expect(slot).toContain("requested no changes");
     expect(slot).not.toContain("Previous reviewer feedback (CHANGES-REQUESTED)");
     expect(slot).not.toContain("Address the concerns above");
+  });
+
+  it("does not contradict a later green gate when the retained approval survives a harness failure", () => {
+    const slot = renderAttemptSlot({
+      ...implementerInputs,
+      extraReprompt: reviewerHarnessFailedReprompt(
+        true,
+        "APPROVED-CORRECTNESS-SKIPPED",
+      ),
+      latestReviewerFeedback: {
+        disposition: "APPROVED-CORRECTNESS-SKIPPED",
+        prose: "Quality checks looked sound in the earlier round.",
+      },
+    });
+    expect(slot).toContain("Gate-1 passed on your last commit");
+    expect(slot).toContain("retained quality approval");
+    expect(slot).toContain("Quality checks looked sound in the earlier round.");
+    expect(slot).not.toContain("Gate-1 was red");
+    expect(slot).not.toContain("gate failure above");
+    expect(slot).not.toContain("Address the independent gate failure");
   });
 });
 
