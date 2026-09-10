@@ -78,7 +78,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
   beforeEach(async () => {
     originalCwd = process.cwd();
-    launchedFrom = await seedRepo("sandbar-launch-", "commit-from-launch-dir");
+    launchedFrom = await seedRepo("sandbar-cwd-", "commit-from-launch-dir");
     target = await seedRepo("sandbar-target-", "commit-from-target-repo");
     // `launchedFrom` doubles as the tree under review below, and a reviewer
     // prompt over an empty `origin/main..HEAD` is refused outright (#40) — the

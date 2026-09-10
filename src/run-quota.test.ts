@@ -168,18 +168,9 @@ vi.mock("./repo-cache.js", async (importOriginal) => ({
 vi.mock("./preflight.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./preflight.js")>(),
   checkForgeReachabilityForPreflight: vi.fn(async () => undefined),
-  runPreflightAfterReachability: vi.fn(async () => ({
-    configStaleness: {
-      configPath: null, sourceBranch: "main", hostCwd: "/repo",
-      behind: 0, touchingConfig: 0,
-    },
-    readyLabelPolicy: "anyone",
-  })), absoluteMountSources: vi.fn(() => []),
+  runPreflightAfterReachability: vi.fn(async () => "anyone" as const),
+  absoluteMountSources: vi.fn(() => []),
   fetchOriginRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
-  readConfigStaleness: vi.fn(async () => ({
-    configPath: null, sourceBranch: "main", hostCwd: "/repo",
-    behind: 0, touchingConfig: 0,
-  })),
 }));
 vi.mock("./containers.js", () => ({
   cleanupOrphanContainers: vi.fn(async () => ({ removed: [], failures: [] })),
@@ -264,7 +255,6 @@ import { UiPortInUseError, startUiServer } from "./ui-server.js";
 import {
   checkForgeReachabilityForPreflight,
   fetchOriginRefs,
-  readConfigStaleness,
   runPreflightAfterReachability,
 } from "./preflight.js";
 import { startKeepawake } from "./keepawake.js";
@@ -360,11 +350,6 @@ describe("run quota orchestration (#109)", () => {
     seams.wakeStatusReports.length = 0;
     vi.mocked(fetchOriginRefs).mockReset();
     vi.mocked(fetchOriginRefs).mockRejectedValue(new Error("stop after idle poll"));
-    vi.mocked(readConfigStaleness).mockReset();
-    vi.mocked(readConfigStaleness).mockResolvedValue({
-      configPath: null, sourceBranch: "main", hostCwd: "/repo",
-      behind: 0, touchingConfig: 0,
-    });
     vi.mocked(ensureImages).mockReset();
     vi.mocked(ensureImages).mockResolvedValue(new Map());
     vi.mocked(createBranchImages).mockReset();
@@ -1157,30 +1142,6 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.wakeLocks[0]?.onStatus).toHaveBeenCalledOnce();
     // The only stop is terminal cleanup: idle did not release this holder.
     expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
-  });
-
-  it("reports a changed stale-config count once, not on every poll", async () => {
-    const stale = {
-      configPath: "/repo/sandbar.config.mjs", sourceBranch: "main", hostCwd: "/repo",
-      behind: 2, touchingConfig: 1,
-    };
-    seams.plan.mockResolvedValue(resolution([]));
-    vi.mocked(fetchOriginRefs)
-      .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
-      .mockResolvedValueOnce({ sourceChanged: false, failures: [] });
-    vi.mocked(readConfigStaleness)
-      .mockResolvedValueOnce({ ...stale, behind: 0, touchingConfig: 0 })
-      .mockResolvedValue(stale);
-    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
-      throw new Error(`EXIT:${code}`);
-    }) as never);
-
-    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
-    expect(eventsOf("complaint").filter((event) =>
-      String(event.message).includes("1 of them change /repo/sandbar.config.mjs")))
-      .toHaveLength(1);
-    expect(eventsOf("recompute").filter((event) => event.trigger === "poll"))
-      .toHaveLength(1);
   });
 
   it("drives issue quota through run(), exits 4, and lands completed work first", async () => {

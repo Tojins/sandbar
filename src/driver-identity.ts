@@ -1,71 +1,25 @@
 // What is driving this run (#69).
 //
-// A run used to record nothing about the code producing its verdicts. That
-// mattered because the driver was built from the operator's WORKING TREE:
-// `npm run sandbar` was `git pull --ff-only && npm run build && node
-// dist/cli.js`, and `build` is `rm -rf dist && tsc` over `src/` — uncommitted
-// edits included. The config file was the same story and worse: it is a PROGRAM
-// that is `import()`ed (cli.ts), and it carries `gateStack`, so the thing that
-// judges every branch was also whatever happened to be on disk. On 2026-08-31 a
-// series ran with uncommitted edits to `src/gate-stack.ts` and to
-// `sandbar.config.mjs`, and nothing in the logs said so.
+// The opening run event attributes both executable code and configuration.
+// They are separate inputs: a normal daemon uses an exact-tag package installed
+// under its private installation directory and a config beside that install,
+// while local/ad-hoc use may run a build and config from development trees.
+// The version identifies installed code whose tree cannot be attributed; a
+// commit and dirty state identify a development build. The config gets its own
+// tree state because a dirty config program changes the gate and orchestration
+// contract just as surely as dirty driver code does.
 //
-// This module never fixed that coupling — #66 did, for the CODE half: a
-// self-hosted run now installs the release `sandbar.pin` names into
-// `.sandbar/driver/` and runs that. What identifies the driver on that path is
-// this line's VERSION field read beside the pin, and NOT its tree state: the
-// install sits under `.sandbar/`, which the repo gitignores, so the
-// check-ignore rule below reports it `unknown` rather than attributing the
-// host's HEAD to it. `unknown` is the CORRECT answer for an installed release
-// and the expected one; a commit named there is the signal that somebody is
-// running a hand build out of a dev tree instead. The CONFIG half survives on
-// purpose (the config resolves against the process cwd, `sandbar.env` against
-// its own `import.meta.url`), which is exactly why this line prints two trees
-// rather than one: the config's is the tree still capable of being dirty, and
-// `requiresSandbar` is the guard on the version seam that pinning one and not
-// the other opens.
+// A fact, never a warning or refusal. Dirty local iteration is supported, but
+// the event must make it visible months later. Every field degrades to
+// `unknown`, and all git calls are local and time-bounded, so attribution can
+// never prevent a run.
 //
-// A fact, never a warning. "dirty" does not block a run and is not phrased as
-// though it should — an operator iterating deliberately is a supported case,
-// and a line that nags is a line that gets ignored.
-//
-// TWO TREES, because there are two of them and they are not always the same
-// repository. The driver's package root (where `dist/` sits) and the directory
-// the config file sits in. Running on itself (#39) they are one checkout; for a
-// host repo the driver is under `node_modules/` and the config is in the host's
-// own checkout.
-//
-// Which is exactly why every read is guarded by `check-ignore`. `git -C
-// node_modules/sandbar rev-parse HEAD` does not fail — it answers
-// with the HOST repo's HEAD, a true sha about an entirely different repository,
-// and printing that after the words "built from" would be worse than printing
-// nothing. So: a directory the enclosing repo IGNORES reports `unknown`, and
-// only a directory whose content that repo actually tracks gets to have its
-// HEAD named. A non-repository falls out the same way — check-ignore's 128 is
-// not "ignored", but the `rev-parse` behind it fails and the state is unknown
-// anyway. `driver-identity.test.ts` pins the adapter decisions around those
-// git facts.
-//
-// DIRTY INCLUDES UNTRACKED, and the argv is imported from `git-ops.ts` rather
-// than spelled again: `tsc` compiles everything under `src/`, so an untracked
-// `src/*.ts` is in `dist/` and on no commit — the sharpest form of the very
-// thing this line exists to show. That import is also what keeps
-// `status.showUntrackedFiles=normal` from being re-forgotten in a second place;
-// the reason it is load-bearing is `git-ops.ts`'s to state.
-//
-// The read happens at RUN START, and says so by being one line printed there.
-// A `dist/` from an older build against a tree since changed is NOT detected,
-// and after #66 that gap no longer has a way to open on the self-hosted path:
-// the driver is an installed release under `.sandbar/`, gitignored, so it
-// reports `unknown` by the check-ignore rule above rather than a stale HEAD,
-// and it is the pin — not this line — that says which release it is. The gap
-// survives only for someone running a hand build out of a dev tree, which is
-// the one case they already know they are in.
-//
-// Total, by construction: every git call is `.then(ok, fail)`, so nothing here
-// rejects and no field can stop a run. Everything degrades to `unknown`. No
-// network, and a timeout on each call so a pathological repository costs a
-// missing field rather than a stalled startup.
+// Each tree read is guarded by `check-ignore`. Running `git -C
+// node_modules/sandbar rev-parse HEAD` otherwise returns the enclosing
+// consumer's HEAD, a true sha for the wrong code. Ignored package content and
+// ordinary non-repository installation directories therefore report unknown.
+// Dirty includes untracked paths via `DIRTY_STATUS_ARGV`, because an untracked
+// `src/*.ts` can be compiled into the code being executed.
 
 import { execFile } from "node:child_process";
 import { dirname, resolve } from "node:path";

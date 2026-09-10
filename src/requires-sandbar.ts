@@ -1,12 +1,8 @@
 // The sandbar version a config was written for (#66).
 //
-// The seam this closes is one that PINNING the driver creates. A self-hosted
-// run is no longer driven by a build of the operator's working tree: it runs an
-// installed release — `.sandbar/driver/`, at the tag `sandbar.pin` names — while
-// the config file stays in the checkout, where it moves whenever a human edits
-// it or pulls. The two are therefore no longer two views of one tree, and the
-// routine skew is the one direction that matters: a config NEWER than the
-// driver reading it.
+// The seam this closes is one that separating config from an exact-tag driver
+// creates. They can be deployed independently, so the routine skew that
+// matters is a config NEWER than the driver reading it.
 //
 // Untreated, that skew is silent and total. `loadConfig` casts the module's
 // default export unchecked (cli.ts), `resolveConfig` spreads unknown keys
@@ -34,11 +30,11 @@
 //
 // OPTIONAL, and that is not a hedge. Requiring the field would break every
 // config already written against a released sandbar — the exact silent-skew
-// failure this exists to prevent, inflicted deliberately on every consumer, and
-// #66 changes no library contract. A config that omits it gets no protection
+// failure this exists to prevent, inflicted deliberately on every consumer.
+// A config that omits it gets no protection
 // and that is the host's call; a config that names one gets a refusal instead
-// of a half-read. This repo's own config names one, because this repo is where
-// driver and config genuinely come from different commits.
+// of a half-read. Installation configs name one because config and driver are
+// deployed independently.
 //
 // REFUSES on a driver whose own version cannot be parsed, "unknown" included.
 // `sandbarVersion()` degrades to "unknown" when `package.json` cannot be read,
@@ -115,9 +111,8 @@ export function checkRequiresSandbar(
       "for a newer version are not rejected anywhere downstream, they are " +
       "silently ignored, so a gate step or a lane this file asks for would " +
       "simply never happen.\n" +
-      "Either move the driver forward (for a self-hosted repo that is the pin " +
-      "in `sandbar.pin`; for a consumer, the installed version of " +
-      "sandbar), or lower `requiresSandbar` to a version this " +
+      "Either move the installed driver forward, or lower `requiresSandbar` " +
+      "to a version this " +
       "config is actually written for.",
   );
 }

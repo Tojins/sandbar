@@ -20,9 +20,9 @@
 //     recreates.
 //   - for the driver line it is a LOST ATTRIBUTION, which is neither of the
 //     other two. The line still prints — it is a fact and never a refusal —
-//     but under #66 a self-hosted driver is an installed release beneath a
-//     gitignored `.sandbar/`, so its TREE state is `unknown` by construction
-//     and this value is the whole of the identification that line carries. A
+//     but a normal daemon driver is an installed release outside a tracked
+//     development tree, so its TREE state is `unknown` by construction and
+//     this value is the whole of the identification that line carries. A
 //     `sandbar unknown` there is the one line that says which release produced
 //     a run, saying nothing; `driver-identity.ts`'s header owns why the tree
 //     cannot answer in its place.

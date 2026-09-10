@@ -744,8 +744,8 @@ export type RunConfig = {
   //
   // Optional, because requiring it would break every config already written.
   // Worth setting the moment config and driver can come from different commits
-  // — which for a consumer is "always", and is the normal state of a
-  // self-hosted repo since #66 pinned its driver. Default: unset, no check.
+  // — which is always true for an installation whose config and exact-tag
+  // driver deploy independently. Default: unset, no check.
   readonly requiresSandbar?: string;
 
   // How the merge result lands on the source branch. Default: {kind:"direct"}.

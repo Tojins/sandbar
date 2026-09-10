@@ -334,6 +334,9 @@ describe("committed installation inventory and configs", () => {
   it("ships sandbar's external config and records its lagging driver rule", () => {
     expect(sandbarConfig).toContain('import { readEnvFile, splitRoleRouting } from "sandbar";');
     expect(sandbarConfig).toContain('const cwd = "/home/sandbar/sandbar";');
+    expect(sandbarConfig).toMatch(
+      /promptExtensions:[\s\S]*?merger:[\s\S]*?one patch bump above the higher/,
+    );
     expect(realInventorySource).toMatch(
       /Self-hosting must lag the checkout:[\s\S]*?driver_tag: github:[^#\s]+#v\d+\.\d+\.\d+/,
     );
