@@ -2,6 +2,9 @@
 - name: Refuse to run without the host variables the role cannot default
   ansible.builtin.assert:
     that:
+      - sandbar_installations is sequence
+      - sandbar_installations is not string
+      - sandbar_installations is not mapping
       - sandbar_installations | length > 0
       - sandbar_git_email | length > 0
       - sandbar_operator_ssh_keys | length > 0
@@ -14,21 +17,20 @@
 - name: Validate every installation inventory entry
   ansible.builtin.assert:
     that:
-      - item.user is defined and item.user | length > 0
-      - item.user is match('^[a-z_][a-z0-9_-]{0,31}$')
-      - item.project is defined and item.project | length > 0
-      - item.project is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
-      - item.clone_url is defined and item.clone_url | length > 0
-      - item.reader_port is defined
-      - item.reader_port is integer
-      - item.reader_port >= 1
-      - item.reader_port <= 65535
+      - (item.user | default('')) is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - (item.user | default('')) != 'root'
+      - (item.project | default('')) is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
+      - (item.project | default('')) != 'installation'
+      - item.clone_url | default('') | length > 0
+      - (item.reader_port | default(none)) is integer
+      - (item.reader_port | default(0) | int) >= 1
+      - (item.reader_port | default(0) | int) <= 65535
       - (item.driver_tag | default(sandbar_driver_tag)) is match('^github:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#v[0-9]+\.[0-9]+\.[0-9]+$')
     fail_msg: >-
-      Every sandbar_installations entry needs a safe Linux user, a project path
-      component, a non-empty clone_url, an integer reader_port from 1 through
-      65535, and an exact github:owner/repo#vX.Y.Z driver. Invalid entry:
-      {{ item }}
+      Every sandbar_installations entry needs a non-root safe Linux user, a
+      project path component other than the reserved installation directory, a
+      non-empty clone_url, an integer reader_port from 1 through 65535, and an
+      exact github:owner/repo#vX.Y.Z driver. Invalid entry: {{ item }}
   loop: "{{ sandbar_installations }}"
   loop_control:
     label: "{{ item.user | default('missing user') }}"

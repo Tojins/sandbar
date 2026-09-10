@@ -213,12 +213,18 @@ describe("multi-installation role orchestration", () => {
   });
 
   it("validates isolation-critical inventory fields before host tasks", () => {
+    const host = taskNamed(mainTasks, "Refuse to run without the host variables the role cannot default");
+    expect(host).toContain("sandbar_installations is sequence");
+    expect(host).toContain("sandbar_installations is not string");
+    expect(host).toContain("sandbar_installations is not mapping");
     const entry = taskNamed(mainTasks, "Validate every installation inventory entry");
-    expect(entry).toContain("item.user is match('^[a-z_][a-z0-9_-]{0,31}$')");
-    expect(entry).toContain("item.project is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')");
-    expect(entry).toContain("item.reader_port is integer");
-    expect(entry).toContain("item.reader_port >= 1");
-    expect(entry).toContain("item.reader_port <= 65535");
+    expect(entry).toContain("(item.user | default('')) is match('^[a-z_][a-z0-9_-]{0,31}$')");
+    expect(entry).toContain("(item.user | default('')) != 'root'");
+    expect(entry).toContain("(item.project | default('')) is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')");
+    expect(entry).toContain("(item.project | default('')) != 'installation'");
+    expect(entry).toContain("(item.reader_port | default(none)) is integer");
+    expect(entry).toContain("(item.reader_port | default(0) | int) >= 1");
+    expect(entry).toContain("(item.reader_port | default(0) | int) <= 65535");
     const unique = taskNamed(mainTasks, "Refuse installation users or reader ports that are not unique");
     expect(unique).toContain("map(attribute='user')");
     expect(unique).toContain("map(attribute='reader_port')");
@@ -252,7 +258,9 @@ describe("committed installation inventory and configs", () => {
     const ports = new Set<number>();
     for (const entry of inventory.sandbar_installations) {
       expect(entry.user).toMatch(SAFE_USER);
+      expect(entry.user).not.toBe("root");
       expect(entry.project).toMatch(SAFE_PROJECT);
+      expect(entry.project).not.toBe("installation");
       expect(entry.clone_url).toEqual(expect.any(String));
       expect(entry.clone_url.length).toBeGreaterThan(0);
       expect(Number.isInteger(entry.reader_port)).toBe(true);
@@ -291,6 +299,17 @@ describe("committed installation inventory and configs", () => {
     expect(realInventorySource).toMatch(
       /Self-hosting must lag the checkout:[\s\S]*?driver_tag: github:[^#\s]+#v\d+\.\d+\.\d+/,
     );
+  });
+
+  it("assigns distinct host ports to both daemons and readers", () => {
+    const daemonPorts = [outdoorConfig, sandbarConfig].map((config) => {
+      const value = config.match(/^\s*uiPort:\s*(\d+),$/m)?.[1];
+      if (value === undefined) throw new Error("installation config lacks uiPort");
+      return Number(value);
+    });
+    const readerPorts = installations.map((entry) => entry.reader_port);
+    expect(new Set([...daemonPorts, ...readerPorts]).size)
+      .toBe(daemonPorts.length + readerPorts.length);
   });
 
   it.each([

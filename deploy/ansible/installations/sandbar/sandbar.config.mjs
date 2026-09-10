@@ -28,6 +28,7 @@ export default {
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
   contextMdPath: "AGENTS.md",
+  uiPort: 7334,
   sandboxImage: image,
   sandboxHooks: {
     host: {

@@ -27,6 +27,7 @@ export default {
   requiresSandbar: "0.40.0",
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
+  uiPort: 7331,
   sandboxImage: image,
   gateStack: JSON.parse(readFileSync(join(cwd, "gate/stack.json"), "utf8")),
   copyToWorktree: [

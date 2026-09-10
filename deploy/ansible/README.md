@@ -52,6 +52,9 @@ The UI unit runs the same driver's `ui` command on the entry's `reader_port`.
 It requires and starts after a successful daemon activation, so a failed driver
 install cannot launch a stale reader; `PartOf=` carries deliberate daemon stops
 and restarts to it, while a later daemon crash leaves the report available.
+Each installation config must also give the daemon's in-process `uiPort` its
+own host port, distinct from every reader; the two committed configs use 7331
+and 7334 around their inventory's 7332 and 7333.
 Both units use `Restart=no`; exits 2 and 4 remain stops for a human to inspect.
 Until prefix routing lands in #150, Caddy serves the first installation's reader
 at `/`.
