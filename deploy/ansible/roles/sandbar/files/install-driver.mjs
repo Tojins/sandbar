@@ -44,8 +44,10 @@ export function readInstallState(paths) {
   let installedSpec = null;
   try {
     installedSpec = readFileSync(paths.stamp, "utf8").trim();
-  } catch {
-    installedSpec = null;
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+      throw error;
+    }
   }
   return { cliPresent: existsSync(paths.cli), installedSpec };
 }
@@ -125,8 +127,11 @@ function isEntrypoint() {
   if (argv1 === undefined) return false;
   try {
     return realpathSync(resolve(argv1)) === fileURLToPath(import.meta.url);
-  } catch {
-    return false;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 

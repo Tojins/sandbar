@@ -57,6 +57,9 @@
 - name: Configure unattended upgrades
   ansible.builtin.import_tasks: upgrades.yml
 
+- name: Configure Caddy for the first installation
+  ansible.builtin.import_tasks: caddy.yml
+
 - name: Create each installation account and podman session
   ansible.builtin.include_tasks: account.yml
   loop: "{{ sandbar_installations }}"
@@ -103,6 +106,3 @@
     sandbar_installation_dir: "/home/{{ sandbar_installation.user }}/installation"
     sandbar_installation_driver_tag: "{{ sandbar_installation.driver_tag | default(sandbar_driver_tag) }}"
     sandbar_reader_port: "{{ sandbar_installation.reader_port }}"
-
-- name: Configure Caddy for the first installation
-  ansible.builtin.import_tasks: caddy.yml

@@ -75,6 +75,12 @@ describe("role-owned driver install (#149)", () => {
     })).toThrow(/not an exact tagged driver/);
   });
 
+  it("propagates a stamp read failure other than absence", () => {
+    const paths = driverPaths(dir);
+    mkdirSync(paths.stamp);
+    expect(() => readInstallState(paths)).toThrow();
+  });
+
   it("preserves an install-script approval manifest", () => {
     const paths = driverPaths(dir);
     mkdirSync(dir, { recursive: true });

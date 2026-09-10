@@ -22,15 +22,6 @@
     - /etc/subgid
   register: sandbar_subids
 
-- name: Migrate the installation user's podman storage after a range change
-  ansible.builtin.command: podman system migrate
-  become: true
-  become_user: "{{ sandbar_user }}"
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
-  changed_when: true
-  when: sandbar_subids is changed
-
 - name: Enable linger for the installation user
   ansible.builtin.command: loginctl enable-linger {{ sandbar_user }}
   args:
@@ -40,6 +31,15 @@
   ansible.builtin.wait_for:
     path: "/run/user/{{ sandbar_user_result.uid }}/bus"
     timeout: 30
+
+- name: Migrate the installation user's podman storage after a range change
+  ansible.builtin.command: podman system migrate
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
+  changed_when: true
+  when: sandbar_subids is changed
 
 - name: Authorize the operator's keys for the installation user, and no others
   ansible.posix.authorized_key:
