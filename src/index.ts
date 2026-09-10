@@ -17,6 +17,7 @@ export { SandbarError } from "./errors.js";
 export { readEnvFile, splitRoleRouting } from "./env-file.js";
 export type {
   RunConfig,
+  CopyToWorktreeEntry,
   LabelConfig,
   MergeModeConfig,
   // The gate stack (#24) — every type a `gateStack` / `images` literal is

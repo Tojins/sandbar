@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 import { SandbarError } from "./errors.js";
@@ -28,7 +28,9 @@ import {
   DEFAULT_SOURCE_BRANCH,
   DEFAULT_WORK_DIR,
   DEFAULT_LABELS,
+  resolveCopyToWorktree,
   resolveConfig,
+  type CopyToWorktreeEntry,
   type RunConfig,
 } from "./config.js";
 import { sandbarVersion } from "./version.js";
@@ -71,6 +73,111 @@ const minimal: RunConfig = {
     ],
   },
 };
+
+describe("resolveCopyToWorktree (#147)", () => {
+  const cwd = "/consumer/checkout";
+
+  it.each<{
+    name: string;
+    entry: CopyToWorktreeEntry;
+    expected: unknown;
+  }>([
+    {
+      name: "legacy string unchanged",
+      entry: ".npmrc",
+      expected: ".npmrc",
+    },
+    {
+      name: "cwd-relative object source",
+      entry: { from: "../sandbar-install/settings.json", to: ".codex/settings.json" },
+      expected: {
+        from: resolve(cwd, "../sandbar-install/settings.json"),
+        to: ".codex/settings.json",
+      },
+    },
+    {
+      name: "absolute source outside the checkout",
+      entry: { from: "/opt/sandbar/files/settings.json", to: "settings.json" },
+      expected: { from: "/opt/sandbar/files/settings.json", to: "settings.json" },
+    },
+    {
+      name: "file URL source",
+      entry: { from: new URL("file:///opt/sandbar/files/settings.json"), to: "settings.json" },
+      expected: { from: "/opt/sandbar/files/settings.json", to: "settings.json" },
+    },
+  ])("resolves $name", ({ entry, expected }) => {
+    expect(resolveCopyToWorktree([entry], cwd)).toEqual([expected]);
+  });
+
+  it.each([
+    ["absolute", "/escape/settings.json"],
+    ["parent segment", "safe/../settings.json"],
+    ["empty", ""],
+  ])("refuses an %s destination and names its entry", (_name, to) => {
+    const entry = { from: "/opt/sandbar/settings.json", to };
+    expect(() => resolveConfig({
+      ...minimal,
+      cwd,
+      copyToWorktree: [entry],
+    })).toThrow(
+      /copyToWorktree\[0\]/,
+    );
+  });
+
+  it("refuses a non-array value at the config boundary", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      cwd,
+      copyToWorktree: "settings.json" as unknown as readonly CopyToWorktreeEntry[],
+    })).toThrow(/config\.copyToWorktree must be an array/);
+  });
+
+  it.each([
+    {
+      name: "null entry",
+      entry: null,
+      message: /string or \{ from, to \} entry/,
+    },
+    {
+      name: "non-object entry",
+      entry: 42,
+      message: /string or \{ from, to \} entry/,
+    },
+    {
+      name: "array entry",
+      entry: [],
+      message: /string or \{ from, to \} entry/,
+    },
+    {
+      name: "non-string destination",
+      entry: { from: "/opt/sandbar/settings.json", to: 42 },
+      message: /non-string 'to'/,
+    },
+    {
+      name: "missing source",
+      entry: { to: "settings.json" },
+      message: /invalid 'from'/,
+    },
+    {
+      name: "invalid source",
+      entry: { from: 42, to: "settings.json" },
+      message: /invalid 'from'/,
+    },
+    {
+      name: "non-file source URL",
+      entry: { from: new URL("https://example.com/settings.json"), to: "settings.json" },
+      message: /non-file 'from' URL/,
+    },
+  ])("refuses $name and names its entry", ({ entry, message }) => {
+    const resolveEntry = () => resolveConfig({
+      ...minimal,
+      cwd,
+      copyToWorktree: [entry] as unknown as readonly CopyToWorktreeEntry[],
+    });
+    expect(resolveEntry).toThrow(/copyToWorktree\[0\]/);
+    expect(resolveEntry).toThrow(message);
+  });
+});
 
 describe("resolveConfig — developers is an explicit queue policy (#136)", () => {
   it("accepts anyone and trims a non-empty login list", () => {
