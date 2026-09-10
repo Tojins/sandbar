@@ -7,7 +7,9 @@ all:
     sandbar-box:
       ansible_user: root
   vars:
-    sandbar_driver_tag: github:Tojins/sandbar#v0.40.1
+    # v0.41.14 is the first tagged release containing #147's mapped
+    # copyToWorktree entries, which the outdoor config below requires.
+    sandbar_driver_tag: github:Tojins/sandbar#v0.41.14
     sandbar_git_name: sandbar
     sandbar_git_email: demanthomas+sandbar@gmail.com
     sandbar_operator_ssh_keys:

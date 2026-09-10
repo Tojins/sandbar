@@ -20,7 +20,7 @@ export default {
   ghOwner: "Tojins",
   ghRepo: "outdoor",
   developers: ["Tojins"],
-  requiresSandbar: "0.40.0",
+  requiresSandbar: "0.41.14",
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
   uiPort: 7331,

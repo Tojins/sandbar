@@ -99,6 +99,24 @@ const installations = realInventory.sandbar_installations.map((entry) => ({
   ...entry,
   driver_tag: entry.driver_tag ?? realInventory.sandbar_driver_tag,
 }));
+const installationConfigs = new Map([
+  ["outdoor", outdoorConfig],
+  ["sandbar", sandbarConfig],
+]);
+
+function requiredVersion(config: string) {
+  const text = config.match(/^\s*requiresSandbar:\s*"([^"]+)",$/m)?.[1];
+  const version = text === undefined ? null : parseVersion(text);
+  if (version === null) throw new Error("installation config lacks valid requiresSandbar");
+  return version;
+}
+
+function driverVersion(tag: string) {
+  const text = tag.split("#v")[1];
+  const version = text === undefined ? null : parseVersion(text);
+  if (version === null) throw new Error(`inventory has invalid driver tag ${tag}`);
+  return version;
+}
 
 function varsFor(row: (typeof installations)[number]): Record<string, string> {
   const home = `/home/${row.user}`;
@@ -320,16 +338,21 @@ describe("committed installation inventory and configs", () => {
       /Self-hosting must lag the checkout:[\s\S]*?driver_tag: github:[^#\s]+#v\d+\.\d+\.\d+/,
     );
     const entry = realInventory.sandbar_installations.find(({ user }) => user === "sandbar");
-    const driverText = entry?.driver_tag?.split("#v")[1];
-    const floorText = sandbarConfig.match(/^\s*requiresSandbar:\s*"([^"]+)",$/m)?.[1];
-    const driver = driverText === undefined ? null : parseVersion(driverText);
+    const driver = entry?.driver_tag === undefined ? null : driverVersion(entry.driver_tag);
     const checkout = parseVersion(packageVersion.version);
-    const floor = floorText === undefined ? null : parseVersion(floorText);
     expect(driver).not.toBeNull();
     expect(checkout).not.toBeNull();
-    expect(floor).not.toBeNull();
     expect(compareVersions(driver!, checkout!)).toBeLessThan(0);
-    expect(compareVersions(driver!, floor!)).toBeGreaterThanOrEqual(0);
+  });
+
+  it.each(installations)("$project's effective driver satisfies its config floor", (entry) => {
+    const config = installationConfigs.get(entry.user);
+    if (config === undefined) {
+      throw new Error(`missing committed installation config for ${entry.user}`);
+    }
+    expect(
+      compareVersions(driverVersion(entry.driver_tag), requiredVersion(config)),
+    ).toBeGreaterThanOrEqual(0);
   });
 
   it("assigns distinct host ports to both daemons and readers", () => {
