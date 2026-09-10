@@ -1,0 +1,52 @@
+---
+- name: Look for the unified cgroup hierarchy
+  ansible.builtin.stat:
+    path: /sys/fs/cgroup/cgroup.controllers
+  register: sandbar_cgroup2
+
+- name: Refuse a host without cgroup v2
+  ansible.builtin.assert:
+    that: sandbar_cgroup2.stat.exists
+    fail_msg: >-
+      /sys/fs/cgroup is not cgroup v2; rootless podman's resource accounting
+      and the pod lifecycle sandbar drives need it.
+
+- name: Create the user manager drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/user@.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Delegate cpu, memory and pids controllers to user managers
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/user@.service.d/sandbar-delegate.conf
+    content: |
+      [Service]
+      Delegate=cpu memory pids
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Create the containers.conf drop-in directory
+  ansible.builtin.file:
+    path: /etc/containers/containers.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Use netavark as the network backend
+  ansible.builtin.copy:
+    dest: /etc/containers/containers.conf.d/10-sandbar.conf
+    content: |
+      [network]
+      network_backend = "netavark"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply host-global systemd changes before configuring users
+  ansible.builtin.meta: flush_handlers

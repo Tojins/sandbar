@@ -1,0 +1,55 @@
+---
+- name: Check the required installation files
+  ansible.builtin.stat:
+    path: "{{ sandbar_installation_dir }}/{{ item }}"
+  loop:
+    - sandbar.config.mjs
+    - sandbar.env
+  register: sandbar_installation_files
+
+- name: Stop unless every required installation file exists
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.item != 'sandbar.env' or (item.stat.pw_name | default('')) == sandbar_user
+      - item.item != 'sandbar.env' or (item.stat.mode | default('')) == sandbar_secret_mode
+    fail_msg: >-
+      {{ sandbar_installation_dir }}/{{ item.item }}:
+      {{ 'missing' if not item.stat.exists
+         else 'owner ' ~ (item.stat.pw_name | default('unknown')) ~
+              ', mode ' ~ (item.stat.mode | default('unknown')) }}.
+      Place it as {{ sandbar_user }}{% if item.item == 'sandbar.env' %} with
+      mode {{ sandbar_secret_mode }}{% endif %}, or set config_src to copy it,
+      then rerun the play.
+    quiet: true
+  loop: "{{ sandbar_installation_files.results }}"
+  loop_control:
+    label: "{{ sandbar_installation_dir }}/{{ item.item }}"
+
+- name: Clone the consumer repository
+  ansible.builtin.git:
+    repo: "{{ sandbar_installation.clone_url }}"
+    dest: "{{ sandbar_checkout }}"
+    update: true
+  become: true
+  become_user: "{{ sandbar_user }}"
+
+- name: Read the installation user's uid
+  ansible.builtin.command: id -u {{ sandbar_user }}
+  register: sandbar_user_uid
+  changed_when: false
+
+- name: Keep the work directory out of the consumer repository
+  ansible.builtin.lineinfile:
+    path: "{{ sandbar_checkout }}/.git/info/exclude"
+    line: "/{{ sandbar_work_dir }}/"
+    create: true
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0644"
+
+- name: Install the daemon unit
+  ansible.builtin.include_tasks: service.yml
+
+- name: Install the standalone UI unit
+  ansible.builtin.include_tasks: ui.yml

@@ -1,5 +1,5 @@
 ---
-- name: Create the service user's unit directory
+- name: Create the installation user's unit directory
   ansible.builtin.file:
     path: "{{ sandbar_home }}/.config/systemd/user"
     state: directory
@@ -10,23 +10,31 @@
 - name: Install the daemon unit
   ansible.builtin.template:
     src: sandbar.service.j2
-    dest: "{{ sandbar_home }}/.config/systemd/user/{{ sandbar_service_name }}.service"
+    dest: "{{ sandbar_home }}/.config/systemd/user/sandbar.service"
     owner: "{{ sandbar_user }}"
     group: "{{ sandbar_user }}"
     mode: "0644"
-  notify: Say a changed unit awaits a restart by hand
+  register: sandbar_daemon_unit
 
-# Enabled so a provider reboot brings the daemon back; started and restarted
-# by a human over SSH (README, "Operating it"). A changed unit is therefore
-# NOT applied to a running daemon here.
+# The role never restarts a running daemon. Keep this message in the same
+# include as the user variables it names; a deferred handler would retain only
+# one notification while several installation units may have changed.
+- name: Say a changed unit awaits a restart by hand
+  ansible.builtin.debug:
+    msg: >-
+      sandbar.service changed. A running daemon keeps the old unit until a
+      human runs `systemctl --user restart sandbar` as {{ sandbar_user }}; a
+      stopped one starts with `systemctl --user start sandbar`.
+  when: sandbar_daemon_unit is changed
+
 - name: Enable the daemon unit at boot
   ansible.builtin.systemd_service:
-    name: "{{ sandbar_service_name }}.service"
+    name: sandbar.service
     scope: user
     enabled: true
     daemon_reload: true
   become: true
   become_user: "{{ sandbar_user }}"
   environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
-    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_result.uid }}/bus"
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_uid.stdout }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_uid.stdout }}/bus"

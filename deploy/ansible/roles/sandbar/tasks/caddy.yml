@@ -1,0 +1,29 @@
+---
+- name: Install Caddy
+  ansible.builtin.apt:
+    name: caddy
+    state: present
+
+- name: Configure Caddy for the first installation reader
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    sandbar_caddy_reader_port: "{{ sandbar_installations[0].reader_port }}"
+  notify: Reload Caddy
+
+- name: Enable and start Caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    enabled: true
+    state: started
+
+# The first play is expected to stop later on a missing hand-placed env file.
+# Apply this host-global change now; a handler deferred past that refusal would
+# be lost, and the next unchanged template would not notify it again. Starting
+# first also makes reload valid when package installation did not auto-start it.
+- name: Apply the Caddy configuration before installation checks can stop the play
+  ansible.builtin.meta: flush_handlers

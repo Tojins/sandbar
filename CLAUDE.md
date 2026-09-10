@@ -667,16 +667,18 @@ names the release that drives a run, and `npm run sandbar`
   either, so their own `origin/<sourceBranch>` would answer for the run before
   the landing. `preflight.ts`'s header owns both halves.
 
-- **Hosting the daemon is a contract this repo ships (#140).**
+- **Hosting daemons is a contract this repo ships (#140, #149).**
   `deploy/ansible/README.md` is the host contract in prose — Ubuntu 24.04 or 26.04,
-  rootless podman, a lingering `sandbar` user with `podman.socket`, swap,
-  key-only SSH, no automatic reboot — and `roles/sandbar` provides it. The
-  systemd USER unit pulls and `npm ci`s before every launch (the only thing
-  that refreshes a checkout since #66), never restarts on its own, and is
-  table-tested as a rendered string in `src/deploy-unit.test.ts`. The box
-  serves the UI through Caddy from a second user unit running `sandbar ui`.
-  Secrets are placed by hand and only asserted; no GitHub Actions deploy, no
-  timers.
+  rootless podman, swap, key-only SSH, no automatic reboot — and
+  `roles/sandbar` provides it once per box. Its inventory list gives every
+  project a Linux user, consumer clone, `~/installation/`, disjoint subuid
+  range, Podman session and identically named systemd user-unit pair. The
+  role-owned `ExecStartPre` installs that entry's exact-tag driver through the
+  same canonical installed-pin module as the repository launcher; `ExecStart`
+  runs it against the installation config, with no consumer `git pull` or
+  `npm ci`. Unit strings and the installed-pin rule are table-tested. Secrets
+  are placed once per installation and only asserted; no automatic restart,
+  GitHub Actions deploy, or timers.
 - **One image, both roles** (agent sandbox and gate pod member): the driver's
   augmentation supplies the sandbox's uid-1000 `agent` user, while the base
   keeps default `USER` root — `checkWorktreeImageUids` refuses the run if that

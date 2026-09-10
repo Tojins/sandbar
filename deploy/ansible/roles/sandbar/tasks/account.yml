@@ -1,0 +1,6 @@
+---
+- name: Create the installation user
+  ansible.builtin.include_tasks: user.yml
+
+- name: Configure rootless podman for the installation user
+  ansible.builtin.include_tasks: podman.yml

@@ -284,10 +284,12 @@ a landing. It bounds persistent failures such as a red source branch or a
 misconfigured gate stack. By default the wake lock is released while idle;
 `keepAwakeWhileIdle: true` keeps it for the daemon's lifetime.
 
-To run the daemon unattended on a dedicated Linux box, `deploy/ansible/` is
-the host contract: an Ansible role that prepares Ubuntu 24.04 (rootless
-podman, a lingering service user, swap, key-only SSH) and a systemd user unit
-that pulls and installs before each launch and never restarts on its own.
+To run daemons unattended on a dedicated Linux box, `deploy/ansible/` is the
+host contract: one inventory list creates an isolated Linux user, consumer
+clone, installation directory, rootless Podman session and systemd unit pair
+per project. Each exact-tag driver lives outside its consumer checkout; starts
+neither pull nor install the consumer's development tree, and never restart on
+their own.
 [`deploy/ansible/README.md`](deploy/ansible/README.md) has the by-hand steps.
 
 ### The three inner-loop budgets

@@ -1,18 +1,50 @@
 ---
-- name: Refuse to run without the variables the role cannot default
+- name: Refuse to run without the host variables the role cannot default
   ansible.builtin.assert:
     that:
-      - sandbar_checkout | length > 0
+      - sandbar_installations is sequence
+      - sandbar_installations is not string
+      - sandbar_installations is not mapping
+      - sandbar_installations | length > 0
       - sandbar_git_email | length > 0
       - sandbar_operator_ssh_keys | length > 0
+      - sandbar_operator_ssh_keys | reject('equalto', '') | list | length == sandbar_operator_ssh_keys | length
     fail_msg: >-
-      Set sandbar_checkout, sandbar_git_email and sandbar_operator_ssh_keys in
-      the inventory (inventory.example.yml). The key list is exclusive: a key
-      not listed is removed from root and the service user.
+      Set sandbar_installations, sandbar_git_email and
+      sandbar_operator_ssh_keys in the inventory. The key list is exclusive:
+      a key not listed is removed from root and every installation user.
 
-# 24.04's podman 4.9 equals the podman-remote client the gate images bake;
-# 26.04's 5.x is newer than it, the safe direction. Debian 12's 4.3 is OLDER
-# than the client, which is the one direction skew bites, so it is refused.
+- name: Validate every installation inventory entry
+  ansible.builtin.assert:
+    that:
+      - (item.user | default('')) is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - (item.user | default('')) != 'root'
+      - (item.project | default('')) is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
+      - (item.project | default('')) != 'installation'
+      - item.clone_url | default('') | length > 0
+      - (item.reader_port | default(none)) is integer
+      - (item.reader_port | default(0) | int) >= 1
+      - (item.reader_port | default(0) | int) <= 65535
+      - (item.driver_tag | default(sandbar_driver_tag)) is match('^github:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#v[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      Every sandbar_installations entry needs a non-root safe Linux user, a
+      project path component other than the reserved installation directory, a
+      non-empty clone_url, an integer reader_port from 1 through 65535, and an
+      exact github:owner/repo#vX.Y.Z driver. Invalid entry: {{ item }}
+  loop: "{{ sandbar_installations }}"
+  loop_control:
+    label: "{{ item.user | default('missing user') }}"
+
+- name: Refuse installation users or reader ports that are not unique
+  ansible.builtin.assert:
+    that:
+      - (sandbar_installations | map(attribute='user') | list | unique | length) == (sandbar_installations | length)
+      - (sandbar_installations | map(attribute='reader_port') | list | unique | length) == (sandbar_installations | length)
+    fail_msg: >-
+      Every installation needs a unique Linux user and reader_port; duplicate
+      users overwrite one home and unit pair, and duplicate ports cannot bind
+      concurrently.
+
 - name: Refuse a host that is not Ubuntu 24.04 or 26.04
   ansible.builtin.assert:
     that:
@@ -23,14 +55,12 @@
       this host is {{ ansible_facts['distribution'] }}
       {{ ansible_facts['distribution_version'] }}.
 
-- name: Install packages
+# Host-global tasks run once regardless of daemon count.
+- name: Install host packages
   ansible.builtin.import_tasks: packages.yml
 
-- name: Create the service user
-  ansible.builtin.import_tasks: user.yml
-
-- name: Configure rootless podman
-  ansible.builtin.import_tasks: podman.yml
+- name: Configure host podman prerequisites
+  ansible.builtin.import_tasks: podman-global.yml
 
 - name: Reconcile the AppArmor profiles rootless podman runs under
   ansible.builtin.import_tasks: apparmor.yml
@@ -44,12 +74,52 @@
 - name: Configure unattended upgrades
   ansible.builtin.import_tasks: upgrades.yml
 
-- name: Check the credentials placed by hand
-  ansible.builtin.import_tasks: secrets.yml
+- name: Configure Caddy for the first installation
+  ansible.builtin.import_tasks: caddy.yml
 
-- name: Install the daemon unit
-  ansible.builtin.import_tasks: service.yml
+- name: Create each installation account and podman session
+  ansible.builtin.include_tasks: account.yml
+  loop: "{{ sandbar_installations }}"
+  loop_control:
+    loop_var: sandbar_installation
+    index_var: sandbar_installation_index
+    label: "{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
+  vars:
+    sandbar_user: "{{ sandbar_installation.user }}"
+    sandbar_project: "{{ sandbar_installation.project }}"
+    sandbar_home: "/home/{{ sandbar_installation.user }}"
+    sandbar_checkout: "/home/{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
+    sandbar_installation_dir: "/home/{{ sandbar_installation.user }}/installation"
+    sandbar_installation_driver_tag: "{{ sandbar_installation.driver_tag | default(sandbar_driver_tag) }}"
+    sandbar_reader_port: "{{ sandbar_installation.reader_port }}"
+    sandbar_installation_git_name: "{{ sandbar_installation.git_name | default(sandbar_git_name) }}"
+    sandbar_installation_git_email: "{{ sandbar_installation.git_email | default(sandbar_git_email) }}"
+    sandbar_subid_start: "{{ sandbar_subid_base + sandbar_installation_index * sandbar_subid_count }}"
 
-- name: Configure the always-on run UI
-  ansible.builtin.import_tasks: ui.yml
-  when: sandbar_ui_port > 0
+# This separate pass guarantees every user and installation directory exists
+# before the expected first-run refusal on a hand-placed sandbar.env.
+- name: Prepare each installation directory
+  ansible.builtin.include_tasks: prepare-installation.yml
+  loop: "{{ sandbar_installations }}"
+  loop_control:
+    loop_var: sandbar_installation
+    label: "{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
+  vars:
+    sandbar_user: "{{ sandbar_installation.user }}"
+    sandbar_home: "/home/{{ sandbar_installation.user }}"
+    sandbar_installation_dir: "/home/{{ sandbar_installation.user }}/installation"
+
+- name: Configure each sandbar checkout and unit pair
+  ansible.builtin.include_tasks: installation.yml
+  loop: "{{ sandbar_installations }}"
+  loop_control:
+    loop_var: sandbar_installation
+    label: "{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
+  vars:
+    sandbar_user: "{{ sandbar_installation.user }}"
+    sandbar_project: "{{ sandbar_installation.project }}"
+    sandbar_home: "/home/{{ sandbar_installation.user }}"
+    sandbar_checkout: "/home/{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
+    sandbar_installation_dir: "/home/{{ sandbar_installation.user }}/installation"
+    sandbar_installation_driver_tag: "{{ sandbar_installation.driver_tag | default(sandbar_driver_tag) }}"
+    sandbar_reader_port: "{{ sandbar_installation.reader_port }}"
