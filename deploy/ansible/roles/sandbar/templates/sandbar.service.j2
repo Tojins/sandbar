@@ -1,44 +1,19 @@
-# Installed by deploy/ansible (role sandbar). Edit the template there, not
-# this file. The template uses plain variable placeholders and nothing else
-# of Jinja, so src/deploy-unit.test.ts renders it without an engine.
+# Installed once in each installation user's systemd session (#149).
 [Unit]
-Description=sandbar daemon in {{ sandbar_checkout }}
-# The gate stack's runner reaches this host's podman through the user socket
-# (#48); ordered after it so the first preflight cannot race the socket.
+Description=sandbar daemon for {{ sandbar_project }}
 Requires=podman.socket
 After=podman.socket
 
 [Service]
 Type=simple
 WorkingDirectory={{ sandbar_checkout }}
-# The host preflight's `gh auth status` and the `git pull` below read GH_TOKEN
-# from the process environment; the config reads the same file itself.
-EnvironmentFile={{ sandbar_checkout }}/sandbar.env
-# Nothing else refreshes the checkout since #66: every start runs the config
-# and the driver that origin carries at that moment.
-ExecStartPre=/usr/bin/git pull --ff-only
-ExecStartPre=/usr/bin/npm ci --no-audit
-ExecStart={{ sandbar_launch_command }}
-# Exits 2 (stuck) and 4 (quota) are deliberate stops (#133); a human reads
-# why and restarts over SSH. No retry loop, by decision.
+EnvironmentFile={{ sandbar_installation_dir }}/sandbar.env
+# The sole pre-start action reconciles this installation's exact driver tag.
+# A failed replacement removes the old stamp and exits non-zero, so systemd
+# never falls through to stale bytes already on disk.
+ExecStartPre=/usr/bin/node {{ sandbar_installation_dir }}/install-driver.mjs {{ sandbar_installation_driver_tag }}
+ExecStart=/usr/bin/node {{ sandbar_installation_dir }}/driver/node_modules/sandbar/dist/cli.js --config {{ sandbar_installation_dir }}/sandbar.config.mjs
 Restart=no
-# A stop must reach the DRIVER with SIGTERM, which is sandbar's ordinary
-# cleanup (#35): containers, pods, the wake lock and the origin lease (#139)
-# are released before the process exits. The main process is npm, which
-# forwards SIGTERM to the launcher; the launcher runs the driver with
-# `spawnSync` and no handler, so it dies at once and takes npm with it while
-# the driver, a third pid, never hears the signal. Under `mixed` that main-pid
-# exit made systemd SIGKILL the driver in the same second (seen 2026-09-09:
-# no run-end, a lease held for ten more minutes, the restart refused).
-# `control-group` signals every process in the unit at once; rootless
-# containers live in their own libpod scopes, so only the driver's podman
-# clients are hit and cleanup spawns fresh ones. That alone is not enough:
-# under the default ExitType=main the unit counts as stopped the moment npm
-# exits, seconds before the driver is done, and the rest of the cgroup is
-# killed anyway (seen 2026-09-09 12:03: "Received SIGTERM" was the record's
-# last line). ExitType=cgroup keeps the unit deactivating until every process
-# has gone, up to TimeoutStopSec, and still reports npm's exit status, which
-# is the driver's.
 KillMode=control-group
 ExitType=cgroup
 TimeoutStopSec={{ sandbar_stop_timeout_sec }}

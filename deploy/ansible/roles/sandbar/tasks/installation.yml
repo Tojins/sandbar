@@ -1,0 +1,84 @@
+---
+- name: Create the installation user
+  ansible.builtin.include_tasks: user.yml
+
+- name: Configure rootless podman for the installation user
+  ansible.builtin.include_tasks: podman.yml
+
+- name: Clone the consumer repository
+  ansible.builtin.git:
+    repo: "{{ sandbar_installation.clone_url }}"
+    dest: "{{ sandbar_checkout }}"
+    update: true
+  become: true
+  become_user: "{{ sandbar_user }}"
+
+- name: Create the installation directory
+  ansible.builtin.file:
+    path: "{{ sandbar_installation_dir }}"
+    state: directory
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0700"
+
+- name: Copy the installation configuration supplied by inventory
+  ansible.builtin.copy:
+    src: "{{ sandbar_installation.config_src }}/"
+    dest: "{{ sandbar_installation_dir }}/"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    directory_mode: "0700"
+    mode: preserve
+  when: sandbar_installation.config_src is defined
+
+- name: Install the role-owned driver installer
+  ansible.builtin.copy:
+    src: install-driver.mjs
+    dest: "{{ sandbar_installation_dir }}/install-driver.mjs"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0500"
+
+- name: Check the required installation files
+  ansible.builtin.stat:
+    path: "{{ sandbar_installation_dir }}/{{ item }}"
+  loop:
+    - sandbar.config.mjs
+    - sandbar.env
+  register: sandbar_installation_files
+
+- name: Stop unless every required installation file exists
+  ansible.builtin.assert:
+    that: item.stat.exists
+    fail_msg: >-
+      Missing {{ item.stat.path }}. Place {{ item.item }} in
+      {{ sandbar_installation_dir }} as {{ sandbar_user }}, or set config_src
+      to copy it, then rerun the play.
+    quiet: true
+  loop: "{{ sandbar_installation_files.results }}"
+  loop_control:
+    label: "{{ item.stat.path }}"
+
+- name: Check the installation environment ownership and mode
+  ansible.builtin.assert:
+    that:
+      - sandbar_installation_files.results[1].stat.pw_name == sandbar_user
+      - sandbar_installation_files.results[1].stat.mode == sandbar_secret_mode
+    fail_msg: >-
+      {{ sandbar_installation_dir }}/sandbar.env must be owned by
+      {{ sandbar_user }} with mode {{ sandbar_secret_mode }}.
+
+- name: Keep the work directory out of the consumer repository
+  ansible.builtin.lineinfile:
+    path: "{{ sandbar_checkout }}/.git/info/exclude"
+    line: "/{{ sandbar_work_dir }}/"
+    create: true
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0644"
+
+- name: Install the daemon unit
+  ansible.builtin.include_tasks: service.yml
+
+- name: Install the standalone UI unit
+  ansible.builtin.include_tasks: ui.yml

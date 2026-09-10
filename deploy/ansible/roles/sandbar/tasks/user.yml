@@ -1,5 +1,5 @@
 ---
-- name: Create the service user
+- name: Create the installation user
   ansible.builtin.user:
     name: "{{ sandbar_user }}"
     home: "{{ sandbar_home }}"
@@ -8,7 +8,7 @@
     state: present
   register: sandbar_user_result
 
-- name: Give the service user subordinate uid and gid ranges
+- name: Give the installation user disjoint subordinate id ranges
   ansible.builtin.lineinfile:
     path: "{{ item }}"
     regexp: "^{{ sandbar_user }}:"
@@ -20,41 +20,45 @@
   loop:
     - /etc/subuid
     - /etc/subgid
-  notify: Migrate podman storage
+  register: sandbar_subids
 
-# Linger keeps the user manager — and with it podman.socket and the daemon
-# unit — running with no login session, and starts them at boot.
-- name: Enable linger for the service user
+- name: Migrate the installation user's podman storage after a range change
+  ansible.builtin.command: podman system migrate
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
+  changed_when: true
+  when: sandbar_subids is changed
+
+- name: Enable linger for the installation user
   ansible.builtin.command: loginctl enable-linger {{ sandbar_user }}
   args:
     creates: "/var/lib/systemd/linger/{{ sandbar_user }}"
 
-- name: Wait for the service user's manager to come up
+- name: Wait for the installation user's manager to come up
   ansible.builtin.wait_for:
     path: "/run/user/{{ sandbar_user_result.uid }}/bus"
     timeout: 30
 
-- name: Authorize the operator's keys for the service user, and no others
+- name: Authorize the operator's keys for the installation user, and no others
   ansible.posix.authorized_key:
     user: "{{ sandbar_user }}"
     key: "{{ sandbar_operator_ssh_keys | join('\n') }}"
     exclusive: true
 
-- name: Set the git identity the agents and the merger commit with
+- name: Set the installation user's git identity
   community.general.git_config:
     name: "{{ item.name }}"
     value: "{{ item.value }}"
     scope: global
   loop:
-    - { name: user.name, value: "{{ sandbar_git_name }}" }
-    - { name: user.email, value: "{{ sandbar_git_email }}" }
+    - { name: user.name, value: "{{ sandbar_installation_git_name }}" }
+    - { name: user.email, value: "{{ sandbar_installation_git_email }}" }
   become: true
   become_user: "{{ sandbar_user }}"
 
-# `gh auth setup-git`, as configuration: GitHub HTTPS remotes authenticate
-# with GH_TOKEN from the unit's environment, so the by-hand clone and the
-# ExecStartPre `git pull` need no stored password.
-- name: Route git's GitHub credentials through gh
+- name: Route GitHub HTTPS credentials through gh
   community.general.git_config:
     name: credential.https://github.com.helper
     value: "!/usr/bin/gh auth git-credential"

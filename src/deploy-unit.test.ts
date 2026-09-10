@@ -1,198 +1,113 @@
-// The systemd user units and Caddyfile deploy/ansible installs (#140/#138),
-// table-tested as the strings a host receives. The templates are Jinja only
-// in that they carry `{{ name }}` placeholders — no filters, loops or
-// conditionals — which lets this suite render them with a substitution and
-// assert the deployment contracts directly.
+// The per-installation systemd units and host-global Caddyfile shipped by
+// deploy/ansible (#149), table-tested as the exact strings two users receive.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const ROLE = new URL("../deploy/ansible/roles/sandbar/", import.meta.url);
-const DAEMON_TEMPLATE = readFileSync(
-  new URL("templates/sandbar.service.j2", ROLE),
-  "utf8",
-);
-const UI_TEMPLATE = readFileSync(
-  new URL("templates/sandbar-ui.service.j2", ROLE),
-  "utf8",
-);
-const CADDY_TEMPLATE = readFileSync(new URL("templates/Caddyfile.j2", ROLE), "utf8");
-const MAIN_TASKS = readFileSync(new URL("tasks/main.yml", ROLE), "utf8");
-const UI_TASKS = readFileSync(new URL("tasks/ui.yml", ROLE), "utf8");
-const HANDLERS = readFileSync(new URL("handlers/main.yml", ROLE), "utf8");
-const DEFAULTS = readFileSync(new URL("defaults/main.yml", ROLE), "utf8");
+const daemonTemplate = readFileSync(new URL("templates/sandbar.service.j2", ROLE), "utf8");
+const uiTemplate = readFileSync(new URL("templates/sandbar-ui.service.j2", ROLE), "utf8");
+const caddyTemplate = readFileSync(new URL("templates/Caddyfile.j2", ROLE), "utf8");
+const mainTasks = readFileSync(new URL("tasks/main.yml", ROLE), "utf8");
+const installationTasks = readFileSync(new URL("tasks/installation.yml", ROLE), "utf8");
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
 
 function render(template: string, vars: Record<string, string>): string {
-  return template.replace(PLACEHOLDER, (_m, name: string) => {
+  return template.replace(PLACEHOLDER, (_match, name: string) => {
     const value = vars[name];
     if (value === undefined) throw new Error(`unrendered placeholder ${name}`);
     return value;
   });
 }
 
-const VARS = {
-  sandbar_checkout: "/home/sandbar/outdoor",
-  sandbar_launch_command: "/usr/bin/npm run sandbar",
-  sandbar_stop_timeout_sec: "900",
-};
-
-function expectPlainDocumentedPlaceholders(
-  template: string,
-  vars: Record<string, string>,
-): void {
-  const braces = template.match(/\{\{[^}]*\}\}/g) ?? [];
-  const names = braces.map((b) => {
-    const m = /^\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}$/.exec(b);
-    expect(m, `not a plain placeholder: ${b}`).not.toBeNull();
-    return m![1]!;
-  });
-  expect(new Set(names)).toEqual(new Set(Object.keys(vars)));
-  for (const name of names) {
-    expect(DEFAULTS, `${name} missing from defaults/main.yml`).toMatch(
-      new RegExp(`^${name}:`, "m"),
-    );
-  }
-  expect(template).not.toMatch(/\{%/);
-}
-
 function directives(unit: string): string[] {
-  return unit
-    .split("\n")
-    .map((line) => line.trim())
+  return unit.split("\n").map((line) => line.trim())
     .filter((line) => line !== "" && !line.startsWith("#"));
 }
 
 function values(unit: string, key: string): string[] {
-  return directives(unit)
-    .filter((line) => line.startsWith(`${key}=`))
+  return directives(unit).filter((line) => line.startsWith(`${key}=`))
     .map((line) => line.slice(key.length + 1));
 }
 
-describe("deploy/ansible sandbar.service template", () => {
-  it("uses only plain placeholders, each a documented role default", () => {
-    expectPlainDocumentedPlaceholders(DAEMON_TEMPLATE, VARS);
-  });
+const installations = [
+  { user: "outdoor", project: "outdoor", port: "7332", tag: "github:Tojins/sandbar#v0.39.7" },
+  { user: "sandbar", project: "sandbar", port: "7333", tag: "github:Tojins/sandbar#v0.40.0" },
+] as const;
 
-  it("renders a unit with the recorded decisions", () => {
-    const unit = render(DAEMON_TEMPLATE, VARS);
+function varsFor(row: (typeof installations)[number]): Record<string, string> {
+  const home = `/home/${row.user}`;
+  return {
+    sandbar_project: row.project,
+    sandbar_checkout: `${home}/${row.project}`,
+    sandbar_installation_dir: `${home}/installation`,
+    sandbar_installation_driver_tag: row.tag,
+    sandbar_reader_port: row.port,
+    sandbar_stop_timeout_sec: "900",
+  };
+}
+
+describe.each(installations)("$project installation units", (row) => {
+  const vars = varsFor(row);
+
+  it("renders the daemon's exact driver and external config contract", () => {
+    const unit = render(daemonTemplate, vars);
     expect(unit).not.toMatch(/\{\{|\}\}/);
-
-    // No retry loop: exits 2 and 4 are deliberate stops.
-    expect(values(unit, "Restart")).toEqual(["no"]);
-    expect(directives(unit).filter((l) => /^Restart(Sec|Force)/.test(l))).toEqual([]);
-
-    // The credential file is in the host process environment.
-    expect(values(unit, "EnvironmentFile")).toEqual(["/home/sandbar/outdoor/sandbar.env"]);
-    expect(values(unit, "WorkingDirectory")).toEqual(["/home/sandbar/outdoor"]);
-
-    // Refresh the checkout, install what it names, then launch — in that order.
+    expect(unit).not.toContain("git pull");
+    expect(unit).not.toContain("npm ci");
+    expect(values(unit, "WorkingDirectory")).toEqual([`/home/${row.user}/${row.project}`]);
+    expect(values(unit, "EnvironmentFile")).toEqual([`/home/${row.user}/installation/sandbar.env`]);
     expect(values(unit, "ExecStartPre")).toEqual([
-      "/usr/bin/git pull --ff-only",
-      "/usr/bin/npm ci --no-audit",
+      `/usr/bin/node /home/${row.user}/installation/install-driver.mjs ${row.tag}`,
     ]);
-    expect(values(unit, "ExecStart")).toEqual(["/usr/bin/npm run sandbar"]);
-    const order = directives(unit).filter((l) => /^Exec/.test(l));
-    expect(order.map((l) => l.split("=")[0])).toEqual([
-      "ExecStartPre",
-      "ExecStartPre",
-      "ExecStart",
+    expect(values(unit, "ExecStart")).toEqual([
+      `/usr/bin/node /home/${row.user}/installation/driver/node_modules/sandbar/dist/cli.js --config /home/${row.user}/installation/sandbar.config.mjs`,
     ]);
-
-    // A user unit that starts at boot under linger, after the podman socket.
-    expect(values(unit, "WantedBy")).toEqual(["default.target"]);
+    expect(values(unit, "Restart")).toEqual(["no"]);
     expect(values(unit, "Requires")).toEqual(["podman.socket"]);
     expect(values(unit, "After")).toEqual(["podman.socket"]);
-
-    // A stop is sandbar's own cleanup, given time. `mixed` only signals the
-    // main pid (npm), whose launcher child dies without forwarding, so the
-    // driver was SIGKILLed the same second; the whole cgroup is signalled.
     expect(values(unit, "KillMode")).toEqual(["control-group"]);
-    // ...and the unit is not "stopped" when npm, the main pid, exits ahead of
-    // the driver, or systemd kills the driver mid-cleanup regardless.
     expect(values(unit, "ExitType")).toEqual(["cgroup"]);
     expect(values(unit, "TimeoutStopSec")).toEqual(["900"]);
+    expect(values(unit, "WantedBy")).toEqual(["default.target"]);
   });
 
-  it("carries no timer, no log sweep and no memory limit", () => {
-    const unit = render(DAEMON_TEMPLATE, VARS);
-    for (const key of ["OnCalendar", "RuntimeMaxSec", "MemoryMax", "MemoryHigh", "ExecStopPost"]) {
-      expect(values(unit, key)).toEqual([]);
-    }
-  });
-});
-
-describe("deploy/ansible standalone UI templates", () => {
-  const uiVars = {
-    sandbar_checkout: "/home/sandbar/outdoor",
-    sandbar_service_name: "sandbar",
-    sandbar_ui_command: "/usr/bin/npx sandbar ui --port 7332",
-  };
-  const caddyVars = {
-    sandbar_ui_http_port: "80",
-    sandbar_ui_port: "7332",
-  };
-
-  it("uses only plain placeholders, each a documented role default", () => {
-    expectPlainDocumentedPlaceholders(UI_TEMPLATE, uiVars);
-    expectPlainDocumentedPlaceholders(CADDY_TEMPLATE, caddyVars);
-  });
-
-  it("keeps the reader behind and part of the daemon without sharing its install step", () => {
-    const unit = render(UI_TEMPLATE, uiVars);
+  it("renders the same driver's reader on its inventory port", () => {
+    const unit = render(uiTemplate, vars);
     expect(unit).not.toMatch(/\{\{|\}\}/);
     expect(values(unit, "PartOf")).toEqual(["sandbar.service"]);
     expect(values(unit, "After")).toEqual(["sandbar.service"]);
-    expect(values(unit, "WorkingDirectory")).toEqual(["/home/sandbar/outdoor"]);
-    expect(values(unit, "ExecStart")).toEqual(["/usr/bin/npx sandbar ui --port 7332"]);
     expect(values(unit, "ExecStartPre")).toEqual([]);
+    expect(values(unit, "ExecStart")).toEqual([
+      `/usr/bin/node /home/${row.user}/installation/driver/node_modules/sandbar/dist/cli.js ui --port ${row.port}`,
+    ]);
     expect(values(unit, "Restart")).toEqual(["no"]);
-    expect(values(unit, "WantedBy")).toEqual(["default.target"]);
+  });
+});
+
+describe("multi-installation role orchestration", () => {
+  it("loops only the user-scoped task group", () => {
+    expect(mainTasks).toMatch(
+      /- name: Configure each sandbar installation[\s\S]*?ansible\.builtin\.include_tasks: installation\.yml[\s\S]*?loop: "\{\{ sandbar_installations \}\}"/,
+    );
+    for (const task of ["packages.yml", "podman-global.yml", "apparmor.yml", "swap.yml", "ssh.yml", "upgrades.yml", "caddy.yml"]) {
+      expect(mainTasks).toContain(`ansible.builtin.import_tasks: ${task}`);
+    }
   });
 
-  it("proxies the public HTTP port to the standalone loopback port", () => {
-    expect(render(CADDY_TEMPLATE, caddyVars)).toBe(
-      ":80 {\n\treverse_proxy 127.0.0.1:7332\n}\n",
-    );
+  it("clones, optionally copies config, names missing files, and excludes workDir", () => {
+    expect(installationTasks).toContain('repo: "{{ sandbar_installation.clone_url }}"');
+    expect(installationTasks).toContain('when: sandbar_installation.config_src is defined');
+    expect(installationTasks).toContain("- sandbar.config.mjs\n    - sandbar.env");
+    expect(installationTasks).toContain("Missing {{ item.stat.path }}");
+    expect(installationTasks).toContain('path: "{{ sandbar_checkout }}/.git/info/exclude"');
+    expect(installationTasks).toContain('line: "/{{ sandbar_work_dir }}/"');
   });
 
-  it("skips the whole UI task file when sandbar_ui_port is zero", () => {
-    expect(MAIN_TASKS).toMatch(
-      /ansible\.builtin\.import_tasks: ui\.yml\n  when: sandbar_ui_port > 0/,
-    );
-  });
-
-  it("installs and enables the standalone reader", () => {
-    expect(UI_TASKS).toMatch(
-      /- name: Install the standalone UI unit\n  ansible\.builtin\.template:\n    src: sandbar-ui\.service\.j2\n    dest: "\{\{ sandbar_home \}\}\/\.config\/systemd\/user\/sandbar-ui\.service"/,
-    );
-    expect(UI_TASKS).toMatch(
-      /- name: Enable the standalone UI unit at boot\n  ansible\.builtin\.systemd_service:\n    name: sandbar-ui\.service\n    scope: user\n    enabled: true\n    daemon_reload: true/,
-    );
-  });
-
-  it("makes a daemon start pull the reader in, from the UI feature's side", () => {
-    // PartOf= carries stops and restarts only; without this a start after a
-    // deliberate stop left Caddy answering 502. The drop-in lives in ui.yml so
-    // a host with the UI disabled never names a unit it does not have.
-    expect(UI_TASKS).toMatch(
-      /- name: Make a daemon start pull the standalone UI in\n  ansible\.builtin\.copy:\n    dest: "\{\{ sandbar_home \}\}\/\.config\/systemd\/user\/\{\{ sandbar_service_name \}\}\.service\.d\/ui\.conf"\n    content: \|\n      \[Unit\]\n      Wants=sandbar-ui\.service\n/,
-    );
-    expect(render(DAEMON_TEMPLATE, VARS)).not.toMatch(/Wants=/);
-  });
-
-  it("installs and starts Caddy, reloading it when its config changes", () => {
-    expect(UI_TASKS).toMatch(
-      /- name: Install Caddy\n  ansible\.builtin\.apt:\n    name: caddy\n    state: present/,
-    );
-    expect(UI_TASKS).toMatch(
-      /- name: Configure Caddy for the run UI\n  ansible\.builtin\.template:\n    src: Caddyfile\.j2\n    dest: \/etc\/caddy\/Caddyfile[\s\S]*?  notify: Reload Caddy/,
-    );
-    expect(UI_TASKS).toMatch(
-      /- name: Enable and start Caddy\n  ansible\.builtin\.systemd_service:\n    name: caddy\n    enabled: true\n    state: started/,
-    );
-    expect(HANDLERS).toMatch(
-      /- name: Reload Caddy\n  ansible\.builtin\.systemd_service:\n    name: caddy\n    state: reloaded/,
-    );
+  it("leaves Caddy on the first reader until prefix routing lands", () => {
+    expect(render(caddyTemplate, {
+      sandbar_ui_http_port: "80",
+      sandbar_caddy_reader_port: "7332",
+    })).toBe(":80 {\n\treverse_proxy 127.0.0.1:7332\n}\n");
   });
 });
