@@ -7,6 +7,16 @@
 // throws that escape BEFORE that handler exists — chiefly `resolveConfig`'s
 // validation, which fires before the lock.
 //
+// The bin also owns one piece of module setup (#148): before it imports a
+// config, it registers `sandbar-resolve-hook.mjs`. A config can therefore
+// import the bare `"sandbar"` package from anywhere on disk, while Node is
+// deliberately re-anchored inside THIS executing driver and cannot pick up a
+// second installation. The hook belongs here, rather than in `index.ts`,
+// because `run(config)` receives an object that its library caller has already
+// imported; changing that caller's module resolution would be an unrelated
+// global side effect. All three bin modes use `loadConfig`, so run, gate and ui
+// share the same hook.
+//
 // The four constraints, written down so they are decisions and not drift:
 //   - EXACTLY ONE flag that carries configuration: `--config`. Every flag that
 //     duplicates a config field creates a second source of truth. (`--help`,
@@ -28,6 +38,7 @@
 // callers.)
 
 import { existsSync, realpathSync } from "node:fs";
+import { register } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -39,6 +50,15 @@ import { run } from "./run.js";
 import { repoLayout } from "./repo-cache.js";
 import { startUiServer } from "./ui-server.js";
 import { sandbarVersion } from "./version.js";
+
+// Use strings, not URL objects: `module.register` arrived in Node 20.6, while
+// its URL-object overload followed in 20.8. The hook is shipped as JavaScript
+// at package root so this same URL works beside both `src/cli.ts` in tests and
+// `dist/cli.js` in an installed driver.
+register(
+  new URL("../sandbar-resolve-hook.mjs", import.meta.url).href,
+  import.meta.url,
+);
 
 const DEFAULT_CONFIG_FILE = "sandbar.config.mjs";
 
