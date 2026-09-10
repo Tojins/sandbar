@@ -1,8 +1,9 @@
-# The one image sandbar's self-hosted run needs, serving BOTH roles (#39).
+# The one image the sandbar installation needs, serving BOTH roles (#39).
 #
 #   - the agent sandbox, run as uid 1000 with HOME=/home/agent. The checked-in
-#     driver still predates the augmentation's user creation, so this image
-#     retains the compatible uid/home migration until sandbar.pin advances;
+#     installation driver still predates the augmentation's user creation, so
+#     this image retains the compatible uid/home migration until its inventory
+#     tag advances;
 #   - the gate stack's `runner`, which lives in a podman POD, where keep-id is
 #     impossible. There, container root is what maps back to the invoking user,
 #     so the image's default USER is deliberately left as root and no `USER`
@@ -28,8 +29,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # node:*-slim already ships a `node` user at uid/gid 1000. Keep the host-side
-# migration while sandbar.pin names a release whose augment layer installs only
-# the CLIs and does not yet absorb the uid-1000 agent user (#76).
+# migration while the installation uses a release whose augment layer installs
+# only the CLIs and does not yet absorb the uid-1000 agent user (#76).
 RUN groupmod -n agent node \
     && usermod -l agent -d /home/agent -m node
 
@@ -64,10 +65,10 @@ RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/pod
 
 # No agent CLI is installed here. The driver appends the routed providers, at
 # its own pins, after resolving this image (#75) — `AGENT_PROVIDER_PACKAGES` in
-# src/agent-providers.ts — and `sandbar.pin` now names a release that does. Do
+# src/agent-providers.ts — and the installation uses a release that does. Do
 # not re-add a host copy: an unpinned one drifts from the parser the driver
 # couples to, and the driver's install wins over it anyway. What this image
-# still owes the currently pinned augmentation is the temporary uid/home migration
+# still owes the installed augmentation is the temporary uid/home migration
 # above. The standalone CLIs need no Node/npm runtime from future augmentations.
 
 # No `ENV HOME`: the sandbox provider sets HOME=/home/agent itself, and the

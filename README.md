@@ -16,8 +16,8 @@ If a version ever lands untagged anyway (e.g. hand-edited inside a feature commi
 
 ## Usage
 
-Sandbar ships a `sandbar` bin. Put one `sandbar.config.mjs` at the root of the
-repo you want worked on, gitignore `.sandbar/`, and run it:
+Sandbar ships a `sandbar` bin. For local/ad-hoc use, install it in the repo you
+want worked on, create a gitignored config, gitignore `.sandbar/`, and run it:
 
 ```sh
 npm i -D sandbar
@@ -37,6 +37,14 @@ nowhere to run it from that operates on the wrong repo.
 
 `run(config)` remains the API — the bin is thin, and a host that wants to embed
 sandbar can still `import { run } from "sandbar"` and call it.
+
+An unattended daemon has a different installation boundary: keep one neutral
+development/test recipe in the consumer repo, and place its config, environment
+and exact-tag driver in one private installation directory on the host. One
+Ansible inventory entry connects those pieces and points the config's `cwd` at
+the consumer clone; the consumer repo needs no sandbar dependency or runtime
+config. The [Ansible host contract](deploy/ansible/README.md) is the concrete
+recipe this repository ships.
 
 ### `sandbar gate` — the gate stack on its own
 
@@ -220,11 +228,11 @@ from `env`, so they never enter a sandbox; `resolveConfig` still performs the
 ordinary provider, model-pairing, and effort validation on the merged object.
 See `sandbar.env.example` for the complete list.
 
-### What sandbar puts in your repo
+### Local/ad-hoc layout
 
 ```
 your-repo/
-  sandbar.config.mjs   <- committed; the whole host-side surface
+  sandbar.config.mjs   <- gitignored; local/ad-hoc config
   sandbar.env          <- gitignored; required by the published example config
   .sandbar/            <- gitignored; node_modules-shaped, `rm -rf` at will
     repo.git/            bare object cache; re-created if you delete it
@@ -242,8 +250,8 @@ Sandbar never writes to your checkout. Every git and `gh` call — including
 `git branch -D` and the worktree removals — runs in `.sandbar/repo.git`, which
 holds only sandbar's own refs. What it *reads* from your checkout is your git
 identity, your `copyToWorktree` sources, and the URL of your `origin` (which is
-why no config names the remote: it cannot drift from the repo the config file
-sits in).
+why no config names the remote: it cannot drift from the consumer repo named by
+`cwd`).
 
 ### Required fields
 
@@ -268,7 +276,7 @@ placeholders, then uncomment only the host settings this repository needs to
 change. Optional host fields are documented in the config; the fifteen
 per-installation role-routing fields are documented in the env template.
 
-### Daemon pool and launcher
+### Daemon operation
 
 Sandbar keeps up to `maxParallelIssues` issue sandboxes in flight and replans
 whenever a slot becomes free. When the queue is empty it remains running and
@@ -285,11 +293,11 @@ misconfigured gate stack. By default the wake lock is released while idle;
 `keepAwakeWhileIdle: true` keeps it for the daemon's lifetime.
 
 To run daemons unattended on a dedicated Linux box, `deploy/ansible/` is the
-host contract: one inventory list creates an isolated Linux user, consumer
-clone, installation directory, rootless Podman session and systemd unit pair
-per project. Each exact-tag driver lives outside its consumer checkout; starts
-neither pull nor install the consumer's development tree, and never restart on
-their own.
+host contract: one neutral recipe in the consumer repo, one private installation
+directory, and one inventory entry. The role creates an isolated Linux user,
+consumer clone, rootless Podman session and systemd unit pair per project. Each
+exact-tag driver lives outside its consumer checkout; starts neither pull nor
+install the consumer's development tree, and never restart on their own.
 [`deploy/ansible/README.md`](deploy/ansible/README.md) has the by-hand steps.
 
 ### The three inner-loop budgets

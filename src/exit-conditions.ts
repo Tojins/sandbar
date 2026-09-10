@@ -15,7 +15,7 @@
 // poll timer provide the next observation instead.
 //
 // All four are `TerminalExit`s. `run.ts` writes that value as one exit event;
-// the UI renders it and the launcher reads only the process code (#132).
+// the UI renders it and service supervision reads only the process code (#132).
 // `EXIT_TAGS` is exhaustive over the union so its table test moves with it.
 
 // Cap on how many times the same issue can hit silent-noop in one run before

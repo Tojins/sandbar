@@ -457,7 +457,7 @@ describe("ensureIssueBranch — operates on repoDir, not process.cwd() (#34)", (
 
   beforeEach(async () => {
     originalCwd = process.cwd();
-    launchedFrom = await mkdtemp(join(tmpdir(), "sandbar-launch-"));
+    launchedFrom = await mkdtemp(join(tmpdir(), "sandbar-cwd-"));
     target = await mkdtemp(join(tmpdir(), "sandbar-target-"));
     await seed(launchedFrom);
     await seed(target);

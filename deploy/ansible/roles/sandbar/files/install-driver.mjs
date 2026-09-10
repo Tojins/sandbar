@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The Ansible role's thin ExecStartPre entrypoint (#149). Reconciliation lives
-// in driver-install.mjs, shared with the repository launcher; this file owns
+// in driver-install.mjs, shared by every installation; this file owns
 // only its one-argument command contract and operator-facing error rendering.
 
 import { realpathSync } from "node:fs";

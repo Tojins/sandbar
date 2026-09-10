@@ -98,9 +98,8 @@
 // slot completion against `pollIntervalMs`. A poll refreshes source, issue,
 // chunk and member refs before running the ordinary plan. A failed refresh is
 // reported and waits for the next wake instead of killing the daemon; startup
-// preflight remains fatal. A no-op poll is silent; work, source movement, and
-// changed config-staleness evidence are recorded. A stable label-actor
-// exclusion is also recorded on each poll because its required diagnostic
+// preflight remains fatal. A no-op poll is silent. A stable label-actor
+// exclusion is recorded on each poll because its required diagnostic
 // makes that recompute reportable. Source movement from either
 // a human push or this process refreshes the image inputs.
 // Agent and branch images are replaced as one bundle and captured by each
@@ -253,9 +252,7 @@ import {
   checkForgeReachabilityForPreflight,
   fetchOriginRefs,
   PreflightError,
-  readConfigStaleness,
   runPreflightAfterReachability,
-  staleConfigWarning,
 } from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
 import {
@@ -553,7 +550,6 @@ export async function run(
   // actionable one.
   const lockPaths = lockPathsFor(layout.stateDir);
   let release: (() => Promise<void>) | null = null;
-  let lastConfigStalenessCount = 0;
   try {
     release = await acquireLock(lockPaths);
   } catch (err) {
@@ -585,7 +581,6 @@ export async function run(
     developers: config.developers,
     pulledImages: pulledImagesOf(config),
     mountSources: absoluteMountSources(config.gateStack.containers),
-    configPath: options.configPath ?? null,
     agentProviders,
   };
   const stopBeforeOriginLock = async (
@@ -951,7 +946,7 @@ export async function run(
       action: "started",
       detail: "Preflight started",
     });
-    const initialConfigStaleness = await runPreflightAfterReachability({
+    readyLabelPolicy = await runPreflightAfterReachability({
       ...preflightBase,
       onEvent: (event) => runRecord.emit(event).then(() => undefined),
     });
@@ -966,8 +961,6 @@ export async function run(
         ...(configuredCodexHome === undefined ? {} : { codexHome: configuredCodexHome }),
       });
     }
-    lastConfigStalenessCount = initialConfigStaleness.configStaleness.touchingConfig;
-    readyLabelPolicy = initialConfigStaleness.readyLabelPolicy;
   } catch (err) {
     return await stopAtStartup("preflight-failed", err);
   }
@@ -1630,22 +1623,6 @@ export async function run(
         await reportSweepFailures(cycleOrphans, (event) => runRecord.emit(event), "quiescent");
       }
 
-      const configStaleness = await readConfigStaleness({
-        layout,
-        sourceBranch: config.sourceBranch,
-        configPath: options.configPath ?? null,
-      });
-      const configStalenessChanged =
-        configStaleness.touchingConfig !== lastConfigStalenessCount;
-      if (configStalenessChanged) {
-        const configWarning = staleConfigWarning(configStaleness);
-        const line = configWarning ??
-          `Config staleness cleared: ${configStaleness.configPath ?? "programmatic config"} ` +
-          `is no longer behind a change from origin/${config.sourceBranch}.`;
-        await runRecord.emit({ kind: "complaint", severity: "warning", message: line });
-      }
-      lastConfigStalenessCount = configStaleness.touchingConfig;
-
       // ---------------------------------------------------------------------
       // Phase 1: Plan
       // ---------------------------------------------------------------------
@@ -1845,7 +1822,7 @@ export async function run(
         providerClosed,
       });
       const pollDidWork =
-        sourceChangedOnPoll || configStalenessChanged || planDiagnosticsChanged ||
+        sourceChangedOnPoll || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";

@@ -3,10 +3,8 @@ dist/
 *.tsbuildinfo
 .DS_Store
 
-# sandbar operating on itself (#39): per-run state, and the credentials file
-# whose name is the host's to pick.
+# Sandbar's local/ad-hoc state.
 .sandbar/
-sandbar.env
 
 # Browser-MCP session logs, written into the checkout by an editor integration.
 .playwright-mcp/

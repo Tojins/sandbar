@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Read @AGENTS.md first. It holds the working rules that apply to every commit made
 here (starting with: bump the version in the same commit), and it is shared with
-the sandbar agents — `sandbar.config.mjs` names it as an anchor doc, so they get
-an `@ref` to it directly rather than through this import.
+the sandbar agents — the sandbar installation config names it as an anchor doc,
+so they get an `@ref` to it directly rather than through this import.
 
 This file is the architecture **map**. The authoritative design notes per module
 are the long header comments at the top of `src/*.ts` — read the header before
@@ -40,13 +40,14 @@ dispatches two subcommands: `sandbar gate` → `runGateCommand` (#45), exported
 from the package root beside `run`, and `sandbar ui` (#132), the standalone
 host of the run UI for post-mortem browsing.
 
-A host repo supplies one committed `sandbar.config.mjs` at its root, its own
-`Containerfile`(s), anchor docs (`CLAUDE.md`, `CONTEXT.md`, optional ADR dir),
-and a **gate stack** (`config.gateStack`, #24) — the containers and steps that
-produce a verdict about a commit. Coding standards for the implementer and
-reviewer ship built-in (`prompts/coding-standards.md`); a host may add per-role
-instructions via `config.promptExtensions`. Sandbar then drives a GitHub-Issues-driven
-coding-agent loop against that host.
+An installation supplies `sandbar.config.mjs`, credentials and an exact-tag
+driver outside its consumer repository. The consumer repo supplies neutral
+development inputs: its `Containerfile`(s), anchor docs (`CLAUDE.md`,
+`CONTEXT.md`, optional ADR dir), and everything its **gate stack**
+(`config.gateStack`, #24) evaluates. Coding standards for the implementer and
+reviewer ship built-in (`prompts/coding-standards.md`); an installation may add
+per-role instructions via `config.promptExtensions`. Sandbar then drives a
+GitHub-Issues-driven coding-agent loop against that consumer.
 
 **The config file is a PROGRAM, not data** — imported, never parsed, so computed
 values and top-level await survive. Exactly one configuration flag (`--config`),
@@ -601,12 +602,11 @@ outcomes.
 - **A run opens by naming what is driving it (#69/#132).** The `run-start`
   event carries the version, the tree `dist/` was built from, the config file's
   path, workdir and whether either tree is dirty; the UI renders the identity.
-  Two trees because there are
-  two, and since #66 they differ in kind: the driver is an installed release
-  (gitignored, so it reports `unknown` and its VERSION is the identification),
-  while the config is still the operator's working-tree file and is the one that
-  can be dirty. A fact, never a warning, never a refusal, and every field
-  degrades to `unknown`. `src/driver-identity.ts` owns the two-tree argument and
+  Two trees because code and config are independent inputs: installed releases
+  report an unknown tree and use VERSION as identification, while local/ad-hoc
+  development may supply dirty code or config trees. A fact, never a warning,
+  never a refusal, and every field degrades to `unknown`.
+  `src/driver-identity.ts` owns the two-tree argument and
   the `check-ignore` guard that keeps a driver under `node_modules` from being
   attributed to the host repo's HEAD; `run(config, { configPath })` is how the
   bin tells it which file it loaded.
@@ -620,52 +620,24 @@ outcomes.
   would break every config already written. `src/requires-sandbar.ts` owns the
   argument, including why an unidentifiable driver fails the check.
 
-## This repo runs itself (#39)
+## This repo is an installation like any consumer (#39, #149, #151)
 
-`sandbar.config.mjs` at the root is the host-side surface, `Containerfile`
-builds the one image, `sandbar.env` (gitignored) holds credentials AND this
-installation's per-role routing — the config calls `splitRoleRouting` on it
-(#137), so the committed file names no vendor and each box chooses its own —
-`sandbar.pin`
-names the release that drives a run, and `npm run sandbar`
-(`scripts/sandbar-launch.mjs`) installs the pin and starts the daemon once.
+The repository contains the neutral development and test inputs its branches
+own, including the root `Containerfile`. Its daemon configuration, credentials
+and exact-tag driver live in the sandbar user's private `~/installation/` on the
+box. `deploy/ansible/installations/sandbar/` is the source copied to that private
+directory, and `deploy/ansible/inventory.yml` chooses the driver tag. The
+inventory comment owns the rule that this installation's tag lags the checkout,
+so a regression cannot immediately become the driver responsible for repairing
+it.
 
-- **The driver is PINNED, not built from the checkout (#66).** The launcher
-  installs the tag `sandbar.pin` names into `.sandbar/driver/` and runs that, so
-  a series is driven by a release somebody chose and an operator may hold local
-  commits and uncommitted edits while it runs. It does not pull. An install that
-  fails stops the launch rather than falling back to what is on disk, and a
-  matching stamp is skipped, so repeated launches run a byte-identical driver. The
-  price is that an orchestrator or PROMPT change takes effect only when the pin
-  moves — which is how every consumer already experiences sandbar; iterate
-  unlanded code with `npm run build && node dist/cli.js` by hand. The pin
-  therefore LAGS the checkout always: `auto-tag.yml` tags package.json's version
-  at the pushed head and the merger lands a whole pass in one push, so the
-  version being written here is not installable and may never be tagged at all.
-  Moving it is its own later commit; `launcher.test.ts` asserts the pin is
-  strictly older than package.json's version and satisfies the config's
-  `requiresSandbar`. `scripts/sandbar-launch.mjs`'s header owns the four
-  decisions, `sandbar.pin`'s the lag rule.
-- **What still comes from the checkout is the CONFIG** (and `sandbar.env` beside
-  it, and the launcher). It must: the config resolves against the process cwd
-  and `sandbar.env` against its own `import.meta.url`. So "driven by a pinned
-  commit" is true of the orchestrator and its prompts and NOT of `gateStack`;
-  `requiresSandbar` is the guard on the version seam that creates, and the
-  `run-start` event's driver identity (#69) is what shows a dirty one. `npm run driver` installs the pin
-  without starting the daemon — which the hand paths need, since the config
-  imports `readEnvFile` from the driver rather than from `./dist/`.
-- **Nothing refreshes that checkout, and that is the price of #66.** The
-  launcher's `git pull` is gone — which is what lets a series run while the
-  operator holds local commits — so a landed `gateStack` change starts judging
-  branches when a human pulls it, not during the existing daemon. Unreported that is
-  silent for an unbounded long-running process,
-  so preflight's `staleConfigWarning` counts the commits the checkout is behind
-  `origin/<sourceBranch>` that touch the config FILE — narrower than "behind" on
-  purpose, since after every landing a checkout is behind and a warning that
-  always fires is one nobody reads. Counted in the CACHE, whose origin refs
-  preflight has just fetched: an operator who has not pulled has not fetched
-  either, so their own `origin/<sourceBranch>` would answer for the run before
-  the landing. `preflight.ts`'s header owns both halves.
+There is no second laptop path and no runtime config, env file, release pin or
+launcher at the repository root. To exercise unlanded driver code deliberately,
+build it and name an installation config explicitly:
+
+```sh
+npm run build && node dist/cli.js --config <path>
+```
 
 - **Hosting daemons is a contract this repo ships (#140, #149).**
   `deploy/ansible/README.md` is the host contract in prose — Ubuntu 24.04 or 26.04,
@@ -674,7 +646,7 @@ names the release that drives a run, and `npm run sandbar`
   project a Linux user, consumer clone, `~/installation/`, disjoint subuid
   range, Podman session and identically named systemd user-unit pair. The
   role-owned `ExecStartPre` installs that entry's exact-tag driver through the
-  same canonical installed-pin module as the repository launcher; `ExecStart`
+  canonical driver-install module; `ExecStart`
   runs it against the installation config, with no consumer `git pull` or
   `npm ci`. Unit strings and the installed-pin rule are table-tested. Secrets
   are placed once per installation and only asserted; no automatic restart,
@@ -700,8 +672,8 @@ names the release that drives a run, and `npm run sandbar`
   slice is reviewed without the half that gives it its reason. Two issues that
   are genuinely separate and both touch `run.ts`/`inner-loop`/`merger` are
   ordered with `## Blocked by`, not run in parallel. #66 keeps a merged
-  regression out of the driver until the pin moves, so the blast radius of one
-  larger landing is a pin decision, not a reason to split.
+  regression out of the driver until the installation's exact tag moves, so the
+  blast radius of one larger landing is a deploy decision, not a reason to split.
 - **The suite must not depend on ambient git config** (the gate runner has no
   global identity) **nor on `process.cwd()` being a repository** (`/workspace/.git`
   is not a repository inside gate containers — name the directory in every git

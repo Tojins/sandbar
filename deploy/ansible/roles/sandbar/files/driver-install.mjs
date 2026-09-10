@@ -1,6 +1,6 @@
 // Canonical exact-tag driver installation (#66, #149).
 //
-// Both the repository launcher and the Ansible role use this module. A driver
+// The Ansible role uses this module for every installation. A driver
 // is current only when its expected CLI exists and `installed-pin` names the
 // requested immutable tag. Replacement removes that stamp before npm runs and
 // restores it only after the CLI exists, so every failed or incomplete install
