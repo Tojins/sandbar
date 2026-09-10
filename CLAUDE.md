@@ -385,9 +385,10 @@ outcomes.
   owned by the uid-1000 agent so Codex can write its per-sandbox session state
   beside the mount. This is the one deliberate exception to per-sandbox write
   isolation: same-trust holders need Codex's reload-before-refresh cooperation
-  around one token family. The host config should read a dedicated login (this
-  repo uses `~/.codex-sandbar`) so the operator's ordinary TUI never shares that
-  family. `src/codex-auth.ts`.
+  around one token family. The host config should read a dedicated login; this
+  repo's installation reads the dedicated `sandbar` Linux user's own
+  `~/.codex/auth.json`, so the operator's ordinary TUI never shares that family.
+  `src/codex-auth.ts`.
 - **A role names its CLI as well as its model (#19, #72, #74, #121, #126).**
   `implementerAgent` / `reviewerAgent` / `mergerAgent`, all defaulting to
   `claude`, plus `uiCheckAgent` defaulting to `implementerAgent` and

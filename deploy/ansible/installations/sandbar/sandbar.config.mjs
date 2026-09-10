@@ -24,6 +24,11 @@ export default {
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
   contextMdPath: "AGENTS.md",
+  promptExtensions: {
+    merger: {
+      text: "When a merge conflicts on `version`, the merged value is one patch bump above the higher of the two sides — never either side's own — and `package-lock.json` carries the same value.",
+    },
+  },
   uiPort: 7334,
   sandboxImage: image,
   sandboxHooks: {
