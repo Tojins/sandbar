@@ -197,8 +197,14 @@ describe("multi-installation role orchestration", () => {
       .toContain("when: sandbar_installation.config_src is defined");
     expect(taskNamed(prepareTasks, "Install the role-owned driver installer"))
       .toContain("src: install-driver.mjs");
-    expect(taskNamed(prepareTasks, "Install the shared driver reconciliation module"))
-      .toContain("src: driver-install.mjs");
+    const sharedInstaller = taskNamed(
+      prepareTasks,
+      "Install the shared driver reconciliation module",
+    );
+    expect(sharedInstaller).toContain("src: driver-install.mjs");
+    expect(sharedInstaller).toContain(
+      'dest: "{{ sandbar_installation_dir }}/driver-install.mjs"',
+    );
   });
 
   it("asserts both required files exist and names the failed path", () => {
@@ -246,10 +252,17 @@ describe("multi-installation role orchestration", () => {
     })).toBe(":80 {\n\treverse_proxy 127.0.0.1:7332\n}\n");
     expect(taskNamed(caddyTasks, "Configure Caddy for the first installation reader"))
       .toContain("notify: Reload Caddy");
-    expect(taskNamed(caddyTasks, "Apply the Caddy configuration before installation checks can stop the play"))
-      .toContain("ansible.builtin.meta: flush_handlers");
-    expect(caddyTasks.indexOf("Enable and start Caddy"))
-      .toBeLessThan(caddyTasks.indexOf("Apply the Caddy configuration"));
+    const startName = "Enable and start Caddy";
+    const flushName = "Apply the Caddy configuration before installation checks can stop the play";
+    const start = taskNamed(caddyTasks, startName);
+    const flush = taskNamed(caddyTasks, flushName);
+    expect(start).toContain("ansible.builtin.systemd_service:");
+    expect(start).toContain("name: caddy");
+    expect(start).toContain("enabled: true");
+    expect(start).toContain("state: started");
+    expect(flush).toContain("ansible.builtin.meta: flush_handlers");
+    expect(caddyTasks.indexOf(`- name: ${startName}`))
+      .toBeLessThan(caddyTasks.indexOf(`- name: ${flushName}`));
   });
 });
 
