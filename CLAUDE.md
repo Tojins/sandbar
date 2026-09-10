@@ -673,7 +673,8 @@ names the release that drives a run, and `npm run sandbar`
   `roles/sandbar` provides it once per box. Its inventory list gives every
   project a Linux user, consumer clone, `~/installation/`, disjoint subuid
   range, Podman session and identically named systemd user-unit pair. The
-  role-owned `ExecStartPre` installs that entry's exact-tag driver; `ExecStart`
+  role-owned `ExecStartPre` installs that entry's exact-tag driver through the
+  same canonical installed-pin module as the repository launcher; `ExecStart`
   runs it against the installation config, with no consumer `git pull` or
   `npm ci`. Unit strings and the installed-pin rule are table-tested. Secrets
   are placed once per installation and only asserted; no automatic restart,

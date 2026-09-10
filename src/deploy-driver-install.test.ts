@@ -1,8 +1,17 @@
 // The role-owned systemd ExecStartPre driver installer (#149).
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -15,6 +24,7 @@ import {
 } from "../deploy/ansible/roles/sandbar/files/install-driver.mjs";
 
 const PIN = "github:Tojins/sandbar#v0.39.7";
+const ROLE_FILES = new URL("../deploy/ansible/roles/sandbar/files/", import.meta.url);
 
 describe("role-owned driver install (#149)", () => {
   let dir: string;
@@ -66,6 +76,49 @@ describe("role-owned driver install (#149)", () => {
       spawn: (() => ({ status: 1 })) as never,
       log: () => {},
     })).toThrow(DriverInstallError);
+    expect(existsSync(paths.stamp)).toBe(false);
+  });
+
+  it("refuses to stamp an npm success that did not produce the CLI", () => {
+    const paths = driverPaths(dir);
+    expect(() => ensureDriver(dir, PIN, {
+      spawn: (() => ({ status: 0 })) as never,
+      log: () => {},
+    })).toThrow(/reported success.*missing/s);
+    expect(existsSync(paths.stamp)).toBe(false);
+  });
+
+  it("executes the deployed entrypoint and exits nonzero when npm fails", () => {
+    const installation = join(dir, "installation");
+    const fakeBin = join(dir, "bin");
+    mkdirSync(installation, { recursive: true });
+    mkdirSync(fakeBin, { recursive: true });
+    copyFileSync(
+      fileURLToPath(new URL("install-driver.mjs", ROLE_FILES)),
+      join(installation, "install-driver.mjs"),
+    );
+    copyFileSync(
+      fileURLToPath(new URL("driver-install.mjs", ROLE_FILES)),
+      join(installation, "driver-install.mjs"),
+    );
+    const npm = join(fakeBin, "npm");
+    writeFileSync(npm, "#!/bin/sh\nexit 23\n");
+    chmodSync(npm, 0o700);
+
+    const paths = driverPaths(join(installation, "driver"));
+    mkdirSync(paths.dir, { recursive: true });
+    writeFileSync(paths.stamp, "github:Tojins/sandbar#v0.39.6\n");
+    const result = spawnSync(
+      process.execPath,
+      [join(installation, "install-driver.mjs"), PIN],
+      {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`npm install of ${PIN} failed (exit 23)`);
     expect(existsSync(paths.stamp)).toBe(false);
   });
 

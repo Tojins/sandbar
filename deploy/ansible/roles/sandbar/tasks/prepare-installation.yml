@@ -24,3 +24,11 @@
     owner: "{{ sandbar_user }}"
     group: "{{ sandbar_user }}"
     mode: "0500"
+
+- name: Install the shared driver reconciliation module
+  ansible.builtin.copy:
+    src: driver-install.mjs
+    dest: "{{ sandbar_installation_dir }}/driver-install.mjs"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0400"
