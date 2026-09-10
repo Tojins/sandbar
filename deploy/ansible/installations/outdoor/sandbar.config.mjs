@@ -11,6 +11,13 @@ const image = "localhost/outdoor:dev";
 const { routing, env: credentials } = splitRoleRouting(
   readEnvFile(new URL("sandbar.env", import.meta.url)),
 );
+const usesCodex = [
+  "implementerAgent",
+  "uiCheckAgent",
+  "reviewerAgent",
+  "reviewerQualityAgent",
+  "mergerAgent",
+].some((field) => routing[field] === "codex");
 
 export default {
   cwd,
@@ -37,7 +44,9 @@ export default {
   ],
   env: {
     ...credentials,
-    CODEX_AUTH_JSON: readFileSync(join(homedir(), ".codex/auth.json"), "utf8"),
+    ...(usesCodex
+      ? { CODEX_AUTH_JSON: readFileSync(join(homedir(), ".codex/auth.json"), "utf8") }
+      : {}),
   },
   ...routing,
 };

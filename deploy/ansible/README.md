@@ -49,15 +49,20 @@ start instead of launching old bytes. `ExecStart` runs that driver's CLI with
 ci` the consumer tree.
 
 The UI unit runs the same driver's `ui` command on the entry's `reader_port`.
+It requires and starts after a successful daemon activation, so a failed driver
+install cannot launch a stale reader; `PartOf=` carries deliberate daemon stops
+and restarts to it, while a later daemon crash leaves the report available.
 Both units use `Restart=no`; exits 2 and 4 remain stops for a human to inspect.
-Until prefix routing lands in #150, Caddy serves the first installation's
-reader at `/`.
+Until prefix routing lands in #150, Caddy serves the first installation's reader
+at `/`.
 
 ## Inventory
 
-`sandbar_installations` is a list. Every entry requires `user`, `project`,
-`clone_url`, and a positive `reader_port`. `driver_tag` overrides the box-level
-`sandbar_driver_tag`; both accept exact tags only. `config_src` is optional.
+`sandbar_installations` is a list. Every entry requires a safe Linux `user`, a
+single path-component `project`, `clone_url`, and a unique integer
+`reader_port` from 1 through 65535. Users are unique too. `driver_tag` overrides
+the box-level `sandbar_driver_tag`; both accept exact tags only. `config_src` is
+optional.
 
 ```yaml
 sandbar_driver_tag: github:Tojins/sandbar#v0.40.1

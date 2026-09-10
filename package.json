@@ -1,6 +1,6 @@
 {
   "name": "sandbar",
-  "version": "0.41.6",
+  "version": "0.41.7",
   "description": "Self-hosted issue-tracker-driven coding agent orchestrator.",
   "type": "module",
   "main": "dist/index.js",
@@ -44,6 +44,7 @@
     "@types/node": "^22.0.0",
     "@types/proper-lockfile": "^4.1.4",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "yaml": "^2.9.0"
   }
 }

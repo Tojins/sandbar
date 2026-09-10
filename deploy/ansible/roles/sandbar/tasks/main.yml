@@ -15,18 +15,33 @@
   ansible.builtin.assert:
     that:
       - item.user is defined and item.user | length > 0
+      - item.user is match('^[a-z_][a-z0-9_-]{0,31}$')
       - item.project is defined and item.project | length > 0
+      - item.project is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
       - item.clone_url is defined and item.clone_url | length > 0
       - item.reader_port is defined
-      - item.reader_port | int > 0
+      - item.reader_port is integer
+      - item.reader_port >= 1
+      - item.reader_port <= 65535
       - (item.driver_tag | default(sandbar_driver_tag)) is match('^github:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#v[0-9]+\.[0-9]+\.[0-9]+$')
     fail_msg: >-
-      Every sandbar_installations entry needs a non-empty user, project and
-      clone_url, a positive reader_port, and an exact tagged driver of the form
-      github:owner/repo#vX.Y.Z. Invalid entry: {{ item }}
+      Every sandbar_installations entry needs a safe Linux user, a project path
+      component, a non-empty clone_url, an integer reader_port from 1 through
+      65535, and an exact github:owner/repo#vX.Y.Z driver. Invalid entry:
+      {{ item }}
   loop: "{{ sandbar_installations }}"
   loop_control:
     label: "{{ item.user | default('missing user') }}"
+
+- name: Refuse installation users or reader ports that are not unique
+  ansible.builtin.assert:
+    that:
+      - (sandbar_installations | map(attribute='user') | list | unique | length) == (sandbar_installations | length)
+      - (sandbar_installations | map(attribute='reader_port') | list | unique | length) == (sandbar_installations | length)
+    fail_msg: >-
+      Every installation needs a unique Linux user and reader_port; duplicate
+      users overwrite one home and unit pair, and duplicate ports cannot bind
+      concurrently.
 
 - name: Refuse a host that is not Ubuntu 24.04 or 26.04
   ansible.builtin.assert:

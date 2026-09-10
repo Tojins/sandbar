@@ -1,6 +1,7 @@
 # Installed once in each installation user's systemd session (#149).
 [Unit]
 Description=sandbar standalone run UI for {{ sandbar_project }}
+Requires=sandbar.service
 PartOf=sandbar.service
 After=sandbar.service
 
