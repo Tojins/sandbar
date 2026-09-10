@@ -1,4 +1,5 @@
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   type AgentProviderName,
@@ -63,6 +64,35 @@ export type PromptExtension =
 export type PromptExtensions = Partial<
   Readonly<Record<PromptRole, PromptExtension>>
 >;
+
+// ---------------------------------------------------------------------------
+// copyToWorktree (#144 decision 7)
+//
+// A legacy string deliberately remains one path interpreted twice: relative
+// to the operator checkout as its source and to the issue worktree as its
+// destination. The object form separates those roles so a config installed
+// outside the checkout can name one of its own files with `from` and place it
+// at the worktree-relative `to` path. Resolution below validates that boundary
+// and converts object sources once; the copying layer never reinterprets them.
+// ---------------------------------------------------------------------------
+
+export type CopyToWorktreeEntry =
+  | string
+  | {
+      readonly from: string | URL;
+      readonly to: string;
+    };
+
+// String entries stay unresolved so the worktree helper can retain their
+// original join-and-mirror semantics. The object form is rooted once at the
+// config boundary: every later path, including prepared worktrees, consumes
+// the same absolute host source.
+export type ResolvedCopyToWorktreeEntry =
+  | string
+  | {
+      readonly from: string;
+      readonly to: string;
+    };
 
 const PROMPT_ROLES: readonly PromptRole[] = [
   "implementer",
@@ -695,14 +725,14 @@ export type RunConfig = {
   // to DEFAULT_LABELS.
   readonly labels?: Partial<LabelConfig>;
 
-  // Extra host paths copied into each issue worktree. Relative entries resolve
-  // against `cwd` — the OPERATOR'S checkout, since #38 (the cache is bare and
-  // has no files to copy from). State it rather than discover it: the feature
-  // exists for host-only files that are not in git, which is arguably the
-  // intent, but it makes issue-worktree content a function of the operator's
-  // uncommitted state — the class of bug #10 was. A consumer who wants it
-  // stable points at absolute paths outside the checkout. Default: [].
-  readonly copyToWorktree?: readonly string[];
+  // Extra host paths copied into each issue worktree. A string keeps the
+  // original behaviour exactly: it is joined to `cwd` and mirrored at that
+  // same entry beneath the worktree. `{ from, to }` (#144 decision 7) separates
+  // those paths so an installation config outside the checkout can ship a
+  // stable file into every worktree; `from` may be an absolute/cwd-relative
+  // string or a file URL, while `to` is worktree-relative. Missing sources are
+  // skipped in either form. Default: [].
+  readonly copyToWorktree?: readonly CopyToWorktreeEntry[];
 
   // The OLDEST sandbar that can read this file, as a plain `X.Y.Z` (#66). A
   // driver older than this refuses the run, naming both versions, instead of
@@ -813,6 +843,7 @@ export type ResolvedConfig = Required<
     | "reviewerQualityEffort"
     | "mergerEffort"
     | "maxConcurrentGates"
+    | "copyToWorktree"
   >
 > & {
   readonly requiresSandbar?: string;
@@ -826,6 +857,7 @@ export type ResolvedConfig = Required<
   readonly mergerEffort?: string;
   // Optional after resolution because absence is the unlimited default.
   readonly maxConcurrentGates?: number;
+  readonly copyToWorktree: readonly ResolvedCopyToWorktreeEntry[];
   readonly labels: LabelConfig;
   readonly gateStack: ResolvedGateStack;
   readonly mergeMode: ResolvedMergeMode;
@@ -1781,6 +1813,55 @@ function requirePort(value: unknown): number {
   return port;
 }
 
+export function resolveCopyToWorktree(
+  entries: readonly CopyToWorktreeEntry[] | undefined,
+  cwd: string,
+): readonly ResolvedCopyToWorktreeEntry[] {
+  if (entries === undefined) return [];
+  if (!Array.isArray(entries)) {
+    throw new SandbarError("config.copyToWorktree must be an array.");
+  }
+  return entries.map((entry, index) => {
+    if (typeof entry === "string") return entry;
+    const label = `config.copyToWorktree[${index}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new SandbarError(`${label} must be a string or { from, to } entry.`);
+    }
+    const { from, to } = entry as {
+      readonly from?: unknown;
+      readonly to?: unknown;
+    };
+    if (typeof to !== "string" || to.length === 0) {
+      throw new SandbarError(
+        `${label} has an empty or non-string 'to'; it must be worktree-relative.`,
+      );
+    }
+    if (isAbsolute(to) || to.split(/[\\/]/).includes("..")) {
+      throw new SandbarError(
+        `${label} has invalid 'to' ${JSON.stringify(to)}; it must be ` +
+          "worktree-relative with no '..' segment.",
+      );
+    }
+
+    let source: string;
+    if (typeof from === "string") {
+      source = resolve(cwd, from);
+    } else if (from instanceof URL) {
+      if (from.protocol !== "file:") {
+        throw new SandbarError(
+          `${label} has non-file 'from' URL ${JSON.stringify(from.href)}.`,
+        );
+      }
+      source = fileURLToPath(from);
+    } else {
+      throw new SandbarError(
+        `${label} has invalid 'from'; expected a path string or file URL.`,
+      );
+    }
+    return { from: source, to };
+  });
+}
+
 // #121 renamed the second reviewer pass, and a renamed field is exactly #66's
 // silent failure: the config is IMPORTED, so a host still saying
 // `reviewerFollowupModelId` would have it spread through `...config` and never
@@ -2023,7 +2104,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       config.maxConcurrentGates === undefined
         ? DEFAULT_MAX_CONCURRENT_GATES
         : requirePositiveInteger("maxConcurrentGates", config.maxConcurrentGates),
-    copyToWorktree: config.copyToWorktree ?? [],
+    copyToWorktree: resolveCopyToWorktree(config.copyToWorktree, cwd),
     labels: { ...DEFAULT_LABELS, ...config.labels },
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),

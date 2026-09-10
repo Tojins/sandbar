@@ -2622,9 +2622,11 @@ describe("createSandbox integration (local provider)", () => {
 
 describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
   let dir: string;
+  let installationDir: string;
 
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), "asb-prep-"));
+    installationDir = await mkdtemp(join(tmpdir(), "asb-install-"));
     await git(["init", "-b", "main"], dir);
     await git(["config", "user.name", "Test Host"], dir);
     await git(["config", "user.email", "host@test.com"], dir);
@@ -2634,7 +2636,10 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     await git(["commit", "-m", "seed"], dir);
   });
   afterAll(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await Promise.all([
+      rm(dir, { recursive: true, force: true }),
+      rm(installationDir, { recursive: true, force: true }),
+    ]);
   });
 
   it("replaces an unmarked leftover at the issue's managed path", async () => {
@@ -3005,8 +3010,10 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     }
   });
 
-  it("runs copy + onWorktreeReady exactly once — createSandbox must not repeat worktree-side setup", async () => {
+  it("copies mixed legacy/external entries once before prepared sandbox setup", async () => {
     await git(["branch", "sandbar/issue-20-prep"], dir);
+    const settingsSource = join(installationDir, "settings.json");
+    await writeFile(settingsSource, '{"sandbox":"configured"}\n');
     const hookLog = join(dir, "hook.log");
     const hooks = {
       host: {
@@ -3017,13 +3024,20 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     const worktreePath = await prepareWorktree({
       branch: "sandbar/issue-20-prep",
       layout: layoutFor(dir),
-      copyToWorktree: ["fixture.txt"],
+      copyToWorktree: [
+        "fixture.txt",
+        { from: settingsSource, to: ".codex/settings.json" },
+        { from: join(installationDir, "missing.json"), to: "missing/file.json" },
+      ],
       hooks,
     });
     expect(worktreePath).toBe(
       join(dir, ".sandbar", "worktrees", "sandbar-issue-20-prep"),
     );
     expect(existsSync(join(worktreePath, "fixture.txt"))).toBe(true);
+    expect(await readFile(join(worktreePath, ".codex", "settings.json"), "utf8"))
+      .toBe('{"sandbox":"configured"}\n');
+    expect(existsSync(join(worktreePath, "missing"))).toBe(false);
 
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({

@@ -83,6 +83,13 @@
 // restoring the issue branch; otherwise a fresh attempt would inherit the
 // prior attempt's detached HEAD or scratch branch.
 //
+// `copyToWorktree` has two resolved forms (#144 decision 7): legacy strings
+// still join to the operator checkout and mirror the same relative path, while
+// `{ from, to }` carries an already-absolute host source and a validated
+// worktree-relative destination. The latter lets an installation config ship
+// files from outside the consumer checkout. Both prepared and directly-created
+// worktrees enter the same helper, and missing sources remain a quiet skip.
+//
 // This container is also the ANCHOR of the sandbox stack's network namespace
 // (#44): joiners attach with `--network container:<name>`, so its name is
 // public (`containerName`) and its removal is `--depend`-aware. It publishes
@@ -96,14 +103,15 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readdir, rm, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { onCleanup, reportCleanupNotice } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
 import { isErrno } from "./errors.js";
 import { RESOURCE_PREFIX, strandedHeadRef } from "./naming.js";
 import { RESERVED_WORKTREE_NAMES, type RepoLayout } from "./repo-cache.js";
+import type { ResolvedCopyToWorktreeEntry } from "./config.js";
 import { startGapTimer, startTimer } from "./timing.js";
 import {
   maxContextDepth,
@@ -474,7 +482,7 @@ export type CreateSandboxOptions = {
   // the call site and wrong only on the hosts that configure one.
   layout: RepoLayout;
   hooks?: SandboxHooks;
-  copyToWorktree?: string[];
+  copyToWorktree?: readonly ResolvedCopyToWorktreeEntry[];
   // The declared credential record (`config.env`). Its keys are the allowlist
   // that crosses into the container, each falling back to `process.env[key]`
   // when empty — see env.ts. A VALUE since #38: sandbar names no env file, and
@@ -520,7 +528,7 @@ export type CreateSandboxOptions = {
 export type PrepareWorktreeOptions = {
   branch: string;
   layout: RepoLayout;
-  copyToWorktree?: string[];
+  copyToWorktree?: readonly ResolvedCopyToWorktreeEntry[];
   // Only host.onWorktreeReady runs here; sandbox-side hooks need the
   // container and stay in createSandbox.
   hooks?: SandboxHooks;
@@ -1701,17 +1709,19 @@ const getCopyOnWriteFlags = (): string[] =>
   process.platform === "darwin" ? ["-cR"] : ["-R", "--reflink=auto"];
 
 const copyToWorktree = (
-  paths: readonly string[],
+  entries: readonly ResolvedCopyToWorktreeEntry[],
   hostRepoDir: string,
   worktreePath: string,
 ): Promise<void> =>
   withTimeout(
     (async () => {
       const cowFlags = getCopyOnWriteFlags();
-      for (const relativePath of paths) {
-        const src = join(hostRepoDir, relativePath);
+      for (const entry of entries) {
+        const legacy = typeof entry === "string";
+        const src = legacy ? join(hostRepoDir, entry) : entry.from;
         if (!existsSync(src)) continue;
-        const dest = join(worktreePath, relativePath);
+        const dest = join(worktreePath, legacy ? entry : entry.to);
+        if (!legacy) await mkdir(dirname(dest), { recursive: true });
         await new Promise<void>((resolveCp, rejectCp) => {
           execFile("cp", [...cowFlags, src, dest], (error) => {
             if (!error) return resolveCp();
@@ -1719,7 +1729,7 @@ const copyToWorktree = (
               if (fallbackError) {
                 rejectCp(
                   new Error(
-                    `Failed to copy ${relativePath} to worktree: ${stderr || fallbackError.message}`,
+                    `Failed to copy ${legacy ? entry : entry.from} to worktree: ${stderr || fallbackError.message}`,
                   ),
                 );
               } else {

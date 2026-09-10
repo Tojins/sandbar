@@ -104,7 +104,11 @@ import type { AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
 import type { CodexAuthMount } from "./codex-auth.js";
-import type { PromptExtensions, ResolvedGateStack } from "./config.js";
+import type {
+  PromptExtensions,
+  ResolvedCopyToWorktreeEntry,
+  ResolvedGateStack,
+} from "./config.js";
 import {
   type AgentImages,
   resolveSandboxImage,
@@ -516,7 +520,7 @@ export type InnerLoopConfig = {
 export type InnerLoopOptions = {
   readonly config: InnerLoopConfig;
   readonly hooks: SandboxHooks;
-  readonly copyToWorktree: readonly string[];
+  readonly copyToWorktree: readonly ResolvedCopyToWorktreeEntry[];
   // Per-branch gate images (#37). Shared across every issue in the run, because
   // its build cache is: two branches that make the same lockfile change produce
   // the same content-addressed tag and must not build it twice.

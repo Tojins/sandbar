@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 import { SandbarError } from "./errors.js";
@@ -28,7 +28,9 @@ import {
   DEFAULT_SOURCE_BRANCH,
   DEFAULT_WORK_DIR,
   DEFAULT_LABELS,
+  resolveCopyToWorktree,
   resolveConfig,
+  type CopyToWorktreeEntry,
   type RunConfig,
 } from "./config.js";
 import { sandbarVersion } from "./version.js";
@@ -71,6 +73,57 @@ const minimal: RunConfig = {
     ],
   },
 };
+
+describe("resolveCopyToWorktree (#147)", () => {
+  const cwd = "/consumer/checkout";
+
+  it.each<{
+    name: string;
+    entry: CopyToWorktreeEntry;
+    expected: unknown;
+  }>([
+    {
+      name: "legacy string unchanged",
+      entry: ".npmrc",
+      expected: ".npmrc",
+    },
+    {
+      name: "cwd-relative object source",
+      entry: { from: "../sandbar-install/settings.json", to: ".codex/settings.json" },
+      expected: {
+        from: resolve(cwd, "../sandbar-install/settings.json"),
+        to: ".codex/settings.json",
+      },
+    },
+    {
+      name: "absolute source outside the checkout",
+      entry: { from: "/opt/sandbar/files/settings.json", to: "settings.json" },
+      expected: { from: "/opt/sandbar/files/settings.json", to: "settings.json" },
+    },
+    {
+      name: "file URL source",
+      entry: { from: new URL("file:///opt/sandbar/files/settings.json"), to: "settings.json" },
+      expected: { from: "/opt/sandbar/files/settings.json", to: "settings.json" },
+    },
+  ])("resolves $name", ({ entry, expected }) => {
+    expect(resolveCopyToWorktree([entry], cwd)).toEqual([expected]);
+  });
+
+  it.each([
+    ["absolute", "/escape/settings.json"],
+    ["parent segment", "safe/../settings.json"],
+    ["empty", ""],
+  ])("refuses an %s destination and names its entry", (_name, to) => {
+    const entry = { from: "/opt/sandbar/settings.json", to };
+    expect(() => resolveConfig({
+      ...minimal,
+      cwd,
+      copyToWorktree: [entry],
+    })).toThrow(
+      /copyToWorktree\[0\]/,
+    );
+  });
+});
 
 describe("resolveConfig — developers is an explicit queue policy (#136)", () => {
   it("accepts anyone and trims a non-empty login list", () => {
