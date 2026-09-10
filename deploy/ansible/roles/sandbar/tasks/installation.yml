@@ -9,24 +9,22 @@
 
 - name: Stop unless every required installation file exists
   ansible.builtin.assert:
-    that: item.stat.exists
+    that:
+      - item.stat.exists
+      - item.item != 'sandbar.env' or (item.stat.pw_name | default('')) == sandbar_user
+      - item.item != 'sandbar.env' or (item.stat.mode | default('')) == sandbar_secret_mode
     fail_msg: >-
-      Missing {{ item.stat.path }}. Place {{ item.item }} in
-      {{ sandbar_installation_dir }} as {{ sandbar_user }}, or set config_src
-      to copy it, then rerun the play.
+      {{ sandbar_installation_dir }}/{{ item.item }}:
+      {{ 'missing' if not item.stat.exists
+         else 'owner ' ~ (item.stat.pw_name | default('unknown')) ~
+              ', mode ' ~ (item.stat.mode | default('unknown')) }}.
+      Place it as {{ sandbar_user }}{% if item.item == 'sandbar.env' %} with
+      mode {{ sandbar_secret_mode }}{% endif %}, or set config_src to copy it,
+      then rerun the play.
     quiet: true
   loop: "{{ sandbar_installation_files.results }}"
   loop_control:
-    label: "{{ item.stat.path }}"
-
-- name: Check the installation environment ownership and mode
-  ansible.builtin.assert:
-    that:
-      - sandbar_installation_files.results[1].stat.pw_name == sandbar_user
-      - sandbar_installation_files.results[1].stat.mode == sandbar_secret_mode
-    fail_msg: >-
-      {{ sandbar_installation_dir }}/sandbar.env must be owned by
-      {{ sandbar_user }} with mode {{ sandbar_secret_mode }}.
+    label: "{{ sandbar_installation_dir }}/{{ item.item }}"
 
 - name: Clone the consumer repository
   ansible.builtin.git:

@@ -115,7 +115,7 @@ describe("multi-installation role orchestration", () => {
     expect(installationTasks).toContain('repo: "{{ sandbar_installation.clone_url }}"');
     expect(prepareTasks).toContain('when: sandbar_installation.config_src is defined');
     expect(installationTasks).toContain("- sandbar.config.mjs\n    - sandbar.env");
-    expect(installationTasks).toContain("Missing {{ item.stat.path }}");
+    expect(installationTasks).toContain("{{ sandbar_installation_dir }}/{{ item.item }}:");
     expect(installationTasks).toContain('path: "{{ sandbar_checkout }}/.git/info/exclude"');
     expect(installationTasks).toContain('line: "/{{ sandbar_work_dir }}/"');
   });
