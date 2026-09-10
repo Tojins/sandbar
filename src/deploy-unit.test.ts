@@ -145,7 +145,7 @@ describe.each(installations)("$project installation units", (row) => {
     expect(values(unit, "After")).toEqual(["sandbar.service"]);
     expect(values(unit, "ExecStartPre")).toEqual([]);
     expect(values(unit, "ExecStart")).toEqual([
-      `/usr/bin/node /home/${row.user}/installation/driver/node_modules/sandbar/dist/cli.js ui --port ${row.reader_port}`,
+      `/usr/bin/node /home/${row.user}/installation/driver/node_modules/sandbar/dist/cli.js ui --config /home/${row.user}/installation/sandbar.config.mjs --port ${row.reader_port}`,
     ]);
     expect(values(unit, "Restart")).toEqual(["no"]);
   });

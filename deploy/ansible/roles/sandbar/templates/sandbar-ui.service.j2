@@ -8,7 +8,7 @@ After=sandbar.service
 [Service]
 Type=simple
 WorkingDirectory={{ sandbar_checkout }}
-ExecStart=/usr/bin/node {{ sandbar_installation_dir }}/driver/node_modules/sandbar/dist/cli.js ui --port {{ sandbar_reader_port }}
+ExecStart=/usr/bin/node {{ sandbar_installation_dir }}/driver/node_modules/sandbar/dist/cli.js ui --config {{ sandbar_installation_dir }}/sandbar.config.mjs --port {{ sandbar_reader_port }}
 Restart=no
 
 [Install]
