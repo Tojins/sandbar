@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
+import { compareVersions, parseVersion } from "./requires-sandbar.js";
+
 const ROLE = new URL("../deploy/ansible/roles/sandbar/", import.meta.url);
 const DEPLOY_ROOT = new URL("../deploy/ansible/", import.meta.url);
 const daemonTemplate = readFileSync(new URL("templates/sandbar.service.j2", ROLE), "utf8");
@@ -24,6 +26,9 @@ const outdoorConfigPath = new URL("installations/outdoor/sandbar.config.mjs", DE
 const sandbarConfigPath = new URL("installations/sandbar/sandbar.config.mjs", DEPLOY_ROOT);
 const outdoorConfig = readFileSync(outdoorConfigPath, "utf8");
 const sandbarConfig = readFileSync(sandbarConfigPath, "utf8");
+const packageVersion = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { readonly version: string };
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
 const EXACT_TAG = /^github:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+#v\d+\.\d+\.\d+$/;
@@ -299,6 +304,17 @@ describe("committed installation inventory and configs", () => {
     expect(realInventorySource).toMatch(
       /Self-hosting must lag the checkout:[\s\S]*?driver_tag: github:[^#\s]+#v\d+\.\d+\.\d+/,
     );
+    const entry = realInventory.sandbar_installations.find(({ user }) => user === "sandbar");
+    const driverText = entry?.driver_tag?.split("#v")[1];
+    const floorText = sandbarConfig.match(/^\s*requiresSandbar:\s*"([^"]+)",$/m)?.[1];
+    const driver = driverText === undefined ? null : parseVersion(driverText);
+    const checkout = parseVersion(packageVersion.version);
+    const floor = floorText === undefined ? null : parseVersion(floorText);
+    expect(driver).not.toBeNull();
+    expect(checkout).not.toBeNull();
+    expect(floor).not.toBeNull();
+    expect(compareVersions(driver!, checkout!)).toBeLessThan(0);
+    expect(compareVersions(driver!, floor!)).toBeGreaterThanOrEqual(0);
   });
 
   it("assigns distinct host ports to both daemons and readers", () => {
