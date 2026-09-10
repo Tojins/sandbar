@@ -15,6 +15,12 @@
     sandbar_caddy_reader_port: "{{ sandbar_installations[0].reader_port }}"
   notify: Reload Caddy
 
+# The first play is expected to stop later on a missing hand-placed env file.
+# Apply this host-global change now; a handler deferred past that refusal would
+# be lost, and the next unchanged template would not notify it again.
+- name: Apply the Caddy configuration before installation checks can stop the play
+  ansible.builtin.meta: flush_handlers
+
 - name: Enable and start Caddy
   ansible.builtin.systemd_service:
     name: caddy

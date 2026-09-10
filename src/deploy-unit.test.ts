@@ -10,6 +10,7 @@ const caddyTemplate = readFileSync(new URL("templates/Caddyfile.j2", ROLE), "utf
 const mainTasks = readFileSync(new URL("tasks/main.yml", ROLE), "utf8");
 const installationTasks = readFileSync(new URL("tasks/installation.yml", ROLE), "utf8");
 const prepareTasks = readFileSync(new URL("tasks/prepare-installation.yml", ROLE), "utf8");
+const caddyTasks = readFileSync(new URL("tasks/caddy.yml", ROLE), "utf8");
 const deployRoot = new URL("../deploy/ansible/", import.meta.url);
 const exampleInventory = readFileSync(new URL("inventory.example.yml", deployRoot), "utf8");
 const realInventory = readFileSync(new URL("inventory.yml", deployRoot), "utf8");
@@ -125,6 +126,9 @@ describe("multi-installation role orchestration", () => {
       sandbar_ui_http_port: "80",
       sandbar_caddy_reader_port: "7332",
     })).toBe(":80 {\n\treverse_proxy 127.0.0.1:7332\n}\n");
+    expect(caddyTasks).toMatch(
+      /notify: Reload Caddy[\s\S]*?ansible\.builtin\.meta: flush_handlers[\s\S]*?- name: Enable and start Caddy/,
+    );
   });
 });
 
