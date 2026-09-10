@@ -316,7 +316,7 @@ describe("committed installation inventory and configs", () => {
     ["outdoor", outdoorConfig],
     ["sandbar", sandbarConfig],
   ])("reads Codex auth only when a %s role routes to Codex", (_name, config) => {
-    expect(config).toMatch(/const usesCodex = \[[\s\S]*?\.some\(\(field\) => routing\[field\] === "codex"\);/);
+    expect(config).toMatch(/Object\.entries\(routing\)[\s\S]*?field\.endsWith\("Agent"\) && provider === "codex"/);
     expect(config).toMatch(/\.\.\.\(usesCodex[\s\S]*?CODEX_AUTH_JSON:[\s\S]*?: \{\}\)/);
   });
 });

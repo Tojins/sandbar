@@ -11,13 +11,9 @@ const podmanSocket = `/run/user/${process.getuid()}/podman/podman.sock`;
 const { routing, env: credentials } = splitRoleRouting(
   readEnvFile(new URL("sandbar.env", import.meta.url)),
 );
-const usesCodex = [
-  "implementerAgent",
-  "uiCheckAgent",
-  "reviewerAgent",
-  "reviewerQualityAgent",
-  "mergerAgent",
-].some((field) => routing[field] === "codex");
+const usesCodex = Object.entries(routing).some(
+  ([field, provider]) => field.endsWith("Agent") && provider === "codex",
+);
 
 export default {
   cwd,
