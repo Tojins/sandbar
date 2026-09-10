@@ -1199,6 +1199,37 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
+  it("forwards mixed legacy/external copies through internal worktree preparation", async () => {
+    const branch = "sandbar/issue-147-direct-copy";
+    await git(["branch", branch], dir);
+    const installationDir = await mkdtemp(join(tmpdir(), "asb-install-"));
+    cleanups.push(installationDir);
+    const legacySource = join(dir, "legacy-copy-147.txt");
+    const externalSource = join(installationDir, "settings.json");
+    await writeFile(legacySource, "legacy\n");
+    await writeFile(externalSource, '{"sandbox":"configured"}\n');
+
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+      copyToWorktree: [
+        "legacy-copy-147.txt",
+        { from: externalSource, to: ".codex/settings.json" },
+      ],
+    });
+    try {
+      await expect(readFile(join(sandbox.worktreePath, "legacy-copy-147.txt"), "utf8"))
+        .resolves.toBe("legacy\n");
+      await expect(readFile(join(sandbox.worktreePath, ".codex", "settings.json"), "utf8"))
+        .resolves.toBe('{"sandbox":"configured"}\n');
+    } finally {
+      await sandbox.close();
+      await rm(legacySource, { force: true });
+    }
+  });
+
   it("attributes cumulative OOM counters to one invocation and excludes snapshot latency", async () => {
     await git(["branch", "sandbar/issue-141-interval"], dir);
     let reads = 0;

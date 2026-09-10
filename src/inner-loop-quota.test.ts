@@ -4,6 +4,7 @@ import type { EventInput } from "./events.js";
 const seams = vi.hoisted(() => ({
   sandboxRun: vi.fn(),
   createSandbox: vi.fn(),
+  prepareWorktree: vi.fn(async () => "/tmp/issue-109-worktree"),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
   ensureIssueBranch: vi.fn(async () => ({
     ref: "origin/main",
@@ -31,7 +32,7 @@ vi.mock("./agent-sandbox.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./agent-sandbox.js")>();
   return {
     ...actual,
-    prepareWorktree: vi.fn(async () => "/tmp/issue-109-worktree"),
+    prepareWorktree: seams.prepareWorktree,
     createSandbox: seams.createSandbox,
     agentPartialUsage: (err: unknown) =>
       typeof err === "object" && err !== null
@@ -159,6 +160,7 @@ const config = (
 describe("runInnerLoop run-scoped quota closure (#109)", () => {
   beforeEach(() => {
     seams.sandboxRun.mockReset();
+    seams.prepareWorktree.mockReset().mockResolvedValue("/tmp/issue-109-worktree");
     seams.ensureIssueBranch.mockReset().mockResolvedValue({
       ref: "origin/main",
       sha: "base-sha",
@@ -225,6 +227,32 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(events.filter((event) =>
       event.kind === "repair" && event.action === "fast-forward")).toEqual([]);
     expect(seams.deferWorktreeReclaim).toHaveBeenCalledOnce();
+  });
+
+  it("forwards mixed resolved copy entries to worktree preparation", async () => {
+    const copyToWorktree = [
+      ".npmrc",
+      { from: "/opt/sandbar/settings.json", to: ".codex/settings.json" },
+    ] as const;
+    seams.sandboxRun.mockResolvedValueOnce({
+      stdout: "<promise>NEEDS-INFO</promise><questions>Which environment?</questions>",
+      headBefore: "base-sha",
+      headAfter: "base-sha",
+      signalMs: 1,
+      maxGapMs: 1,
+      toolCalls: 0,
+      peakContext: 1,
+      commits: [],
+    });
+
+    await expect(runInnerLoop(issue("147"), {
+      config: config("claude"), hooks: {}, copyToWorktree,
+      onEvent: () => undefined,
+    })).resolves.toMatchObject({ type: "NEEDS-INFO" });
+
+    expect(seams.prepareWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      copyToWorktree: [...copyToWorktree],
+    }));
   });
 
   it("logs the larger peak context across an implementer and its promise nudge", async () => {

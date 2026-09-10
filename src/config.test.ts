@@ -123,6 +123,60 @@ describe("resolveCopyToWorktree (#147)", () => {
       /copyToWorktree\[0\]/,
     );
   });
+
+  it("refuses a non-array value at the config boundary", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      cwd,
+      copyToWorktree: "settings.json" as unknown as readonly CopyToWorktreeEntry[],
+    })).toThrow(/config\.copyToWorktree must be an array/);
+  });
+
+  it.each([
+    {
+      name: "null entry",
+      entry: null,
+      message: /string or \{ from, to \} entry/,
+    },
+    {
+      name: "non-object entry",
+      entry: 42,
+      message: /string or \{ from, to \} entry/,
+    },
+    {
+      name: "array entry",
+      entry: [],
+      message: /string or \{ from, to \} entry/,
+    },
+    {
+      name: "non-string destination",
+      entry: { from: "/opt/sandbar/settings.json", to: 42 },
+      message: /non-string 'to'/,
+    },
+    {
+      name: "missing source",
+      entry: { to: "settings.json" },
+      message: /invalid 'from'/,
+    },
+    {
+      name: "invalid source",
+      entry: { from: 42, to: "settings.json" },
+      message: /invalid 'from'/,
+    },
+    {
+      name: "non-file source URL",
+      entry: { from: new URL("https://example.com/settings.json"), to: "settings.json" },
+      message: /non-file 'from' URL/,
+    },
+  ])("refuses $name and names its entry", ({ entry, message }) => {
+    const resolveEntry = () => resolveConfig({
+      ...minimal,
+      cwd,
+      copyToWorktree: [entry] as unknown as readonly CopyToWorktreeEntry[],
+    });
+    expect(resolveEntry).toThrow(/copyToWorktree\[0\]/);
+    expect(resolveEntry).toThrow(message);
+  });
 });
 
 describe("resolveConfig — developers is an explicit queue policy (#136)", () => {
