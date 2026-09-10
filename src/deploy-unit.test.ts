@@ -248,6 +248,8 @@ describe("multi-installation role orchestration", () => {
       .toContain("notify: Reload Caddy");
     expect(taskNamed(caddyTasks, "Apply the Caddy configuration before installation checks can stop the play"))
       .toContain("ansible.builtin.meta: flush_handlers");
+    expect(caddyTasks.indexOf("Enable and start Caddy"))
+      .toBeLessThan(caddyTasks.indexOf("Apply the Caddy configuration"));
   });
 });
 
