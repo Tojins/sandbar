@@ -1,3 +1,25 @@
 :{{ sandbar_ui_http_port }} {
-	reverse_proxy 127.0.0.1:{{ sandbar_caddy_reader_port }}
+{% for installation in sandbar_installations %}
+	handle_path /{{ installation.project }}/* {
+		reverse_proxy 127.0.0.1:{{ installation.reader_port }}
+	}
+{% endfor %}
+	header / Content-Type text/html
+	respond / <<HTML
+		<!doctype html>
+		<html lang="en">
+		<head>
+		<meta charset="utf-8">
+		<title>Sandbar installations</title>
+		</head>
+		<body>
+		<h1>Sandbar installations</h1>
+		<ul>
+{% for installation in sandbar_installations %}
+		<li><a href="/{{ installation.project }}/">{{ installation.project }}</a></li>
+{% endfor %}
+		</ul>
+		</body>
+		</html>
+		HTML 200
 }

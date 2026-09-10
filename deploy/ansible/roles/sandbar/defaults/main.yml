@@ -16,7 +16,7 @@ sandbar_driver_tag: github:Tojins/sandbar#v0.39.7
 
 sandbar_stop_timeout_sec: 900
 
-# Until prefix routing (#150), Caddy serves the first installation at `/`.
+# Caddy serves an installation index at `/` and each reader at `/<project>/`.
 sandbar_ui_http_port: 80
 
 # An installation may override either identity in its inventory entry.

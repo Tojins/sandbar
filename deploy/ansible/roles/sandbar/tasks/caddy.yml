@@ -4,15 +4,13 @@
     name: caddy
     state: present
 
-- name: Configure Caddy for the first installation reader
+- name: Configure Caddy installation routes and index
   ansible.builtin.template:
     src: Caddyfile.j2
     dest: /etc/caddy/Caddyfile
     owner: root
     group: root
     mode: "0644"
-  vars:
-    sandbar_caddy_reader_port: "{{ sandbar_installations[0].reader_port }}"
   notify: Reload Caddy
 
 - name: Enable and start Caddy

@@ -518,8 +518,11 @@ outcomes.
   file plus live matching `run.pid` means working; a dead/missing PID without
   `run-end` means crashed. `uiPort` is per-workdir host configuration and a
   bind collision refuses the run; `sandbar ui --port` overrides it for a
-  standalone deployment reader. Unreadable history is omitted, and any
-  current request or post-listen server failure stays inside the observing UI;
+  standalone deployment reader. One Caddy site indexes the installations at
+  `/` and strips each inventory project's `/<project>/` prefix before proxying
+  to that reader; the page's relative `state.json` fetch therefore works both
+  there and at its direct root. Unreadable history is omitted, and any current
+  request or post-listen server failure stays inside the observing UI;
   its best-effort complaint callback cannot stop a healthy run.
 - **Every outcome carries how long it took, and nothing decides on it (#82).**
   `src/timing.ts` is the one measurement — `startTimer` on a MONOTONIC clock,

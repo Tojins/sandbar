@@ -56,7 +56,7 @@ function render(state, serverNotice=null) {
 function failed(text) { if(lastState)render(lastState,text); else document.getElementById("app").innerHTML=`<header class="top">${notice(text)}</header>` }
 async function poll(){
   let response;
-  try { response=await fetch("/state.json",{cache:"no-store"}) }
+  try { response=await fetch("state.json",{cache:"no-store"}) }
   catch(_networkError) { failed("No run is serving; last state below. Reconnecting…"); return }
   if(!response.ok){ failed(`State request failed (${response.status}): ${await response.text()}`); return }
   const state=await response.json();

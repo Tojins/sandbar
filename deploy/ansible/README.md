@@ -56,16 +56,16 @@ Each installation config must also give the daemon's in-process `uiPort` its
 own host port, distinct from every reader; the two committed configs use 7331
 and 7334 around their inventory's 7332 and 7333.
 Both units use `Restart=no`; exits 2 and 4 remain stops for a human to inspect.
-Until prefix routing lands in #150, Caddy serves the first installation's reader
-at `/`.
+Caddy serves a browser-default index of installation projects at `/`; each link
+opens that installation's reader at `/<project>/`.
 
 ## Inventory
 
 `sandbar_installations` is a list. Every entry requires a safe Linux `user`, a
 single path-component `project`, `clone_url`, and a unique integer
 `reader_port` from 1 through 65535. Users are unique too. `driver_tag` overrides
-the box-level `sandbar_driver_tag`; both accept exact tags only. `config_src` is
-optional.
+the box-level `sandbar_driver_tag`; both accept exact tags only. Projects are
+unique because each names its Caddy route. `config_src` is optional.
 
 ```yaml
 sandbar_driver_tag: github:Tojins/sandbar#v0.40.1

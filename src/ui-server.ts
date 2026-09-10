@@ -1,8 +1,10 @@
 // File-fed run UI (#132).
 //
 // One dependency-free HTTP server serves the shipped vanilla page and the
-// pure reducer's `/state.json`. A live run and `sandbar ui` use this same
-// module. The server never holds scheduler state in memory: every request
+// pure reducer's `/state.json`. The page fetches `state.json` relatively so
+// this same asset works at `/` for a live run or `sandbar ui`, and behind
+// Caddy's stripped `/<project>/` prefix for a deployed reader. The server
+// never holds scheduler state in memory: every request
 // rereads the newest events.jsonl, so post-mortem and in-process views cannot
 // disagree. An unreadable historical record is omitted; a request failure is
 // an HTTP 500 and can never terminate the run being observed — but it is not
