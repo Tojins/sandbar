@@ -5,6 +5,7 @@
       - sandbar_installations | length > 0
       - sandbar_git_email | length > 0
       - sandbar_operator_ssh_keys | length > 0
+      - sandbar_operator_ssh_keys | reject('equalto', '') | list | length == sandbar_operator_ssh_keys | length
     fail_msg: >-
       Set sandbar_installations, sandbar_git_email and
       sandbar_operator_ssh_keys in the inventory. The key list is exclusive:
@@ -56,8 +57,8 @@
 - name: Configure unattended upgrades
   ansible.builtin.import_tasks: upgrades.yml
 
-- name: Configure each sandbar installation
-  ansible.builtin.include_tasks: installation.yml
+- name: Create each installation account and podman session
+  ansible.builtin.include_tasks: account.yml
   loop: "{{ sandbar_installations }}"
   loop_control:
     loop_var: sandbar_installation
@@ -74,6 +75,34 @@
     sandbar_installation_git_name: "{{ sandbar_installation.git_name | default(sandbar_git_name) }}"
     sandbar_installation_git_email: "{{ sandbar_installation.git_email | default(sandbar_git_email) }}"
     sandbar_subid_start: "{{ sandbar_subid_base + sandbar_installation_index * sandbar_subid_count }}"
+
+# This separate pass guarantees every user and installation directory exists
+# before the expected first-run refusal on a hand-placed sandbar.env.
+- name: Prepare each installation directory
+  ansible.builtin.include_tasks: prepare-installation.yml
+  loop: "{{ sandbar_installations }}"
+  loop_control:
+    loop_var: sandbar_installation
+    label: "{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
+  vars:
+    sandbar_user: "{{ sandbar_installation.user }}"
+    sandbar_home: "/home/{{ sandbar_installation.user }}"
+    sandbar_installation_dir: "/home/{{ sandbar_installation.user }}/installation"
+
+- name: Configure each sandbar checkout and unit pair
+  ansible.builtin.include_tasks: installation.yml
+  loop: "{{ sandbar_installations }}"
+  loop_control:
+    loop_var: sandbar_installation
+    label: "{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
+  vars:
+    sandbar_user: "{{ sandbar_installation.user }}"
+    sandbar_project: "{{ sandbar_installation.project }}"
+    sandbar_home: "/home/{{ sandbar_installation.user }}"
+    sandbar_checkout: "/home/{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
+    sandbar_installation_dir: "/home/{{ sandbar_installation.user }}/installation"
+    sandbar_installation_driver_tag: "{{ sandbar_installation.driver_tag | default(sandbar_driver_tag) }}"
+    sandbar_reader_port: "{{ sandbar_installation.reader_port }}"
 
 - name: Configure Caddy for the first installation
   ansible.builtin.import_tasks: caddy.yml

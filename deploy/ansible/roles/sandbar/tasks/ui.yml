@@ -34,5 +34,5 @@
   become: true
   become_user: "{{ sandbar_user }}"
   environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
-    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_result.uid }}/bus"
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_uid.stdout }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_uid.stdout }}/bus"

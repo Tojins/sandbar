@@ -9,6 +9,16 @@ const uiTemplate = readFileSync(new URL("templates/sandbar-ui.service.j2", ROLE)
 const caddyTemplate = readFileSync(new URL("templates/Caddyfile.j2", ROLE), "utf8");
 const mainTasks = readFileSync(new URL("tasks/main.yml", ROLE), "utf8");
 const installationTasks = readFileSync(new URL("tasks/installation.yml", ROLE), "utf8");
+const prepareTasks = readFileSync(new URL("tasks/prepare-installation.yml", ROLE), "utf8");
+const deployRoot = new URL("../deploy/ansible/", import.meta.url);
+const exampleInventory = readFileSync(new URL("inventory.example.yml", deployRoot), "utf8");
+const realInventory = readFileSync(new URL("inventory.yml", deployRoot), "utf8");
+const outdoorConfig = readFileSync(
+  new URL("installations/outdoor/sandbar.config.mjs", deployRoot), "utf8",
+);
+const sandbarConfig = readFileSync(
+  new URL("installations/sandbar/sandbar.config.mjs", deployRoot), "utf8",
+);
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
 
@@ -86,9 +96,15 @@ describe.each(installations)("$project installation units", (row) => {
 });
 
 describe("multi-installation role orchestration", () => {
-  it("loops only the user-scoped task group", () => {
+  it("loops the account, preparation and unit phases over the same list", () => {
     expect(mainTasks).toMatch(
-      /- name: Configure each sandbar installation[\s\S]*?ansible\.builtin\.include_tasks: installation\.yml[\s\S]*?loop: "\{\{ sandbar_installations \}\}"/,
+      /- name: Create each installation account and podman session[\s\S]*?ansible\.builtin\.include_tasks: account\.yml[\s\S]*?loop: "\{\{ sandbar_installations \}\}"/,
+    );
+    expect(mainTasks).toMatch(
+      /- name: Prepare each installation directory[\s\S]*?ansible\.builtin\.include_tasks: prepare-installation\.yml[\s\S]*?loop: "\{\{ sandbar_installations \}\}"/,
+    );
+    expect(mainTasks).toMatch(
+      /- name: Configure each sandbar checkout and unit pair[\s\S]*?ansible\.builtin\.include_tasks: installation\.yml[\s\S]*?loop: "\{\{ sandbar_installations \}\}"/,
     );
     for (const task of ["packages.yml", "podman-global.yml", "apparmor.yml", "swap.yml", "ssh.yml", "upgrades.yml", "caddy.yml"]) {
       expect(mainTasks).toContain(`ansible.builtin.import_tasks: ${task}`);
@@ -97,7 +113,7 @@ describe("multi-installation role orchestration", () => {
 
   it("clones, optionally copies config, names missing files, and excludes workDir", () => {
     expect(installationTasks).toContain('repo: "{{ sandbar_installation.clone_url }}"');
-    expect(installationTasks).toContain('when: sandbar_installation.config_src is defined');
+    expect(prepareTasks).toContain('when: sandbar_installation.config_src is defined');
     expect(installationTasks).toContain("- sandbar.config.mjs\n    - sandbar.env");
     expect(installationTasks).toContain("Missing {{ item.stat.path }}");
     expect(installationTasks).toContain('path: "{{ sandbar_checkout }}/.git/info/exclude"');
@@ -109,5 +125,31 @@ describe("multi-installation role orchestration", () => {
       sandbar_ui_http_port: "80",
       sandbar_caddy_reader_port: "7332",
     })).toBe(":80 {\n\treverse_proxy 127.0.0.1:7332\n}\n");
+  });
+});
+
+describe("committed installation inventory and configs", () => {
+  it.each([
+    ["example", exampleInventory],
+    ["real", realInventory],
+  ])("makes the %s inventory a list, with a box-level exact tag", (_name, inventory) => {
+    expect(inventory).toMatch(/^\s{4}sandbar_driver_tag: github:[^#\s]+#v\d+\.\d+\.\d+$/m);
+    expect(inventory).toContain("    sandbar_installations:\n      - user:");
+    expect(inventory.match(/^      - user:/gm)?.length).toBe(2);
+  });
+
+  it("ships outdoor's explicit checkout, mapped settings, gate file and neutral image", () => {
+    expect(outdoorConfig).toContain('import { readEnvFile, splitRoleRouting } from "sandbar";');
+    expect(outdoorConfig).toContain('const cwd = "/home/outdoor/outdoor";');
+    expect(outdoorConfig).toContain('readFileSync(join(cwd, "gate/stack.json"), "utf8")');
+    expect(outdoorConfig).toMatch(/copyToWorktree:[\s\S]*?from:[\s\S]*?to:/);
+    expect(outdoorConfig).toContain('const image = "localhost/outdoor:dev";');
+    expect(outdoorConfig).toContain('containerfile: "Containerfile.dev"');
+  });
+
+  it("ships sandbar's external config and records its lagging driver rule", () => {
+    expect(sandbarConfig).toContain('import { readEnvFile, splitRoleRouting } from "sandbar";');
+    expect(sandbarConfig).toContain('const cwd = "/home/sandbar/sandbar";');
+    expect(realInventory).toMatch(/Self-hosting must lag the checkout:[\s\S]*?driver_tag: github:[^#\s]+#v\d+\.\d+\.\d+/);
   });
 });

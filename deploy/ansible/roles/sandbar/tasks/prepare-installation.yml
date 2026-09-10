@@ -1,0 +1,26 @@
+---
+- name: Create the installation directory
+  ansible.builtin.file:
+    path: "{{ sandbar_installation_dir }}"
+    state: directory
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0700"
+
+- name: Copy the installation configuration supplied by inventory
+  ansible.builtin.copy:
+    src: "{{ sandbar_installation.config_src }}/"
+    dest: "{{ sandbar_installation_dir }}/"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    directory_mode: "0700"
+    mode: preserve
+  when: sandbar_installation.config_src is defined
+
+- name: Install the role-owned driver installer
+  ansible.builtin.copy:
+    src: install-driver.mjs
+    dest: "{{ sandbar_installation_dir }}/install-driver.mjs"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0500"

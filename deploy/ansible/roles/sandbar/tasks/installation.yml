@@ -1,44 +1,4 @@
 ---
-- name: Create the installation user
-  ansible.builtin.include_tasks: user.yml
-
-- name: Configure rootless podman for the installation user
-  ansible.builtin.include_tasks: podman.yml
-
-- name: Clone the consumer repository
-  ansible.builtin.git:
-    repo: "{{ sandbar_installation.clone_url }}"
-    dest: "{{ sandbar_checkout }}"
-    update: true
-  become: true
-  become_user: "{{ sandbar_user }}"
-
-- name: Create the installation directory
-  ansible.builtin.file:
-    path: "{{ sandbar_installation_dir }}"
-    state: directory
-    owner: "{{ sandbar_user }}"
-    group: "{{ sandbar_user }}"
-    mode: "0700"
-
-- name: Copy the installation configuration supplied by inventory
-  ansible.builtin.copy:
-    src: "{{ sandbar_installation.config_src }}/"
-    dest: "{{ sandbar_installation_dir }}/"
-    owner: "{{ sandbar_user }}"
-    group: "{{ sandbar_user }}"
-    directory_mode: "0700"
-    mode: preserve
-  when: sandbar_installation.config_src is defined
-
-- name: Install the role-owned driver installer
-  ansible.builtin.copy:
-    src: install-driver.mjs
-    dest: "{{ sandbar_installation_dir }}/install-driver.mjs"
-    owner: "{{ sandbar_user }}"
-    group: "{{ sandbar_user }}"
-    mode: "0500"
-
 - name: Check the required installation files
   ansible.builtin.stat:
     path: "{{ sandbar_installation_dir }}/{{ item }}"
@@ -67,6 +27,19 @@
     fail_msg: >-
       {{ sandbar_installation_dir }}/sandbar.env must be owned by
       {{ sandbar_user }} with mode {{ sandbar_secret_mode }}.
+
+- name: Clone the consumer repository
+  ansible.builtin.git:
+    repo: "{{ sandbar_installation.clone_url }}"
+    dest: "{{ sandbar_checkout }}"
+    update: true
+  become: true
+  become_user: "{{ sandbar_user }}"
+
+- name: Read the installation user's uid
+  ansible.builtin.command: id -u {{ sandbar_user }}
+  register: sandbar_user_uid
+  changed_when: false
 
 - name: Keep the work directory out of the consumer repository
   ansible.builtin.lineinfile:

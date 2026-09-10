@@ -1,0 +1,28 @@
+---
+# The operator's SSH config resolves `sandbar-box`; the public key remains an
+# invocation-time value rather than repository data:
+#   SANDBAR_OPERATOR_SSH_KEY="$(cat ~/.ssh/id_ed25519.pub)" ansible-playbook ...
+all:
+  hosts:
+    sandbar-box:
+      ansible_user: root
+  vars:
+    sandbar_driver_tag: github:Tojins/sandbar#v0.40.1
+    sandbar_git_name: sandbar
+    sandbar_git_email: demanthomas+sandbar@gmail.com
+    sandbar_operator_ssh_keys:
+      - "{{ lookup('ansible.builtin.env', 'SANDBAR_OPERATOR_SSH_KEY') }}"
+    sandbar_installations:
+      - user: outdoor
+        project: outdoor
+        clone_url: https://github.com/Tojins/outdoor.git
+        reader_port: 7332
+        config_src: "{{ inventory_dir }}/installations/outdoor"
+      - user: sandbar
+        project: sandbar
+        clone_url: https://github.com/Tojins/sandbar.git
+        # Self-hosting must lag the checkout: a bad driver cannot be allowed to
+        # brick the loop that would repair that same driver.
+        driver_tag: github:Tojins/sandbar#v0.40.1
+        reader_port: 7333
+        config_src: "{{ inventory_dir }}/installations/sandbar"
