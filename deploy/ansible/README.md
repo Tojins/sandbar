@@ -1,8 +1,7 @@
 # Hosting sandbar daemons
 
 This directory is the host contract for running several independent sandbar
-daemons on one Ubuntu box (#140, #149): **one neutral recipe in your repo, one
-installation directory on the box, one inventory entry**.
+daemons on one Ubuntu box (#140, #149): **one neutral recipe in your repo, one installation directory on the box, one inventory entry**.
 
 The consumer repository keeps only the development/test container recipe and
 files that recipe needs. It need not have a sandbar dependency, config, script,
