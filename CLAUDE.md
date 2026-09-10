@@ -20,7 +20,7 @@ none of it is restated here.
 - `npm test` — run the Vitest suite (`vitest run`, non-watch).
 - `npx vitest run src/plan-resolver.test.ts` — run a single test file. Add `-t "<name>"` to filter by test name.
 
-Node ≥ 20 is required. The package is ESM (`"type": "module"`); imports inside
+Node ≥ 20.6 is required. The package is ESM (`"type": "module"`); imports inside
 `src/` use the `.js` extension even when the on-disk file is `.ts` (NodeNext).
 
 **Whatever bounds a test run must kill the process GROUP, not the pid (#25).**
