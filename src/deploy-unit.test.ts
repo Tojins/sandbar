@@ -30,7 +30,8 @@ const packageVersion = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 ) as { readonly version: string };
 
-const PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
+const PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}/g;
+const INSTALLATION_LOOP = /\{%\s*for installation in sandbar_installations\s*%\}\n([\s\S]*?)\{%\s*endfor\s*%\}\n/g;
 const EXACT_TAG = /^github:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+#v\d+\.\d+\.\d+$/;
 const SAFE_USER = /^[a-z_][a-z0-9_-]{0,31}$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -72,6 +73,19 @@ function render(template: string, vars: Readonly<Record<string, string>>): strin
     if (value === undefined) throw new Error(`unrendered placeholder ${name}`);
     return value;
   });
+}
+
+function renderCaddy(
+  template: string,
+  rows: readonly InventoryInstallation[],
+  httpPort: string,
+): string {
+  const expanded = template.replace(INSTALLATION_LOOP, (_match, body: string) =>
+    rows.map((row) => render(body, {
+      "installation.project": row.project,
+      "installation.reader_port": String(row.reader_port),
+    })).join(""));
+  return render(expanded, { sandbar_ui_http_port: httpPort });
 }
 
 function directives(unit: string): string[] {
@@ -191,7 +205,7 @@ describe("multi-installation role orchestration", () => {
       ["Provide swap", "swap.yml"],
       ["Restrict SSH", "ssh.yml"],
       ["Configure unattended upgrades", "upgrades.yml"],
-      ["Configure Caddy for the first installation", "caddy.yml"],
+      ["Configure Caddy installation routes", "caddy.yml"],
     ] as const) {
       const task = taskNamed(mainTasks, name);
       expect(task).toContain(`ansible.builtin.import_tasks: ${include}`);
@@ -254,21 +268,49 @@ describe("multi-installation role orchestration", () => {
     expect(entry).toContain("(item.reader_port | default(none)) is integer");
     expect(entry).toContain("(item.reader_port | default(0) | int) >= 1");
     expect(entry).toContain("(item.reader_port | default(0) | int) <= 65535");
-    const unique = taskNamed(mainTasks, "Refuse installation users or reader ports that are not unique");
+    const unique = taskNamed(
+      mainTasks,
+      "Refuse installation identities, routes or reader ports that are not unique",
+    );
     expect(unique).toContain("map(attribute='user')");
+    expect(unique).toContain("map(attribute='project')");
     expect(unique).toContain("map(attribute='reader_port')");
     expect(mainTasks.indexOf("Validate every installation inventory entry"))
       .toBeLessThan(mainTasks.indexOf("Install host packages"));
-    expect(mainTasks.indexOf("Refuse installation users or reader ports that are not unique"))
+    expect(mainTasks.indexOf(
+      "Refuse installation identities, routes or reader ports that are not unique",
+    ))
       .toBeLessThan(mainTasks.indexOf("Install host packages"));
   });
 
-  it("leaves Caddy on the first reader until prefix routing lands", () => {
-    expect(render(caddyTemplate, {
-      sandbar_ui_http_port: "80",
-      sandbar_caddy_reader_port: String(installations[0]?.reader_port),
-    })).toBe(":80 {\n\treverse_proxy 127.0.0.1:7332\n}\n");
-    expect(taskNamed(caddyTasks, "Configure Caddy for the first installation reader"))
+  it("renders an ordered installation index and one stripped-prefix route per reader", () => {
+    expect(renderCaddy(caddyTemplate, installations, "80")).toBe(`:80 {
+\thandle_path /outdoor/* {
+\t\treverse_proxy 127.0.0.1:7332
+\t}
+\thandle_path /sandbar/* {
+\t\treverse_proxy 127.0.0.1:7333
+\t}
+\theader / Content-Type text/html
+\trespond / <<HTML
+\t\t<!doctype html>
+\t\t<html lang="en">
+\t\t<head>
+\t\t<meta charset="utf-8">
+\t\t<title>Sandbar installations</title>
+\t\t</head>
+\t\t<body>
+\t\t<h1>Sandbar installations</h1>
+\t\t<ul>
+\t\t<li><a href="/outdoor/">outdoor</a></li>
+\t\t<li><a href="/sandbar/">sandbar</a></li>
+\t\t</ul>
+\t\t</body>
+\t\t</html>
+\t\tHTML 200
+}
+`);
+    expect(taskNamed(caddyTasks, "Configure Caddy installation routes and index"))
       .toContain("notify: Reload Caddy");
     const startName = "Enable and start Caddy";
     const flushName = "Apply the Caddy configuration before installation checks can stop the play";

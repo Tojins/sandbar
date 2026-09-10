@@ -35,15 +35,16 @@
   loop_control:
     label: "{{ item.user | default('missing user') }}"
 
-- name: Refuse installation users or reader ports that are not unique
+- name: Refuse installation identities, routes or reader ports that are not unique
   ansible.builtin.assert:
     that:
       - (sandbar_installations | map(attribute='user') | list | unique | length) == (sandbar_installations | length)
+      - (sandbar_installations | map(attribute='project') | list | unique | length) == (sandbar_installations | length)
       - (sandbar_installations | map(attribute='reader_port') | list | unique | length) == (sandbar_installations | length)
     fail_msg: >-
-      Every installation needs a unique Linux user and reader_port; duplicate
-      users overwrite one home and unit pair, and duplicate ports cannot bind
-      concurrently.
+      Every installation needs a unique Linux user, project route and
+      reader_port; duplicates would overwrite one home and unit pair, route
+      one prefix to multiple readers, or prevent readers binding concurrently.
 
 - name: Refuse a host that is not Ubuntu 24.04 or 26.04
   ansible.builtin.assert:
@@ -74,7 +75,7 @@
 - name: Configure unattended upgrades
   ansible.builtin.import_tasks: upgrades.yml
 
-- name: Configure Caddy for the first installation
+- name: Configure Caddy installation routes
   ansible.builtin.import_tasks: caddy.yml
 
 - name: Create each installation account and podman session

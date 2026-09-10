@@ -89,6 +89,7 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("No run is serving; last state below");
     expect(app.innerHTML).toContain("sandbar updated");
     expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenNthCalledWith(1, "state.json", { cache: "no-store" });
   });
 
   it("renders a failed state request, with or without a last state", async () => {
