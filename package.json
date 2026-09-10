@@ -1,6 +1,6 @@
 {
   "name": "sandbar",
-  "version": "0.40.0",
+  "version": "0.40.1",
   "description": "Self-hosted issue-tracker-driven coding agent orchestrator.",
   "type": "module",
   "main": "dist/index.js",
@@ -30,7 +30,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc",
     "check": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "npm run build && vitest run",
     "sandbar": "node scripts/sandbar-launch.mjs",
     "driver": "node scripts/sandbar-launch.mjs --install-only",
     "prepare": "npm run build",
