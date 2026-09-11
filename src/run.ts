@@ -1637,17 +1637,12 @@ export async function run(
     for (;;) {
       iteration += 1;
       const planTrigger: RecomputeTrigger = nextPlanTrigger;
-      // Ahead of the poll's refresh, and ahead of the failure path that skips
-      // the rest of this iteration: a restart request is an instruction from
-      // the box, and a daemon that could only honour it while origin answers
-      // is a daemon a landed fetch regression could strand on the broken
-      // build. Under a pending restart the refresh is also work thrown away —
-      // nothing more will be admitted, and rebuilding the source images for a
-      // main that just moved is exactly the minutes the deploy is waiting on.
-      // The restarted driver does that once, with the new code.
+      // Ahead of the poll, so the request is on the record from the first wake
+      // that can see it even when the refresh below fails and skips the rest of
+      // this iteration.
       await observeRestartRequest();
       let sourceChangedOnPoll = false;
-      if (planTrigger === "poll" && restartRequested === null) {
+      if (planTrigger === "poll") {
         const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
         if (refresh.failures.length > 0) {
           const message =
@@ -1662,7 +1657,14 @@ export async function run(
         // a poll boundary and must not spend that guard.
         pool.beginPoll();
         sourceChangedOnPoll = refresh.sourceChanged;
-        if (sourceChangedOnPoll) {
+        // A pending restart admits nothing more, so rebuilding this run's
+        // images for a source that just moved is minutes the deploy waits on
+        // and the restarted driver spends again with the new code. That case is
+        // the COMMON one here, not an edge: the commit the play applied is a
+        // commit on this same source branch. Landing keeps working without it —
+        // gate-2 resolves its branch images from the merger worktree, which is
+        // the merge result rather than either input.
+        if (sourceChangedOnPoll && restartRequested === null) {
           const line = `origin/${config.sourceBranch} moved during poll; refreshing source images`;
           await runRecord.emit({ kind: "preflight", action: "origin-refreshed", detail: line });
           await refreshSourceImages();

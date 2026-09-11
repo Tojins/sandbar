@@ -178,10 +178,10 @@ running work before exit 2. An unchanged `land` deferral waits for another
 trigger and advances no counter. A `restart-requested` file in the
 installation directory (#146) drains exactly the same way and exits 75, the one
 code an installation unit turns back into a start: the converging deploy writes
-it, the daemon reads it at the top of every recompute — ahead of the poll's
-fetch, so neither an unreachable origin nor a thrown-away source-image rebuild
-can hold the deploy — and removes it at startup, which is what keeps that exit
-from repeating. It outranks provider closure and the backstop because it is an
+it, the daemon reads it at the top of every recompute — ahead of the poll, so a
+failed refresh cannot keep it off the record — skips the source-image rebuild a
+moved source would otherwise trigger, since nothing more will be admitted, and
+removes the file at startup, which is what keeps that exit from repeating. It outranks provider closure and the backstop because it is an
 instruction rather than a condition, and both of those are run-local state a
 fresh process re-derives in seconds. `src/restart-request.ts` owns the channel,
 including why it is a file beside the config rather than a signal or a per-poll
