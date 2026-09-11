@@ -138,8 +138,9 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     });
     const filtered = argv.filter((a) => init === "with-init" || a !== "--init");
     const started = previousStart.then(async () => {
-      // Through the production helper: the variables reach podman as a file
-      // this writes and removes around the call (#154).
+      // Through the production helper, which is how an invocation becomes a
+      // command (#154). Inert for this fixture's empty `env` — sandbox-stack-
+      // podman.test.ts is the one that runs a real env file past real podman.
       await withRuntimeEnv({ argv: filtered, env }, (a) => exec(RUNTIME, a));
     });
     previousStart = started.catch(() => {});

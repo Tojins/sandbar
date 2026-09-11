@@ -2498,7 +2498,7 @@ export function buildResolveRunArgv(args: {
     ...(args.codexAuthMount === undefined
       ? {}
       : { CODEX_HOME: dirname(args.codexAuthMount.sandboxPath) }),
-    // A credential with no value is omitted entirely, as it was when the
+    // A credential with no value is omitted entirely, exactly as when the
     // omission was a `-e` pair this builder never pushed.
     ...Object.fromEntries(
       Object.entries(args.credentials).filter(

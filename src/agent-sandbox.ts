@@ -1846,6 +1846,8 @@ export function sandboxRunArgs(opts: {
   readonly devices: readonly string[];
   readonly cpus: number | undefined;
 }): RuntimeInvocation {
+  // The argv below names no variable: they travel in the returned `env`, which
+  // `withRuntimeEnv` hands podman as a file (#154, runtime.ts).
   const argv = [
     "run",
     "-d",
@@ -1869,8 +1871,6 @@ export function sandboxRunArgs(opts: {
     ...(opts.cpus !== undefined ? ["--cpus", String(opts.cpus)] : []),
     "-w",
     opts.workdir,
-    // No env flag at all: the variables ride in the returned env, which
-    // `withRuntimeEnv` hands podman as a file (#154, runtime.ts).
     ...opts.volumeMounts.flatMap((v) => ["-v", v]),
     "--entrypoint",
     "sleep",

@@ -39,6 +39,10 @@ import type { ContainerTeardown } from "./container-resources.js";
 
 const exec = promisify(execFile);
 
+// #154: a consumer gate value shaped like a credential and awkward for a
+// line-based parser — an embedded `=`, a `#` that is not a comment, a space.
+const SECRET = "sk-ant=oat01#not-a-comment and a space";
+
 // Every VOLUME-typed mount a container holds, space-separated (#50). Bind
 // mounts are excluded by the type test: sandbar builds those by the dozen and
 // they are not what leaks. A host-wide `podman volume ls | wc -l` baseline is
@@ -212,6 +216,7 @@ describe.runIf(available)("gate stack against real podman", () => {
                 image: IMAGE,
                 mountWorktree: "/work",
                 hold: true,
+                env: { GATE_SECRET: SECRET },
               },
             ],
             steps: [
@@ -220,10 +225,17 @@ describe.runIf(available)("gate stack against real podman", () => {
                 in: "runner",
                 command: ["cat", "marker.txt"],
               },
+              // Both halves of #154 against real podman: `CI` arrives through
+              // `stepExecArgs`' file on the `exec`, `GATE_SECRET` through
+              // `containerRunArgs`' file on the `run` that made the container.
               {
                 name: "env",
                 in: "runner",
-                command: ["sh", "-c", 'test "$CI" = true'],
+                command: [
+                  "sh",
+                  "-c",
+                  `test "$CI" = true && test "$GATE_SECRET" = '${SECRET}'`,
+                ],
               },
             ],
           }),

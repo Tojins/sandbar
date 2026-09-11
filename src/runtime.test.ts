@@ -18,9 +18,9 @@
 // Between them, a new builder either hands its variables to `withRuntimeEnv` —
 // which cannot put one in an argv — or it announces itself.
 //
-// Each case supplies credential-SHAPED values, so the second half of the check
-// — no value appears anywhere in the argv — is testing what the issue reported
-// rather than a placeholder.
+// Each case supplies credential-SHAPED values, so the check that no value
+// appears anywhere in the argv is testing what the issue reported rather than a
+// placeholder.
 import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
