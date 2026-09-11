@@ -35,7 +35,11 @@
 // health (#36, #49). The health side polls rather than deciding on one shot,
 // and a container still unhealthy at the deadline is recreated in place before
 // anything is thrown; `pollUntilHealthy` and `assertIssueContainerHealthy`
-// carry that argument.
+// carry that argument. Liveness and health are the whole of what is re-checked:
+// what an `issue` container HOLDS across those runs is the consumer's contract,
+// not sandbar's (config.ts's `StackContainer` owns that rule, #152) — nothing
+// here can see branch-derived state one attempt left inside one, so a step that
+// refuses on it reds every later attempt and no participant can reset it.
 //
 // Nothing here may hang: this module holds the run's single-instance lock, and
 // node's execFile has NO default timeout. Every podman call goes through

@@ -781,6 +781,19 @@ describe("renderSandboxStackSlot (#44)", () => {
     expect(slot).toMatch(/restarts a sibling/i);
   });
 
+  // #152: the slot used to offer `gateStack` as "ordinary code you can edit",
+  // and an implementer that believes it spends its rounds making the branch fit
+  // a stack it cannot move. Both halves are load-bearing — the stack is fixed
+  // for this issue, and the gate's `issue` containers keep what an earlier
+  // attempt put in them — because together they leave "report it" as the only
+  // move, which is the one the outdoor case never took.
+  it("says a gateStack change cannot take effect for this issue, and that issue containers persist", () => {
+    const slot = renderSandboxStackSlot([up]);
+    expect(slot).not.toMatch(/ordinary code you can edit/i);
+    expect(slot).toMatch(/not a change you can make take effect here/i);
+    expect(slot).toMatch(/outlive your attempts/i);
+  });
+
   // The list is written once, at bringup, and nothing re-reads it — so a
   // sibling that has died since still renders as running. Saying so is the
   // whole of what sandbar does about that, which makes the sentence load-

@@ -237,6 +237,23 @@ export type Readiness = {
 // this backwards means an agent that breaks the service bootstrap burns two
 // fresh-stack retries reproducing the same failure and then lands on
 // NEEDS-HUMAN with an "environment" trace for a bug it could have fixed.
+//
+// "Never on the branch's code" binds the container's STATE as much as its
+// image (#152). An `issue` container is created once and reused by every gate
+// run on that branch, so anything branch-derived it accumulates — an applied
+// migration, a stamped fixture, a warm cache — is still inside it for the next
+// attempt. So either it holds no such state, or a step that runs on EVERY gate
+// run resets it; a consumer that declares `issue` and then lets one attempt's
+// code write to it has chosen the third thing, which is a gate that reds every
+// later attempt on the consumer's behalf. Sandbar cannot help there and
+// deliberately does not try: the gate's namespace is unreachable from the
+// sandbox, there is no reset channel, and no step output is parsed — so the
+// refusal is a red trace naming a condition neither the implementer nor the
+// reviewer can act on, and the only moves left to the branch are the ones that
+// make its code fit the stale state. The motivating case: a migration edited
+// on one attempt against a database that had already stamped the previous
+// attempt's copy of the same file. `attempt` is the right lifecycle for
+// anything the branch's own code writes to.
 export type StackContainer = {
   // Becomes `sandbar-<stackId>-<name>`; also what a step's `in` refers to.
   readonly name: string;
