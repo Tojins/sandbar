@@ -244,6 +244,13 @@
 // five log lines between them. `captureAgentRun` is the seam that does it; the
 // classification and the pipe-drain deadline are its header's.
 //
+// `buildResolveRunArgv` returns a `RuntimeInvocation` rather than an argv, for
+// the reason runtime.ts's header owns (#154): no `=` after `-e`, so the merger
+// agent's credential, `GH_TOKEN` and the bot identity travel in the podman
+// child's environment and `captureAgentRun` — which keeps both raw streams
+// verbatim in the attempt log — has nothing to keep. The same argument #134
+// already made about `CODEX_AUTH_JSON` and `ps`, now applied to all of them.
+//
 // `buildAbandonComment` is the other end, and the reason all of it is carried:
 // that comment is the only artefact a human reads when they find a stuck issue
 // in the morning. It now names the conflicted paths, what each attempt did and
@@ -344,7 +351,10 @@ import {
   boundedRuntime,
   boundedRuntimeOk,
   type BoundedRuntime,
+  envArgs,
   RUNTIME,
+  runtimeChildEnv,
+  type RuntimeInvocation,
 } from "./runtime.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import {
@@ -2332,14 +2342,24 @@ export function captureAgentRun(
   file: string,
   args: readonly string[],
   input: string,
-  opts: { readonly container: string; readonly timeoutMs: number },
+  opts: {
+    readonly container: string;
+    readonly timeoutMs: number;
+    // The child's own environment, which is what the argv's bare `-e KEY`
+    // tokens resolve against (#154, runtime.ts). Absent for an argv that names
+    // none, which is every exec this seam runs.
+    readonly env?: Readonly<Record<string, string>>;
+  },
 ): Promise<CapturedAgentRun> {
   // The one duration sandbar had before #82, now measured the same way as the
   // new ones rather than being the odd one out — and monotonically, which
   // `Date.now()` was not.
   const elapsed = startTimer();
   return new Promise<CapturedAgentRun>((resolve) => {
-    const child = spawn(file, [...args], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(file, [...args], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: runtimeChildEnv(opts.env),
+    });
     let out = "";
     let err = "";
     child.stdout.on("data", (chunk) => {
@@ -2477,7 +2497,28 @@ export function buildResolveRunArgv(args: {
   readonly credentials: Readonly<Record<string, string | undefined>>;
   readonly botName: string;
   readonly botEmail: string;
-}): readonly string[] {
+}): RuntimeInvocation {
+  // Every variable the resolve container needs, in one record: the argv below
+  // names these keys and podman copies their values out of its own environment
+  // (#154, runtime.ts). Insertion order is what `envArgs` emits, so it is also
+  // the argv order the pin test reads.
+  const env: Record<string, string> = {
+    HOME: "/tmp",
+    ...(args.codexAuthMount === undefined
+      ? {}
+      : { CODEX_HOME: dirname(args.codexAuthMount.sandboxPath) }),
+    // A credential with no value is omitted entirely, as it was when the
+    // omission was a `-e` pair this builder never pushed.
+    ...Object.fromEntries(
+      Object.entries(args.credentials).filter(
+        (entry): entry is [string, string] => Boolean(entry[1]),
+      ),
+    ),
+    GIT_AUTHOR_NAME: args.botName,
+    GIT_AUTHOR_EMAIL: args.botEmail,
+    GIT_COMMITTER_NAME: args.botName,
+    GIT_COMMITTER_EMAIL: args.botEmail,
+  };
   const argv = [
     "run",
     "-d",
@@ -2503,32 +2544,15 @@ export function buildResolveRunArgv(args: {
     ]),
     "-w",
     "/workspace",
-    "-e",
-    "HOME=/tmp",
-    ...(args.codexAuthMount === undefined
-      ? []
-      : ["-e", `CODEX_HOME=${dirname(args.codexAuthMount.sandboxPath)}`]),
     "--label",
     "sandbar=true",
-  ];
-  for (const [key, value] of Object.entries(args.credentials)) {
-    if (value) argv.push("-e", `${key}=${value}`);
-  }
-  argv.push(
-    "-e",
-    `GIT_AUTHOR_NAME=${args.botName}`,
-    "-e",
-    `GIT_AUTHOR_EMAIL=${args.botEmail}`,
-    "-e",
-    `GIT_COMMITTER_NAME=${args.botName}`,
-    "-e",
-    `GIT_COMMITTER_EMAIL=${args.botEmail}`,
+    ...envArgs(env),
     "--entrypoint",
     "sleep",
     args.image,
     "infinity",
-  );
-  return argv;
+  ];
+  return { argv, env };
 }
 
 export function buildResolveExecArgv(
@@ -2567,8 +2591,9 @@ export function resolveAgentCredentials(
     [
       ...PROVIDER_CREDENTIALS[provider]
         .map(({ key }) => key)
-        // ChatGPT auth is a shared file mount since #134. Putting its JSON in
-        // podman's argv is redundant and exposes the refresh token to `ps`.
+        // ChatGPT auth is a shared file mount since #134, so passing the JSON
+        // as a variable as well is redundant. #154 took the `ps` half of that
+        // argument and applied it to every remaining key.
         .filter((key) => key !== "CODEX_AUTH_JSON"),
       "GH_TOKEN",
     ].map(
@@ -2766,7 +2791,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         prompt,
         dangerouslySkipPermissions: true,
       });
-      const args = buildResolveRunArgv({
+      const runInvocation = buildResolveRunArgv({
         container,
         cwd,
         extraMounts: [],
@@ -2796,10 +2821,16 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         return removePromise;
       };
       const processResult = await Promise.resolve().then(async () => {
-        const started = await captureResolveProcess(RUNTIME, args, "", {
-          container,
-          timeoutMs: CONTROL_TIMEOUT_MS,
-        });
+        const started = await captureResolveProcess(
+          RUNTIME,
+          runInvocation.argv,
+          "",
+          {
+            container,
+            timeoutMs: CONTROL_TIMEOUT_MS,
+            env: runInvocation.env,
+          },
+        );
         if (started.exitCode !== 0 || started.end !== "exit") {
           return { ...started, end: "spawn-error" as const };
         }

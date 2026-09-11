@@ -3341,7 +3341,7 @@ describe("sandboxRunArgs (#42)", () => {
   };
 
   it("runs the sandbox under --init, so pid 1 reaps what the agent orphans", () => {
-    expect(sandboxRunArgs(base)).toContain("--init");
+    expect(sandboxRunArgs(base).argv).toContain("--init");
   });
 
   // #50. `sandboxImage` is the CONSUMER's image and is free to declare a
@@ -3349,7 +3349,7 @@ describe("sandboxRunArgs (#42)", () => {
   // volume per sandbox that nothing ever reads and that outlives the container
   // as one permanently consumed lock out of the host's 2048.
   it("provisions no anonymous volume for the image's VOLUME directives", () => {
-    const args = sandboxRunArgs(base);
+    const { argv: args } = sandboxRunArgs(base);
     expect(args).toContain("--image-volume=ignore");
     // An option of `run`, not an argument of `sleep` — everything after the
     // image name belongs to the entrypoint, where it would be a silent no-op
@@ -3363,12 +3363,12 @@ describe("sandboxRunArgs (#42)", () => {
     // `podman run ... --entrypoint sleep <image> infinity`: everything after the
     // image name belongs to `sleep`, so an --init appended there would be a
     // silent no-op that `toContain` alone would still accept.
-    const args = sandboxRunArgs(base);
+    const { argv: args } = sandboxRunArgs(base);
     expect(args.indexOf("--init")).toBeLessThan(args.indexOf(base.imageName));
   });
 
   it("carries the identity, workdir, env and mounts it was given", () => {
-    const args = sandboxRunArgs({
+    const { argv: args, env } = sandboxRunArgs({
       ...base,
       env: { HOME: "/home/agent", GH_TOKEN: "t" },
       volumeMounts: ["/host/wt:/home/agent/workspace:rw,z"],
@@ -3395,18 +3395,20 @@ describe("sandboxRunArgs (#42)", () => {
         "2",
         "-w",
         SANDBOX_REPO_DIR,
+        // Bare keys (#154) — the values are the invocation's env, below.
         "-e",
-        "HOME=/home/agent",
+        "HOME",
         "-e",
-        "GH_TOKEN=t",
+        "GH_TOKEN",
         "-v",
         "/host/wt:/home/agent/workspace:rw,z",
       ]),
     );
+    expect(env).toEqual({ HOME: "/home/agent", GH_TOKEN: "t" });
   });
 
   it("omits --userns when the provider was configured without one", () => {
-    const args = sandboxRunArgs({ ...base, userns: false });
+    const { argv: args } = sandboxRunArgs({ ...base, userns: false });
     expect(args.some((a) => a.startsWith("--userns"))).toBe(false);
     // The uid mapping is a separate flag and must survive.
     expect(args).toContain("--user");
@@ -3421,7 +3423,7 @@ describe("sandboxRunArgs (#42)", () => {
   // the namespace the agent shares with its siblings, which is a hole in the
   // isolation the whole feature rests on.
   it("publishes nothing on the sandbox stack's behalf", () => {
-    expect(sandboxRunArgs(base)).not.toContain("-p");
+    expect(sandboxRunArgs(base).argv).not.toContain("-p");
   });
 
   // The other half of the anchor's tax
@@ -3449,7 +3451,7 @@ describe("sandboxRunArgs (#42)", () => {
   });
 
   it("emits no empty optional flags", () => {
-    expect(sandboxRunArgs(base)).toEqual([
+    expect(sandboxRunArgs(base).argv).toEqual([
       "run",
       "-d",
       "--name",

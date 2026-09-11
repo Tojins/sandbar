@@ -402,10 +402,10 @@ describe("resolve provider invocation (#74)", () => {
       ["CODEX_AUTH_JSON", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
     ],
   ] as const)(
-    "routes only %s credentials into the resolve argv",
+    "routes only %s credentials into the resolve invocation",
     (provider, present, absent) => {
       const credentials = resolveAgentCredentials(provider, (key) => values[key]);
-      const argv = buildResolveRunArgv({
+      const { argv, env } = buildResolveRunArgv({
         container: "resolve-1",
         cwd: "/worktree",
         extraMounts: ["/git-common"],
@@ -414,12 +414,16 @@ describe("resolve provider invocation (#74)", () => {
         botName: "sandbar-bot",
         botEmail: "bot@example.test",
       });
-      const joined = argv.join(" ");
+      // The routing is unchanged; where the value lives is (#154).
       for (const key of present) {
-        expect(joined).toContain(`${key}=${values[key]}`);
+        expect(argv).toContain(key);
+        expect(env[key]).toBe(values[key]);
       }
-      for (const key of absent) expect(joined).not.toContain(`${key}=`);
-      expect(joined).toContain("GH_TOKEN=github-key");
+      for (const key of absent) {
+        expect(argv).not.toContain(key);
+        expect(env).not.toHaveProperty(key);
+      }
+      expect(env["GH_TOKEN"]).toBe("github-key");
       expect(argv.slice(-4)).toEqual([
         "--entrypoint",
         "sleep",
@@ -430,8 +434,8 @@ describe("resolve provider invocation (#74)", () => {
     },
   );
 
-  it("pins the complete resolve-container argv", () => {
-    const argv = buildResolveRunArgv({
+  it("pins the complete resolve-container invocation", () => {
+    const { argv, env } = buildResolveRunArgv({
       container: "resolve-1",
       cwd: "/worktree",
       extraMounts: ["/git-common"],
@@ -445,14 +449,22 @@ describe("resolve provider invocation (#74)", () => {
       "--name", "resolve-1",
       "--userns=keep-id:uid=1000,gid=1000", "--user", "1000:1000",
       "-v", "/worktree:/workspace", "-v", "/git-common:/git-common",
-      "-w", "/workspace", "-e", "HOME=/tmp",
+      "-w", "/workspace",
       "--label", "sandbar=true",
-      "-e", "GIT_AUTHOR_NAME=sandbar-bot",
-      "-e", "GIT_AUTHOR_EMAIL=bot@example.test",
-      "-e", "GIT_COMMITTER_NAME=sandbar-bot",
-      "-e", "GIT_COMMITTER_EMAIL=bot@example.test",
+      "-e", "HOME",
+      "-e", "GIT_AUTHOR_NAME",
+      "-e", "GIT_AUTHOR_EMAIL",
+      "-e", "GIT_COMMITTER_NAME",
+      "-e", "GIT_COMMITTER_EMAIL",
       "--entrypoint", "sleep", "sandbox-image", "infinity",
     ]);
+    expect(env).toEqual({
+      HOME: "/tmp",
+      GIT_AUTHOR_NAME: "sandbar-bot",
+      GIT_AUTHOR_EMAIL: "bot@example.test",
+      GIT_COMMITTER_NAME: "sandbar-bot",
+      GIT_COMMITTER_EMAIL: "bot@example.test",
+    });
     expect(argv).not.toContain("--init");
     // #141 runs the agent through exec while this PID 1 keeps its cgroup live,
     // then the adapter measures and explicitly removes the container.
@@ -466,7 +478,7 @@ describe("resolve provider invocation (#74)", () => {
   });
 
   it("mounts the shared Codex credential read-write without putting it in env", () => {
-    const argv = buildResolveRunArgv({
+    const { argv, env } = buildResolveRunArgv({
       container: "resolve-1",
       cwd: "/worktree",
       extraMounts: [],
@@ -480,12 +492,13 @@ describe("resolve provider invocation (#74)", () => {
       botEmail: "bot@example.test",
     });
     expect(argv).toContain("/state/codex-auth.json:/home/agent/.codex/auth.json:z");
-    expect(argv).toContain("CODEX_HOME=/home/agent/.codex");
+    expect(env["CODEX_HOME"]).toBe("/home/agent/.codex");
     // The 0600 host file is readable only if the daemon's uid is mapped onto
     // container uid 1000; bare keep-id left it owned by 1001 on a #149 box.
     expect(argv).toContain("--userns=keep-id:uid=1000,gid=1000");
     expect(argv).not.toContain("--userns=keep-id");
-    expect(argv.join(" ")).not.toContain("CODEX_AUTH_JSON=");
+    expect(argv).not.toContain("CODEX_AUTH_JSON");
+    expect(env).not.toHaveProperty("CODEX_AUTH_JSON");
   });
 
   it("forwards the shared credential through the real adapter into Podman argv", async () => {
@@ -497,7 +510,11 @@ describe("resolve provider invocation (#74)", () => {
       `#!${process.execPath}`,
       'const { appendFileSync } = require("node:fs");',
       'const args = process.argv.slice(2);',
-      `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(args) + "\\n");`,
+      // Podman resolves a bare `-e KEY` against its OWN environment (#154), so
+      // the shim has to do the same to observe what the container would get.
+      'const named = args.filter((a, i) => i > 0 && args[i - 1] === "-e");',
+      'const env = Object.fromEntries(named.map((k) => [k, process.env[k]]));',
+      `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify({ args, env }) + "\\n");`,
       'if (args[0] === "run") process.stdout.write("container-id\\n");',
       'if (args[0] === "exec") process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"<promise>ABANDON</promise>"}}) + "\\n");',
       'if (args[0] === "inspect") process.stdout.write("\\nfalse\\n");',
@@ -533,14 +550,20 @@ describe("resolve provider invocation (#74)", () => {
       const calls = (await readFile(argvLog, "utf8"))
         .trim()
         .split("\n")
-        .map((line) => JSON.parse(line) as string[]);
-      const argv = calls.find((args) => args[0] === "run")!;
-      expect(argv).toContain(
+        .map((line) => JSON.parse(line) as {
+          args: string[];
+          env: Record<string, string | undefined>;
+        });
+      const runCall = calls.find((call) => call.args[0] === "run")!;
+      expect(runCall.args).toContain(
         `${codexAuthMount.hostPath}:${codexAuthMount.sandboxPath}:z`,
       );
-      expect(argv).toContain("CODEX_HOME=/var/lib/codex");
-      expect(argv?.join(" ")).not.toContain("CODEX_AUTH_JSON=");
-      expect(calls.map((args) => args[0])).toEqual([
+      // The value reaches podman's environment; the argv names only the key.
+      expect(runCall.env["CODEX_HOME"]).toBe("/var/lib/codex");
+      expect(runCall.args).toContain("CODEX_HOME");
+      // The shared credential is a mount, and appears nowhere in the argv.
+      expect(runCall.args.join(" ")).not.toContain("CODEX_AUTH_JSON");
+      expect(calls.map((call) => call.args[0])).toEqual([
         "run", "exec", "exec", "inspect", "stats", "rm",
       ]);
       expect(run).toMatchObject({ peakMemoryBytes: 2048 });

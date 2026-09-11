@@ -39,6 +39,13 @@
 //   F7 — every host git invocation runs under LC_ALL=C (locale-stable stderr).
 //   F8 — the container runs with `--init`: the entrypoint is `sleep infinity`,
 //        which reaps nothing (#42). See `sandboxRunArgs`.
+//   F8b — `sandboxRunArgs` returns a `RuntimeInvocation`, not an argv: every
+//        `-e` is a BARE KEY and the values ride in the podman child's own
+//        environment (#154, runtime.ts owns the rule). `config.env` is the
+//        credential allowlist, and this is the argv the reported leak came
+//        through — node's `execFile` error is `Command failed: <argv joined>`,
+//        which `create` wraps as `podman run failed:` and the inner loop
+//        records as a hard-error `reason` the UI then serves.
 //   F9 — a run that FAILS still carries out whatever the agent had emitted
 //        (`agentPartialOutput`) and what it had spent getting there
 //        (`agentPartialUsage`, #85/#109/#124 — an invocation that burned ten
@@ -130,6 +137,7 @@ import {
   type ContainerResourceSnapshot,
   type ContainerResources,
 } from "./container-resources.js";
+import { envArgs, runtimeChildEnv, type RuntimeInvocation } from "./runtime.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -1835,8 +1843,8 @@ export function sandboxRunArgs(opts: {
   readonly groups: ReadonlyArray<string | number>;
   readonly devices: readonly string[];
   readonly cpus: number | undefined;
-}): string[] {
-  return [
+}): RuntimeInvocation {
+  const argv = [
     "run",
     "-d",
     "--name",
@@ -1859,13 +1867,15 @@ export function sandboxRunArgs(opts: {
     ...(opts.cpus !== undefined ? ["--cpus", String(opts.cpus)] : []),
     "-w",
     opts.workdir,
-    ...Object.entries(opts.env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+    // Bare keys; the values ride in the returned env (#154, runtime.ts).
+    ...envArgs(opts.env),
     ...opts.volumeMounts.flatMap((v) => ["-v", v]),
     "--entrypoint",
     "sleep",
     opts.imageName,
     "infinity",
   ];
+  return { argv, env: opts.env };
 }
 
 // The sandbox container's removal argv (#44), pure and exported for the same
@@ -1933,23 +1943,29 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
           : [options.network]
         : [];
 
+      const runInvocation = sandboxRunArgs({
+        containerName,
+        imageName,
+        workdir: sandboxWorktreePath,
+        env,
+        volumeMounts,
+        userns,
+        containerUid,
+        containerGid,
+        networks,
+        groups: options?.groups ?? [],
+        devices: options?.devices ?? [],
+        cpus: options?.cpus,
+      });
       await new Promise<void>((resolveRun, rejectRun) => {
         execFile(
           "podman",
-          sandboxRunArgs({
-            containerName,
-            imageName,
-            workdir: sandboxWorktreePath,
-            env,
-            volumeMounts,
-            userns,
-            containerUid,
-            containerGid,
-            networks,
-            groups: options?.groups ?? [],
-            devices: options?.devices ?? [],
-            cpus: options?.cpus,
-          }),
+          runInvocation.argv,
+          // `error.message` below is `Command failed: <argv joined>`, which the
+          // inner loop records as a hard-error `reason` and the UI serves. That
+          // is exactly why the argv names keys and this env carries the values
+          // (#154).
+          { env: runtimeChildEnv(runInvocation.env) },
           (error) => {
             if (error) rejectRun(new Error(`podman run failed: ${error.message}`));
             else resolveRun();

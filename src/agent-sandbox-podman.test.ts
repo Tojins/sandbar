@@ -57,6 +57,7 @@ import {
   removeFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { sandboxRunArgs } from "./agent-sandbox.js";
+import { runtimeChildEnv } from "./runtime.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -119,7 +120,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     const name = `${scopedResourcePrefix(SCOPE)}initprobe-${randomUUID()}-${
       init === "with-init" ? "init" : "noinit"
     }`;
-    const args = sandboxRunArgs({
+    const { argv, env } = sandboxRunArgs({
       containerName: name,
       imageName: IMAGE,
       // Not the real sandbox paths: this image has neither, and `-w` is not
@@ -134,9 +135,12 @@ describe.runIf(available)("the sandbox container against real podman", () => {
       groups: [],
       devices: [],
       cpus: undefined,
-    }).filter((a) => init === "with-init" || a !== "--init");
+    });
+    const args = argv.filter((a) => init === "with-init" || a !== "--init");
     const started = previousStart.then(async () => {
-      await exec(RUNTIME, args);
+      // The invocation's env, not the suite's: podman resolves the argv's bare
+      // `-e KEY` tokens against its own environment (#154).
+      await exec(RUNTIME, args, { env: runtimeChildEnv(env) });
     });
     previousStart = started.catch(() => {});
     await started;

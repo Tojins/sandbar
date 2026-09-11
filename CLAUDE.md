@@ -377,7 +377,20 @@ outcomes.
   and returns the remainder for `config.env`, so no routing key crosses into a
   sandbox. The committed config remains a program and spreads `routing` over
   its defaults; `resolveConfig` remains the one validation boundary.
-  `src/env-file.ts`, `src/env.ts`. Codex's ChatGPT subscription is `auth.json`,
+  `src/env-file.ts`, `src/env.ts`. **A podman argv never has `=` after `-e`
+  (#154).** Every container variable sandbar sets — `config.env`, `HOME`,
+  `CI=true`, the bot identity, the consumer's own `gateStack.containers[].env`
+  — travels in the podman child's environment, and the argv carries the bare
+  key podman copies it from. One rule rather than a secret/non-secret split,
+  because the failure it closes is that every `Command failed:` wrapper quotes
+  the argv: a failed sandbox `podman run` put both tokens in a `hard-error`
+  event `reason`, and the record is the source of truth the UI serves (#132).
+  A redaction pass would be the weaker line — it has to know every key. The
+  four builders that emit any `-e` therefore return `RuntimeInvocation` (argv
+  and env together, `src/runtime.ts`), so no caller can run one without the
+  other, and one table test over all four is the enforcer. Nothing can fix a
+  record already written; the `ps` exposure closes as a side effect.
+  Codex's ChatGPT subscription is `auth.json`,
   so `CODEX_AUTH_JSON` carries its content. At preflight the driver reconciles
   that value by `last_refresh` into one `<workDir>/codex-auth.json`; every Codex
   sandbox and merger container mounts the run-owned file read-write at
