@@ -37,6 +37,11 @@ async function runTree(withPid: boolean): Promise<{ logsDir: string; runDir: str
   return { logsDir, runDir };
 }
 
+// The whole #69 identity line, as `formatDriverIdentity` spells it.
+const DRIVER_LINE =
+  "Driver: sandbar 0.42.5 · built from /opt/driver @abc123 clean" +
+  " · config /opt/installation/sandbar.config.mjs @def456 dirty";
+
 describe("run UI server", () => {
   it("renders, polls repeatedly, and retains the last state after a network failure", async () => {
     const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
@@ -46,7 +51,7 @@ describe("run UI server", () => {
     let interval: (() => Promise<void>) | undefined;
     const state = {
       now: "2026-09-07T10:00:00Z",
-      run: { startedAt: "2026-09-07T09:00:00Z", status: "live", driver: "sandbar test",
+      run: { startedAt: "2026-09-07T09:00:00Z", status: "live", driver: DRIVER_LINE,
         slots: { used: 1, max: 2 }, lastRecompute: { n: 2, trigger: "slot freed", at: "2026-09-07T09:30:00Z" },
         exit: null, complaints: [] },
       pool: [{ issue: 2, title: "Pool title", phase: "implementer",
@@ -77,8 +82,18 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("Pool title");
     expect(app.innerHTML).toContain("Waiting title");
     expect(app.innerHTML).toContain("Finished title");
-    expect(app.innerHTML).toContain("HARD-ERROR · provider cause");
-    expect(app.innerHTML).not.toContain("codex exited with code 1");
+    // Only the first line is rendered; the rest of the cause is the title's.
+    expect(app.innerHTML).toContain(">HARD-ERROR · provider cause</span>");
+    expect(app.innerHTML).toContain(
+      `title="provider cause\n(codex exited with code 1)"`,
+    );
+    // The header is the driver's name and version, with the identity line
+    // (#69) reachable on it, and the slots belong to the pool's heading.
+    expect(app.innerHTML).toContain(
+      `<span class="name" title="${DRIVER_LINE}">sandbar 0.42.5</span>`,
+    );
+    expect(app.innerHTML).toContain("In the pool · 1/2 slots");
+    expect(app.innerHTML.match(/slots/g)).toHaveLength(1);
     expect(app.innerHTML).toContain("attempt started");
     // A feed the reader opened stays open across the next poll's re-render.
     (app as { open?: boolean }).open = true;
