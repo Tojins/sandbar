@@ -193,35 +193,35 @@ export const AGENT_PROVIDER_PACKAGES: Readonly<
     },
   },
   codex: {
-    version: "0.152.0",
+    version: "0.154.0",
     artifacts: {
       x64: [
         {
           variant: "static",
-          url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-x86_64-unknown-linux-musl.tar.gz",
-          sha256: "05f942d3d3c5b5acd9edad56ce2797b6fe72dbb1462b24e5c9bf7dcec9a28a11",
+          url: "https://github.com/openai/codex/releases/download/rust-v0.154.0/codex-x86_64-unknown-linux-musl.tar.gz",
+          sha256: "d7e18b2597ae8f242f5f31ee9e90deef48dbc9edd634d9868fb6435d08c07f02",
           archive: true,
         },
         {
           variant: "static",
           binary: CODEX_CODE_MODE_HOST,
-          url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz",
-          sha256: "449cefe35b9f347e3fdbf121e816339b37825eb0bfee7de8298a0a61b6687cba",
+          url: "https://github.com/openai/codex/releases/download/rust-v0.154.0/codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz",
+          sha256: "a68df7cca23c6da7cde175677df7de61c73a234add1333a1254b86d641af01f7",
           archive: true,
         },
       ],
       arm64: [
         {
           variant: "static",
-          url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-aarch64-unknown-linux-musl.tar.gz",
-          sha256: "37da6b486503c8a42cc4604d2a3d80d388df896dd251e9225f4f3d49b08c2e8c",
+          url: "https://github.com/openai/codex/releases/download/rust-v0.154.0/codex-aarch64-unknown-linux-musl.tar.gz",
+          sha256: "583b48df32804213bdcd338c2e5adb06b34340821fa757a726cc0a524fa33c27",
           archive: true,
         },
         {
           variant: "static",
           binary: CODEX_CODE_MODE_HOST,
-          url: "https://github.com/openai/codex/releases/download/rust-v0.152.0/codex-code-mode-host-aarch64-unknown-linux-musl.tar.gz",
-          sha256: "134183c7f5bb2245ed4bb15cfcf00d1a64950adbdd089d33c003c8bcf13267e9",
+          url: "https://github.com/openai/codex/releases/download/rust-v0.154.0/codex-code-mode-host-aarch64-unknown-linux-musl.tar.gz",
+          sha256: "20aefa302c2022b496e32911bf954a5f76c7fd749c6bdb9fbd711e32b66dcbfa",
           archive: true,
         },
       ],

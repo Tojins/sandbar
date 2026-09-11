@@ -927,7 +927,7 @@ const codexErrorMessage = (err: unknown): string => {
   return "no message";
 };
 
-// Codex 0.152.0's five permanent refresh failures, pinned beside the JSONL
+// Codex 0.154.0's five permanent refresh failures, pinned beside the JSONL
 // parser that interprets its wire. Keep these in step with
 // AGENT_PROVIDER_PACKAGES.codex and login/src/auth/manager.rs. Classification
 // intentionally uses their common prefix so added detail does not turn a dead
