@@ -22,21 +22,16 @@
     group: root
     mode: "0755"
 
+# Rendered, not copied: the tunnel directory and the endpoint, port and
+# protocol a profile dials are role variables, and the script is the only
+# other thing that has to agree with the server configuration about them.
 - name: Install the certificate authority script
-  ansible.builtin.copy:
-    src: sandbar-vpn
+  ansible.builtin.template:
+    src: sandbar-vpn.j2
     dest: /usr/local/sbin/sandbar-vpn
     owner: root
     group: root
     mode: "0700"
-
-- name: Render what that script and a profile need to know about this box
-  ansible.builtin.template:
-    src: vpn.env.j2
-    dest: "{{ sandbar_vpn_dir }}/vpn.env"
-    owner: root
-    group: root
-    mode: "0644"
 
 # Guarded by what it creates, so a repeat play does no work and the CA key
 # stays the one it issued every live profile from. Issuing and revoking

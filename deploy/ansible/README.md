@@ -186,7 +186,10 @@ ansible-playbook -i inventory.yml --check site.yml
 
 `src/deploy-unit.test.ts` renders both unit templates for the two real
 installation shapes, and pins the site address Caddy answers on together with
-the reach the VPN server grants. `src/deploy-driver-install.test.ts` pins the
+the reach the VPN server grants. It also RUNS `sandbar-vpn` as the role
+renders it, against stub easy-rsa, openssl, openvpn and install commands in a
+throwaway tunnel directory, so the device lifecycle and the profile it prints
+are exercised rather than read. `src/deploy-driver-install.test.ts` pins the
 matching, changed, and failed stamp paths. A third play against a configured
 box must report `changed=0`; PKI initialisation and device profiles are
 one-time actions guarded out of that count.

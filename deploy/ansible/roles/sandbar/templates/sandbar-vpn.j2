@@ -16,10 +16,19 @@
 # data — Tojins/sandbar is public and deploy/ansible/inventory.yml is committed
 # there — so issuing and revoking are operator actions, never play state, and
 # a lost laptop is revoked without touching any other device.
+#
+# Rendered by the role from the variables the server configuration is rendered
+# from, so this box's tunnel directory and what a profile dials have one
+# spelling and a profile cannot describe a server this box is not running.
 set -eu
 
-SETTINGS=/etc/openvpn/sandbar/vpn.env
-EASYRSA=/usr/share/easy-rsa
+VPN_DIR={{ sandbar_vpn_dir }}
+VPN_ENDPOINT={{ sandbar_vpn_endpoint }}
+VPN_PORT={{ sandbar_vpn_port }}
+VPN_PROTO={{ sandbar_vpn_proto }}
+# easy-rsa's own variable for where it is installed; honoured if this box
+# already sets it, since the script exports it to easy-rsa either way.
+EASYRSA=${EASYRSA:-/usr/share/easy-rsa}
 
 die() {
 	echo "sandbar-vpn: $1" >&2
@@ -27,11 +36,9 @@ die() {
 }
 
 [ "$(id -u)" -eq 0 ] || die "run as root"
-[ -f "$SETTINGS" ] || die "no $SETTINGS; run the sandbar Ansible role on this box first"
-. "$SETTINGS"
 
-EASYRSA_PKI="$SANDBAR_VPN_DIR/pki"
-CRL="$SANDBAR_VPN_DIR/crl.pem"
+EASYRSA_PKI="$VPN_DIR/pki"
+CRL="$VPN_DIR/crl.pem"
 # Elliptic-curve keys throughout, so the server needs no Diffie-Hellman
 # parameter file. A decade of list validity because an EXPIRED revocation list
 # rejects every client: the only thing that rewrites it is a revocation.
@@ -82,8 +89,8 @@ case ${1:-} in
 		cat <<-PROFILE
 			client
 			dev tun
-			proto ${SANDBAR_VPN_PROTO}-client
-			remote $SANDBAR_VPN_ENDPOINT $SANDBAR_VPN_PORT
+			proto ${VPN_PROTO}-client
+			remote $VPN_ENDPOINT $VPN_PORT
 			resolv-retry infinite
 			nobind
 			persist-key
