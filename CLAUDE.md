@@ -659,13 +659,13 @@ npm run build && node dist/cli.js --config <path>
   box that would repair it. The CA is initialised once on the box, guarded by
   the server certificate it writes; `sandbar-vpn issue|revoke <person>-<machine>`
   is the whole device lifecycle and devices are deliberately not inventory
-  data, since `inventory.yml` is committed to a public repository. Its inventory list gives every
-  project a Linux user, consumer clone, `~/installation/`, disjoint subuid
-  range, Podman session and identically named systemd user-unit pair. The
-  role-owned `ExecStartPre` installs that entry's exact-tag driver through the
-  canonical driver-install module; `ExecStart`
-  runs it against the installation config, with no consumer `git pull` or
-  `npm ci`. Unit strings and the installed-pin rule are table-tested. Secrets
+  data, since `inventory.yml` is committed to a public repository. Its
+  inventory list gives every project a Linux user, consumer clone,
+  `~/installation/`, disjoint subuid range, Podman session and identically
+  named systemd user-unit pair. The role-owned `ExecStartPre` installs that
+  entry's exact-tag driver through the canonical driver-install module;
+  `ExecStart` runs it against the installation config, with no consumer
+  `git pull` or `npm ci`. Unit strings and the installed-pin rule are table-tested. Secrets
   are placed once per installation and only asserted; no automatic restart,
   GitHub Actions deploy, or timers.
 - **One image, both roles** (agent sandbox and gate pod member): the driver's
