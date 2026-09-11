@@ -25,7 +25,9 @@ all:
         project: sandbar
         clone_url: https://github.com/Tojins/sandbar.git
         # Self-hosting must lag the checkout: a bad driver cannot be allowed to
-        # brick the loop that would repair that same driver.
-        driver_tag: github:Tojins/sandbar#v0.40.1
+        # brick the loop that would repair that same driver. v0.42.2 is the
+        # oldest tag whose page fetches state.json relative to the /<project>/
+        # prefix (#150); v0.40.1's absolute fetch 404s behind Caddy.
+        driver_tag: github:Tojins/sandbar#v0.42.2
         reader_port: 7333
         config_src: "{{ inventory_dir }}/installations/sandbar"
