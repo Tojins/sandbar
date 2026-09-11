@@ -62,7 +62,9 @@ export async function readRestartRequest(path: string): Promise<string | null> {
 // Returns what the cleared request carried, or `null` when none was pending.
 // A removal that fails propagates for the sharper reason: a daemon that cannot
 // clear the file would observe the same request on its next recompute, drain,
-// exit, and be restarted into doing it again.
+// exit, and be restarted into doing it again. `run.ts` halts the startup on it
+// through the same path as every other post-lock startup fault, so the refusal
+// is an event and cleanup still releases what this process holds.
 export async function clearRestartRequest(path: string): Promise<string | null> {
   const pending = await readRestartRequest(path);
   if (pending === null) return null;

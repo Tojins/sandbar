@@ -1613,15 +1613,22 @@ export async function run(
   // BEFORE the loop is also what makes the restart exit unrepeatable — a
   // request carried into the scheduler would drain straight back out, and the
   // unit turns that exit code into another start. A removal that fails stops
-  // the run here rather than at the exit it would otherwise loop on.
+  // the run here rather than at the exit it would otherwise loop on — through
+  // `stopAtStartup` like every other post-lock startup fault, so the record
+  // still gets its complaint and exit event (#70) and cleanup still releases
+  // the origin lease and the `run.pid` sidecar (#139).
   if (restartRequestFile !== null) {
-    const cleared = await clearRestartRequest(restartRequestFile);
-    if (cleared !== null) {
-      await runRecord.emit({
-        kind: "preflight",
-        action: "restart-request-cleared",
-        detail: `Started for the deployment of ${cleared}`,
-      });
+    try {
+      const cleared = await clearRestartRequest(restartRequestFile);
+      if (cleared !== null) {
+        await runRecord.emit({
+          kind: "preflight",
+          action: "restart-request-cleared",
+          detail: `Started for the deployment of ${cleared}`,
+        });
+      }
+    } catch (err) {
+      return await stopAtStartup("restart-request-clear-failed", err);
     }
   }
 
