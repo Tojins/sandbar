@@ -52,6 +52,7 @@ import {
   parseCodexJsonLine,
   parseCodexRolloutLine,
   parseStreamJsonLine,
+  podman,
   prepareWorktree,
   reclaimIssueClone,
   registerShutdown,
@@ -60,6 +61,7 @@ import {
   sandboxRunArgs,
 } from "./agent-sandbox.js";
 import { createTranscriptTree } from "./logs.js";
+import { readPodmanCalls, writePodmanShim } from "./podman-shim.test-util.js";
 
 const CODEX_REFRESH_FAILURE_LITERALS = [
   "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
@@ -3349,7 +3351,7 @@ describe("sandboxRunArgs (#42)", () => {
   };
 
   it("runs the sandbox under --init, so pid 1 reaps what the agent orphans", () => {
-    expect(sandboxRunArgs(base)).toContain("--init");
+    expect(sandboxRunArgs(base).argv).toContain("--init");
   });
 
   // #50. `sandboxImage` is the CONSUMER's image and is free to declare a
@@ -3357,7 +3359,7 @@ describe("sandboxRunArgs (#42)", () => {
   // volume per sandbox that nothing ever reads and that outlives the container
   // as one permanently consumed lock out of the host's 2048.
   it("provisions no anonymous volume for the image's VOLUME directives", () => {
-    const args = sandboxRunArgs(base);
+    const { argv: args } = sandboxRunArgs(base);
     expect(args).toContain("--image-volume=ignore");
     // An option of `run`, not an argument of `sleep` — everything after the
     // image name belongs to the entrypoint, where it would be a silent no-op
@@ -3371,12 +3373,12 @@ describe("sandboxRunArgs (#42)", () => {
     // `podman run ... --entrypoint sleep <image> infinity`: everything after the
     // image name belongs to `sleep`, so an --init appended there would be a
     // silent no-op that `toContain` alone would still accept.
-    const args = sandboxRunArgs(base);
+    const { argv: args } = sandboxRunArgs(base);
     expect(args.indexOf("--init")).toBeLessThan(args.indexOf(base.imageName));
   });
 
   it("carries the identity, workdir, env and mounts it was given", () => {
-    const args = sandboxRunArgs({
+    const { argv: args, env } = sandboxRunArgs({
       ...base,
       env: { HOME: "/home/agent", GH_TOKEN: "t" },
       volumeMounts: ["/host/wt:/home/agent/workspace:rw,z"],
@@ -3403,18 +3405,17 @@ describe("sandboxRunArgs (#42)", () => {
         "2",
         "-w",
         SANDBOX_REPO_DIR,
-        "-e",
-        "HOME=/home/agent",
-        "-e",
-        "GH_TOKEN=t",
         "-v",
         "/host/wt:/home/agent/workspace:rw,z",
       ]),
     );
+    // The env is the invocation's, not the argv's (#154).
+    expect(env).toEqual({ HOME: "/home/agent", GH_TOKEN: "t" });
+    expect(args.join(" ")).not.toContain("GH_TOKEN");
   });
 
   it("omits --userns when the provider was configured without one", () => {
-    const args = sandboxRunArgs({ ...base, userns: false });
+    const { argv: args } = sandboxRunArgs({ ...base, userns: false });
     expect(args.some((a) => a.startsWith("--userns"))).toBe(false);
     // The uid mapping is a separate flag and must survive.
     expect(args).toContain("--user");
@@ -3429,7 +3430,7 @@ describe("sandboxRunArgs (#42)", () => {
   // the namespace the agent shares with its siblings, which is a hole in the
   // isolation the whole feature rests on.
   it("publishes nothing on the sandbox stack's behalf", () => {
-    expect(sandboxRunArgs(base)).not.toContain("-p");
+    expect(sandboxRunArgs(base).argv).not.toContain("-p");
   });
 
   // The other half of the anchor's tax
@@ -3457,7 +3458,7 @@ describe("sandboxRunArgs (#42)", () => {
   });
 
   it("emits no empty optional flags", () => {
-    expect(sandboxRunArgs(base)).toEqual([
+    expect(sandboxRunArgs(base).argv).toEqual([
       "run",
       "-d",
       "--name",
@@ -3474,5 +3475,82 @@ describe("sandboxRunArgs (#42)", () => {
       base.imageName,
       "infinity",
     ]);
+  });
+});
+
+// #154's sandbox half — the one of the four call sites no other test can see.
+// `merger.ts`'s is pinned end to end by merger-capture.test.ts and
+// `gate-stack.ts`'s two by gate-stack-podman.test.ts, while every assertion
+// above reads `sandboxRunArgs`'s return value and would stay green with the
+// provider's `withRuntimeEnv` deleted — leaving a sandbox with no variables at
+// all. So this drives `create` itself, through the shared podman shim.
+describe("the podman provider's run environment (#154)", () => {
+  const TOKEN = "sk-ant-oat01-thisisthewholetoken";
+  const PAT = "ghp_thisisthewholepat";
+  const CONTAINER_ONLY_SOCKET = "unix:///run/sandbar-154-inside-only.sock";
+
+  it("hands the values to podman as a file, never to its argv", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-podman-env-"));
+    const callLog = join(root, "calls.jsonl");
+    await writePodmanShim({ path: join(root, "podman"), logPath: callLog });
+    const originalPath = process.env["PATH"];
+    process.env["PATH"] = `${root}:${originalPath ?? ""}`;
+
+    try {
+      const provider = podman({ imageName: "localhost/img:test" });
+      const handle = await provider.create({
+        worktreePath: "/host/wt",
+        hostRepoPath: "/host/repo",
+        mounts: [{ hostPath: "/host/wt", sandboxPath: SANDBOX_REPO_DIR }],
+        // `CONTAINER_HOST` because `config.env` is an arbitrary allowlist and
+        // this is a name PODMAN reads for itself — the service URL. This repo's
+        // own gate declares it on a gate container (#48), pointing at a socket
+        // that exists only inside one. The value names a socket no host could
+        // be serving, because this suite RUNS in that gate container: the
+        // driver has a CONTAINER_HOST of its own there, and a container value
+        // that happened to match it would make the client assertion vacuous.
+        env: {
+          GH_TOKEN: PAT,
+          CLAUDE_CODE_OAUTH_TOKEN: TOKEN,
+          CONTAINER_HOST: CONTAINER_ONLY_SOCKET,
+        },
+      });
+      await handle.close();
+
+      const run = (await readPodmanCalls(callLog)).find(
+        (call) => call.args[0] === "run",
+      );
+      expect(run).toBeDefined();
+      expect(run?.containerEnv).toEqual({
+        GH_TOKEN: PAT,
+        CLAUDE_CODE_OAUTH_TOKEN: TOKEN,
+        CONTAINER_HOST: CONTAINER_ONLY_SOCKET,
+        // The provider's own, which travels the same way as the credentials.
+        HOME: provider.sandboxHomedir,
+      });
+      // The half the issue is about: nothing in the argv is the secret, so the
+      // `Command failed: <argv joined>` message a failed run raises — recorded
+      // as a hard-error `reason` and served by the UI — cannot carry one.
+      expect(run?.args.join(" ")).not.toContain(PAT);
+      expect(run?.args.join(" ")).not.toContain(TOKEN);
+      // The other half, and the one podman's bare-key form could not have: a
+      // container variable never reconfigures the CLIENT. Under `-e KEY` these
+      // two would have had to be in podman's own environment for it to copy
+      // them, and podman would have gone remote to a socket that is not there.
+      // Asserted as "whatever the driver had" rather than as "absent": this
+      // repo's own gate container sets CONTAINER_HOST for the suite running
+      // inside it (#48), and passing the driver's own through is exactly what
+      // a client must keep doing.
+      expect(run?.clientEnv.CONTAINER_HOST).toBe(process.env["CONTAINER_HOST"]);
+      expect(run?.clientEnv.HOME).toBe(process.env["HOME"]);
+      // And the file is gone once the call it was written for returned.
+      const envFileAt = run!.args.indexOf("--env-file");
+      expect(envFileAt).toBeGreaterThan(0);
+      expect(existsSync(run!.args[envFileAt + 1]!)).toBe(false);
+    } finally {
+      if (originalPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = originalPath;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

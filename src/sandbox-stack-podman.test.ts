@@ -43,6 +43,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { sandboxRunArgs } from "./agent-sandbox.js";
+import { withRuntimeEnv } from "./runtime.js";
 import { resolveGateStack } from "./config.js";
 import { sandboxContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
@@ -113,27 +114,28 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
   const startAnchor = async (): Promise<string> => {
     const name = `sandbar-${SCOPE}-anchor`;
     await removeFixtureContainer("--depend", name).catch(() => {});
-    await exec(
-      RUNTIME,
-      sandboxRunArgs({
-        containerName: name,
-        imageName: IMAGE,
-        workdir: "/",
-        // keep-id maps the invoking user onto uid 1000, which the images here
-        // have no passwd entry for — harmless for the exec below, but a client
-        // that looks for a home directory should find one it can write. The
-        // production provider always supplies HOME for the same reason.
-        env: { HOME: "/tmp" },
-        volumeMounts: [],
-        userns: "keep-id",
-        containerUid: 1000,
-        containerGid: 1000,
-        networks: [],
-        groups: [],
-        devices: [],
-        cpus: undefined,
-      }),
-    );
+    const anchor = sandboxRunArgs({
+      containerName: name,
+      imageName: IMAGE,
+      workdir: "/",
+      // keep-id maps the invoking user onto uid 1000, which the images here
+      // have no passwd entry for — harmless for the exec below, but a client
+      // that looks for a home directory should find one it can write. The
+      // production provider always supplies HOME for the same reason.
+      env: { HOME: "/tmp" },
+      volumeMounts: [],
+      userns: "keep-id",
+      containerUid: 1000,
+      containerGid: 1000,
+      networks: [],
+      groups: [],
+      devices: [],
+      cpus: undefined,
+    });
+    // Through the production helper, which is what puts `HOME` in front of
+    // podman as a file (#154) — this file's whole point is that the production
+    // path is what runs.
+    await withRuntimeEnv(anchor, (argv) => exec(RUNTIME, argv));
     return name;
   };
 

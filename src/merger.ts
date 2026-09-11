@@ -244,6 +244,16 @@
 // five log lines between them. `captureAgentRun` is the seam that does it; the
 // classification and the pipe-drain deadline are its header's.
 //
+// `buildResolveRunArgv` returns a `RuntimeInvocation` rather than an argv, for
+// the reason runtime.ts's header owns (#154): no environment value in a podman
+// argv, so the merger agent's credential, `GH_TOKEN` and the bot identity reach
+// podman as a file and `captureAgentRun` — which keeps both raw streams verbatim
+// in the attempt log — has nothing to keep. The same argument #134 already made
+// about `CODEX_AUTH_JSON` and `ps`, now applied to all of them. The resolve
+// container's `HOME=/tmp` is also why none of it is merged into podman's own
+// environment: a rootless client reads `HOME` for its storage root, and would
+// find no `sandbox-image` under an empty one.
+//
 // `buildAbandonComment` is the other end, and the reason all of it is carried:
 // that comment is the only artefact a human reads when they find a stuck issue
 // in the morning. It now names the conflicted paths, what each attempt did and
@@ -345,6 +355,8 @@ import {
   boundedRuntimeOk,
   type BoundedRuntime,
   RUNTIME,
+  type RuntimeInvocation,
+  withRuntimeEnv,
 } from "./runtime.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import {
@@ -2477,7 +2489,27 @@ export function buildResolveRunArgv(args: {
   readonly credentials: Readonly<Record<string, string | undefined>>;
   readonly botName: string;
   readonly botEmail: string;
-}): readonly string[] {
+}): RuntimeInvocation {
+  // Every variable the resolve container needs, in one record. The argv below
+  // names none of them: `withRuntimeEnv` writes this record to the file it adds
+  // to the argv it runs (#154, runtime.ts).
+  const env: Record<string, string> = {
+    HOME: "/tmp",
+    ...(args.codexAuthMount === undefined
+      ? {}
+      : { CODEX_HOME: dirname(args.codexAuthMount.sandboxPath) }),
+    // A credential with no value is omitted entirely, exactly as when the
+    // omission was a `-e` pair this builder never pushed.
+    ...Object.fromEntries(
+      Object.entries(args.credentials).filter(
+        (entry): entry is [string, string] => Boolean(entry[1]),
+      ),
+    ),
+    GIT_AUTHOR_NAME: args.botName,
+    GIT_AUTHOR_EMAIL: args.botEmail,
+    GIT_COMMITTER_NAME: args.botName,
+    GIT_COMMITTER_EMAIL: args.botEmail,
+  };
   const argv = [
     "run",
     "-d",
@@ -2503,32 +2535,14 @@ export function buildResolveRunArgv(args: {
     ]),
     "-w",
     "/workspace",
-    "-e",
-    "HOME=/tmp",
-    ...(args.codexAuthMount === undefined
-      ? []
-      : ["-e", `CODEX_HOME=${dirname(args.codexAuthMount.sandboxPath)}`]),
     "--label",
     "sandbar=true",
-  ];
-  for (const [key, value] of Object.entries(args.credentials)) {
-    if (value) argv.push("-e", `${key}=${value}`);
-  }
-  argv.push(
-    "-e",
-    `GIT_AUTHOR_NAME=${args.botName}`,
-    "-e",
-    `GIT_AUTHOR_EMAIL=${args.botEmail}`,
-    "-e",
-    `GIT_COMMITTER_NAME=${args.botName}`,
-    "-e",
-    `GIT_COMMITTER_EMAIL=${args.botEmail}`,
     "--entrypoint",
     "sleep",
     args.image,
     "infinity",
-  );
-  return argv;
+  ];
+  return { argv, env };
 }
 
 export function buildResolveExecArgv(
@@ -2567,8 +2581,9 @@ export function resolveAgentCredentials(
     [
       ...PROVIDER_CREDENTIALS[provider]
         .map(({ key }) => key)
-        // ChatGPT auth is a shared file mount since #134. Putting its JSON in
-        // podman's argv is redundant and exposes the refresh token to `ps`.
+        // ChatGPT auth is a shared file mount since #134, so passing the JSON
+        // as a variable as well is redundant. #154 took the `ps` half of that
+        // argument and applied it to every remaining variable.
         .filter((key) => key !== "CODEX_AUTH_JSON"),
       "GH_TOKEN",
     ].map(
@@ -2766,7 +2781,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         prompt,
         dangerouslySkipPermissions: true,
       });
-      const args = buildResolveRunArgv({
+      const runInvocation = buildResolveRunArgv({
         container,
         cwd,
         extraMounts: [],
@@ -2796,10 +2811,12 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         return removePromise;
       };
       const processResult = await Promise.resolve().then(async () => {
-        const started = await captureResolveProcess(RUNTIME, args, "", {
-          container,
-          timeoutMs: CONTROL_TIMEOUT_MS,
-        });
+        const started = await withRuntimeEnv(runInvocation, (argv) =>
+          captureResolveProcess(RUNTIME, argv, "", {
+            container,
+            timeoutMs: CONTROL_TIMEOUT_MS,
+          }),
+        );
         if (started.exitCode !== 0 || started.end !== "exit") {
           return { ...started, end: "spawn-error" as const };
         }

@@ -106,7 +106,11 @@ describe("sandbar.config.example.mjs", () => {
       implementerEffort: "high",
     });
     expect(() => resolveConfig(example)).not.toThrow();
-  });
+    // The default 5s is a measurement of the box, not of this contract: the
+    // case imports the BUILT package root through the example's own idiom,
+    // under whatever load the other 87 files are putting on the machine, and
+    // timed out at 5s in one gate run while passing in 1.7s on an idle one.
+  }, 30_000);
 
   it("ships both files that make up the published example", () => {
     const packageJson = JSON.parse(

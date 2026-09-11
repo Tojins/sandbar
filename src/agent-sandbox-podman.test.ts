@@ -57,6 +57,7 @@ import {
   removeFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { sandboxRunArgs } from "./agent-sandbox.js";
+import { withRuntimeEnv } from "./runtime.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -119,7 +120,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     const name = `${scopedResourcePrefix(SCOPE)}initprobe-${randomUUID()}-${
       init === "with-init" ? "init" : "noinit"
     }`;
-    const args = sandboxRunArgs({
+    const { argv, env } = sandboxRunArgs({
       containerName: name,
       imageName: IMAGE,
       // Not the real sandbox paths: this image has neither, and `-w` is not
@@ -134,9 +135,13 @@ describe.runIf(available)("the sandbox container against real podman", () => {
       groups: [],
       devices: [],
       cpus: undefined,
-    }).filter((a) => init === "with-init" || a !== "--init");
+    });
+    const filtered = argv.filter((a) => init === "with-init" || a !== "--init");
     const started = previousStart.then(async () => {
-      await exec(RUNTIME, args);
+      // Through the production helper, which is how an invocation becomes a
+      // command (#154). Inert for this fixture's empty `env` — sandbox-stack-
+      // podman.test.ts is the one that runs a real env file past real podman.
+      await withRuntimeEnv({ argv: filtered, env }, (a) => exec(RUNTIME, a));
     });
     previousStart = started.catch(() => {});
     await started;

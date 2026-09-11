@@ -58,14 +58,6 @@ const container = (
   ...over,
 });
 
-// A flag's value, reading the LAST occurrence — podman keeps the final value
-// for a repeated -e, so "reserved" means "emitted after the consumer's".
-const lastEnv = (args: string[], key: string): string | undefined =>
-  args
-    .filter((a, i) => i > 0 && args[i - 1] === "-e" && a.startsWith(`${key}=`))
-    .at(-1)
-    ?.slice(key.length + 1);
-
 describe("mountSpec", () => {
   it("resolves a relative hostPath against the gated worktree", () => {
     expect(
@@ -291,7 +283,7 @@ describe("containerRunArgs", () => {
   };
 
   it("joins the pod and names the container", () => {
-    const args = containerRunArgs({ ...base, container: container() });
+    const { argv: args } = containerRunArgs({ ...base, container: container() });
     expect(args.slice(0, 6)).toEqual([
       "run",
       "-d",
@@ -316,7 +308,7 @@ describe("containerRunArgs", () => {
   it.each(["pod", "netns"] as const)(
     "provisions no anonymous volume, on the %s topology",
     (kind) => {
-      const args = containerRunArgs({
+      const { argv: args } = containerRunArgs({
         ...base,
         attach:
           kind === "pod"
@@ -338,7 +330,7 @@ describe("containerRunArgs", () => {
   // the attachment — env, mounts, the worktree, `hold` — is the same container
   // definition, and a copy would be the place the two silently diverge.
   it("joins an anchor's network namespace when told to", () => {
-    const args = containerRunArgs({
+    const { argv: args } = containerRunArgs({
       ...base,
       attach: { kind: "netns", anchorContainerName: "sandbar-w1-uuid" },
       container: container(),
@@ -364,7 +356,7 @@ describe("containerRunArgs", () => {
   // and using it here would map the container to uid 1000 and break every image
   // that needs its own root (the mariadb of #44's fact 3).
   it("passes no --userns and no --user to a netns joiner either", () => {
-    const args = containerRunArgs({
+    const { argv: args } = containerRunArgs({
       ...base,
       attach: { kind: "netns", anchorContainerName: "sandbar-w1-uuid" },
       container: container({ mountWorktree: "/app" }),
@@ -377,7 +369,7 @@ describe("containerRunArgs", () => {
   // The pod is why: podman refuses `--userns` alongside `--pod`, and uid 1000
   // inside a pod maps to a subuid rather than to the invoking user.
   it("passes no --userns and no --user — neither works inside a pod", () => {
-    const args = containerRunArgs({
+    const { argv: args } = containerRunArgs({
       ...base,
       container: container({ mountWorktree: "/app" }),
     });
@@ -386,7 +378,7 @@ describe("containerRunArgs", () => {
   });
 
   it("mounts the worktree rw,z and makes it the working directory", () => {
-    const args = containerRunArgs({
+    const { argv: args } = containerRunArgs({
       ...base,
       container: container({ mountWorktree: "/app" }),
     });
@@ -396,7 +388,7 @@ describe("containerRunArgs", () => {
   });
 
   it("does not mask a file-shaped gitlink", () => {
-    const args = containerRunArgs({
+    const { argv: args } = containerRunArgs({
       ...base,
       hideWorktreeGit: false,
       container: container({ mountWorktree: "/app" }),
@@ -406,22 +398,41 @@ describe("containerRunArgs", () => {
   });
 
   it("omits the worktree mount when the container does not ask for one", () => {
-    const args = containerRunArgs({ ...base, container: container() });
+    const { argv: args } = containerRunArgs({ ...base, container: container() });
     expect(args.some((a) => a.includes("/wt:"))).toBe(false);
     expect(args).not.toContain("-w");
   });
 
-  it("injects CI=true after the consumer's env, so it cannot be overridden", () => {
-    const args = containerRunArgs({
+  // The override moved from repeated-`-e` precedence to spread order when the
+  // values left the argv (#154): the invocation's env is what podman is given,
+  // and the reserved key is spread last.
+  it("injects CI=true over the consumer's env, so it cannot be overridden", () => {
+    const { argv: args, env } = containerRunArgs({
       ...base,
-      container: container({ env: { CI: "false", APP_ENV: "test" } }),
+      // `CONTAINER_HOST` is this repo's own gate config (#48) and is the name
+      // that proves the env is the CONTAINER's: it names a socket that exists
+      // only inside the container, so a podman that read it for itself would
+      // go remote to nothing.
+      container: container({
+        env: {
+          CI: "false",
+          APP_ENV: "test",
+          CONTAINER_HOST: "unix:///run/podman.sock",
+        },
+      }),
     });
-    expect(lastEnv(args, "CI")).toBe("true");
-    expect(lastEnv(args, "APP_ENV")).toBe("test");
+    expect(env).toEqual({
+      CI: "true",
+      APP_ENV: "test",
+      CONTAINER_HOST: "unix:///run/podman.sock",
+    });
+    // And none of it is in the argv, consumer values included (#154).
+    expect(args.join(" ")).not.toContain("APP_ENV");
+    expect(args.join(" ")).not.toContain("CONTAINER_HOST");
   });
 
   it("puts image CMD args AFTER the image ref", () => {
-    const args = containerRunArgs({
+    const { argv: args } = containerRunArgs({
       ...base,
       container: container({
         image: "docker.io/library/mariadb:10.11",
@@ -436,7 +447,7 @@ describe("containerRunArgs", () => {
   // What makes a one-shot task runner an ordinary container rather than a
   // special case: hold it open and `exec` steps into it.
   it("holds a `hold` container open with sleep infinity", () => {
-    const args = containerRunArgs({
+    const { argv: args } = containerRunArgs({
       ...base,
       container: container({ image: "runner:gate", hold: true }),
     });
@@ -449,7 +460,7 @@ describe("containerRunArgs", () => {
   });
 
   it("labels the container so a label-based sweep can find it", () => {
-    const args = containerRunArgs({ ...base, container: container() });
+    const { argv: args } = containerRunArgs({ ...base, container: container() });
     expect(args[args.indexOf("--label") + 1]).toBe("sandbar=true");
   });
 
@@ -457,7 +468,7 @@ describe("containerRunArgs", () => {
   // arguments to the image's own entrypoint — the same mistake `--entrypoint
   // id` exists to avoid in `checkWorktreeImageUids`.
   it("registers a readiness probe before the image ref", () => {
-    const args = containerRunArgs({
+    const { argv: args } = containerRunArgs({
       ...base,
       container: container({
         image: "docker.io/library/mariadb:10.11",
@@ -475,7 +486,7 @@ describe("containerRunArgs", () => {
   // `--entrypoint sleep <image> infinity` — a health flag appended after that
   // would become an argument to `sleep`.
   it("registers a readiness probe before a held container's entrypoint", () => {
-    const args = containerRunArgs({
+    const { argv: args } = containerRunArgs({
       ...base,
       container: container({
         image: "runner:gate",
@@ -493,21 +504,17 @@ describe("containerRunArgs", () => {
   });
 
   it("registers no healthcheck for a container with no readiness", () => {
-    const args = containerRunArgs({ ...base, container: container() });
+    const { argv: args } = containerRunArgs({ ...base, container: container() });
     expect(args.some((a) => a.startsWith("--health"))).toBe(false);
   });
 });
 
 describe("stepExecArgs", () => {
   it("execs the command in the named container with CI set", () => {
-    expect(stepExecArgs("sandbar-42-app", ["npm", "test"])).toEqual([
-      "exec",
-      "-e",
-      "CI=true",
-      "sandbar-42-app",
-      "npm",
-      "test",
-    ]);
+    expect(stepExecArgs("sandbar-42-app", ["npm", "test"])).toEqual({
+      argv: ["exec", "sandbar-42-app", "npm", "test"],
+      env: { CI: "true" },
+    });
   });
 });
 

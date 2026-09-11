@@ -396,7 +396,32 @@ outcomes.
   and returns the remainder for `config.env`, so no routing key crosses into a
   sandbox. The committed config remains a program and spreads `routing` over
   its defaults; `resolveConfig` remains the one validation boundary.
-  `src/env-file.ts`, `src/env.ts`. Codex's ChatGPT subscription is `auth.json`,
+  `src/env-file.ts`, `src/env.ts`. **A podman argv never carries an environment
+  VALUE (#154).** Every container variable sandbar sets — `config.env`, `HOME`,
+  `CI=true`, the bot identity, the consumer's own `gateStack.containers[].env`
+  — reaches podman as a 0600 FILE, and the argv carries only that file's path.
+  One rule rather than a secret/non-secret split, because the failure it closes
+  is that every `Command failed:` wrapper quotes the argv: a failed sandbox
+  `podman run` put both tokens in a `hard-error` event `reason`, and the record
+  is the source of truth the UI serves (#132). A redaction pass would be the
+  weaker line — it has to know every key. Podman's other value-free form,
+  `-e KEY`, is not usable, and that is the second half of the rule: it copies
+  the value out of PODMAN'S OWN environment, and the podman child's environment
+  belongs to podman. These are names for the CONTAINER, and podman reads
+  several of them for itself — `HOME` is a rootless client's storage root and
+  `CONTAINER_HOST` the service URL, which #48's gate container declares as a
+  socket that exists only inside it. So every seam spawns podman with the
+  driver's environment untouched. The four builders that need any container
+  variable return `RuntimeInvocation` (argv and env together), and
+  `withRuntimeEnv` in `src/runtime.ts` is the one place that writes the file,
+  splices its path in and removes it when the command returns. A value podman's
+  line-based format cannot represent is refused, not garbled. Two enforcers,
+  because a table over the four only covers a fifth builder its author
+  remembered to add: one table test, plus a source scan pinning `runtime.ts` as
+  the ONE production module that spells any of podman's environment flags.
+  Nothing can fix a record already written; the `ps` exposure closes as a side
+  effect.
+  Codex's ChatGPT subscription is `auth.json`,
   so `CODEX_AUTH_JSON` carries its content. At preflight the driver reconciles
   that value by `last_refresh` into one `<workDir>/codex-auth.json`; every Codex
   sandbox and merger container mounts the run-owned file read-write at
