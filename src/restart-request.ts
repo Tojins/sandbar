@@ -9,11 +9,20 @@
 // A FILE, not a signal: a signal would need a second trap outside cleanup.ts
 // (#35 allows exactly one owner) and would be lost entirely whenever the
 // request arrives while the daemon is down. A file survives that window, and
-// the daemon REMOVES IT AT STARTUP — the start it was asking for has happened,
-// so carrying the request into the new process would drain it straight back
-// out again. Equally deliberately it is not a commit comparison per poll: the
-// daemon cannot tell a driver change from a docs-only landing, and restarting
-// on every landing is what that would do.
+// the daemon REMOVES THE REQUEST IT WAS STARTED TO ANSWER — that start has
+// happened, so carrying the same request into the new process would drain it
+// straight back out again. Which request that is has to be decided by CONTENT
+// rather than by "whatever is there once startup finishes": a process is pinned
+// to one build at `execve` (node realpaths its entry, so a later flip of
+// `/opt/sandbar/current` cannot reach it), while the converging play runs every
+// five minutes and may write a request for the NEXT commit at any point during
+// a startup that spends minutes in preflight and image builds. Deleting that
+// one would leave the box running a driver nothing asked for — the revert case
+// included. So the daemon reads the pending request before it does anything
+// slow and removes only that exact content, leaving anything written later for
+// the first recompute to latch. Equally deliberately it is not a commit
+// comparison per poll: the daemon cannot tell a driver change from a docs-only
+// landing, and restarting on every landing is what that would do.
 //
 // Beside the config file, because that directory IS the installation: the play
 // places `sandbar.config.mjs` and this file together, and deriving the path
@@ -59,15 +68,20 @@ export async function readRestartRequest(path: string): Promise<string | null> {
   }
 }
 
-// Returns what the cleared request carried, or `null` when none was pending.
+// Removes the request only while it still carries `answered` — the content the
+// caller read before it became the process that answers it. A file withdrawn or
+// rewritten for a newer commit since then is left exactly where it is and
+// `false` says so; the ordinary per-recompute read is what picks that one up.
 // A removal that fails propagates for the sharper reason: a daemon that cannot
 // clear the file would observe the same request on its next recompute, drain,
 // exit, and be restarted into doing it again. `run.ts` halts the startup on it
 // through the same path as every other post-lock startup fault, so the refusal
 // is an event and cleanup still releases what this process holds.
-export async function clearRestartRequest(path: string): Promise<string | null> {
-  const pending = await readRestartRequest(path);
-  if (pending === null) return null;
+export async function clearRestartRequest(
+  path: string,
+  answered: string,
+): Promise<boolean> {
+  if ((await readRestartRequest(path)) !== answered) return false;
   await rm(path);
-  return pending;
+  return true;
 }

@@ -298,8 +298,9 @@ A `restart-requested` file beside the config file is how a deployment asks a
 running daemon to step aside for new code: the daemon stops admitting, lands
 what is already committed, and exits 75 once nothing is running — the one exit
 a supervisor should turn back into a start (`RestartForceExitStatus=`), and the
-one it reaches only because it was asked. It removes the file at startup, so
-that exit cannot repeat.
+one it reaches only because it was asked. At startup it removes the request it
+was started to answer, so that exit cannot repeat, and leaves one written since
+for the deployment that wrote it.
 
 To run daemons unattended on a dedicated Linux box, `deploy/ansible/` is the
 host contract: one neutral recipe in the consumer repo, one private installation

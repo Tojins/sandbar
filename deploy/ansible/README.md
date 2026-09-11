@@ -85,7 +85,9 @@ stops admitting, keeps landing every pending terminal and every landable `land`
 request — and exits 75 once nothing is running, ongoing or landing. The unit's
 `RestartForceExitStatus=75` turns exactly that exit back into a start; `Restart=no`
 stays, so exits 1, 2 and 4 remain stops for a human to inspect. The new process
-removes the request file at startup, so the exit cannot repeat.
+removes that request at startup, so the exit cannot repeat — and only that one:
+a play that lands the next commit while a daemon is still starting leaves a
+request the daemon honours instead of deleting, so no commit is skipped.
 
 A daemon that is stopped is left stopped, and its request simply waits for the
 next start. Host-level changes — packages, AppArmor, Caddy — apply as soon as

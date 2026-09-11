@@ -540,6 +540,27 @@ export async function run(
     process.exit(1);
   }
 
+  // The deployment channel's request (#146), read HERE — ahead of the locks,
+  // the origin lease, preflight and the image builds, which is where this
+  // startup's minutes are. What this process may later clear is the request
+  // this `execve` answered, and node pinned that build by realpathing its entry
+  // before `run()` was called, so the answer is fixed from before the first
+  // line of it. A request the converging play writes during the startup below
+  // names a commit this process is NOT running and has to survive to the first
+  // recompute; reading late could not tell the two apart.
+  //
+  // The path comes from the config file the loader resolved, because that
+  // directory IS the installation: a programmatic `run(config)` has no
+  // installation directory and therefore no channel, which `run-start` already
+  // records as `configPath: null`. A read that fails is a pre-lock refusal like
+  // the config's own, stderr-only because no record can be owned yet.
+  const restartRequestFile = options.configPath === undefined
+    ? null
+    : restartRequestPath(options.configPath);
+  const restartRequestAtStartup = restartRequestFile === null
+    ? null
+    : await readRestartRequest(restartRequestFile);
+
   installCleanupTraps();
 
   // THE WAKE LOCK IS TAKEN FIRST (#117), before the single-instance lock and
@@ -1327,13 +1348,6 @@ export async function run(
     (issue) => issue.id,
   );
   let providerExitPending: TerminalExit | null = null;
-  // The deployment channel (#146). The converging play leaves its request
-  // beside the config file it placed, so the installation directory is named
-  // once — by the loader — and a programmatic run with no config file simply
-  // has no channel (`run-start` already records that as `configPath: null`).
-  const restartRequestFile = options.configPath === undefined
-    ? null
-    : restartRequestPath(options.configPath);
   // What the observed request carried, and the whole of the drain's state.
   let restartRequested: string | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
@@ -1608,23 +1622,24 @@ export async function run(
     branchImageRuns.push(nextBranchImages);
   };
 
-  // A request pending at startup has been answered by this very process (#146):
-  // the play asked for the built driver to be running, and it is. Clearing it
-  // BEFORE the loop is also what makes the restart exit unrepeatable — a
-  // request carried into the scheduler would drain straight back out, and the
-  // unit turns that exit code into another start. A removal that fails stops
+  // The request read before this startup began has been answered by this very
+  // process (#146): the play asked for the built driver to be running, and it
+  // is. Clearing it BEFORE the loop is what makes the restart exit
+  // unrepeatable — that same request carried into the scheduler would drain
+  // straight back out, and the unit turns that exit code into another start.
+  // Only that content is removed, so a newer request the play wrote while this
+  // startup ran stays for `observeRestartRequest`. A removal that fails stops
   // the run here rather than at the exit it would otherwise loop on — through
   // `stopAtStartup` like every other post-lock startup fault, so the record
   // still gets its complaint and exit event (#70) and cleanup still releases
   // the origin lease and the `run.pid` sidecar (#139).
-  if (restartRequestFile !== null) {
+  if (restartRequestFile !== null && restartRequestAtStartup !== null) {
     try {
-      const cleared = await clearRestartRequest(restartRequestFile);
-      if (cleared !== null) {
+      if (await clearRestartRequest(restartRequestFile, restartRequestAtStartup)) {
         await runRecord.emit({
           kind: "preflight",
           action: "restart-request-cleared",
-          detail: `Started for the deployment of ${cleared}`,
+          detail: `Started for the deployment of ${restartRequestAtStartup}`,
         });
       }
     } catch (err) {
