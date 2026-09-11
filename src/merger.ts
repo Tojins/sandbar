@@ -215,7 +215,10 @@
 // This file owns the two ENDS of that: the invocation, and the prose.
 //
 // `runResolveAgent` runs the configured provider in a NAMED, run-scoped
-// container. The same provider object owns its argv and line parser; credential
+// container, as container uid 1000 with the daemon's host uid mapped onto it
+// (`--userns=keep-id:uid=1000,gid=1000`, the sandbox's own spelling) so the
+// worktree and the shared Codex credential stay readable whatever uid the
+// installation's Linux user has (#149). The same provider object owns its argv and line parser; credential
 // keys come from `PROVIDER_CREDENTIALS`, so no vendor detail is re-spelled here.
 // It deliberately does not route through createSandbox/invokeAgent: each
 // attempt needs a fresh conversation, a wall-clock kill of the agent process,
@@ -2481,7 +2484,14 @@ export function buildResolveRunArgv(args: {
     "--image-volume=ignore",
     "--name",
     args.container,
-    "--userns=keep-id",
+    // The daemon's host uid is mapped ONTO container uid 1000, the same
+    // spelling the agent sandbox uses (agent-sandbox.ts). Bare `keep-id` maps
+    // the host user to its own uid instead, which coincided with 1000 only
+    // while the daemon ran as the box's first user: under #149's one-user-
+    // per-installation layout the worktree and the 0600 codex-auth.json are
+    // owned by uid 1001+, unreadable to `--user 1000`, and codex sent every
+    // request without a bearer (401 on outdoor's #238 landing).
+    "--userns=keep-id:uid=1000,gid=1000",
     "--user",
     "1000:1000",
     "-v",

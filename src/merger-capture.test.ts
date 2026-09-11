@@ -443,7 +443,7 @@ describe("resolve provider invocation (#74)", () => {
     expect(argv).toEqual([
       "run", "-d", "--image-volume=ignore",
       "--name", "resolve-1",
-      "--userns=keep-id", "--user", "1000:1000",
+      "--userns=keep-id:uid=1000,gid=1000", "--user", "1000:1000",
       "-v", "/worktree:/workspace", "-v", "/git-common:/git-common",
       "-w", "/workspace", "-e", "HOME=/tmp",
       "--label", "sandbar=true",
@@ -481,6 +481,10 @@ describe("resolve provider invocation (#74)", () => {
     });
     expect(argv).toContain("/state/codex-auth.json:/home/agent/.codex/auth.json:z");
     expect(argv).toContain("CODEX_HOME=/home/agent/.codex");
+    // The 0600 host file is readable only if the daemon's uid is mapped onto
+    // container uid 1000; bare keep-id left it owned by 1001 on a #149 box.
+    expect(argv).toContain("--userns=keep-id:uid=1000,gid=1000");
+    expect(argv).not.toContain("--userns=keep-id");
     expect(argv.join(" ")).not.toContain("CODEX_AUTH_JSON=");
   });
 
