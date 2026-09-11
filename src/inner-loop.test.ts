@@ -1121,6 +1121,14 @@ describe("runGate1 admission (#142)", () => {
 
   it("files the gate output as the attempt's artefact before reporting it (#153)", async () => {
     const writeGate = vi.fn();
+    // A sequencer that has already spent three attempts on an earlier cycle,
+    // as a HARD-ERROR retry's would have: the state machine restarts its
+    // attempt counter at 1, so the gate artefact is only named correctly if it
+    // is allocated from the cycle rather than from `agentInvocationFilename`.
+    // `writeGate` is create-only, so getting this wrong throws EEXIST out of
+    // `runGate1` and turns a readmission into a HARD-ERROR.
+    const sequencer = createAgentInvocationSequencer();
+    sequencer.startCycle().filename({ role: "implementer", attempt: 3, nudge: false });
     const gate: GateResult = {
       ok: false,
       stdout: "=== test ===\nfail",
@@ -1139,7 +1147,7 @@ describe("runGate1 admission (#142)", () => {
         onEvent: () => undefined,
       },
       gateStack: { runGate: async () => gate },
-      invocationSequence: createAgentInvocationSequencer().startCycle(),
+      invocationSequence: sequencer.startCycle(),
     } as unknown as Parameters<typeof runGate1>[1];
 
     const result = await runGate1(
@@ -1147,7 +1155,7 @@ describe("runGate1 admission (#142)", () => {
       ctx,
     );
     expect(result.ok).toBe(false);
-    expect(writeGate).toHaveBeenCalledWith("attempt-2-gate.log", {
+    expect(writeGate).toHaveBeenCalledWith("attempt-5-gate.log", {
       ok: false,
       stdout: "=== test ===\nfail",
       stderr: "boom",
@@ -1221,6 +1229,23 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
           }),
           record,
         );
+        // The gate artefact comes from the same sequence as the invocations
+        // around it: every cycle calls it attempt 1, and only the sequence
+        // knows this is the fourth. `writeGate` is `wx`, so a gate log that
+        // stopped following it would not merely mislabel itself — it would
+        // throw EEXIST out of `runGate1` and turn a readmission into a
+        // HARD-ERROR (#153).
+        await opts.attemptLogger.writeGate(
+          sequence.filename({ role: "gate", attempt: 1 }),
+          {
+            ok: cycle >= 3,
+            stdout: `gate-stdout-${cycle}`,
+            stderr: "",
+            failedStep: cycle < 3 ? "test" : null,
+            exitCode: cycle < 3 ? 1 : 0,
+            containerLogs: "",
+          },
+        );
         return cycle < 3
           ? {
               verdict: { type: "HARD-ERROR" as const, reason: `failed-${cycle}` },
@@ -1251,15 +1276,19 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         runCycle,
       )).resolves.toMatchObject({ type: "DONE" });
       expect((await readdir(issueLogger.dir)).sort()).toEqual([
+        "attempt-1-gate.log",
         "attempt-1-nudge.log",
         "attempt-1-reviewer-quality-1.log",
         "attempt-1.log",
+        "attempt-2-gate.log",
         "attempt-2-nudge.log",
         "attempt-2-reviewer-quality-1.log",
         "attempt-2.log",
+        "attempt-3-gate.log",
         "attempt-3-nudge.log",
         "attempt-3-reviewer-quality-1.log",
         "attempt-3.log",
+        "attempt-4-gate.log",
         "attempt-4-nudge.log",
         "attempt-4-reviewer-quality-1.log",
         "attempt-4.log",
@@ -1272,6 +1301,8 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         .resolves.toContain("speech-1");
       await expect(readFile(join(issueLogger.dir, "attempt-3.log"), "utf8"))
         .resolves.toContain("speech-3");
+      await expect(readFile(join(issueLogger.dir, "attempt-3-gate.log"), "utf8"))
+        .resolves.toContain("gate-stdout-3");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

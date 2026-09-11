@@ -108,7 +108,7 @@ describe("raw transcript tree", () => {
     const landing = tree.landing(1);
     await landing.appendMerger("merge branch");
     await landing.writeMergerGate("64", {
-      ok: false, stdout: "gate stdout", stderr: "gate stderr", failedStep: "unit",
+      stdout: "gate stdout", stderr: "gate stderr", failedStep: "unit",
       exitCode: 7, containerLogs: "db tail",
     });
     const path = await landing.writeResolveAttempt("64", {
