@@ -40,8 +40,10 @@ dispatches two subcommands: `sandbar gate` → `runGateCommand` (#45), exported
 from the package root beside `run`, and `sandbar ui` (#132), the standalone
 host of the run UI for post-mortem browsing.
 
-An installation supplies `sandbar.config.mjs`, credentials and an exact-tag
-driver outside its consumer repository. The consumer repo supplies neutral
+An installation supplies `sandbar.config.mjs`, credentials and a driver outside
+its consumer repository — an exact-tag install for an `npm i -D sandbar`
+consumer, the box's own build of `main` for the deployment this repo ships
+(#146). The consumer repo supplies neutral
 development inputs: its `Containerfile`(s), anchor docs (`CLAUDE.md`,
 `CONTEXT.md`, optional ADR dir), and everything its **gate stack**
 (`config.gateStack`, #24) evaluates. Coding standards for the implementer and

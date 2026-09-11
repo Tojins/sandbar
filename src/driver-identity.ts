@@ -1,11 +1,15 @@
 // What is driving this run (#69).
 //
 // The opening run event attributes both executable code and configuration.
-// They are separate inputs: a normal daemon uses an exact-tag package installed
-// under its private installation directory and a config beside that install,
-// while local/ad-hoc use may run a build and config from development trees.
+// They are separate inputs: a daemon may run an exact-tag package installed
+// under its private installation directory with a config beside that install,
+// or — as the deployment this repo ships does since #146 — a build of one
+// commit in a real clone outside the consumer checkout, with the config
+// deployed by that same commit; local/ad-hoc use may run a build and config
+// from development trees.
 // The version identifies installed code whose tree cannot be attributed; a
-// commit and dirty state identify a development build. The config gets its own
+// commit and dirty state identify a build made from a repository, which is why
+// #146 builds from a clone rather than an export. The config gets its own
 // tree state because a dirty config program changes the gate and orchestration
 // contract just as surely as dirty driver code does.
 //
