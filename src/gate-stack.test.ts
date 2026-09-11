@@ -404,15 +404,31 @@ describe("containerRunArgs", () => {
   });
 
   // The override moved from repeated-`-e` precedence to spread order when the
-  // values left the argv (#154): one `-e CI` token, and the reserved value is
-  // the one the child process carries.
+  // values left the argv (#154): the invocation's env is what podman is given,
+  // and the reserved key is spread last.
   it("injects CI=true over the consumer's env, so it cannot be overridden", () => {
     const { argv: args, env } = containerRunArgs({
       ...base,
-      container: container({ env: { CI: "false", APP_ENV: "test" } }),
+      // `CONTAINER_HOST` is this repo's own gate config (#48) and is the name
+      // that proves the env is the CONTAINER's: it names a socket that exists
+      // only inside the container, so a podman that read it for itself would
+      // go remote to nothing.
+      container: container({
+        env: {
+          CI: "false",
+          APP_ENV: "test",
+          CONTAINER_HOST: "unix:///run/podman.sock",
+        },
+      }),
     });
-    expect(env).toEqual({ CI: "true", APP_ENV: "test" });
-    expect(args.filter((a) => a === "CI")).toEqual(["CI"]);
+    expect(env).toEqual({
+      CI: "true",
+      APP_ENV: "test",
+      CONTAINER_HOST: "unix:///run/podman.sock",
+    });
+    // And none of it is in the argv, consumer values included (#154).
+    expect(args.join(" ")).not.toContain("APP_ENV");
+    expect(args.join(" ")).not.toContain("CONTAINER_HOST");
   });
 
   it("puts image CMD args AFTER the image ref", () => {
@@ -496,7 +512,7 @@ describe("containerRunArgs", () => {
 describe("stepExecArgs", () => {
   it("execs the command in the named container with CI set", () => {
     expect(stepExecArgs("sandbar-42-app", ["npm", "test"])).toEqual({
-      argv: ["exec", "-e", "CI", "sandbar-42-app", "npm", "test"],
+      argv: ["exec", "sandbar-42-app", "npm", "test"],
       env: { CI: "true" },
     });
   });

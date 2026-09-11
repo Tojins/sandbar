@@ -43,7 +43,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { sandboxRunArgs } from "./agent-sandbox.js";
-import { runtimeChildEnv } from "./runtime.js";
+import { withRuntimeEnv } from "./runtime.js";
 import { resolveGateStack } from "./config.js";
 import { sandboxContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
@@ -132,10 +132,10 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
       devices: [],
       cpus: undefined,
     });
-    // The invocation's env, not the suite's: podman resolves the argv's bare
-    // `-e HOME` against its own environment (#154), and this file's whole
-    // point is that the production builder is what runs.
-    await exec(RUNTIME, anchor.argv, { env: runtimeChildEnv(anchor.env) });
+    // Through the production helper, which is what puts `HOME` in front of
+    // podman as a file (#154) — this file's whole point is that the production
+    // path is what runs.
+    await withRuntimeEnv(anchor, (argv) => exec(RUNTIME, argv));
     return name;
   };
 

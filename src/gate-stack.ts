@@ -24,14 +24,18 @@
 // are the operator's to clear (they carry no label); the recovery command is in
 // containers.ts's header.
 //
-// No `=` after `-e` (#154, runtime.ts owns the rule): `containerRunArgs` and
-// `stepExecArgs` return a `RuntimeInvocation`, and `boundedPodman` takes its
-// env so the values reach the podman CHILD rather than the argv. The consumer's
-// own `gateStack.containers[].env` moves too — it is as free to hold a database
-// password as `config.env` is to hold a PAT, and every `Command failed:`
-// wrapper on this path quotes the argv into a run event. One consequence to
-// know: `CI=true` beats a consumer's own `CI` by SPREAD ORDER now, where it
-// used to rely on podman keeping the last value for a repeated `-e`.
+// No environment VALUE in a podman argv (#154, runtime.ts owns the rule):
+// `containerRunArgs` and `stepExecArgs` return a `RuntimeInvocation`, and
+// `withRuntimeEnv` writes its env to the file the argv it runs names. The
+// consumer's own `gateStack.containers[].env` moves too — it is as free to hold
+// a database password as `config.env` is to hold a PAT, and every
+// `Command failed:` wrapper on this path quotes the argv into a run event. Two
+// consequences to know: `CI=true` beats a consumer's own `CI` by SPREAD ORDER
+// now, where it used to rely on podman keeping the last value for a repeated
+// `-e`; and this env is never merged into the podman client's own, because
+// #48's `CONTAINER_HOST` on a gate container names a socket that exists only
+// INSIDE it and would turn the next `podman run` into a remote client aimed at
+// nothing.
 //
 // Whose failure is a failed bringup: `lifecycle` decides (D5). An `issue`
 // container depends only on image + env, so its failure is infra — it throws,
@@ -138,10 +142,10 @@ import {
   boundedRuntime,
   boundedRuntimeOk,
   type BoundedRuntimeResult,
-  envArgs,
   RUNTIME,
   RUNTIME_MAX_BUFFER,
   type RuntimeInvocation,
+  withRuntimeEnv,
 } from "./runtime.js";
 import {
   containerResourcesSince,
@@ -195,14 +199,10 @@ export type BoundedResult = BoundedRuntimeResult;
 // know whether anyone was watching. `execFile` collects through its own
 // listeners on the same streams, and a second `data` listener sees the same
 // chunks, so this costs one extra listener and no behaviour.
-//
-// `env` is the podman CHILD's environment, not the container's directly: it is
-// what the argv's bare `-e KEY` tokens resolve against (#154, runtime.ts).
 export function boundedPodman(
   args: readonly string[],
   timeoutMs: number,
   onChunk?: (chunk: string) => void,
-  env?: Readonly<Record<string, string>>,
 ): Promise<BoundedResult> {
   return boundedRuntime(
     args,
@@ -210,7 +210,6 @@ export function boundedPodman(
     onChunk === undefined
       ? undefined
       : (chunk) => onChunk(stripAnsi(chunk.toString())),
-    env,
   );
 }
 
@@ -678,7 +677,8 @@ export function containerRunArgs(opts: {
   const { container: c } = opts;
   // Consumer env first, sandbar's reserved key last: the spread keeps the
   // reserved value, which is what repeated-`-e` precedence used to do before
-  // the values left the argv (#154).
+  // the values left the argv (#154). The argv below names none of it —
+  // `withRuntimeEnv` gives podman this record as a file.
   const env = { ...c.env, ...RESERVED_ENV };
   const args = [
     "run",
@@ -694,7 +694,6 @@ export function containerRunArgs(opts: {
     "--image-volume=ignore",
     "--label",
     "sandbar=true",
-    ...envArgs(env),
     ...c.mounts.flatMap((m) => ["-v", mountSpec(opts.worktreePath, m)]),
     ...healthCheckArgs(c),
   ];
@@ -752,10 +751,7 @@ export function stepExecArgs(
   containerName: string,
   command: readonly string[],
 ): RuntimeInvocation {
-  return {
-    argv: ["exec", ...envArgs(RESERVED_ENV), containerName, ...command],
-    env: RESERVED_ENV,
-  };
+  return { argv: ["exec", containerName, ...command], env: RESERVED_ENV };
 }
 
 // One recorded probe invocation, out of `.State.Health.Log`.
@@ -1441,11 +1437,8 @@ export async function bringUpContainers(
       worktreePath: ctx.worktreePath,
       hideWorktreeGit: ctx.hideWorktreeGit,
     });
-    const started = await boundedPodman(
-      runInvocation.argv,
-      CONTROL_TIMEOUT_MS,
-      undefined,
-      runInvocation.env,
+    const started = await withRuntimeEnv(runInvocation, (argv) =>
+      boundedPodman(argv, CONTROL_TIMEOUT_MS),
     );
     if (!boundedOk(started)) {
       throw new ContainerBringupError(
@@ -1474,11 +1467,8 @@ export async function bringUpContainers(
       // reason steps get it — a migration or seed script that branches on it
       // must not see a different environment than the steps that follow.
       const postReady = stepExecArgs(containerName, command);
-      const r = await boundedPodman(
-        postReady.argv,
-        c.readinessTimeoutMs,
-        undefined,
-        postReady.env,
+      const r = await withRuntimeEnv(postReady, (argv) =>
+        boundedPodman(argv, c.readinessTimeoutMs),
       );
       if (boundedOk(r)) continue;
       // Post-ready setup is part of the container's contract — a failing
@@ -2404,11 +2394,8 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     const resourceStart = await ctx.resourceSnapshotReader?.(containerName);
     const tStep = startTimer();
     const stepExec = stepExecArgs(containerName, step.command);
-    const r = await boundedPodman(
-      stepExec.argv,
-      step.timeoutMs,
-      ctx.onStepOutput,
-      stepExec.env,
+    const r = await withRuntimeEnv(stepExec, (argv) =>
+      boundedPodman(argv, step.timeoutMs, ctx.onStepOutput),
     );
     const durationMs = tStep();
     const resourceEnd = await ctx.resourceSnapshotReader?.(containerName);

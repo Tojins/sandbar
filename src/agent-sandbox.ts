@@ -39,13 +39,15 @@
 //   F7 — every host git invocation runs under LC_ALL=C (locale-stable stderr).
 //   F8 — the container runs with `--init`: the entrypoint is `sleep infinity`,
 //        which reaps nothing (#42). See `sandboxRunArgs`.
-//   F8b — `sandboxRunArgs` returns a `RuntimeInvocation`, not an argv: every
-//        `-e` is a BARE KEY and the values ride in the podman child's own
-//        environment (#154, runtime.ts owns the rule). `config.env` is the
-//        credential allowlist, and this is the argv the reported leak came
+//   F8b — `sandboxRunArgs` returns a `RuntimeInvocation`, not an argv: the
+//        argv names no variable at all and `withRuntimeEnv` hands the values
+//        to podman as a file (#154, runtime.ts owns the rule). `config.env` is
+//        the credential allowlist, and this is the argv the reported leak came
 //        through — node's `execFile` error is `Command failed: <argv joined>`,
 //        which `create` wraps as `podman run failed:` and the inner loop
-//        records as a hard-error `reason` the UI then serves.
+//        records as a hard-error `reason` the UI then serves. The sandbox's
+//        `HOME` is also why podman's own environment is left alone: a rootless
+//        client reads `HOME` for its storage root.
 //   F9 — a run that FAILS still carries out whatever the agent had emitted
 //        (`agentPartialOutput`) and what it had spent getting there
 //        (`agentPartialUsage`, #85/#109/#124 — an invocation that burned ten
@@ -137,7 +139,7 @@ import {
   type ContainerResourceSnapshot,
   type ContainerResources,
 } from "./container-resources.js";
-import { envArgs, runtimeChildEnv, type RuntimeInvocation } from "./runtime.js";
+import { withRuntimeEnv, type RuntimeInvocation } from "./runtime.js";
 
 // ---------------------------------------------------------------------------
 // Constants (copy exactly — matched by sandbar code outside this boundary)
@@ -1867,8 +1869,8 @@ export function sandboxRunArgs(opts: {
     ...(opts.cpus !== undefined ? ["--cpus", String(opts.cpus)] : []),
     "-w",
     opts.workdir,
-    // Bare keys; the values ride in the returned env (#154, runtime.ts).
-    ...envArgs(opts.env),
+    // No env flag at all: the variables ride in the returned env, which
+    // `withRuntimeEnv` hands podman as a file (#154, runtime.ts).
     ...opts.volumeMounts.flatMap((v) => ["-v", v]),
     "--entrypoint",
     "sleep",
@@ -1957,21 +1959,20 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         devices: options?.devices ?? [],
         cpus: options?.cpus,
       });
-      await new Promise<void>((resolveRun, rejectRun) => {
-        execFile(
-          "podman",
-          runInvocation.argv,
-          // `error.message` below is `Command failed: <argv joined>`, which the
-          // inner loop records as a hard-error `reason` and the UI serves. That
-          // is exactly why the argv names keys and this env carries the values
-          // (#154).
-          { env: runtimeChildEnv(runInvocation.env) },
-          (error) => {
+      // `error.message` below is `Command failed: <argv joined>`, which the
+      // inner loop records as a hard-error `reason` and the UI serves. That is
+      // exactly why the variables reach podman as a file whose path is all this
+      // argv holds (#154), and why podman is spawned with the DRIVER's own
+      // environment: `HOME` here is the sandbox's, and a podman that read it
+      // would go looking for its image store under it.
+      await withRuntimeEnv(runInvocation, (argv) =>
+        new Promise<void>((resolveRun, rejectRun) => {
+          execFile("podman", argv, (error) => {
             if (error) rejectRun(new Error(`podman run failed: ${error.message}`));
             else resolveRun();
-          },
-        );
-      });
+          });
+        }),
+      );
 
       const removeArgs = sandboxRemoveArgs(containerName);
       const removeContainerSync = (): void => {

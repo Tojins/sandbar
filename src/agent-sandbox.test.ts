@@ -61,6 +61,7 @@ import {
   sandboxRunArgs,
 } from "./agent-sandbox.js";
 import { createTranscriptTree } from "./logs.js";
+import { readPodmanCalls, writePodmanShim } from "./podman-shim.test-util.js";
 
 const CODEX_REFRESH_FAILURE_LITERALS = [
   "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
@@ -3396,16 +3397,13 @@ describe("sandboxRunArgs (#42)", () => {
         "2",
         "-w",
         SANDBOX_REPO_DIR,
-        // Bare keys (#154) — the values are the invocation's env, below.
-        "-e",
-        "HOME",
-        "-e",
-        "GH_TOKEN",
         "-v",
         "/host/wt:/home/agent/workspace:rw,z",
       ]),
     );
+    // The env is the invocation's, not the argv's (#154).
     expect(env).toEqual({ HOME: "/home/agent", GH_TOKEN: "t" });
+    expect(args.join(" ")).not.toContain("GH_TOKEN");
   });
 
   it("omits --userns when the provider was configured without one", () => {
@@ -3472,37 +3470,20 @@ describe("sandboxRunArgs (#42)", () => {
   });
 });
 
-// #154's sandbox half — the one of the four `-e` call sites no other test can
-// see. `merger.ts`'s is pinned end to end by merger-capture.test.ts and
+// #154's sandbox half — the one of the four call sites no other test can see.
+// `merger.ts`'s is pinned end to end by merger-capture.test.ts and
 // `gate-stack.ts`'s two by gate-stack-podman.test.ts, while every assertion
 // above reads `sandboxRunArgs`'s return value and would stay green with the
-// provider's `{ env }` deleted — and a sandbox whose podman carries no
-// environment gets NO variables at all, because podman silently omits a bare
-// `-e KEY` its own environment does not hold. So this drives `create` itself,
-// through the same PATH shim the merger's test uses: the provider spawns the
-// bare name `podman`, so a shim on PATH sees exactly what the real one would.
+// provider's `withRuntimeEnv` deleted — leaving a sandbox with no variables at
+// all. So this drives `create` itself, through the shared podman shim.
 describe("the podman provider's run environment (#154)", () => {
   const TOKEN = "sk-ant-oat01-thisisthewholetoken";
   const PAT = "ghp_thisisthewholepat";
 
-  it("hands the values to podman's own environment, never to its argv", async () => {
+  it("hands the values to podman as a file, never to its argv", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-podman-env-"));
     const callLog = join(root, "calls.jsonl");
-    const shim = join(root, "podman");
-    await writeFile(
-      shim,
-      [
-        `#!${process.execPath}`,
-        'const { appendFileSync } = require("node:fs");',
-        "const args = process.argv.slice(2);",
-        // Resolve the bare keys the way podman does, out of the child's OWN
-        // environment, so the log records what the container would receive.
-        'const named = args.filter((a, i) => i > 0 && args[i - 1] === "-e");',
-        "const env = Object.fromEntries(named.map((k) => [k, process.env[k]]));",
-        `appendFileSync(${JSON.stringify(callLog)}, JSON.stringify({ args, env }) + "\\n");`,
-      ].join("\n"),
-      { mode: 0o755 },
-    );
+    await writePodmanShim({ path: join(root, "podman"), logPath: callLog });
     const originalPath = process.env["PATH"];
     process.env["PATH"] = `${root}:${originalPath ?? ""}`;
 
@@ -3512,25 +3493,26 @@ describe("the podman provider's run environment (#154)", () => {
         worktreePath: "/host/wt",
         hostRepoPath: "/host/repo",
         mounts: [{ hostPath: "/host/wt", sandboxPath: SANDBOX_REPO_DIR }],
-        env: { GH_TOKEN: PAT, CLAUDE_CODE_OAUTH_TOKEN: TOKEN },
+        // `CONTAINER_HOST` because `config.env` is an arbitrary allowlist and
+        // this is a name PODMAN reads for itself — the service URL. This repo's
+        // own gate declares it on a gate container (#48), pointing at a socket
+        // that exists only inside one.
+        env: {
+          GH_TOKEN: PAT,
+          CLAUDE_CODE_OAUTH_TOKEN: TOKEN,
+          CONTAINER_HOST: "unix:///run/podman.sock",
+        },
       });
       await handle.close();
 
-      const calls = (await readFile(callLog, "utf8"))
-        .trim()
-        .split("\n")
-        .map(
-          (line) =>
-            JSON.parse(line) as {
-              args: string[];
-              env: Record<string, string | undefined>;
-            },
-        );
-      const run = calls.find((call) => call.args[0] === "run");
+      const run = (await readPodmanCalls(callLog)).find(
+        (call) => call.args[0] === "run",
+      );
       expect(run).toBeDefined();
-      expect(run?.env).toEqual({
+      expect(run?.containerEnv).toEqual({
         GH_TOKEN: PAT,
         CLAUDE_CODE_OAUTH_TOKEN: TOKEN,
+        CONTAINER_HOST: "unix:///run/podman.sock",
         // The provider's own, which travels the same way as the credentials.
         HOME: provider.sandboxHomedir,
       });
@@ -3539,11 +3521,16 @@ describe("the podman provider's run environment (#154)", () => {
       // as a hard-error `reason` and served by the UI — cannot carry one.
       expect(run?.args.join(" ")).not.toContain(PAT);
       expect(run?.args.join(" ")).not.toContain(TOKEN);
-      // What the argv carries instead: the bare keys podman copied those
-      // values out of, in `sandboxRunArgs`'s order.
-      expect(
-        run?.args.filter((a, i) => i > 0 && run.args[i - 1] === "-e"),
-      ).toEqual(["GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "HOME"]);
+      // The other half, and the one podman's bare-key form could not have: a
+      // container variable never reconfigures the CLIENT. Under `-e KEY` these
+      // two would have had to be in podman's own environment for it to copy
+      // them, and podman would have gone remote to a socket that is not there.
+      expect(run?.clientEnv.CONTAINER_HOST).toBeUndefined();
+      expect(run?.clientEnv.HOME).toBe(process.env["HOME"]);
+      // And the file is gone once the call it was written for returned.
+      const envFileAt = run!.args.indexOf("--env-file");
+      expect(envFileAt).toBeGreaterThan(0);
+      expect(existsSync(run!.args[envFileAt + 1]!)).toBe(false);
     } finally {
       if (originalPath === undefined) delete process.env["PATH"];
       else process.env["PATH"] = originalPath;

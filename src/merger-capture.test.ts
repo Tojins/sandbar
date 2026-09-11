@@ -11,7 +11,7 @@
 // The one bound on a test here is vitest's own; every case exits on its own or
 // is killed by a timeout this file sets in milliseconds.
 
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,6 +30,7 @@ import {
   resolveAgentCredentials,
 } from "./merger.js";
 import { runScope } from "./naming.js";
+import { readPodmanCalls, writePodmanShim } from "./podman-shim.test-util.js";
 import { isInfraFailure, parseResolveSignal } from "./resolve-loop.js";
 import type { BoundedRuntimeResult } from "./runtime.js";
 
@@ -414,15 +415,14 @@ describe("resolve provider invocation (#74)", () => {
         botName: "sandbar-bot",
         botEmail: "bot@example.test",
       });
-      // The routing is unchanged; where the value lives is (#154).
+      // The routing is unchanged; where the value lives is (#154) — the argv
+      // names neither the key nor the value.
       for (const key of present) {
-        expect(argv).toContain(key);
         expect(env[key]).toBe(values[key]);
+        expect(argv.join(" ")).not.toContain(key);
+        expect(argv.join(" ")).not.toContain(values[key]);
       }
-      for (const key of absent) {
-        expect(argv).not.toContain(key);
-        expect(env).not.toHaveProperty(key);
-      }
+      for (const key of absent) expect(env).not.toHaveProperty(key);
       expect(env["GH_TOKEN"]).toBe("github-key");
       expect(argv.slice(-4)).toEqual([
         "--entrypoint",
@@ -451,11 +451,6 @@ describe("resolve provider invocation (#74)", () => {
       "-v", "/worktree:/workspace", "-v", "/git-common:/git-common",
       "-w", "/workspace",
       "--label", "sandbar=true",
-      "-e", "HOME",
-      "-e", "GIT_AUTHOR_NAME",
-      "-e", "GIT_AUTHOR_EMAIL",
-      "-e", "GIT_COMMITTER_NAME",
-      "-e", "GIT_COMMITTER_EMAIL",
       "--entrypoint", "sleep", "sandbox-image", "infinity",
     ]);
     expect(env).toEqual({
@@ -497,7 +492,7 @@ describe("resolve provider invocation (#74)", () => {
     // container uid 1000; bare keep-id left it owned by 1001 on a #149 box.
     expect(argv).toContain("--userns=keep-id:uid=1000,gid=1000");
     expect(argv).not.toContain("--userns=keep-id");
-    expect(argv).not.toContain("CODEX_AUTH_JSON");
+    expect(argv.join(" ")).not.toContain("CODEX_AUTH_JSON");
     expect(env).not.toHaveProperty("CODEX_AUTH_JSON");
   });
 
@@ -505,21 +500,16 @@ describe("resolve provider invocation (#74)", () => {
     const root = await mkdtemp(join(tmpdir(), "sandbar-resolve-auth-"));
     const argvLog = join(root, "podman-argv.json");
     const originalPath = process.env["PATH"];
-    const podman = join(root, "podman");
-    await writeFile(podman, [
-      `#!${process.execPath}`,
-      'const { appendFileSync } = require("node:fs");',
-      'const args = process.argv.slice(2);',
-      // Podman resolves a bare `-e KEY` against its OWN environment (#154), so
-      // the shim has to do the same to observe what the container would get.
-      'const named = args.filter((a, i) => i > 0 && args[i - 1] === "-e");',
-      'const env = Object.fromEntries(named.map((k) => [k, process.env[k]]));',
-      `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify({ args, env }) + "\\n");`,
-      'if (args[0] === "run") process.stdout.write("container-id\\n");',
-      'if (args[0] === "exec") process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"<promise>ABANDON</promise>"}}) + "\\n");',
-      'if (args[0] === "inspect") process.stdout.write("\\nfalse\\n");',
-      'if (args[0] === "stats") process.stdout.write("2048 / 4096\\n");',
-    ].join("\n"), { mode: 0o755 });
+    await writePodmanShim({
+      path: join(root, "podman"),
+      logPath: argvLog,
+      respond: [
+        'if (args[0] === "run") process.stdout.write("container-id\\n");',
+        'if (args[0] === "exec") process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"<promise>ABANDON</promise>"}}) + "\\n");',
+        'if (args[0] === "inspect") process.stdout.write("\\nfalse\\n");',
+        'if (args[0] === "stats") process.stdout.write("2048 / 4096\\n");',
+      ],
+    });
     process.env["PATH"] = `${root}:${originalPath ?? ""}`;
 
     const codexAuthMount = {
@@ -547,20 +537,19 @@ describe("resolve provider invocation (#74)", () => {
 
       const run = await adapter.runResolveAgent("resolve this", 1);
       expect(run.output).toBe("<promise>ABANDON</promise>");
-      const calls = (await readFile(argvLog, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as {
-          args: string[];
-          env: Record<string, string | undefined>;
-        });
+      const calls = await readPodmanCalls(argvLog);
       const runCall = calls.find((call) => call.args[0] === "run")!;
       expect(runCall.args).toContain(
         `${codexAuthMount.hostPath}:${codexAuthMount.sandboxPath}:z`,
       );
-      // The value reaches podman's environment; the argv names only the key.
-      expect(runCall.env["CODEX_HOME"]).toBe("/var/lib/codex");
-      expect(runCall.args).toContain("CODEX_HOME");
+      // The value reaches podman as a file; the argv names neither (#154).
+      expect(runCall.containerEnv["CODEX_HOME"]).toBe("/var/lib/codex");
+      expect(runCall.args.join(" ")).not.toContain("CODEX_HOME");
+      // ...and podman itself was left with the driver's environment: the
+      // resolve container's `HOME` is `/tmp`, under which a rootless client
+      // would find no image store at all.
+      expect(runCall.containerEnv["HOME"]).toBe("/tmp");
+      expect(runCall.clientEnv.HOME).toBe(process.env["HOME"]);
       // The shared credential is a mount, and appears nowhere in the argv.
       expect(runCall.args.join(" ")).not.toContain("CODEX_AUTH_JSON");
       expect(calls.map((call) => call.args[0])).toEqual([

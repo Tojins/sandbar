@@ -245,11 +245,14 @@
 // classification and the pipe-drain deadline are its header's.
 //
 // `buildResolveRunArgv` returns a `RuntimeInvocation` rather than an argv, for
-// the reason runtime.ts's header owns (#154): no `=` after `-e`, so the merger
-// agent's credential, `GH_TOKEN` and the bot identity travel in the podman
-// child's environment and `captureAgentRun` — which keeps both raw streams
-// verbatim in the attempt log — has nothing to keep. The same argument #134
-// already made about `CODEX_AUTH_JSON` and `ps`, now applied to all of them.
+// the reason runtime.ts's header owns (#154): no environment value in a podman
+// argv, so the merger agent's credential, `GH_TOKEN` and the bot identity reach
+// podman as a file and `captureAgentRun` — which keeps both raw streams verbatim
+// in the attempt log — has nothing to keep. The same argument #134 already made
+// about `CODEX_AUTH_JSON` and `ps`, now applied to all of them. The resolve
+// container's `HOME=/tmp` is also why none of it is merged into podman's own
+// environment: a rootless client reads `HOME` for its storage root, and would
+// find no `sandbox-image` under an empty one.
 //
 // `buildAbandonComment` is the other end, and the reason all of it is carried:
 // that comment is the only artefact a human reads when they find a stuck issue
@@ -351,10 +354,9 @@ import {
   boundedRuntime,
   boundedRuntimeOk,
   type BoundedRuntime,
-  envArgs,
   RUNTIME,
-  runtimeChildEnv,
   type RuntimeInvocation,
+  withRuntimeEnv,
 } from "./runtime.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import {
@@ -2342,24 +2344,14 @@ export function captureAgentRun(
   file: string,
   args: readonly string[],
   input: string,
-  opts: {
-    readonly container: string;
-    readonly timeoutMs: number;
-    // The child's own environment, which is what the argv's bare `-e KEY`
-    // tokens resolve against (#154, runtime.ts). Absent for an argv that names
-    // none, which is every exec this seam runs.
-    readonly env?: Readonly<Record<string, string>>;
-  },
+  opts: { readonly container: string; readonly timeoutMs: number },
 ): Promise<CapturedAgentRun> {
   // The one duration sandbar had before #82, now measured the same way as the
   // new ones rather than being the odd one out — and monotonically, which
   // `Date.now()` was not.
   const elapsed = startTimer();
   return new Promise<CapturedAgentRun>((resolve) => {
-    const child = spawn(file, [...args], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: runtimeChildEnv(opts.env),
-    });
+    const child = spawn(file, [...args], { stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (chunk) => {
@@ -2498,10 +2490,9 @@ export function buildResolveRunArgv(args: {
   readonly botName: string;
   readonly botEmail: string;
 }): RuntimeInvocation {
-  // Every variable the resolve container needs, in one record: the argv below
-  // names these keys and podman copies their values out of its own environment
-  // (#154, runtime.ts). Insertion order is what `envArgs` emits, so it is also
-  // the argv order the pin test reads.
+  // Every variable the resolve container needs, in one record. The argv below
+  // names none of them: `withRuntimeEnv` writes this record to the file it adds
+  // to the argv it runs (#154, runtime.ts).
   const env: Record<string, string> = {
     HOME: "/tmp",
     ...(args.codexAuthMount === undefined
@@ -2546,7 +2537,6 @@ export function buildResolveRunArgv(args: {
     "/workspace",
     "--label",
     "sandbar=true",
-    ...envArgs(env),
     "--entrypoint",
     "sleep",
     args.image,
@@ -2593,7 +2583,7 @@ export function resolveAgentCredentials(
         .map(({ key }) => key)
         // ChatGPT auth is a shared file mount since #134, so passing the JSON
         // as a variable as well is redundant. #154 took the `ps` half of that
-        // argument and applied it to every remaining key.
+        // argument and applied it to every remaining variable.
         .filter((key) => key !== "CODEX_AUTH_JSON"),
       "GH_TOKEN",
     ].map(
@@ -2821,15 +2811,11 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         return removePromise;
       };
       const processResult = await Promise.resolve().then(async () => {
-        const started = await captureResolveProcess(
-          RUNTIME,
-          runInvocation.argv,
-          "",
-          {
+        const started = await withRuntimeEnv(runInvocation, (argv) =>
+          captureResolveProcess(RUNTIME, argv, "", {
             container,
             timeoutMs: CONTROL_TIMEOUT_MS,
-            env: runInvocation.env,
-          },
+          }),
         );
         if (started.exitCode !== 0 || started.end !== "exit") {
           return { ...started, end: "spawn-error" as const };

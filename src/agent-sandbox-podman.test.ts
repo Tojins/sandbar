@@ -57,7 +57,7 @@ import {
   removeFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { sandboxRunArgs } from "./agent-sandbox.js";
-import { runtimeChildEnv } from "./runtime.js";
+import { withRuntimeEnv } from "./runtime.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -136,11 +136,11 @@ describe.runIf(available)("the sandbox container against real podman", () => {
       devices: [],
       cpus: undefined,
     });
-    const args = argv.filter((a) => init === "with-init" || a !== "--init");
+    const filtered = argv.filter((a) => init === "with-init" || a !== "--init");
     const started = previousStart.then(async () => {
-      // The invocation's env, not the suite's: podman resolves the argv's bare
-      // `-e KEY` tokens against its own environment (#154).
-      await exec(RUNTIME, args, { env: runtimeChildEnv(env) });
+      // Through the production helper: the variables reach podman as a file
+      // this writes and removes around the call (#154).
+      await withRuntimeEnv({ argv: filtered, env }, (a) => exec(RUNTIME, a));
     });
     previousStart = started.catch(() => {});
     await started;
