@@ -172,10 +172,12 @@ describe.each(installations)("$project installation units", (row) => {
     expect(values(unit, "WantedBy")).toEqual(["default.target"]);
   });
 
-  it("renders the same driver's reader only after a successful daemon start", () => {
+  it("renders the same driver's reader, restartable without its daemon", () => {
     const unit = render(uiTemplate, vars);
     expect(unit).not.toMatch(/\{\{|\}\}/);
-    expect(values(unit, "Requires")).toEqual(["sandbar.service"]);
+    // No Requires=: restarting the reader onto a new build must not pull a
+    // deliberately stopped daemon back up (#146).
+    expect(values(unit, "Requires")).toEqual([]);
     expect(values(unit, "PartOf")).toEqual(["sandbar.service"]);
     expect(values(unit, "After")).toEqual(["sandbar.service"]);
     expect(values(unit, "ExecStartPre")).toEqual([]);
@@ -259,6 +261,19 @@ describe("continuous deployment (#146)", () => {
     // The play never starts or restarts a daemon itself.
     expect(installationTasks).not.toContain("state: restarted");
     expect(installationTasks).not.toContain("state: started");
+  });
+
+  it("restarts only the reader, and only when its code or unit moved", () => {
+    const uiTasks = readFileSync(new URL("tasks/ui.yml", ROLE), "utf8");
+    const restart = taskNamed(uiTasks, "Restart the reader onto the current driver");
+    expect(restart).toContain("name: sandbar-ui.service");
+    expect(restart).toContain("state: restarted");
+    expect(restart).toContain(
+      "when: sandbar_driver_flip is changed or sandbar_ui_unit is changed",
+    );
+    const daemonTasks = readFileSync(new URL("tasks/service.yml", ROLE), "utf8");
+    expect(daemonTasks).not.toContain("state: restarted");
+    expect(daemonTasks).not.toContain("state: started");
   });
 
   it("keys the file-changed answer per installation across the two loops", () => {

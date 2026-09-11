@@ -115,12 +115,16 @@ the commit, the time and the result, and the Caddy index page at `/` renders it
 beside the installation links. A box stuck on an old commit therefore says so;
 a stale timestamp means the timer itself stopped.
 
-The UI unit runs the same driver's `ui` command on the entry's `reader_port`.
-It requires and starts after a successful daemon activation; `PartOf=` carries
-deliberate daemon stops and restarts to it, while a later daemon crash leaves
-the report available. Each installation config must also give the daemon's
-in-process `uiPort` its own host port, distinct from every reader; the two
-committed configs use 7331 and 7334 around 7332 and 7333.
+The UI unit runs the same driver's `ui` command on the entry's `reader_port`,
+and it is the one thing the play does restart: a reader aborts no work by being
+restarted, systemd's automatic restart of the daemon does not propagate to it,
+and a reader left on an older build is the page an operator reads. It carries no
+`Requires=` for exactly that reason — restarting it must not pull a
+deliberately stopped daemon back up. `PartOf=` still carries deliberate daemon
+stops and restarts to it, and a daemon crash still leaves the report available.
+Each installation config must also give the daemon's in-process `uiPort` its
+own host port, distinct from every reader; the two committed configs use 7331
+and 7334 around 7332 and 7333.
 
 ## Installations
 

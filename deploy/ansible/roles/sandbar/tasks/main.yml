@@ -43,22 +43,6 @@
       {{ sandbar_operator_keys_file }} exists. The key list is exclusive: a key
       not listed is removed from root and every installation user.
 
-- name: Create the directory the remembered keys live in
-  ansible.builtin.file:
-    path: "{{ sandbar_operator_keys_file | dirname }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-
-- name: Remember the operator keys so the box can converge unattended
-  ansible.builtin.copy:
-    content: "{{ sandbar_operator_ssh_keys | join('\n') }}\n"
-    dest: "{{ sandbar_operator_keys_file }}"
-    owner: root
-    group: root
-    mode: "0644"
-
 - name: Validate every installation inventory entry
   ansible.builtin.assert:
     that:
@@ -99,6 +83,22 @@
       This role targets Ubuntu {{ sandbar_ubuntu_releases | join(' or ') }};
       this host is {{ ansible_facts['distribution'] }}
       {{ ansible_facts['distribution_version'] }}.
+
+- name: Create the directory the remembered keys live in
+  ansible.builtin.file:
+    path: "{{ sandbar_operator_keys_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Remember the operator keys so the box can converge unattended
+  ansible.builtin.copy:
+    content: "{{ sandbar_operator_ssh_keys | join('\n') }}\n"
+    dest: "{{ sandbar_operator_keys_file }}"
+    owner: root
+    group: root
+    mode: "0644"
 
 # Host-global tasks run once regardless of daemon count.
 - name: Install host packages

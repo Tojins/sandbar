@@ -673,8 +673,10 @@ npm run build && node dist/cli.js --config <path>
   `restart-requested` and the daemon decides when, so exits 1, 2 and 4 remain
   stops a human inspects. Every attempt records a commit, time and result the
   Caddy index renders, so a box stuck on an old commit is visible rather than
-  journalled. Unit strings, the driver build, the restart contract and the
-  timer are table-tested. Secrets are placed once per installation and only
+  journalled. The standalone reader is the one unit the play restarts — it
+  aborts no work, and a systemd auto-restart of the daemon does not reach it —
+  which is why it carries no `Requires=`. Unit strings, the driver build, the
+  restart contract and the timer are table-tested. Secrets are placed once per installation and only
   asserted; the operator's public key is remembered on the box so an unattended
   pull cannot strip it. Still no GitHub Actions deploy.
 - **One image, both roles** (agent sandbox and gate pod member): the driver's

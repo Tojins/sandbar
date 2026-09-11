@@ -37,3 +37,21 @@
   environment:
     XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_uid.stdout }}"
     DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_uid.stdout }}/bus"
+
+# The one thing this play does restart, because the reader aborts no work by
+# being restarted: it reads the event record off disk and serves it. A daemon's
+# own restart is the daemon's decision (#146), and systemd's automatic restart
+# does not propagate to this unit, so without this the page an operator reads
+# would stay on whatever build was current when the reader last started.
+- name: Restart the reader onto the current driver
+  ansible.builtin.systemd_service:
+    name: sandbar-ui.service
+    scope: user
+    state: restarted
+    daemon_reload: true
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_uid.stdout }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_uid.stdout }}/bus"
+  when: sandbar_driver_flip is changed or sandbar_ui_unit is changed
