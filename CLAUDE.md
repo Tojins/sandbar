@@ -169,8 +169,10 @@ image inputs whether sandbar or a human moved it; each admission captures one
 immutable agent/branch-image bundle, so in-flight work keeps its original pair.
 No-op polls write nothing; a queue-label actor exclusion is a required
 per-recompute diagnostic and therefore makes that poll reportable. A failed
-poll fetch is reported and retried after another interval; only the startup
-fetch remains a preflight refusal.
+poll fetch is reported and retried after another interval — unless a latched
+restart has nothing left to drain, the one state whose action needs none of the
+refs the fetch did not get (#146); only the startup fetch remains a preflight
+refusal.
 The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
 
 Provider closure by quota or a permanent credential refusal stops admissions
@@ -181,8 +183,10 @@ trigger and advances no counter. A `restart-requested` file in the
 installation directory (#146) drains exactly the same way and exits 75, the one
 code an installation unit turns back into a start: the converging deploy writes
 it, the daemon reads it at the top of every recompute — ahead of the poll, so a
-failed refresh cannot keep it off the record — skips the source-image rebuild a
-moved source would otherwise trigger, since nothing more will be admitted, and
+failed refresh cannot keep it off the record, and a refresh that keeps failing
+over a drained pool exits on it rather than waiting for refs the exit does not
+read — skips the source-image rebuild a moved source would otherwise trigger,
+since nothing more will be admitted, and
 removes at startup exactly the request it was started to answer, which is what
 keeps that exit from repeating without swallowing one the play wrote for a
 later commit while this startup ran. It outranks provider closure and the

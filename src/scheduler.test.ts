@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { ContinuousPool, decideSchedulerAction, type SchedulerSnapshot } from "./scheduler.js";
+import {
+  ContinuousPool,
+  decideAfterFailedRefresh,
+  decideSchedulerAction,
+  type SchedulerSnapshot,
+} from "./scheduler.js";
 
 type Issue = { id: string };
 const issue = (id: string): Issue => ({ id });
@@ -177,5 +182,20 @@ describe("scheduler decisions", () => {
     ["idle waits for the poll", snapshot(), { kind: "wait" }],
   ] as const)("%s", (_name, state, action) => {
     expect(decideSchedulerAction(state)).toEqual(action);
+  });
+
+  // A failed refresh ordinarily retries, and the deploy is the one thing that
+  // cannot afford it: an emptied pool's only wake is the poll timer, so a fetch
+  // that stays broken would otherwise hold the restart exit forever (#146).
+  it.each([
+    ["no restart: retry", snapshot(), { kind: "wait" }],
+    ["no restart, nothing running: still a retry", snapshot({ noProgressSinceLanding: 6, providerClosed: true }), { kind: "wait" }],
+    ["a drained restart exits without the refs", snapshot({ restartRequested: true }), { kind: "exit", reason: "restart" }],
+    ["restart with a slot still held retries", snapshot({ restartRequested: true, active: 1, ongoing: 1 }), { kind: "wait" }],
+    ["restart with work still ongoing retries", snapshot({ restartRequested: true, ongoing: 1 }), { kind: "wait" }],
+    ["restart with a terminal still to land retries", snapshot({ restartRequested: true, hasPendingTerminals: true }), { kind: "wait" }],
+    ["an outstanding land request could not land on refs this poll lacks", snapshot({ restartRequested: true, hasLandRequests: true }), { kind: "exit", reason: "restart" }],
+  ] as const)("failed poll refresh: %s", (_name, state, action) => {
+    expect(decideAfterFailedRefresh(state)).toEqual(action);
   });
 });

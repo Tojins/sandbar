@@ -249,6 +249,7 @@ import {
 } from "./plan-resolver.js";
 import {
   ContinuousPool,
+  decideAfterFailedRefresh,
   decideSchedulerAction,
   type SchedulerExit,
   type SettledIssue,
@@ -1667,10 +1668,34 @@ export async function run(
       if (planTrigger === "poll") {
         const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
         if (refresh.failures.length > 0) {
-          const message =
-            `Poll refresh failed; retrying in ${config.pollIntervalMs}ms: ` +
-            refresh.failures.join("; ");
-          await runRecord.emit({ kind: "complaint", severity: "warning", message });
+          // This iteration cannot plan or land on refs it did not get, and for
+          // an emptied pool it is also the only wake there is, so a fetch that
+          // stays broken would hold a latched restart here forever (#146).
+          // `decideAfterFailedRefresh` owns which of the two that is.
+          const stalled = decideAfterFailedRefresh({
+            restartRequested: restartRequested !== null,
+            active: pool.activeCount,
+            ongoing: pool.ongoingCount,
+            hasPendingTerminals: pool.hasPendingTerminals,
+          });
+          const next = stalled.kind === "exit"
+            ? "the pending restart needs none of it, so exiting"
+            : `retrying in ${config.pollIntervalMs}ms`;
+          await runRecord.emit({
+            kind: "complaint",
+            severity: "warning",
+            message: `Poll refresh failed; ${next}: ${refresh.failures.join("; ")}`,
+          });
+          if (stalled.kind === "exit") {
+            terminalExit = await announceExit(
+              schedulerExit(stalled.reason, {
+                pool,
+                providerExit: providerExitPending ?? closedProviderExit(config, providerState),
+                restartDetail: restartRequested,
+              }),
+            );
+            break;
+          }
           nextPlanTrigger = await waitForSchedulerWake();
           continue;
         }

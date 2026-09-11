@@ -57,6 +57,11 @@
 // honour an outstanding `land` request on the way out, and folding it in here
 // would quietly change that.
 //
+// A POLL WHOSE REF REFRESH FAILED never reaches that decision: planning and
+// landing both read refs it did not get, so run.ts reports the failure and
+// waits for another wake. `decideAfterFailedRefresh` is the one exception, and
+// it is the whole rule (#146) — see its comment.
+//
 // WHAT `recordLandingOutcome` COUNTS. `landed` is landings in the sense
 // exit-conditions.ts's header defines — source-branch merges, chunks landed on
 // the source branch, AND DONE branches landed on their chunk branch. The
@@ -122,6 +127,40 @@ function drainToward(
     return { kind: "land" };
   }
   return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason };
+}
+
+// What a poll whose ref refresh FAILED may still do (#146). Ordinarily
+// nothing: the refs planning and landing read are exactly what the fetch did
+// not produce, so the daemon reports the failure and waits for another wake.
+//
+// A latched restart with nothing left to drain is the one state where waiting
+// is wrong, and the asymmetry is deliberate. That wake is the ONLY one an
+// emptied pool gets — `waitForWake` arms the poll timer and nothing else — so a
+// fetch that keeps failing means the exit never happens: the deploy stays
+// blocked on a process that will not leave, and the commit the box is waiting
+// to run may be the revert that repairs the very fetch this is failing on.
+// Exiting is safe because it reads no refs, and admission is already stopped,
+// so a successful fetch could not produce work this drain would take. Anything
+// still active, ongoing or pending a landing keeps the retry: finishing that
+// work is what the drain exists for, and it does need the refs.
+//
+// Provider closure and the backstop deliberately keep the plain retry. Nothing
+// outside the process waits on either, and both are conditions the next process
+// re-derives in seconds — the same reason they rank below restart above.
+//
+// Pool-derived fields only, so a full `SchedulerSnapshot` satisfies it: this
+// decision is taken where no plan exists.
+export function decideAfterFailedRefresh(
+  state: Pick<
+    SchedulerSnapshot,
+    "restartRequested" | "active" | "ongoing" | "hasPendingTerminals"
+  >,
+): Extract<SchedulerAction, { kind: "exit" | "wait" }> {
+  if (!state.restartRequested) return { kind: "wait" };
+  if (state.active > 0 || state.ongoing > 0 || state.hasPendingTerminals) {
+    return { kind: "wait" };
+  }
+  return { kind: "exit", reason: "restart" };
 }
 
 // The complete control decision for one scheduler observation. Keeping the

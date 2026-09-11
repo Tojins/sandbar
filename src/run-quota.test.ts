@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PullRequestSummary } from "./chunk-land.js";
 import type { WakeLockStatus } from "./keepawake.js";
@@ -263,6 +266,7 @@ import { OriginLockHeldError, acquireOriginLock } from "./origin-lock.js";
 import { ensureRepoCache } from "./repo-cache.js";
 import { startEventRecord } from "./events.js";
 import { beginCleanup } from "./cleanup.js";
+import { RESTART_REQUEST_FILE } from "./restart-request.js";
 
 const config: RunConfig = {
   ghOwner: "o", ghRepo: "r", developers: "anyone", cwd: "/tmp", workDir: "sandbar-run-quota-test",
@@ -1010,6 +1014,50 @@ describe("run quota orchestration (#109)", () => {
         .not.toContain("SANDBAR HALTED");
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  // The drained daemon's only wake is that poll timer, so a fetch that stays
+  // broken used to hold the deploy on a process that would never leave —
+  // including when the commit waiting to run is the revert for that fetch
+  // (#146).
+  it("exits for a latched restart the poll refresh keeps failing under", async () => {
+    const installation = await mkdtemp(join(tmpdir(), "sandbar-run-restart-"));
+    seams.plan.mockResolvedValue(resolution([]));
+    // Every fetch fails, and the first one is also where the converging play
+    // reaches this daemon: the request lands after the startup that could have
+    // cleared it and before a poll that can latch it.
+    vi.mocked(fetchOriginRefs).mockImplementation(async () => {
+      await writeFile(join(installation, RESTART_REQUEST_FILE), "abc1234\n");
+      return {
+        sourceChanged: false,
+        failures: ["Fetching origin refs failed: network unavailable"],
+      };
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    try {
+      await expect(run(
+        { ...config, pollIntervalMs: 1 },
+        { configPath: join(installation, "sandbar.config.mjs") },
+      )).rejects.toThrow("EXIT:75");
+      expect(exit).toHaveBeenCalledWith(75);
+      expect(eventsOf("restart-requested"))
+        .toEqual([{ kind: "restart-requested", detail: "abc1234" }]);
+      expect(eventsOf("complaint").map((event) => event.message)).toContainEqual(
+        "Poll refresh failed; the pending restart needs none of it, so exiting: " +
+        "Fetching origin refs failed: network unavailable",
+      );
+      expect(eventsOf("exit")).toEqual([expect.objectContaining({
+        kind: "exit", tag: "restart", exitCode: 75,
+      })]);
+      // No poll ever got past its refresh, so the exit came from the failed
+      // refresh itself rather than from a recompute that read the refs.
+      expect(eventsOf("recompute").map((event) => event.trigger)).toEqual(["launch"]);
+    } finally {
+      await rm(installation, { recursive: true, force: true });
     }
   });
 
