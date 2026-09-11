@@ -21,7 +21,8 @@
 // Each case supplies credential-SHAPED values, so the check that no value
 // appears anywhere in the argv is testing what the issue reported rather than a
 // placeholder.
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -261,6 +262,49 @@ describe("withRuntimeEnv", () => {
       }),
     ).rejects.toThrow("podman run failed");
     await expect(stat(path)).rejects.toThrow();
+  });
+
+  // WHERE the file lands is the one placement decision between a 0600
+  // credential file and a consumer's gate step: this repo's own gate config
+  // bind-mounts the host `/tmp` into a gate container rw, and its pod
+  // containers run without `--userns`/`--user`, so container root reads a file
+  // the invoking user owns. A per-user runtime directory is one no container
+  // sandbar starts can see, and the mode alone does not make that choice for
+  // us — hence both directions, asserted here rather than left to the header.
+  it("writes the file under XDG_RUNTIME_DIR when the host has one", async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), "sandbar-xdg-"));
+    const original = process.env["XDG_RUNTIME_DIR"];
+    process.env["XDG_RUNTIME_DIR"] = runtimeDir;
+    try {
+      let path = "";
+      await withRuntimeEnv({ argv: ["run"], env: { A: "1" } }, async (argv) => {
+        path = argv[argv.indexOf("--env-file") + 1]!;
+        expect(path.startsWith(`${runtimeDir}/`)).toBe(true);
+        // The directory the file sits in is the other half of keeping it to
+        // this user, and mkdtemp's 0700 is what provides it.
+        expect((await stat(dirname(path))).mode & 0o777).toBe(0o700);
+      });
+      expect(path).not.toBe("");
+    } finally {
+      if (original === undefined) delete process.env["XDG_RUNTIME_DIR"];
+      else process.env["XDG_RUNTIME_DIR"] = original;
+      await rm(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the temp directory when the host has none", async () => {
+    const original = process.env["XDG_RUNTIME_DIR"];
+    delete process.env["XDG_RUNTIME_DIR"];
+    try {
+      let path = "";
+      await withRuntimeEnv({ argv: ["run"], env: { A: "1" } }, async (argv) => {
+        path = argv[argv.indexOf("--env-file") + 1]!;
+        expect(path.startsWith(`${tmpdir()}/`)).toBe(true);
+      });
+      expect(path).not.toBe("");
+    } finally {
+      if (original !== undefined) process.env["XDG_RUNTIME_DIR"] = original;
+    }
   });
 
   // An argv that needs nothing gets no file and no flag, so the invocation a
