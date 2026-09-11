@@ -3479,6 +3479,7 @@ describe("sandboxRunArgs (#42)", () => {
 describe("the podman provider's run environment (#154)", () => {
   const TOKEN = "sk-ant-oat01-thisisthewholetoken";
   const PAT = "ghp_thisisthewholepat";
+  const CONTAINER_ONLY_SOCKET = "unix:///run/sandbar-154-inside-only.sock";
 
   it("hands the values to podman as a file, never to its argv", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-podman-env-"));
@@ -3496,11 +3497,14 @@ describe("the podman provider's run environment (#154)", () => {
         // `CONTAINER_HOST` because `config.env` is an arbitrary allowlist and
         // this is a name PODMAN reads for itself — the service URL. This repo's
         // own gate declares it on a gate container (#48), pointing at a socket
-        // that exists only inside one.
+        // that exists only inside one. The value names a socket no host could
+        // be serving, because this suite RUNS in that gate container: the
+        // driver has a CONTAINER_HOST of its own there, and a container value
+        // that happened to match it would make the client assertion vacuous.
         env: {
           GH_TOKEN: PAT,
           CLAUDE_CODE_OAUTH_TOKEN: TOKEN,
-          CONTAINER_HOST: "unix:///run/podman.sock",
+          CONTAINER_HOST: CONTAINER_ONLY_SOCKET,
         },
       });
       await handle.close();
@@ -3512,7 +3516,7 @@ describe("the podman provider's run environment (#154)", () => {
       expect(run?.containerEnv).toEqual({
         GH_TOKEN: PAT,
         CLAUDE_CODE_OAUTH_TOKEN: TOKEN,
-        CONTAINER_HOST: "unix:///run/podman.sock",
+        CONTAINER_HOST: CONTAINER_ONLY_SOCKET,
         // The provider's own, which travels the same way as the credentials.
         HOME: provider.sandboxHomedir,
       });
@@ -3525,7 +3529,11 @@ describe("the podman provider's run environment (#154)", () => {
       // container variable never reconfigures the CLIENT. Under `-e KEY` these
       // two would have had to be in podman's own environment for it to copy
       // them, and podman would have gone remote to a socket that is not there.
-      expect(run?.clientEnv.CONTAINER_HOST).toBeUndefined();
+      // Asserted as "whatever the driver had" rather than as "absent": this
+      // repo's own gate container sets CONTAINER_HOST for the suite running
+      // inside it (#48), and passing the driver's own through is exactly what
+      // a client must keep doing.
+      expect(run?.clientEnv.CONTAINER_HOST).toBe(process.env["CONTAINER_HOST"]);
       expect(run?.clientEnv.HOME).toBe(process.env["HOME"]);
       // And the file is gone once the call it was written for returned.
       const envFileAt = run!.args.indexOf("--env-file");
