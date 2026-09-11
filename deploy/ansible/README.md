@@ -185,6 +185,11 @@ enables both unit pairs, and finally installs the convergence timer — last, so
 its first firing cannot land in the middle of the bootstrap. Start each daemon
 once by hand; from then on the box owns both the code and the restarts.
 
+A box already running the previous exact-tag scheme needs that same one hand
+restart per daemon, once: its daemon predates the request file and will not read
+one. Everything after that is automatic, and `~/installation/driver/` can be
+removed by hand afterwards — nothing references it.
+
 ## Operating an installation
 
 SSH as the installation user, then:
