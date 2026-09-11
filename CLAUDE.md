@@ -388,7 +388,9 @@ outcomes.
   A redaction pass would be the weaker line — it has to know every key. The
   four builders that emit any `-e` therefore return `RuntimeInvocation` (argv
   and env together, `src/runtime.ts`), so no caller can run one without the
-  other, and one table test over all four is the enforcer. Nothing can fix a
+  other. Two enforcers, because a table over the four only covers a fifth
+  builder its author remembered to add: one table test, plus a source scan
+  pinning `envArgs` as the flag's ONE production spelling. Nothing can fix a
   record already written; the `ps` exposure closes as a side effect.
   Codex's ChatGPT subscription is `auth.json`,
   so `CODEX_AUTH_JSON` carries its content. At preflight the driver reconciles

@@ -7,41 +7,48 @@
 // saw — node's `execFile` error message is `Command failed: <argv joined>`, and
 // the inner loop records that as a `hard-error` event `reason` the UI then
 // serves (#132). That argument holds only while every builder obeys, so the
-// invariant is asserted over the set, not per builder: a fifth builder added
-// with `KEY=VALUE` beside its siblings is exactly the regression this catches,
-// and it is text-shaped, so it needs an assertion rather than a comment.
+// invariant is asserted over the set, not per builder.
+//
+// The table alone would be a weaker claim than the rule needs, because a fifth
+// builder is only covered by it if its author also adds it to `BUILDERS` — and
+// the author of a `KEY=VALUE` regression is exactly who would not. So the scan
+// below carries the other half, the way error-swallow-ratchet.test.ts does for
+// its own rule: `envArgs` in runtime.ts is the ONE production spelling of the
+// flag, so any other module that writes it as a string literal fails here.
+// Between them, a new builder either goes through `envArgs` — which cannot
+// emit a value — or it announces itself.
 //
 // Each case supplies credential-SHAPED values, so the second half of the check
 // — no value appears anywhere in the argv — is testing what the issue reported
 // rather than a placeholder.
+import { readdir, readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import { sandboxRunArgs } from "./agent-sandbox.js";
+import { resolveGateStack } from "./config.js";
 import { containerRunArgs, stepExecArgs } from "./gate-stack.js";
 import { buildResolveRunArgv } from "./merger.js";
 import { envArgs, runtimeChildEnv, type RuntimeInvocation } from "./runtime.js";
-import type { ResolvedStackContainer } from "./config.js";
 
 const SECRET = "sk-ant-oat01-thisisthewholetoken";
 const PAT = "ghp_thisisthewholepat";
 
+// Through the validation boundary rather than a hand-built literal: a second
+// copy of `ResolvedStackContainer`'s fields is one more fixture to repair every
+// time the type gains one, and gate-stack.test.ts already keeps the one this
+// suite would be duplicating.
 const gateContainer = (
-  over: Partial<ResolvedStackContainer> = {},
-): ResolvedStackContainer => ({
-  name: "app",
-  image: "localhost/app:gate",
-  lifecycle: "attempt",
-  env: {},
-  args: [],
-  mounts: [],
-  mountWorktree: null,
-  servesWorktree: false,
-  hold: false,
-  readiness: null,
-  readinessTimeoutMs: 60_000,
-  postReadyCommands: [],
-  ...over,
-});
+  env: Readonly<Record<string, string>>,
+): ReturnType<typeof resolveGateStack>["containers"][number] =>
+  resolveGateStack({
+    containers: [
+      { name: "app", image: "localhost/app:gate", env, mountWorktree: "/app" },
+    ],
+    steps: [{ name: "test", in: "app", command: ["npm", "test"] }],
+  }).containers[0]!;
 
 const BUILDERS: ReadonlyArray<readonly [string, () => RuntimeInvocation]> = [
   [
@@ -74,10 +81,7 @@ const BUILDERS: ReadonlyArray<readonly [string, () => RuntimeInvocation]> = [
         attach: { kind: "pod", podName: "sandbar-pod-42" },
         // A consumer's own gate env moves too: `config.env` is not the only
         // record that can hold a credential.
-        container: gateContainer({
-          env: { DB_PASSWORD: SECRET, CI: "false" },
-          mountWorktree: "/app",
-        }),
+        container: gateContainer({ DB_PASSWORD: SECRET }),
         worktreePath: "/wt",
         hideWorktreeGit: true,
       }),
@@ -134,6 +138,51 @@ describe("a podman argv never has `=` after -e (#154)", () => {
       expect(specs(argv)).toContain(key);
       expect(argv).not.toContain(`${key}=${value}`);
     }
+  });
+});
+
+// The scan the header promises. Podman spells the flag `-e` or `--env`, and an
+// argv element is a STRING LITERAL — prose quotes it in backticks, which is
+// why those two forms are what is banned and why every header that states the
+// rule is untouched by this.
+const SRC = dirname(fileURLToPath(import.meta.url));
+const ENV_FLAG = /["'](?:-e|--env)["']/g;
+const ENV_FLAG_HOME = "runtime.ts";
+
+const envFlagCounts = (source: string): number =>
+  [...source.matchAll(ENV_FLAG)].length;
+
+describe("the -e flag has one production spelling (#154)", () => {
+  it("counts the flag in either of podman's spellings", () => {
+    expect(envFlagCounts('["-e", key]; ["--env", key]; `-e` in prose')).toBe(2);
+  });
+
+  it("is written in runtime.ts and in no other production module", async () => {
+    const files = (await readdir(SRC))
+      .filter(
+        (file) =>
+          file.endsWith(".ts") &&
+          !file.endsWith(".test.ts") &&
+          !file.endsWith(".test-util.ts"),
+      )
+      .sort();
+    const counts = Object.fromEntries(
+      await Promise.all(
+        files.map(async (file) => [
+          file,
+          envFlagCounts(await readFile(join(SRC, file), "utf8")),
+        ]),
+      ),
+    ) as Record<string, number>;
+
+    expect(
+      Object.entries(counts).filter(
+        ([file, count]) => count > 0 && file !== ENV_FLAG_HOME,
+      ),
+    ).toEqual([]);
+    // And the home itself still has it, so a rename cannot leave the scan
+    // asserting a rule nothing enforces any more.
+    expect(counts[ENV_FLAG_HOME]).toBe(1);
   });
 });
 

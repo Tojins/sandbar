@@ -52,6 +52,7 @@ import {
   parseCodexJsonLine,
   parseCodexRolloutLine,
   parseStreamJsonLine,
+  podman,
   prepareWorktree,
   reclaimIssueClone,
   registerShutdown,
@@ -3468,5 +3469,85 @@ describe("sandboxRunArgs (#42)", () => {
       base.imageName,
       "infinity",
     ]);
+  });
+});
+
+// #154's sandbox half — the one of the four `-e` call sites no other test can
+// see. `merger.ts`'s is pinned end to end by merger-capture.test.ts and
+// `gate-stack.ts`'s two by gate-stack-podman.test.ts, while every assertion
+// above reads `sandboxRunArgs`'s return value and would stay green with the
+// provider's `{ env }` deleted — and a sandbox whose podman carries no
+// environment gets NO variables at all, because podman silently omits a bare
+// `-e KEY` its own environment does not hold. So this drives `create` itself,
+// through the same PATH shim the merger's test uses: the provider spawns the
+// bare name `podman`, so a shim on PATH sees exactly what the real one would.
+describe("the podman provider's run environment (#154)", () => {
+  const TOKEN = "sk-ant-oat01-thisisthewholetoken";
+  const PAT = "ghp_thisisthewholepat";
+
+  it("hands the values to podman's own environment, never to its argv", async () => {
+    const root = await mkdtemp(join(tmpdir(), "asb-podman-env-"));
+    const callLog = join(root, "calls.jsonl");
+    const shim = join(root, "podman");
+    await writeFile(
+      shim,
+      [
+        `#!${process.execPath}`,
+        'const { appendFileSync } = require("node:fs");',
+        "const args = process.argv.slice(2);",
+        // Resolve the bare keys the way podman does, out of the child's OWN
+        // environment, so the log records what the container would receive.
+        'const named = args.filter((a, i) => i > 0 && args[i - 1] === "-e");',
+        "const env = Object.fromEntries(named.map((k) => [k, process.env[k]]));",
+        `appendFileSync(${JSON.stringify(callLog)}, JSON.stringify({ args, env }) + "\\n");`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const originalPath = process.env["PATH"];
+    process.env["PATH"] = `${root}:${originalPath ?? ""}`;
+
+    try {
+      const provider = podman({ imageName: "localhost/img:test" });
+      const handle = await provider.create({
+        worktreePath: "/host/wt",
+        hostRepoPath: "/host/repo",
+        mounts: [{ hostPath: "/host/wt", sandboxPath: SANDBOX_REPO_DIR }],
+        env: { GH_TOKEN: PAT, CLAUDE_CODE_OAUTH_TOKEN: TOKEN },
+      });
+      await handle.close();
+
+      const calls = (await readFile(callLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              args: string[];
+              env: Record<string, string | undefined>;
+            },
+        );
+      const run = calls.find((call) => call.args[0] === "run");
+      expect(run).toBeDefined();
+      expect(run?.env).toEqual({
+        GH_TOKEN: PAT,
+        CLAUDE_CODE_OAUTH_TOKEN: TOKEN,
+        // The provider's own, which travels the same way as the credentials.
+        HOME: provider.sandboxHomedir,
+      });
+      // The half the issue is about: nothing in the argv is the secret, so the
+      // `Command failed: <argv joined>` message a failed run raises — recorded
+      // as a hard-error `reason` and served by the UI — cannot carry one.
+      expect(run?.args.join(" ")).not.toContain(PAT);
+      expect(run?.args.join(" ")).not.toContain(TOKEN);
+      // What the argv carries instead: the bare keys podman copied those
+      // values out of, in `sandboxRunArgs`'s order.
+      expect(
+        run?.args.filter((a, i) => i > 0 && run.args[i - 1] === "-e"),
+      ).toEqual(["GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "HOME"]);
+    } finally {
+      if (originalPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = originalPath;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

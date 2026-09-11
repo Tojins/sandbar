@@ -26,6 +26,12 @@
 // `RuntimeInvocation` is what that costs: a builder that emits any `-e` returns
 // its argv and its env TOGETHER, so a caller cannot run the argv without the
 // values it names. Builders that emit no `-e` stay plain string arrays.
+//
+// `envArgs` below is the ONE production spelling of the flag, and runtime.test.ts
+// asserts exactly that by scanning `src/`: a table test can only cover the
+// builders someone added to it, so the scan is what a fifth builder written
+// with `KEY=VALUE` runs into. A module that genuinely needs the flag for
+// something else has to move that assertion deliberately.
 import { execFile } from "node:child_process";
 
 export const RUNTIME = "podman";

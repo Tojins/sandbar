@@ -58,7 +58,6 @@ const container = (
   ...over,
 });
 
-
 describe("mountSpec", () => {
   it("resolves a relative hostPath against the gated worktree", () => {
     expect(
