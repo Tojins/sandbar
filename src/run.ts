@@ -97,8 +97,9 @@
 // At capacity below `maxParallelIssues`, one cancellable wait races the next
 // slot completion against `pollIntervalMs`. A poll refreshes source, issue,
 // chunk and member refs before running the ordinary plan. A failed refresh is
-// reported and waits for the next wake instead of killing the daemon; startup
-// preflight remains fatal. A no-op poll is silent. A stable label-actor
+// reported and waits for the next wake instead of killing the daemon, unless
+// `decideAfterFailedRefresh` says this daemon is a drained restart whose exit
+// reads no refs at all (#146); startup preflight remains fatal. A no-op poll is silent. A stable label-actor
 // exclusion is recorded on each poll because its required diagnostic
 // makes that recompute reportable. Source movement from either
 // a human push or this process refreshes the image inputs.
