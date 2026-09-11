@@ -75,6 +75,10 @@ export type UiState = {
       readonly at: string;
     } | null;
     readonly exit: { readonly tag: string; readonly reason: string } | null;
+    // The deploy channel's pending instruction (#146): set from the moment the
+    // request is observed, so a reader watching a long drain sees WHY nothing
+    // new is being admitted instead of an idle-looking pool.
+    readonly restart: { readonly detail: string; readonly at: string } | null;
     readonly complaints: readonly { readonly severity: "warning" | "error"; readonly text: string }[];
   };
   readonly pool: readonly PoolIssueState[];
@@ -150,6 +154,10 @@ function feedText(event: RunEvent): FeedEvent | null {
     case "idle":
       text = `idle · polling every ${event.pollIntervalMs}ms`;
       tone = "dim";
+      break;
+    case "restart-requested":
+      text = `restart requested · ${event.detail} · draining`;
+      tone = "warn";
       break;
     case "preflight":
       text = `preflight ${event.action} · ${event.detail}`;
@@ -396,6 +404,7 @@ export function reduceRunEvents(
   let lastRecompute: Extract<RunEvent, { kind: "recompute" }> | null = null;
   let waiting: readonly RecomputeWaiting[] = [];
   let exit: Extract<RunEvent, { kind: "exit" }> | null = null;
+  let restart: Extract<RunEvent, { kind: "restart-requested" }> | null = null;
   let ended = false;
   const complaints: Array<{ severity: "warning" | "error"; text: string }> = [];
   const feed: FeedEvent[] = [];
@@ -530,6 +539,9 @@ export function reduceRunEvents(
         break;
       case "idle":
         break;
+      case "restart-requested":
+        restart = event;
+        break;
       case "complaint":
         complaints.push({ severity: event.severity, text: event.message });
         break;
@@ -620,6 +632,7 @@ export function reduceRunEvents(
           }
         : null,
       exit: exit ? { tag: exit.tag, reason: exit.reason } : null,
+      restart: restart ? { detail: restart.detail, at: restart.ts } : null,
       complaints,
     },
     pool: [...issues.values()].sort((a, b) => a.issue - b.issue),

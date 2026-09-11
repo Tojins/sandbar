@@ -1,12 +1,19 @@
-// Exit vocabulary for the daemon pool (#87, #133).
+// Exit vocabulary for the daemon pool (#87, #133, #146).
 //
-// An empty plan is an idle state, never a terminal. Relaunch, the lifetime
-// admission budget, and its defensive recompute ceiling disappeared with that
-// finite-run model. Provider closure exits (quota or credential) use 4, stuck
-// after six consecutive issue terminals without a landing uses 2, and halted
-// covers faults sandbar cannot safely continue past (1). Scheduler decisions
-// own provider-closure/stuck precedence;
+// An empty plan is an idle state, never a terminal. The lifetime admission
+// budget and its defensive recompute ceiling disappeared with that finite-run
+// model. Provider closure exits (quota or credential) use 4, stuck after six
+// consecutive issue terminals without a landing uses 2, halted covers faults
+// sandbar cannot safely continue past (1), and a restart the box asked for uses
+// 75. Scheduler decisions own restart/provider-closure/stuck precedence;
 // run.ts constructs halted exits at the failure boundary.
+//
+// 75 is the one code an installation unit turns back into a start
+// (`RestartForceExitStatus=`, #146), so it has to be a code nothing else in
+// this system can produce: 1, 2 and 4 are the deliberate stops a human
+// inspects, and an unhandled Node throw is 1. EX_TEMPFAIL is the sysexits name
+// for exactly this claim — nothing is wrong, ask again — and sandbar spelled
+// the retired per-landing relaunch (#65) with it for the same reason.
 //
 // A landing for the stuck counter is a source merge, a reviewed chunk merged
 // onto source, or a DONE member landed on its chunk branch. The last matters on
@@ -14,7 +21,7 @@
 // deferrals do not count: the daemon suppresses an immediate retry and lets the
 // poll timer provide the next observation instead.
 //
-// All four are `TerminalExit`s. `run.ts` writes that value as one exit event;
+// All five are `TerminalExit`s. `run.ts` writes that value as one exit event;
 // the UI renders it and service supervision reads only the process code (#132).
 // `EXIT_TAGS` is exhaustive over the union so its table test moves with it.
 
@@ -37,6 +44,7 @@ export const MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING = 6;
 export const EXIT_CODE_HALTED = 1;
 export const EXIT_CODE_STUCK = 2;
 export const EXIT_CODE_QUOTA = 4;
+export const EXIT_CODE_RESTART = 75;
 
 // The terminal union as a VALUE, with ExitTag derived from it rather than the
 // other way round. That direction is what makes the table in
@@ -47,6 +55,7 @@ export const EXIT_TAGS = [
   "credential",
   "stuck",
   "halted",
+  "restart",
 ] as const;
 
 export type ExitTag = (typeof EXIT_TAGS)[number];
@@ -103,6 +112,18 @@ export function haltedExit(causes: readonly string[]): TerminalExit {
     tag: "halted",
     reason: `${named} — see the complaint event for details`,
     exitCode: EXIT_CODE_HALTED,
+  };
+}
+
+// The drain the box asked for, finished (#146). The detail is what the request
+// file carried — the commit the converging play applied — so the record names
+// which deploy this process stepped aside for, not merely that it did.
+export function restartExit(detail: string): TerminalExit {
+  return {
+    tag: "restart",
+    reason: `restart requested by the deployment of ${detail}; drained and ` +
+      "exiting for the unit to start the built driver",
+    exitCode: EXIT_CODE_RESTART,
   };
 }
 

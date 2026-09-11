@@ -175,8 +175,14 @@ import {
   haltedExit,
   credentialExit,
   quotaExit,
+  restartExit,
   stuckExit,
 } from "./exit-conditions.js";
+import {
+  clearRestartRequest,
+  readRestartRequest,
+  restartRequestPath,
+} from "./restart-request.js";
 import { type RunProviderState, createRunProviderState, recordProviderClosure } from "./inner-loop.js";
 import {
   type FinalizeInput,
@@ -423,15 +429,26 @@ export function closedProviderExit(
 
 function schedulerExit(
   reason: SchedulerExit,
-  pool: ContinuousPool<PlannedIssue, Terminal>,
-  providerExit: TerminalExit | null,
+  state: {
+    readonly pool: ContinuousPool<PlannedIssue, Terminal>;
+    readonly providerExit: TerminalExit | null;
+    readonly restartDetail: string | null;
+  },
 ): TerminalExit {
   switch (reason) {
-    case "provider-closed": {
-      if (!providerExit) throw new Error("scheduler selected provider closure without an exit");
-      return providerExit;
+    case "restart": {
+      if (state.restartDetail === null) {
+        throw new Error("scheduler selected a restart with no request observed");
+      }
+      return restartExit(state.restartDetail);
     }
-    case "stuck": return stuckExit(pool.noProgressSinceLanding);
+    case "provider-closed": {
+      if (!state.providerExit) {
+        throw new Error("scheduler selected provider closure without an exit");
+      }
+      return state.providerExit;
+    }
+    case "stuck": return stuckExit(state.pool.noProgressSinceLanding);
   }
 }
 
@@ -1310,6 +1327,15 @@ export async function run(
     (issue) => issue.id,
   );
   let providerExitPending: TerminalExit | null = null;
+  // The deployment channel (#146). The converging play leaves its request
+  // beside the config file it placed, so the installation directory is named
+  // once — by the loader — and a programmatic run with no config file simply
+  // has no channel (`run-start` already records that as `configPath: null`).
+  const restartRequestFile = options.configPath === undefined
+    ? null
+    : restartRequestPath(options.configPath);
+  // What the observed request carried, and the whole of the drain's state.
+  let restartRequested: string | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
   let deferredChunksForRecompute: string[] = [];
   let landingNumber = 0;
@@ -1321,6 +1347,18 @@ export async function run(
     const wake = await pool.waitForWake(config.pollIntervalMs);
     await renewOriginLease();
     return wake;
+  };
+
+  // One observation per recompute, and the request is latched: the play may
+  // overwrite a pending file with a newer commit, but this process is already
+  // leaving for whichever driver `current` names by the time it restarts, so a
+  // second reading would only move the detail in the record.
+  const observeRestartRequest = async (): Promise<void> => {
+    if (restartRequestFile === null || restartRequested !== null) return;
+    const pending = await readRestartRequest(restartRequestFile);
+    if (pending === null) return;
+    restartRequested = pending;
+    await runRecord.emit({ kind: "restart-requested", detail: pending });
   };
 
   const emitRecompute = async (
@@ -1570,6 +1608,23 @@ export async function run(
     branchImageRuns.push(nextBranchImages);
   };
 
+  // A request pending at startup has been answered by this very process (#146):
+  // the play asked for the built driver to be running, and it is. Clearing it
+  // BEFORE the loop is also what makes the restart exit unrepeatable — a
+  // request carried into the scheduler would drain straight back out, and the
+  // unit turns that exit code into another start. A removal that fails stops
+  // the run here rather than at the exit it would otherwise loop on.
+  if (restartRequestFile !== null) {
+    const cleared = await clearRestartRequest(restartRequestFile);
+    if (cleared !== null) {
+      await runRecord.emit({
+        kind: "preflight",
+        action: "restart-request-cleared",
+        detail: `Started for the deployment of ${cleared}`,
+      });
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
@@ -1582,8 +1637,17 @@ export async function run(
     for (;;) {
       iteration += 1;
       const planTrigger: RecomputeTrigger = nextPlanTrigger;
+      // Ahead of the poll's refresh, and ahead of the failure path that skips
+      // the rest of this iteration: a restart request is an instruction from
+      // the box, and a daemon that could only honour it while origin answers
+      // is a daemon a landed fetch regression could strand on the broken
+      // build. Under a pending restart the refresh is also work thrown away —
+      // nothing more will be admitted, and rebuilding the source images for a
+      // main that just moved is exactly the minutes the deploy is waiting on.
+      // The restarted driver does that once, with the new code.
+      await observeRestartRequest();
       let sourceChangedOnPoll = false;
-      if (planTrigger === "poll") {
+      if (planTrigger === "poll" && restartRequested === null) {
         const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
         if (refresh.failures.length > 0) {
           const message =
@@ -1820,6 +1884,7 @@ export async function run(
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         providerClosed,
+        restartRequested: restartRequested !== null,
       });
       const pollDidWork =
         sourceChangedOnPoll || planDiagnosticsChanged ||
@@ -1835,11 +1900,11 @@ export async function run(
       if (schedulerAction.kind === "exit") {
         await emitRecompute(iteration, planTrigger, resolution, [], landRequests);
         terminalExit = await announceExit(
-          schedulerExit(
-            schedulerAction.reason,
+          schedulerExit(schedulerAction.reason, {
             pool,
-            providerExitPending ?? closedProviderExit(config, providerState),
-          ),
+            providerExit: providerExitPending ?? closedProviderExit(config, providerState),
+            restartDetail: restartRequested,
+          }),
         );
         break;
       }

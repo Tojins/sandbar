@@ -25,23 +25,37 @@
 //
 //   1. recompute — a completion arrived while the plan was being built, so the
 //      snapshot describes a pool that no longer exists. Cheapest to rebuild.
-//   2. provider — a provider closed for the process (#109, #134). No new starts;
+//   2. restart  — the box has a newer build of this driver and asked this
+//      process to step aside (#146). It outranks both stops below because it
+//      is an INSTRUCTION rather than a condition, and because everything those
+//      two describe is run-local state a fresh process re-derives in seconds:
+//      a closed quota window and a red source branch are both rediscovered
+//      immediately, while a no-progress streak that the landed code fixes
+//      should not outlive it. It cannot loop — the request file is removed at
+//      startup, so the new process has nothing left to obey.
+//   3. provider — a provider closed for the process (#109, #134). No new starts;
 //      pending terminals land first, because committed-but-unlanded work is
 //      the expensive thing in this system; running work drains to its
 //      terminal (under a two-vendor config an issue routed to the other
 //      provider may genuinely finish); then exit 4. Outranks the backstop.
-//   3. stuck    — `noProgressBackstop` consecutive no-progress observations.
+//   4. stuck    — `noProgressBackstop` consecutive no-progress observations.
 //      Same shape as provider closure: land pending, drain active work, exit
 //      2. Evaluated on EVERY observation, not at quiescence — a deep queue
 //      refills every freed slot and is never quiescent until the candidates
 //      run out, which is the one case the backstop exists for.
-//   4. admit    — a free slot and something to put in it: a retry first, then
+//   5. admit    — a free slot and something to put in it: a retry first, then
 //      a candidate. Refill BEFORE landing, so a slot does
 //      not idle through gate-2; `next` says which of `land`/`wait` follows.
-//   5. land     — terminals are pending, or a human's `land` request is the
+//   6. land     — terminals are pending, or a human's `land` request is the
 //      only work and nothing is running to grow the chunk under it.
-//   6. wait     — wait on one cancellable race between a freed slot and the
+//   7. wait     — wait on one cancellable race between a freed slot and the
 //      poll timer. This is also the empty-plan action: the daemon stays alive.
+//
+// Restart and provider closure share `drainToward` because they are the same
+// stop: stop admitting, land what is already committed, let running work reach
+// its terminal, exit. Stuck deliberately keeps its own two lines — it does not
+// honour an outstanding `land` request on the way out, and folding it in here
+// would quietly change that.
 //
 // WHAT `recordLandingOutcome` COUNTS. `landed` is landings in the sense
 // exit-conditions.ts's header defines — source-branch merges, chunks landed on
@@ -74,7 +88,7 @@ export type SettledIssue<T, R> =
 
 export type PoolWake = "slot-freed" | "poll";
 
-export type SchedulerExit = "provider-closed" | "stuck";
+export type SchedulerExit = "restart" | "provider-closed" | "stuck";
 export type SchedulerAction =
   | { readonly kind: "recompute" }
   | { readonly kind: "admit"; readonly next: "land" | "wait" }
@@ -95,7 +109,20 @@ export type SchedulerSnapshot = {
   readonly noProgressSinceLanding: number;
   readonly noProgressBackstop: number;
   readonly providerClosed: boolean;
+  readonly restartRequested: boolean;
 };
+
+// Stop admitting, land what is committed, drain the rest, then exit — the shape
+// every stop that is not a fault has. Only the tag differs.
+function drainToward(
+  reason: SchedulerExit,
+  state: SchedulerSnapshot,
+): SchedulerAction {
+  if (state.hasPendingTerminals || (state.hasLandRequests && state.active === 0)) {
+    return { kind: "land" };
+  }
+  return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason };
+}
 
 // The complete control decision for one scheduler observation. Keeping the
 // precedence here makes run.ts an executor: it performs I/O, refreshes this
@@ -103,15 +130,8 @@ export type SchedulerSnapshot = {
 // rules at several points in its outer loop.
 export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction {
   if (state.hasCompleted) return { kind: "recompute" };
-  if (
-    state.providerClosed &&
-    (state.hasPendingTerminals || (state.hasLandRequests && state.active === 0))
-  ) {
-    return { kind: "land" };
-  }
-  if (state.providerClosed) {
-    return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason: "provider-closed" };
-  }
+  if (state.restartRequested) return drainToward("restart", state);
+  if (state.providerClosed) return drainToward("provider-closed", state);
   if (state.noProgressSinceLanding >= state.noProgressBackstop) {
     if (state.hasPendingTerminals) return { kind: "land" };
     return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason: "stuck" };

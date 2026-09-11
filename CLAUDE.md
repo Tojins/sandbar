@@ -175,11 +175,21 @@ Provider closure by quota or a permanent credential refusal stops admissions
 and drains running and landing work before exit 4. Six consecutive issue
 terminals without a landing stop admissions and drain
 running work before exit 2. An unchanged `land` deferral waits for another
-trigger and advances no counter. Remaining exits are `stuck`, `quota`,
-`credential`, and `halted`; plan-empty, relaunch, budget, and the recompute
-ceiling are gone.
+trigger and advances no counter. A `restart-requested` file in the
+installation directory (#146) drains exactly the same way and exits 75, the one
+code an installation unit turns back into a start: the converging deploy writes
+it, the daemon reads it at the top of every recompute — ahead of the poll's
+fetch, so neither an unreachable origin nor a thrown-away source-image rebuild
+can hold the deploy — and removes it at startup, which is what keeps that exit
+from repeating. It outranks provider closure and the backstop because it is an
+instruction rather than a condition, and both of those are run-local state a
+fresh process re-derives in seconds. `src/restart-request.ts` owns the channel,
+including why it is a file beside the config rather than a signal or a per-poll
+commit compare. Remaining exits are `stuck`, `quota`,
+`credential`, `restart` and `halted`; plan-empty, relaunch, budget, and the
+recompute ceiling are gone.
 
-All four are one type, `TerminalExit`, and the run ends with exactly one
+All five are one type, `TerminalExit`, and the run ends with exactly one
 `exit` event whichever fired (#70/#132). `EXIT_TAGS` is exhaustive over the
 union and a table test asserts every tag has a code and reason. The pool owns
 run-wide starts, ongoing work, landings, and the terminal-without-landing
@@ -512,7 +522,9 @@ outcomes.
   events, and finished issues across recent run directories. `src/ui-server.ts`
   serves the shipped vanilla page and `/state.json`, rereading the record on
   every request. Terminal causes stay full in the event feed and lead the
-  compact HARD-ERROR retry, parked and recently-finished projections. A live
+  compact HARD-ERROR retry, parked and recently-finished projections. A pending
+  restart request stays on the header for the whole drain, so a pool that has
+  stopped admitting says why (#146). A live
   run hosts it in-process; `sandbar ui` hosts the same
   module for post-mortem browsing. The page polls every two seconds. A growing
   file plus live matching `run.pid` means working; a dead/missing PID without
