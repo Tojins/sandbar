@@ -1,0 +1,123 @@
+---
+# The driver is main's build (#146).
+#
+# Exact driver tags, `~/installation/driver/` and the unit's ExecStartPre are
+# gone with this: config and driver now arrive in the same commit, so pinning
+# one against the other was a version negotiation between a repository and
+# itself. What replaces the pin is this: one build per commit, and a `current`
+# symlink that moves only after `npm run build` succeeded. A running daemon
+# therefore never sees its own `dist/` change under it — a restart is what
+# switches to a new build — and a failed build fails the play before anything
+# asks a daemon to restart.
+#
+# The source checkout here is the box's own, NOT the one ansible-pull owns:
+# updating the tree a running play is being read from would let a mid-play
+# landing swap the task file that is about to be included. It is updated in this
+# same play and before the installation configs are copied, so the driver is
+# never OLDER than the config it will read — the one direction `requiresSandbar`
+# tolerates.
+- name: Create the driver build root
+  ansible.builtin.file:
+    path: "{{ sandbar_driver_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Update the box's copy of the driver source
+  ansible.builtin.git:
+    repo: "{{ sandbar_driver_repo }}"
+    dest: "{{ sandbar_driver_src }}"
+    version: "{{ sandbar_driver_branch }}"
+    force: true
+  register: sandbar_driver_source
+
+- name: Name the commit this box builds its driver from
+  ansible.builtin.set_fact:
+    sandbar_driver_commit: "{{ sandbar_driver_source.after }}"
+
+- name: Look for a completed build of that commit
+  ansible.builtin.stat:
+    path: "{{ sandbar_driver_build }}/{{ sandbar_driver_stamp }}"
+  register: sandbar_driver_built
+
+# A real clone rather than an export, because #69's driver identity reads the
+# tree `dist/` was built from: the run record then names the exact commit
+# driving it instead of reporting an unattributable install.
+- name: Build the driver for that commit
+  when: not sandbar_driver_built.stat.exists
+  block:
+    - name: Check the commit out into its own build directory
+      ansible.builtin.git:
+        repo: "{{ sandbar_driver_src }}"
+        dest: "{{ sandbar_driver_build }}"
+        version: "{{ sandbar_driver_commit }}"
+        force: true
+
+    - name: Install the build's dependencies
+      ansible.builtin.command:
+        cmd: npm ci --no-audit --no-fund
+        chdir: "{{ sandbar_driver_build }}"
+      changed_when: true
+
+    - name: Compile the driver
+      ansible.builtin.command:
+        cmd: npm run build
+        chdir: "{{ sandbar_driver_build }}"
+      changed_when: true
+
+    - name: Look for the CLI the build had to produce
+      ansible.builtin.stat:
+        path: "{{ sandbar_driver_build }}/dist/cli.js"
+      register: sandbar_driver_cli
+
+    - name: Refuse a build that produced no CLI
+      ansible.builtin.assert:
+        that: sandbar_driver_cli.stat.exists
+        fail_msg: >-
+          npm run build reported success in {{ sandbar_driver_build }} but left
+          no dist/cli.js. {{ sandbar_driver_current }} has not been moved.
+
+    - name: Mark the build complete
+      ansible.builtin.copy:
+        content: "{{ sandbar_driver_commit }}\n"
+        dest: "{{ sandbar_driver_build }}/{{ sandbar_driver_stamp }}"
+        owner: root
+        group: root
+        mode: "0444"
+
+- name: Read the build the box is currently running
+  ansible.builtin.stat:
+    path: "{{ sandbar_driver_current }}"
+  register: sandbar_driver_link
+
+- name: Point the current driver at that build
+  ansible.builtin.file:
+    src: "{{ sandbar_driver_build }}"
+    dest: "{{ sandbar_driver_current }}"
+    state: link
+    force: true
+    owner: root
+    group: root
+  register: sandbar_driver_flip
+
+# The previous build stays so a revert lands on bytes that are already on disk.
+# Anything older is what a revert would have to rebuild anyway.
+- name: List the driver builds on disk
+  ansible.builtin.find:
+    paths: "{{ sandbar_driver_builds }}"
+    file_type: directory
+    depth: 1
+  register: sandbar_driver_build_dirs
+
+- name: Remove every build but the current and the previous one
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ sandbar_driver_build_dirs.files | map(attribute='path')
+       | reject('in', sandbar_driver_kept) | list }}
+  vars:
+    sandbar_driver_kept:
+      - "{{ sandbar_driver_build }}"
+      - "{{ sandbar_driver_link.stat.lnk_target | default('') }}"

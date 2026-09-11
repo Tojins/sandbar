@@ -48,7 +48,11 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // startup faults share the run's internal-failure path (#132). The two
   // pre-record startup catches classify workdir/preflight and origin-lock
   // refusal while running the cleanup that releases the local lock (#139).
-  "run.ts": 11,
+  // The twelfth is the restart request's startup clear (#146), which stops
+  // through `stopAtStartup` like every other post-lock startup fault: the fault
+  // is recorded as a complaint and a halted exit, and cleanup releases the
+  // origin lease — none of which happens if it escapes `run()` instead.
+  "run.ts": 12,
   "sandbox-stack.ts": 2,
   // The HTTP request boundary maps record/reducer failures to a 500 response
   // for the polling page (#132).

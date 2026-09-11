@@ -1,0 +1,10 @@
+# The box converging on {{ sandbar_driver_branch }} (#146). Timer-activated;
+# never enabled on its own.
+[Unit]
+Description=Converge this host on {{ sandbar_driver_repo }} {{ sandbar_driver_branch }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sandbar-pull

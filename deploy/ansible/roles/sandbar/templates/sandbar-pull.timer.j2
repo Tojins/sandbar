@@ -1,0 +1,12 @@
+# Every {{ sandbar_pull_interval }}, measured from the end of the last run so a
+# slow play cannot queue behind itself (#146).
+[Unit]
+Description=Converge this host on {{ sandbar_driver_branch }} every {{ sandbar_pull_interval }}
+
+[Timer]
+OnBootSec={{ sandbar_pull_interval }}
+OnUnitInactiveSec={{ sandbar_pull_interval }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

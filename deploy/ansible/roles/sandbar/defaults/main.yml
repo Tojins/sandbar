@@ -7,12 +7,40 @@ sandbar_ubuntu_releases:
   - "26.04"
 
 # Required list. Every entry names `user`, `project`, `clone_url`, and
-# `reader_port`; `driver_tag` and `config_src` are optional.
+# `reader_port`; `config_src` is optional.
 sandbar_installations: []
 
-# Exact driver tag used when an installation does not override it. Branches,
-# ranges and commits are deliberately refused: a restart must be repeatable.
-sandbar_driver_tag: github:Tojins/sandbar#v0.39.7
+# Continuous deployment (#146): a commit on this branch of this repository is
+# the deploy. The box pulls it every interval and applies it to itself, and the
+# driver every installation executes is that commit's build.
+sandbar_driver_repo: https://github.com/Tojins/sandbar.git
+sandbar_driver_branch: main
+sandbar_driver_root: /opt/sandbar
+# The box's own copy of the driver source, separate from the checkout
+# ansible-pull owns: the play must not rewrite the tree it is being read from.
+sandbar_driver_src: "{{ sandbar_driver_root }}/src"
+sandbar_driver_builds: "{{ sandbar_driver_root }}/builds"
+# What every unit's ExecStart names. A symlink, flipped only after a build
+# succeeded, so a running daemon never sees its own `dist/` change under it.
+sandbar_driver_current: "{{ sandbar_driver_root }}/current"
+# Resolved once tasks/driver.yml knows which commit it is building.
+sandbar_driver_build: "{{ sandbar_driver_builds }}/{{ sandbar_driver_commit }}"
+# Written last, so a failed or interrupted build never looks complete.
+sandbar_driver_stamp: built-commit
+
+sandbar_pull_dir: /var/lib/sandbar/deploy
+sandbar_pull_interval: 5min
+# What the bootstrap makes the box remember, so an unattended pull can converge
+# without the operator's environment.
+sandbar_operator_keys_file: /etc/sandbar/operator-ssh-keys
+
+# The file the play leaves in an installation directory to ask its daemon to
+# drain and exit for a restart, and the code it then exits with. The reading
+# ends are `RESTART_REQUEST_FILE` and `EXIT_CODE_RESTART` in src; they are one
+# contract with the unit's `RestartForceExitStatus=` and deploy-unit.test.ts
+# pins all three together.
+sandbar_restart_request_file: restart-requested
+sandbar_restart_exit_status: 75
 
 sandbar_stop_timeout_sec: 900
 
@@ -41,6 +69,8 @@ sandbar_ui_http_port: 80
 sandbar_ui_root: /var/www/sandbar
 # Successful requests included, so the next incident has a who-fetched-what.
 sandbar_ui_access_log: /var/log/caddy/sandbar-ui.log
+# Where the convergence script records each attempt for that index to render.
+sandbar_deploy_status_file: deploy.json
 
 # An installation may override either identity in its inventory entry.
 sandbar_git_name: sandbar-bot

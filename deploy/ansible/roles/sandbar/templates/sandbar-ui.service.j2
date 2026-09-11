@@ -1,14 +1,20 @@
 # Installed once in each installation user's systemd session (#149).
+#
+# No `Requires=`: it was there so a failed driver install could not launch a
+# stale reader, and there is no install at start any more (#146). Dropping it is
+# what lets the converging play restart this reader onto a new build without
+# that restart pulling a deliberately stopped daemon back up. `PartOf=` still
+# carries deliberate daemon stops and restarts here, and a daemon crash still
+# leaves the report available.
 [Unit]
 Description=sandbar standalone run UI for {{ sandbar_project }}
-Requires=sandbar.service
 PartOf=sandbar.service
 After=sandbar.service
 
 [Service]
 Type=simple
 WorkingDirectory={{ sandbar_checkout }}
-ExecStart=/usr/bin/node {{ sandbar_installation_dir }}/driver/node_modules/sandbar/dist/cli.js ui --config {{ sandbar_installation_dir }}/sandbar.config.mjs --port {{ sandbar_reader_port }}
+ExecStart=/usr/bin/node {{ sandbar_driver_current }}/dist/cli.js ui --config {{ sandbar_installation_dir }}/sandbar.config.mjs --port {{ sandbar_reader_port }}
 Restart=no
 
 [Install]

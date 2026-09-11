@@ -130,6 +130,7 @@ export type EventInput =
       readonly pid: number;
     }
   | { readonly kind: "wake-lock"; readonly state: "held" | "refused" | "lost" | "released"; readonly detail: string }
+  | { readonly kind: "restart-requested"; readonly detail: string }
   | { readonly kind: "idle"; readonly pollIntervalMs: number }
   | { readonly kind: "preflight"; readonly action: string; readonly detail: string }
   | { readonly kind: "sweep"; readonly scope: "startup" | "quiescent"; readonly removed: readonly string[]; readonly failures: readonly string[] }

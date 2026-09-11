@@ -97,8 +97,9 @@
 // At capacity below `maxParallelIssues`, one cancellable wait races the next
 // slot completion against `pollIntervalMs`. A poll refreshes source, issue,
 // chunk and member refs before running the ordinary plan. A failed refresh is
-// reported and waits for the next wake instead of killing the daemon; startup
-// preflight remains fatal. A no-op poll is silent. A stable label-actor
+// reported and waits for the next wake instead of killing the daemon, unless
+// `decideAfterFailedRefresh` says this daemon is a drained restart whose exit
+// reads no refs at all (#146); startup preflight remains fatal. A no-op poll is silent. A stable label-actor
 // exclusion is recorded on each poll because its required diagnostic
 // makes that recompute reportable. Source movement from either
 // a human push or this process refreshes the image inputs.
@@ -175,8 +176,14 @@ import {
   haltedExit,
   credentialExit,
   quotaExit,
+  restartExit,
   stuckExit,
 } from "./exit-conditions.js";
+import {
+  clearRestartRequest,
+  readRestartRequest,
+  restartRequestPath,
+} from "./restart-request.js";
 import { type RunProviderState, createRunProviderState, recordProviderClosure } from "./inner-loop.js";
 import {
   type FinalizeInput,
@@ -243,6 +250,7 @@ import {
 } from "./plan-resolver.js";
 import {
   ContinuousPool,
+  decideAfterFailedRefresh,
   decideSchedulerAction,
   type SchedulerExit,
   type SettledIssue,
@@ -423,15 +431,26 @@ export function closedProviderExit(
 
 function schedulerExit(
   reason: SchedulerExit,
-  pool: ContinuousPool<PlannedIssue, Terminal>,
-  providerExit: TerminalExit | null,
+  state: {
+    readonly pool: ContinuousPool<PlannedIssue, Terminal>;
+    readonly providerExit: TerminalExit | null;
+    readonly restartDetail: string | null;
+  },
 ): TerminalExit {
   switch (reason) {
-    case "provider-closed": {
-      if (!providerExit) throw new Error("scheduler selected provider closure without an exit");
-      return providerExit;
+    case "restart": {
+      if (state.restartDetail === null) {
+        throw new Error("scheduler selected a restart with no request observed");
+      }
+      return restartExit(state.restartDetail);
     }
-    case "stuck": return stuckExit(pool.noProgressSinceLanding);
+    case "provider-closed": {
+      if (!state.providerExit) {
+        throw new Error("scheduler selected provider closure without an exit");
+      }
+      return state.providerExit;
+    }
+    case "stuck": return stuckExit(state.pool.noProgressSinceLanding);
   }
 }
 
@@ -522,6 +541,27 @@ export async function run(
     );
     process.exit(1);
   }
+
+  // The deployment channel's request (#146), read HERE — ahead of the locks,
+  // the origin lease, preflight and the image builds, which is where this
+  // startup's minutes are. What this process may later clear is the request
+  // this `execve` answered, and node pinned that build by realpathing its entry
+  // before `run()` was called, so the answer is fixed from before the first
+  // line of it. A request the converging play writes during the startup below
+  // names a commit this process is NOT running and has to survive to the first
+  // recompute; reading late could not tell the two apart.
+  //
+  // The path comes from the config file the loader resolved, because that
+  // directory IS the installation: a programmatic `run(config)` has no
+  // installation directory and therefore no channel, which `run-start` already
+  // records as `configPath: null`. A read that fails is a pre-lock refusal like
+  // the config's own, stderr-only because no record can be owned yet.
+  const restartRequestFile = options.configPath === undefined
+    ? null
+    : restartRequestPath(options.configPath);
+  const restartRequestAtStartup = restartRequestFile === null
+    ? null
+    : await readRestartRequest(restartRequestFile);
 
   installCleanupTraps();
 
@@ -1310,6 +1350,8 @@ export async function run(
     (issue) => issue.id,
   );
   let providerExitPending: TerminalExit | null = null;
+  // What the observed request carried, and the whole of the drain's state.
+  let restartRequested: string | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
   let deferredChunksForRecompute: string[] = [];
   let landingNumber = 0;
@@ -1321,6 +1363,18 @@ export async function run(
     const wake = await pool.waitForWake(config.pollIntervalMs);
     await renewOriginLease();
     return wake;
+  };
+
+  // One observation per recompute, and the request is latched: the play may
+  // overwrite a pending file with a newer commit, but this process is already
+  // leaving for whichever driver `current` names by the time it restarts, so a
+  // second reading would only move the detail in the record.
+  const observeRestartRequest = async (): Promise<void> => {
+    if (restartRequestFile === null || restartRequested !== null) return;
+    const pending = await readRestartRequest(restartRequestFile);
+    if (pending === null) return;
+    restartRequested = pending;
+    await runRecord.emit({ kind: "restart-requested", detail: pending });
   };
 
   const emitRecompute = async (
@@ -1570,6 +1624,31 @@ export async function run(
     branchImageRuns.push(nextBranchImages);
   };
 
+  // The request read before this startup began has been answered by this very
+  // process (#146): the play asked for the built driver to be running, and it
+  // is. Clearing it BEFORE the loop is what makes the restart exit
+  // unrepeatable — that same request carried into the scheduler would drain
+  // straight back out, and the unit turns that exit code into another start.
+  // Only that content is removed, so a newer request the play wrote while this
+  // startup ran stays for `observeRestartRequest`. A removal that fails stops
+  // the run here rather than at the exit it would otherwise loop on — through
+  // `stopAtStartup` like every other post-lock startup fault, so the record
+  // still gets its complaint and exit event (#70) and cleanup still releases
+  // the origin lease and the `run.pid` sidecar (#139).
+  if (restartRequestFile !== null && restartRequestAtStartup !== null) {
+    try {
+      if (await clearRestartRequest(restartRequestFile, restartRequestAtStartup)) {
+        await runRecord.emit({
+          kind: "preflight",
+          action: "restart-request-cleared",
+          detail: `Started for the deployment of ${restartRequestAtStartup}`,
+        });
+      }
+    } catch (err) {
+      return await stopAtStartup("restart-request-clear-failed", err);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
@@ -1582,14 +1661,42 @@ export async function run(
     for (;;) {
       iteration += 1;
       const planTrigger: RecomputeTrigger = nextPlanTrigger;
+      // Ahead of the poll, so the request is on the record from the first wake
+      // that can see it even when the refresh below fails and skips the rest of
+      // this iteration.
+      await observeRestartRequest();
       let sourceChangedOnPoll = false;
       if (planTrigger === "poll") {
         const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
         if (refresh.failures.length > 0) {
-          const message =
-            `Poll refresh failed; retrying in ${config.pollIntervalMs}ms: ` +
-            refresh.failures.join("; ");
-          await runRecord.emit({ kind: "complaint", severity: "warning", message });
+          // This iteration cannot plan or land on refs it did not get, and for
+          // an emptied pool it is also the only wake there is, so a fetch that
+          // stays broken would hold a latched restart here forever (#146).
+          // `decideAfterFailedRefresh` owns which of the two that is.
+          const stalled = decideAfterFailedRefresh({
+            restartRequested: restartRequested !== null,
+            active: pool.activeCount,
+            ongoing: pool.ongoingCount,
+            hasPendingTerminals: pool.hasPendingTerminals,
+          });
+          const next = stalled.kind === "exit"
+            ? "the pending restart needs none of it, so exiting"
+            : `retrying in ${config.pollIntervalMs}ms`;
+          await runRecord.emit({
+            kind: "complaint",
+            severity: "warning",
+            message: `Poll refresh failed; ${next}: ${refresh.failures.join("; ")}`,
+          });
+          if (stalled.kind === "exit") {
+            terminalExit = await announceExit(
+              schedulerExit(stalled.reason, {
+                pool,
+                providerExit: providerExitPending ?? closedProviderExit(config, providerState),
+                restartDetail: restartRequested,
+              }),
+            );
+            break;
+          }
           nextPlanTrigger = await waitForSchedulerWake();
           continue;
         }
@@ -1598,7 +1705,14 @@ export async function run(
         // a poll boundary and must not spend that guard.
         pool.beginPoll();
         sourceChangedOnPoll = refresh.sourceChanged;
-        if (sourceChangedOnPoll) {
+        // A pending restart admits nothing more, so rebuilding this run's
+        // images for a source that just moved is minutes the deploy waits on
+        // and the restarted driver spends again with the new code. That case is
+        // the COMMON one here, not an edge: the commit the play applied is a
+        // commit on this same source branch. Landing keeps working without it —
+        // gate-2 resolves its branch images from the merger worktree, which is
+        // the merge result rather than either input.
+        if (sourceChangedOnPoll && restartRequested === null) {
           const line = `origin/${config.sourceBranch} moved during poll; refreshing source images`;
           await runRecord.emit({ kind: "preflight", action: "origin-refreshed", detail: line });
           await refreshSourceImages();
@@ -1820,6 +1934,7 @@ export async function run(
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         providerClosed,
+        restartRequested: restartRequested !== null,
       });
       const pollDidWork =
         sourceChangedOnPoll || planDiagnosticsChanged ||
@@ -1835,11 +1950,11 @@ export async function run(
       if (schedulerAction.kind === "exit") {
         await emitRecompute(iteration, planTrigger, resolution, [], landRequests);
         terminalExit = await announceExit(
-          schedulerExit(
-            schedulerAction.reason,
+          schedulerExit(schedulerAction.reason, {
             pool,
-            providerExitPending ?? closedProviderExit(config, providerState),
-          ),
+            providerExit: providerExitPending ?? closedProviderExit(config, providerState),
+            restartDetail: restartRequested,
+          }),
         );
         break;
       }

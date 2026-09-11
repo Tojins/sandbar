@@ -39,12 +39,14 @@ nowhere to run it from that operates on the wrong repo.
 sandbar can still `import { run } from "sandbar"` and call it.
 
 An unattended daemon has a different installation boundary: keep one neutral
-development/test recipe in the consumer repo, and place its config, environment
-and exact-tag driver in one private installation directory on the host. One
-Ansible inventory entry connects those pieces and points the config's `cwd` at
-the consumer clone; the consumer repo needs no sandbar dependency or runtime
-config. The [Ansible host contract](deploy/ansible/README.md) is the concrete
-recipe this repository ships.
+development/test recipe in the consumer repo, and place its config and
+environment in one private installation directory on the host, with the driver
+outside the consumer checkout. One installation entry connects those pieces and
+points the config's `cwd` at the consumer clone; the consumer repo needs no
+sandbar dependency or runtime config. The
+[Ansible host contract](deploy/ansible/README.md) is the concrete recipe this
+repository ships — there the driver is the box's own build of `main`, deployed
+by the same commit as the config that reads it.
 
 ### `sandbar gate` — the gate stack on its own
 
@@ -292,12 +294,21 @@ a landing. It bounds persistent failures such as a red source branch or a
 misconfigured gate stack. By default the wake lock is released while idle;
 `keepAwakeWhileIdle: true` keeps it for the daemon's lifetime.
 
+A `restart-requested` file beside the config file is how a deployment asks a
+running daemon to step aside for new code: the daemon stops admitting, lands
+what is already committed, and exits 75 once nothing is running — the one exit
+a supervisor should turn back into a start (`RestartForceExitStatus=`), and the
+one it reaches only because it was asked. At startup it removes the request it
+was started to answer, so that exit cannot repeat, and leaves one written since
+for the deployment that wrote it.
+
 To run daemons unattended on a dedicated Linux box, `deploy/ansible/` is the
 host contract: one neutral recipe in the consumer repo, one private installation
-directory, and one inventory entry. The role creates an isolated Linux user,
-consumer clone, rootless Podman session and systemd unit pair per project. Each
-exact-tag driver lives outside its consumer checkout; starts neither pull nor
-install the consumer's development tree, and never restart on their own.
+directory, and one installation entry. The role creates an isolated Linux user,
+consumer clone, rootless Podman session and systemd unit pair per project. The
+driver lives outside every consumer checkout; starts neither pull nor install
+the consumer's development tree, and a daemon restarts only when it has been
+asked to and has finished draining.
 [`deploy/ansible/README.md`](deploy/ansible/README.md) has the by-hand steps.
 
 ### The three inner-loop budgets

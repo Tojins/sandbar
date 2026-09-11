@@ -13,6 +13,44 @@ describe("run event reducer", () => {
       .toBe("excluded: ready-for-agent label actor unknown");
   });
 
+  // A drain can take an hour, and a reader who cannot see the request would
+  // see only a pool that stopped admitting (#146).
+  it("keeps a pending restart visible for the whole drain", () => {
+    const events = [
+      at(1, "2026-09-11T09:00:00Z", {
+        kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: "/i/c.mjs",
+        workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-11T09:01:00Z", { kind: "restart-requested", detail: "abc1234" }),
+    ];
+    const draining = reduceRunEvents(events, {
+      now: new Date("2026-09-11T09:02:00Z"), pidAlive: true,
+    });
+    expect(draining.run.restart).toEqual({ detail: "abc1234", at: "2026-09-11T09:01:00Z" });
+    expect(draining.events[0]).toMatchObject({
+      text: "restart requested · abc1234 · draining", tone: "warn",
+    });
+
+    const exited = reduceRunEvents([
+      ...events,
+      at(3, "2026-09-11T09:05:00Z", {
+        kind: "exit", tag: "restart", reason: "drained", exitCode: 75,
+      }),
+    ], { now: new Date("2026-09-11T09:06:00Z"), pidAlive: false });
+    expect(exited.run.restart).toEqual({ detail: "abc1234", at: "2026-09-11T09:01:00Z" });
+    expect(exited.run.exit).toEqual({ tag: "restart", reason: "drained" });
+  });
+
+  it("reports no pending restart on a run nobody asked to stop", () => {
+    const state = reduceRunEvents([
+      at(1, "2026-09-11T09:00:00Z", {
+        kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+    ], { now: new Date("2026-09-11T09:01:00Z"), pidAlive: true });
+    expect(state.run.restart).toBeNull();
+  });
+
   it("passes container resource facts through to feed rows without defaulting absences", () => {
     const steps = {
       test: { ok: false, durationMs: 12, peakMemoryBytes: 4096, oomKilled: false },

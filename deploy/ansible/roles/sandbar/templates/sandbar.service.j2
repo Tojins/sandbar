@@ -8,12 +8,15 @@ After=podman.socket
 Type=simple
 WorkingDirectory={{ sandbar_checkout }}
 EnvironmentFile={{ sandbar_installation_dir }}/sandbar.env
-# The sole pre-start action reconciles this installation's exact driver tag.
-# A failed replacement removes the old stamp and exits non-zero, so systemd
-# never falls through to stale bytes already on disk.
-ExecStartPre=/usr/bin/node {{ sandbar_installation_dir }}/install-driver.mjs {{ sandbar_installation_driver_tag }}
-ExecStart=/usr/bin/node {{ sandbar_installation_dir }}/driver/node_modules/sandbar/dist/cli.js --config {{ sandbar_installation_dir }}/sandbar.config.mjs
+# No pre-start action: the driver is the box's build of main, flipped into place
+# by the converging play (#146), so a start never installs anything.
+ExecStart=/usr/bin/node {{ sandbar_driver_current }}/dist/cli.js --config {{ sandbar_installation_dir }}/sandbar.config.mjs
+# The daemon exits {{ sandbar_restart_exit_status }} only after the play asked it
+# to and it finished draining, which is the one exit that means "start me again
+# on the new build". Every other non-zero exit — 1, 2 and 4 — stays a stop for a
+# human to inspect, so `Restart=no` is deliberately kept beside this.
 Restart=no
+RestartForceExitStatus={{ sandbar_restart_exit_status }}
 KillMode=control-group
 ExitType=cgroup
 TimeoutStopSec={{ sandbar_stop_timeout_sec }}

@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { ContinuousPool, decideSchedulerAction, type SchedulerSnapshot } from "./scheduler.js";
+import {
+  ContinuousPool,
+  decideAfterFailedRefresh,
+  decideSchedulerAction,
+  type SchedulerSnapshot,
+} from "./scheduler.js";
 
 type Issue = { id: string };
 const issue = (id: string): Issue => ({ id });
@@ -142,7 +147,7 @@ describe("scheduler decisions", () => {
     active: 0, ongoing: 0, hasCompleted: false, hasPendingTerminals: false,
     hasCandidates: false, hasRetries: false, hasLandRequests: false, hasCapacity: true,
     noProgressSinceLanding: 0,
-    noProgressBackstop: 6, providerClosed: false, ...overrides,
+    noProgressBackstop: 6, providerClosed: false, restartRequested: false, ...overrides,
   });
 
   // Every row names the WHOLE action, reason included: the exit tags are the
@@ -156,6 +161,14 @@ describe("scheduler decisions", () => {
     ["provider closure exits", snapshot({ providerClosed: true }), { kind: "exit", reason: "provider-closed" }],
     ["provider closure outranks stuck", snapshot({ providerClosed: true, noProgressSinceLanding: 6 }), { kind: "exit", reason: "provider-closed" }],
     ["provider closure outranks admission", snapshot({ providerClosed: true, hasCandidates: true }), { kind: "exit", reason: "provider-closed" }],
+    ["restart lands pending terminals first", snapshot({ restartRequested: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
+    ["restart lands an outstanding land request", snapshot({ restartRequested: true, hasLandRequests: true }), { kind: "land" }],
+    ["restart drains running work", snapshot({ restartRequested: true, active: 1, ongoing: 1 }), { kind: "drain" }],
+    ["restart exits when idle", snapshot({ restartRequested: true }), { kind: "exit", reason: "restart" }],
+    ["restart outranks admission", snapshot({ restartRequested: true, hasCandidates: true }), { kind: "exit", reason: "restart" }],
+    ["restart outranks provider closure", snapshot({ restartRequested: true, providerClosed: true }), { kind: "exit", reason: "restart" }],
+    ["restart outranks stuck", snapshot({ restartRequested: true, noProgressSinceLanding: 6 }), { kind: "exit", reason: "restart" }],
+    ["a completion still outranks restart", snapshot({ restartRequested: true, hasCompleted: true, active: 1, ongoing: 1 }), { kind: "recompute" }],
     ["stuck exits", snapshot({ noProgressSinceLanding: 6 }), { kind: "exit", reason: "stuck" }],
     ["stuck outranks admission", snapshot({ noProgressSinceLanding: 6, hasCandidates: true }), { kind: "exit", reason: "stuck" }],
     ["stuck drains on every observation, not at quiescence", snapshot({ noProgressSinceLanding: 6, active: 3, ongoing: 3, hasCandidates: true }), { kind: "drain" }],
@@ -169,5 +182,20 @@ describe("scheduler decisions", () => {
     ["idle waits for the poll", snapshot(), { kind: "wait" }],
   ] as const)("%s", (_name, state, action) => {
     expect(decideSchedulerAction(state)).toEqual(action);
+  });
+
+  // A failed refresh ordinarily retries, and the deploy is the one thing that
+  // cannot afford it: an emptied pool's only wake is the poll timer, so a fetch
+  // that stays broken would otherwise hold the restart exit forever (#146).
+  it.each([
+    ["no restart: retry", snapshot(), { kind: "wait" }],
+    ["no restart, nothing running: still a retry", snapshot({ noProgressSinceLanding: 6, providerClosed: true }), { kind: "wait" }],
+    ["a drained restart exits without the refs", snapshot({ restartRequested: true }), { kind: "exit", reason: "restart" }],
+    ["restart with a slot still held retries", snapshot({ restartRequested: true, active: 1, ongoing: 1 }), { kind: "wait" }],
+    ["restart with work still ongoing retries", snapshot({ restartRequested: true, ongoing: 1 }), { kind: "wait" }],
+    ["restart with a terminal still to land retries", snapshot({ restartRequested: true, hasPendingTerminals: true }), { kind: "wait" }],
+    ["an outstanding land request could not land on refs this poll lacks", snapshot({ restartRequested: true, hasLandRequests: true }), { kind: "exit", reason: "restart" }],
+  ] as const)("failed poll refresh: %s", (_name, state, action) => {
+    expect(decideAfterFailedRefresh(state)).toEqual(action);
   });
 });

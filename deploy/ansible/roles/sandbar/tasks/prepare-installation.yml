@@ -16,19 +16,13 @@
     directory_mode: "0700"
     mode: preserve
   when: sandbar_installation.config_src is defined
+  register: sandbar_installation_copy
 
-- name: Install the role-owned driver installer
-  ansible.builtin.copy:
-    src: install-driver.mjs
-    dest: "{{ sandbar_installation_dir }}/install-driver.mjs"
-    owner: "{{ sandbar_user }}"
-    group: "{{ sandbar_user }}"
-    mode: "0500"
-
-- name: Install the shared driver reconciliation module
-  ansible.builtin.copy:
-    src: driver-install.mjs
-    dest: "{{ sandbar_installation_dir }}/driver-install.mjs"
-    owner: "{{ sandbar_user }}"
-    group: "{{ sandbar_user }}"
-    mode: "0400"
+# Keyed by user, because this pass and the unit pass are two separate loops over
+# the installation list: a bare register would hold only the last entry's result
+# by the time installation.yml asks whether THIS installation's files moved.
+- name: Remember whether this installation's files changed
+  ansible.builtin.set_fact:
+    sandbar_installation_files_changed: >-
+      {{ sandbar_installation_files_changed | default({})
+         | combine({sandbar_user: sandbar_installation_copy is changed}) }}

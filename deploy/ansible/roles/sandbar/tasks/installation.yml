@@ -53,3 +53,28 @@
 
 - name: Install the standalone UI unit
   ansible.builtin.include_tasks: ui.yml
+
+# Continuous deployment's last step (#146). The play never restarts a daemon
+# itself: a restart while an issue is running or landing would abort that work.
+# It leaves the commit it applied in the installation directory instead, and the
+# daemon drains and exits for it at a moment of its own choosing. A stopped
+# daemon is left stopped — exits 1, 2 and 4 are stops a human inspects, and a
+# converging play that started them would turn those into a retry loop; the
+# request simply waits, and a start clears it.
+#
+# Host-level changes are deliberately not in this condition: unattended security
+# upgrades already replace packages under a running daemon, so a box-wide freeze
+# would not buy an invariant this box has today and would couple the
+# installations' queues.
+- name: Ask the daemon to restart into what this play changed
+  ansible.builtin.copy:
+    content: "{{ sandbar_driver_commit }}\n"
+    dest: "{{ sandbar_installation_dir }}/{{ sandbar_restart_request_file }}"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0600"
+  when: >-
+    sandbar_driver_flip is changed
+    or sandbar_installation_files_changed[sandbar_user] | default(false)
+    or sandbar_daemon_unit is changed
+    or sandbar_ui_unit is changed

@@ -40,8 +40,10 @@ dispatches two subcommands: `sandbar gate` → `runGateCommand` (#45), exported
 from the package root beside `run`, and `sandbar ui` (#132), the standalone
 host of the run UI for post-mortem browsing.
 
-An installation supplies `sandbar.config.mjs`, credentials and an exact-tag
-driver outside its consumer repository. The consumer repo supplies neutral
+An installation supplies `sandbar.config.mjs`, credentials and a driver outside
+its consumer repository — an exact-tag install for an `npm i -D sandbar`
+consumer, the box's own build of `main` for the deployment this repo ships
+(#146). The consumer repo supplies neutral
 development inputs: its `Containerfile`(s), anchor docs (`CLAUDE.md`,
 `CONTEXT.md`, optional ADR dir), and everything its **gate stack**
 (`config.gateStack`, #24) evaluates. Coding standards for the implementer and
@@ -167,19 +169,36 @@ image inputs whether sandbar or a human moved it; each admission captures one
 immutable agent/branch-image bundle, so in-flight work keeps its original pair.
 No-op polls write nothing; a queue-label actor exclusion is a required
 per-recompute diagnostic and therefore makes that poll reportable. A failed
-poll fetch is reported and retried after another interval; only the startup
-fetch remains a preflight refusal.
+poll fetch is reported and retried after another interval — unless a latched
+restart has nothing left to drain, the one state whose action needs none of the
+refs the fetch did not get (#146); only the startup fetch remains a preflight
+refusal.
 The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
 
 Provider closure by quota or a permanent credential refusal stops admissions
 and drains running and landing work before exit 4. Six consecutive issue
 terminals without a landing stop admissions and drain
 running work before exit 2. An unchanged `land` deferral waits for another
-trigger and advances no counter. Remaining exits are `stuck`, `quota`,
-`credential`, and `halted`; plan-empty, relaunch, budget, and the recompute
-ceiling are gone.
+trigger and advances no counter. A `restart-requested` file in the
+installation directory (#146) drains exactly the same way and exits 75, the one
+code an installation unit turns back into a start: the converging deploy writes
+it, the daemon reads it at the top of every recompute — ahead of the poll, so a
+failed refresh cannot keep it off the record, and a refresh that keeps failing
+over a drained pool exits on it rather than waiting for refs the exit does not
+read — skips the source-image rebuild a moved source would otherwise trigger,
+since nothing more will be admitted, and
+removes at startup exactly the request it was started to answer, which is what
+keeps that exit from repeating without swallowing one the play wrote for a
+later commit while this startup ran. It outranks provider closure and the
+backstop because it is an
+instruction rather than a condition, and both of those are run-local state a
+fresh process re-derives in seconds. `src/restart-request.ts` owns the channel,
+including why it is a file beside the config rather than a signal or a per-poll
+commit compare. Remaining exits are `stuck`, `quota`,
+`credential`, `restart` and `halted`; plan-empty, relaunch, budget, and the
+recompute ceiling are gone.
 
-All four are one type, `TerminalExit`, and the run ends with exactly one
+All five are one type, `TerminalExit`, and the run ends with exactly one
 `exit` event whichever fired (#70/#132). `EXIT_TAGS` is exhaustive over the
 union and a table test asserts every tag has a code and reason. The pool owns
 run-wide starts, ongoing work, landings, and the terminal-without-landing
@@ -514,14 +533,16 @@ outcomes.
   events, and finished issues across recent run directories. `src/ui-server.ts`
   serves the shipped vanilla page and `/state.json`, rereading the record on
   every request. Terminal causes stay full in the event feed and lead the
-  compact HARD-ERROR retry, parked and recently-finished projections. A live
+  compact HARD-ERROR retry, parked and recently-finished projections. A pending
+  restart request stays on the header for the whole drain, so a pool that has
+  stopped admitting says why (#146). A live
   run hosts it in-process; `sandbar ui` hosts the same
   module for post-mortem browsing. The page polls every two seconds. A growing
   file plus live matching `run.pid` means working; a dead/missing PID without
   `run-end` means crashed. `uiPort` is per-workdir host configuration and a
   bind collision refuses the run; `sandbar ui --port` overrides it for a
   standalone deployment reader. One Caddy site indexes the installations at
-  `/` and strips each inventory project's `/<project>/` prefix before proxying
+  `/` and strips each installation project's `/<project>/` prefix before proxying
   to that reader; the page's relative `state.json` fetch therefore works both
   there and at its direct root. That site answers on the operator VPN's tunnel
   address alone and logs every request (#155): the page has no authentication
@@ -630,16 +651,22 @@ outcomes.
   would break every config already written. `src/requires-sandbar.ts` owns the
   argument, including why an unidentifiable driver fails the check.
 
-## This repo is an installation like any consumer (#39, #149, #151)
+## This repo is an installation like any consumer (#39, #149, #151, #146)
 
 The repository contains the neutral development and test inputs its branches
-own, including the root `Containerfile`. Its daemon configuration, credentials
-and exact-tag driver live in the sandbar user's private `~/installation/` on the
-box. `deploy/ansible/installations/sandbar/` is the source copied to that private
-directory, and `deploy/ansible/inventory.yml` chooses the driver tag. The
-inventory comment owns the rule that this installation's tag lags the checkout,
-so a regression cannot immediately become the driver responsible for repairing
-it.
+own, including the root `Containerfile`. Its daemon configuration and
+credentials live in the sandbar user's private `~/installation/` on the box;
+`deploy/ansible/installations/sandbar/` is the source copied to that private
+directory and `deploy/ansible/group_vars/all.yml` is the installation list both
+deploy channels read. A COMMIT ON MAIN IS THE DEPLOY (#146): the box runs
+`ansible-pull` every five minutes, builds that commit into
+`/opt/sandbar/builds/<sha>`, moves `current` only once the build succeeded, and
+asks each installation whose driver, files or unit changed to restart. Config
+and driver therefore arrive in the same commit, which retired the exact driver
+tag, `~/installation/driver/`, the unit's `ExecStartPre` and the rule that this
+installation's driver had to lag its checkout — a bad landing now costs one
+revert instead of a hand-timed repair. `requiresSandbar` stays for
+`npm i -D sandbar` consumers. `deploy/ansible/README.md` owns the rest.
 
 There is no second laptop path and no runtime config, env file, release pin or
 launcher at the repository root. To exercise unlanded driver code deliberately,
@@ -649,7 +676,7 @@ build it and name an installation config explicitly:
 npm run build && node dist/cli.js --config <path>
 ```
 
-- **Hosting daemons is a contract this repo ships (#140, #149, #155).**
+- **Hosting daemons is a contract this repo ships (#140, #149, #155, #146).**
   `deploy/ansible/README.md` is the host contract in prose — Ubuntu 24.04 or 26.04,
   rootless podman, swap, key-only SSH, no automatic reboot, and the box's own
   OpenVPN as the only interface the run UI answers on — and
@@ -659,15 +686,22 @@ npm run build && node dist/cli.js --config <path>
   box that would repair it. The CA is initialised once on the box, guarded by
   the server certificate it writes; `sandbar-vpn issue|revoke <person>-<machine>`
   is the whole device lifecycle and devices are deliberately not inventory
-  data, since `inventory.yml` is committed to a public repository. Its
-  inventory list gives every project a Linux user, consumer clone,
+  data, since `deploy/ansible/` is committed to a public repository. Its
+  installation list gives every project a Linux user, consumer clone,
   `~/installation/`, disjoint subuid range, Podman session and identically
-  named systemd user-unit pair. The role-owned `ExecStartPre` installs that
-  entry's exact-tag driver through the canonical driver-install module;
-  `ExecStart` runs it against the installation config, with no consumer
-  `git pull` or `npm ci`. Unit strings and the installed-pin rule are table-tested. Secrets
-  are placed once per installation and only asserted; no automatic restart,
-  GitHub Actions deploy, or timers.
+  named systemd user-unit pair, whose `ExecStart` runs `/opt/sandbar/current`'s
+  CLI against the installation config with no pre-start action and no consumer
+  `git pull` or `npm ci`. The one timer is root-level convergence, never a
+  daemon retry: the play writes `restart-requested` and the daemon decides
+  when, so exits 1, 2 and 4 remain stops a human inspects. Every attempt
+  records a commit, time and result the Caddy index renders, so a box stuck on
+  an old commit is visible rather than journalled. The standalone reader is the
+  one unit the play restarts — it aborts no work, and a systemd auto-restart of
+  the daemon does not reach it — which is why it carries no `Requires=`. Unit
+  strings, the VPN reach, the driver build, the restart contract and the timer
+  are table-tested. Secrets are placed once per installation and only asserted;
+  the operator's public key is remembered on the box so an unattended pull
+  cannot strip it. Still no GitHub Actions deploy.
 - **One image, both roles** (agent sandbox and gate pod member): the driver's
   augmentation supplies the sandbox's uid-1000 `agent` user, while the base
   keeps default `USER` root — `checkWorktreeImageUids` refuses the run if that
@@ -688,9 +722,10 @@ npm run build && node dist/cli.js --config <path>
   slices lands N+1 on top of N without either having driven anything, and each
   slice is reviewed without the half that gives it its reason. Two issues that
   are genuinely separate and both touch `run.ts`/`inner-loop`/`merger` are
-  ordered with `## Blocked by`, not run in parallel. #66 keeps a merged
-  regression out of the driver until the installation's exact tag moves, so the
-  blast radius of one larger landing is a deploy decision, not a reason to split.
+  ordered with `## Blocked by`, not run in parallel. Since #146 a landing on
+  main IS the driver within five minutes, so the blast radius of one larger
+  landing is bounded by the gate, the reviewer and a `git revert` through the
+  same channel — still not a reason to split.
 - **The suite must not depend on ambient git config** (the gate runner has no
   global identity) **nor on `process.cwd()` being a repository** (`/workspace/.git`
   is not a repository inside gate containers — name the directory in every git

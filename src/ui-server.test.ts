@@ -125,6 +125,48 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("State request failed (500): Invalid event JSON at line 7");
   });
 
+  // The drain's user-visible half (#146): a pool that admits nothing has to say
+  // why for as long as it is draining, and stop saying it once it has exited.
+  it("keeps a pending restart on the header until the run exits", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    expect(html).toContain(".pill.restart{");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    const app = { innerHTML: "" };
+    let interval: (() => Promise<void>) | undefined;
+    const run = {
+      startedAt: "2026-09-07T09:00:00Z", status: "live", driver: "sandbar test",
+      slots: { used: 1, max: 2 }, lastRecompute: null, exit: null,
+      restart: { detail: "abc1234", at: "2026-09-07T09:30:00Z" }, complaints: [],
+    };
+    const state = {
+      now: "2026-09-07T10:00:00Z", run,
+      pool: [], waiting: [], finished: [], eventCount: 0, events: [],
+    };
+    const fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => state })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({
+        ...state,
+        run: {
+          ...run, status: "ended",
+          exit: { tag: "restart", reason: "drained and exiting" },
+        },
+      }) });
+    runInNewContext(script!, {
+      document: { getElementById: () => app }, fetch,
+      setInterval: (callback: () => Promise<void>) => { interval = callback; return 1; },
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(app.innerHTML).toContain(
+      '<span class="pill restart">restart pending · draining · abc1234</span>',
+    );
+
+    // The reducer retains the request after the exit (#146); the header must not.
+    await interval?.();
+    expect(app.innerHTML).toContain('<span class="pill ended">ended · restart</span>');
+    expect(app.innerHTML).not.toContain("restart pending");
+  });
+
   it("uses both run.pid and process liveness to classify standalone runs", async () => {
     const live = await runTree(true);
     await mkdir(join(live.logsDir, "run-2026-09-06T10-00-00-000Z"));
