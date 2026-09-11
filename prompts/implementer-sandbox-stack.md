@@ -37,7 +37,20 @@ Some things to know before you spend time on them:
   paths shows up as uncommitted work and costs you attempts. If that happens,
   fix where it writes rather than deleting the files each time.
 - **You are not given a container runtime, and that is deliberate.** These
-  containers are your neighbours, not yours to start, stop or rebuild. If a
-  service is missing or wrong, that is a change to the project's `gateStack`,
-  which is ordinary code you can edit — not something to work around by
-  installing a database into this container.
+  containers are your neighbours, not yours to start, stop or rebuild. A
+  service that is missing or wrong is a change to the project's `gateStack`,
+  and that is not a change you can make take effect here: the stack this issue
+  runs against was resolved once, when the run started, from the host's
+  configuration as it stood then. Commit the change if it belongs to this issue
+  — it takes effect for later issues, not this one — and say in your report that
+  this issue ran without it. What you must not do is work around it: neither by
+  installing a database into this container, nor by shaping the branch's code
+  around the stack you were handed.
+- **The gate's `issue`-lifecycle containers outlive your attempts.** They are
+  created once for the issue and reused by every gate run on this branch, so
+  state an earlier attempt's code left inside one — an applied migration, a
+  stamped fixture, a warm cache — is still there for the next attempt, and from
+  here you can neither see it nor reset it. If a gate step reds because that
+  state is stale, report it: the fix is the project resetting it in a step that
+  runs every gate run, never the branch's own code edited until the stale state
+  accepts it.
