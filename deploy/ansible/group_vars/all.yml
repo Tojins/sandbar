@@ -1,0 +1,36 @@
+---
+# Host and installation data for BOTH deploy channels (#146).
+#
+# It lives beside `site.yml` rather than in an inventory because the box's own
+# `ansible-pull` runs the play against a one-host inventory (`-i localhost,`)
+# and therefore has no `inventory_dir` to anchor anything to. Ansible loads
+# `group_vars/` adjacent to the playbook in both channels, and `playbook_dir`
+# resolves to this directory in both, so every path below is anchored there.
+#
+# `inventory.yml` keeps only the host the operator's bootstrap connects to.
+sandbar_git_name: sandbar
+sandbar_git_email: demanthomas+sandbar@gmail.com
+
+# The operator's public key stays an invocation-time value on the bootstrap
+# channel:
+#   SANDBAR_OPERATOR_SSH_KEY="$(cat ~/.ssh/id_ed25519.pub)" ansible-playbook ...
+# An unattended pull supplies nothing here and the role falls back to the keys
+# the last bootstrap made the box remember (tasks/main.yml).
+sandbar_operator_ssh_keys:
+  - "{{ lookup('ansible.builtin.env', 'SANDBAR_OPERATOR_SSH_KEY') }}"
+
+# One entry per daemon: its Linux user, consumer clone, Caddy route, reader port
+# and the directory copied into `~/installation/`. No driver pin — every
+# installation runs the one build of main this box made (roles/sandbar/tasks/
+# driver.yml), so a config and the driver that reads it come from one commit.
+sandbar_installations:
+  - user: outdoor
+    project: outdoor
+    clone_url: https://github.com/Tojins/outdoor.git
+    reader_port: 7332
+    config_src: "{{ playbook_dir }}/installations/outdoor"
+  - user: sandbar
+    project: sandbar
+    clone_url: https://github.com/Tojins/sandbar.git
+    reader_port: 7333
+    config_src: "{{ playbook_dir }}/installations/sandbar"

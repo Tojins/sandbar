@@ -1,0 +1,57 @@
+---
+# The convergence channel (#146): the box pulls main and applies it to itself.
+#
+# A pull rather than a push, because root-level changes are in scope and a push
+# channel would need a root key in GitHub Actions secrets (#140's objection).
+# Deliberately not sandbar either: if a landed regression bricks a daemon, the
+# thing that applies the revert still has to work.
+#
+# Installed LAST in the role. The timer counts from its own activation, so
+# installing it before the rest of a fresh box's bootstrap would let it fire a
+# second play into the middle of the first. systemd already refuses to start a
+# service its timer finds still running, so pulls never overlap each other.
+- name: Install Ansible on the box so it can converge itself
+  ansible.builtin.apt:
+    name: ansible
+    state: present
+
+- name: Create the convergence state directory
+  ansible.builtin.file:
+    path: "{{ sandbar_pull_dir | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the convergence script
+  ansible.builtin.template:
+    src: sandbar-pull.sh.j2
+    dest: /usr/local/bin/sandbar-pull
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the convergence unit
+  ansible.builtin.template:
+    src: sandbar-pull.service.j2
+    dest: /etc/systemd/system/sandbar-pull.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the convergence timer
+  ansible.builtin.template:
+    src: sandbar-pull.timer.j2
+    dest: /etc/systemd/system/sandbar-pull.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the convergence timer
+
+- name: Enable and start the convergence timer
+  ansible.builtin.systemd_service:
+    name: sandbar-pull.timer
+    enabled: true
+    state: started
+    daemon_reload: true

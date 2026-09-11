@@ -1,4 +1,33 @@
 ---
+# The operator's public key is an invocation-time value on the bootstrap channel
+# and box state afterwards (#146): an unattended `ansible-pull` has none of the
+# operator's environment, and a key list that came out empty there would take
+# every key off root. So the bootstrap's keys are remembered, and a pull with
+# nothing supplied uses exactly what the last bootstrap set.
+- name: Separate the operator keys this invocation supplied from empty placeholders
+  ansible.builtin.set_fact:
+    sandbar_supplied_ssh_keys: "{{ sandbar_operator_ssh_keys | reject('equalto', '') | list }}"
+
+- name: Look for the operator keys the box remembers
+  ansible.builtin.stat:
+    path: "{{ sandbar_operator_keys_file }}"
+  register: sandbar_remembered_keys_file
+
+- name: Read the operator keys the box remembers
+  ansible.builtin.slurp:
+    src: "{{ sandbar_operator_keys_file }}"
+  register: sandbar_remembered_keys
+  when:
+    - sandbar_supplied_ssh_keys | length == 0
+    - sandbar_remembered_keys_file.stat.exists
+
+- name: Take the operator keys from this invocation, or from the box's memory
+  ansible.builtin.set_fact:
+    sandbar_operator_ssh_keys: >-
+      {{ sandbar_supplied_ssh_keys if sandbar_supplied_ssh_keys | length > 0
+         else (sandbar_remembered_keys.content | default('') | b64decode).splitlines()
+              | reject('equalto', '') | list }}
+
 - name: Refuse to run without the host variables the role cannot default
   ansible.builtin.assert:
     that:
@@ -8,11 +37,27 @@
       - sandbar_installations | length > 0
       - sandbar_git_email | length > 0
       - sandbar_operator_ssh_keys | length > 0
-      - sandbar_operator_ssh_keys | reject('equalto', '') | list | length == sandbar_operator_ssh_keys | length
     fail_msg: >-
-      Set sandbar_installations, sandbar_git_email and
-      sandbar_operator_ssh_keys in the inventory. The key list is exclusive:
-      a key not listed is removed from root and every installation user.
+      Set sandbar_installations and sandbar_git_email in group_vars, and run one
+      bootstrap with SANDBAR_OPERATOR_SSH_KEY set so
+      {{ sandbar_operator_keys_file }} exists. The key list is exclusive: a key
+      not listed is removed from root and every installation user.
+
+- name: Create the directory the remembered keys live in
+  ansible.builtin.file:
+    path: "{{ sandbar_operator_keys_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Remember the operator keys so the box can converge unattended
+  ansible.builtin.copy:
+    content: "{{ sandbar_operator_ssh_keys | join('\n') }}\n"
+    dest: "{{ sandbar_operator_keys_file }}"
+    owner: root
+    group: root
+    mode: "0644"
 
 - name: Validate every installation inventory entry
   ansible.builtin.assert:
@@ -25,12 +70,11 @@
       - (item.reader_port | default(none)) is integer
       - (item.reader_port | default(0) | int) >= 1
       - (item.reader_port | default(0) | int) <= 65535
-      - (item.driver_tag | default(sandbar_driver_tag)) is match('^github:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#v[0-9]+\.[0-9]+\.[0-9]+$')
     fail_msg: >-
       Every sandbar_installations entry needs a non-root safe Linux user, a
       project path component other than the reserved installation directory, a
-      non-empty clone_url, an integer reader_port from 1 through 65535, and an
-      exact github:owner/repo#vX.Y.Z driver. Invalid entry: {{ item }}
+      non-empty clone_url and an integer reader_port from 1 through 65535.
+      Invalid entry: {{ item }}
   loop: "{{ sandbar_installations }}"
   loop_control:
     label: "{{ item.user | default('missing user') }}"
@@ -78,6 +122,11 @@
 - name: Configure Caddy installation routes
   ansible.builtin.import_tasks: caddy.yml
 
+# Before every installation task: the units name the built driver, and an
+# installation whose files or unit changed is asked to restart into it.
+- name: Build the driver every installation runs
+  ansible.builtin.import_tasks: driver.yml
+
 - name: Create each installation account and podman session
   ansible.builtin.include_tasks: account.yml
   loop: "{{ sandbar_installations }}"
@@ -91,7 +140,6 @@
     sandbar_home: "/home/{{ sandbar_installation.user }}"
     sandbar_checkout: "/home/{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
     sandbar_installation_dir: "/home/{{ sandbar_installation.user }}/installation"
-    sandbar_installation_driver_tag: "{{ sandbar_installation.driver_tag | default(sandbar_driver_tag) }}"
     sandbar_reader_port: "{{ sandbar_installation.reader_port }}"
     sandbar_installation_git_name: "{{ sandbar_installation.git_name | default(sandbar_git_name) }}"
     sandbar_installation_git_email: "{{ sandbar_installation.git_email | default(sandbar_git_email) }}"
@@ -122,5 +170,9 @@
     sandbar_home: "/home/{{ sandbar_installation.user }}"
     sandbar_checkout: "/home/{{ sandbar_installation.user }}/{{ sandbar_installation.project }}"
     sandbar_installation_dir: "/home/{{ sandbar_installation.user }}/installation"
-    sandbar_installation_driver_tag: "{{ sandbar_installation.driver_tag | default(sandbar_driver_tag) }}"
     sandbar_reader_port: "{{ sandbar_installation.reader_port }}"
+
+# Last, and host-global: the timer counts from its own activation, so a fresh
+# box's bootstrap finishes before the first unattended play can start (#146).
+- name: Install the convergence timer that applies every later commit
+  ansible.builtin.import_tasks: pull.yml

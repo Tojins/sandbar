@@ -636,16 +636,22 @@ outcomes.
   would break every config already written. `src/requires-sandbar.ts` owns the
   argument, including why an unidentifiable driver fails the check.
 
-## This repo is an installation like any consumer (#39, #149, #151)
+## This repo is an installation like any consumer (#39, #149, #151, #146)
 
 The repository contains the neutral development and test inputs its branches
-own, including the root `Containerfile`. Its daemon configuration, credentials
-and exact-tag driver live in the sandbar user's private `~/installation/` on the
-box. `deploy/ansible/installations/sandbar/` is the source copied to that private
-directory, and `deploy/ansible/inventory.yml` chooses the driver tag. The
-inventory comment owns the rule that this installation's tag lags the checkout,
-so a regression cannot immediately become the driver responsible for repairing
-it.
+own, including the root `Containerfile`. Its daemon configuration and
+credentials live in the sandbar user's private `~/installation/` on the box;
+`deploy/ansible/installations/sandbar/` is the source copied to that private
+directory and `deploy/ansible/group_vars/all.yml` is the installation list both
+deploy channels read. A COMMIT ON MAIN IS THE DEPLOY (#146): the box runs
+`ansible-pull` every five minutes, builds that commit into
+`/opt/sandbar/builds/<sha>`, moves `current` only once the build succeeded, and
+asks each installation whose driver, files or unit changed to restart. Config
+and driver therefore arrive in the same commit, which retired the exact driver
+tag, `~/installation/driver/`, the unit's `ExecStartPre` and the rule that this
+installation's driver had to lag its checkout — a bad landing now costs one
+revert instead of a hand-timed repair. `requiresSandbar` stays for
+`npm i -D sandbar` consumers. `deploy/ansible/README.md` owns the rest.
 
 There is no second laptop path and no runtime config, env file, release pin or
 launcher at the repository root. To exercise unlanded driver code deliberately,
@@ -655,18 +661,22 @@ build it and name an installation config explicitly:
 npm run build && node dist/cli.js --config <path>
 ```
 
-- **Hosting daemons is a contract this repo ships (#140, #149).**
+- **Hosting daemons is a contract this repo ships (#140, #149, #146).**
   `deploy/ansible/README.md` is the host contract in prose — Ubuntu 24.04 or 26.04,
   rootless podman, swap, key-only SSH, no automatic reboot — and
-  `roles/sandbar` provides it once per box. Its inventory list gives every
+  `roles/sandbar` provides it once per box. Its installation list gives every
   project a Linux user, consumer clone, `~/installation/`, disjoint subuid
-  range, Podman session and identically named systemd user-unit pair. The
-  role-owned `ExecStartPre` installs that entry's exact-tag driver through the
-  canonical driver-install module; `ExecStart`
-  runs it against the installation config, with no consumer `git pull` or
-  `npm ci`. Unit strings and the installed-pin rule are table-tested. Secrets
-  are placed once per installation and only asserted; no automatic restart,
-  GitHub Actions deploy, or timers.
+  range, Podman session and identically named systemd user-unit pair, whose
+  `ExecStart` runs `/opt/sandbar/current`'s CLI against the installation
+  config with no pre-start action and no consumer `git pull` or `npm ci`. The
+  one timer is root-level convergence, never a daemon retry: the play writes
+  `restart-requested` and the daemon decides when, so exits 1, 2 and 4 remain
+  stops a human inspects. Every attempt records a commit, time and result the
+  Caddy index renders, so a box stuck on an old commit is visible rather than
+  journalled. Unit strings, the driver build, the restart contract and the
+  timer are table-tested. Secrets are placed once per installation and only
+  asserted; the operator's public key is remembered on the box so an unattended
+  pull cannot strip it. Still no GitHub Actions deploy.
 - **One image, both roles** (agent sandbox and gate pod member): the driver's
   augmentation supplies the sandbox's uid-1000 `agent` user, while the base
   keeps default `USER` root — `checkWorktreeImageUids` refuses the run if that
@@ -687,9 +697,10 @@ npm run build && node dist/cli.js --config <path>
   slices lands N+1 on top of N without either having driven anything, and each
   slice is reviewed without the half that gives it its reason. Two issues that
   are genuinely separate and both touch `run.ts`/`inner-loop`/`merger` are
-  ordered with `## Blocked by`, not run in parallel. #66 keeps a merged
-  regression out of the driver until the installation's exact tag moves, so the
-  blast radius of one larger landing is a deploy decision, not a reason to split.
+  ordered with `## Blocked by`, not run in parallel. Since #146 a landing on
+  main IS the driver within five minutes, so the blast radius of one larger
+  landing is bounded by the gate, the reviewer and a `git revert` through the
+  same channel — still not a reason to split.
 - **The suite must not depend on ambient git config** (the gate runner has no
   global identity) **nor on `process.cwd()` being a repository** (`/workspace/.git`
   is not a repository inside gate containers — name the directory in every git

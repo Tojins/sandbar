@@ -17,6 +17,15 @@
     name: caddy
     state: reloaded
 
+# A changed timer takes effect only once systemd rereads it. Restarting the
+# timer does not touch the service it activates, so this is safe to run from
+# inside a play the timer itself started (#146).
+- name: Restart the convergence timer
+  ansible.builtin.systemd_service:
+    name: sandbar-pull.timer
+    state: restarted
+    daemon_reload: true
+
 # A replaced profile applies to the pasta processes already running under it.
 - name: Reload the pasta AppArmor profile
   ansible.builtin.command: apparmor_parser --replace /etc/apparmor.d/usr.bin.pasta

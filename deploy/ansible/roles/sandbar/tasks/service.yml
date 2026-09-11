@@ -16,17 +16,6 @@
     mode: "0644"
   register: sandbar_daemon_unit
 
-# The role never restarts a running daemon. Keep this message in the same
-# include as the user variables it names; a deferred handler would retain only
-# one notification while several installation units may have changed.
-- name: Say a changed unit awaits a restart by hand
-  ansible.builtin.debug:
-    msg: >-
-      sandbar.service changed. A running daemon keeps the old unit until a
-      human runs `systemctl --user restart sandbar` as {{ sandbar_user }}; a
-      stopped one starts with `systemctl --user start sandbar`.
-  when: sandbar_daemon_unit is changed
-
 - name: Enable the daemon unit at boot
   ansible.builtin.systemd_service:
     name: sandbar.service

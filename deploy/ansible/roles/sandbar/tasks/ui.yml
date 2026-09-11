@@ -6,6 +6,7 @@
     owner: "{{ sandbar_user }}"
     group: "{{ sandbar_user }}"
     mode: "0644"
+  register: sandbar_ui_unit
 
 - name: Create the daemon unit's UI drop-in directory
   ansible.builtin.file:

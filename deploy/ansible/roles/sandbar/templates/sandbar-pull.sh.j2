@@ -1,0 +1,29 @@
+#!/bin/sh
+# One convergence attempt, and the record of it the installation index renders
+# (#146). A failed pull has to be visible as "the box is stuck on an old
+# commit" rather than as a journal line nobody reads.
+#
+# `--only-if-changed` keeps an unchanged main from re-running the play; the
+# status file is written either way, so a stale timestamp means the timer itself
+# stopped rather than that main stopped moving.
+set -u
+
+status={{ sandbar_ui_root }}/{{ sandbar_deploy_status_file }}
+
+/usr/bin/ansible-pull \
+  --only-if-changed \
+  --url {{ sandbar_driver_repo }} \
+  --checkout {{ sandbar_driver_branch }} \
+  --directory {{ sandbar_pull_dir }} \
+  --inventory localhost, \
+  deploy/ansible/site.yml
+result=$?
+
+commit=$(git -C {{ sandbar_pull_dir }} rev-parse HEAD 2>/dev/null || echo unknown)
+if [ "$result" -eq 0 ]; then outcome=ok; else outcome="failed (exit $result)"; fi
+cat > "$status.new" <<JSON
+{"commit":"$commit","at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","result":"$outcome"}
+JSON
+mv "$status.new" "$status"
+
+exit "$result"
