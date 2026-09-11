@@ -532,6 +532,16 @@ describe("the operator VPN the run UI answers on (#155)", () => {
     expect(directives(renderVpnServer())).toContain("remote-cert-tls client");
   });
 
+  // The box has no DNS name, so the address a profile dials is a fact about
+  // the host rather than something an inventory has to carry. Without this
+  // default the public-interface refusal above evaluates an undefined
+  // variable on every box that does not override it.
+  it("dials this box at the address it answers the world on", () => {
+    expect(roleDefaults["sandbar_vpn_endpoint"])
+      .toBe("{{ ansible_facts['default_ipv4']['address'] | default('') }}");
+    expect(vpnScriptTemplate).toContain("VPN_ENDPOINT={{ sandbar_vpn_endpoint }}");
+  });
+
   it("verifies every certificate against a revocation list the server can read", () => {
     const server = directives(renderVpnServer());
     expect(server).toContain(`crl-verify ${roleDefault("sandbar_vpn_dir")}/crl.pem`);
@@ -672,6 +682,24 @@ describe("sandbar-vpn, the device lifecycle (#155)", () => {
     expect(twice.status).not.toBe(0);
     expect(twice.stderr).toContain("already has a profile");
     expect(twice.stdout).toBe("");
+  });
+
+  // The same rule on the other verb, where it is the load-bearing one:
+  // `init` leaves `issued/server.crt` behind, so an unguarded
+  // `revoke server` clears the existence check and withdraws the
+  // certificate every device authenticates the server by.
+  it("refuses those names on revoke too, the server's own certificate included", () => {
+    const box = vpnBox();
+    runVpn(box, ["init"]);
+    runVpn(box, ["issue", "tojins-laptop"]);
+    for (const name of ["", "../../etc/shadow", "tojins laptop", "server"]) {
+      const refused = runVpn(box, ["revoke", name]);
+      expect(refused.status).not.toBe(0);
+      // Refused by the name rule, not by happening to name nothing issued.
+      expect(refused.stderr).not.toContain("no profile named");
+    }
+    expect(existsSync(join(box.pki, "issued/server.crt"))).toBe(true);
+    expect(readFileSync(box.log, "utf8")).not.toContain("easyrsa revoke");
   });
 
   it("revokes one device, republishing the list and leaving the others alone", () => {
