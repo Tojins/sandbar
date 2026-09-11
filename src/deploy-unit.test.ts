@@ -364,13 +364,13 @@ describe("committed installation inventory and configs", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
-  it("ships outdoor's explicit checkout, mapped settings, gate file and neutral image", () => {
+  it("ships outdoor's explicit checkout, mapped settings, gate file and its own image recipe", () => {
     expect(outdoorConfig).toContain('import { readEnvFile, splitRoleRouting } from "sandbar";');
     expect(outdoorConfig).toContain('const cwd = "/home/outdoor/outdoor";');
     expect(outdoorConfig).toContain('readFileSync(join(cwd, "gate/stack.json"), "utf8")');
     expect(outdoorConfig).toMatch(/copyToWorktree:[\s\S]*?from:[\s\S]*?to:/);
-    expect(outdoorConfig).toContain('const image = "localhost/outdoor:dev";');
-    expect(outdoorConfig).toContain('containerfile: "Containerfile.dev"');
+    expect(outdoorConfig).toContain('const sandboxImage = "localhost/sandbar:outdoor";');
+    expect(outdoorConfig).toContain('containerfile: "Containerfile.sandbar"');
   });
 
   it("ships sandbar's external config and records its lagging driver rule", () => {
