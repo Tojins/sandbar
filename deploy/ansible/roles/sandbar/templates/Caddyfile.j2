@@ -1,4 +1,8 @@
 :{{ sandbar_ui_http_port }} {
+	bind {{ sandbar_ui_bind }}
+	log {
+		output file {{ sandbar_ui_access_log }}
+	}
 {% for installation in sandbar_installations %}
 	handle_path /{{ installation.project }}/* {
 		reverse_proxy 127.0.0.1:{{ installation.reader_port }}

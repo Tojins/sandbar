@@ -523,7 +523,11 @@ outcomes.
   standalone deployment reader. One Caddy site indexes the installations at
   `/` and strips each inventory project's `/<project>/` prefix before proxying
   to that reader; the page's relative `state.json` fetch therefore works both
-  there and at its direct root. Unreadable history is omitted, and any current
+  there and at its direct root. That site answers on the operator VPN's tunnel
+  address alone and logs every request (#155): the page has no authentication
+  by design, so what keeps a private consumer's issue titles, branch names,
+  agent speech and log paths off the internet is the interface it is bound to,
+  not a directive in front of it. Unreadable history is omitted, and any current
   request or post-listen server failure stays inside the observing UI;
   its best-effort complaint callback cannot stop a healthy run.
 - **Every outcome carries how long it took, and nothing decides on it (#82).**
@@ -645,16 +649,23 @@ build it and name an installation config explicitly:
 npm run build && node dist/cli.js --config <path>
 ```
 
-- **Hosting daemons is a contract this repo ships (#140, #149).**
+- **Hosting daemons is a contract this repo ships (#140, #149, #155).**
   `deploy/ansible/README.md` is the host contract in prose — Ubuntu 24.04 or 26.04,
-  rootless podman, swap, key-only SSH, no automatic reboot — and
-  `roles/sandbar` provides it once per box. Its inventory list gives every
-  project a Linux user, consumer clone, `~/installation/`, disjoint subuid
-  range, Podman session and identically named systemd user-unit pair. The
-  role-owned `ExecStartPre` installs that entry's exact-tag driver through the
-  canonical driver-install module; `ExecStart`
-  runs it against the installation config, with no consumer `git pull` or
-  `npm ci`. Unit strings and the installed-pin rule are table-tested. Secrets
+  rootless podman, swap, key-only SSH, no automatic reboot, and the box's own
+  OpenVPN as the only interface the run UI answers on — and
+  `roles/sandbar` provides it once per box. The server forwards nothing and
+  pushes no route, so a profile buys the tunnel subnet and nothing else, while
+  SSH stays public because a broken VPN must not lock the operator out of the
+  box that would repair it. The CA is initialised once on the box, guarded by
+  the server certificate it writes; `sandbar-vpn issue|revoke <person>-<machine>`
+  is the whole device lifecycle and devices are deliberately not inventory
+  data, since `inventory.yml` is committed to a public repository. Its
+  inventory list gives every project a Linux user, consumer clone,
+  `~/installation/`, disjoint subuid range, Podman session and identically
+  named systemd user-unit pair. The role-owned `ExecStartPre` installs that
+  entry's exact-tag driver through the canonical driver-install module;
+  `ExecStart` runs it against the installation config, with no consumer
+  `git pull` or `npm ci`. Unit strings and the installed-pin rule are table-tested. Secrets
   are placed once per installation and only asserted; no automatic restart,
   GitHub Actions deploy, or timers.
 - **One image, both roles** (agent sandbox and gate pod member): the driver's

@@ -29,7 +29,7 @@ naming a missing path before it installs either unit.
 The target is Ubuntu 24.04 or 26.04. Host-global work runs once: packages,
 Node 24, git, gh, AppArmor's podman/pasta interoperability rule, cgroup-v2
 delegation, swap, key-only SSH, unattended security upgrades without automatic
-reboots, and Caddy.
+reboots, the operator VPN, and Caddy.
 
 For every `sandbar_installations` entry the role provides:
 
@@ -58,7 +58,44 @@ and 7334 around their inventory's 7332 and 7333.
 Both units use `Restart=no`; exits 2 and 4 remain stops for a human to inspect.
 Caddy serves a static index of installation projects at `/` (a rendered file,
 since Ubuntu's packaged Caddy 2.6 has no heredocs); each link opens that
-installation's reader at `/<project>/`.
+installation's reader at `/<project>/`. That site answers on the tunnel address
+alone — see below — and logs every request, successful ones included, to
+`sandbar_ui_access_log`.
+
+## Reaching the run UI
+
+The run UI is an operator surface (#155). What it renders is a private
+consumer's issue titles, branch names, agent speech, parked-issue causes and
+attempt log paths, so it is not served to the internet: the role runs an
+OpenVPN server whose only reach is this box, Caddy binds to the tunnel address
+(`sandbar_vpn_address`, 10.8.0.1 by default) and nothing on the public
+interface answers but SSH and that server. The box forwards nothing and the
+server pushes no route or DNS, so a connected client can reach the tunnel
+subnet and nothing else; the readers themselves stay on loopback.
+
+SSH deliberately stays public and key-only. A broken VPN must not lock the
+operator out of the box that would repair it.
+
+The certificate authority lives here, under root, and is the one piece of this
+the play does not own past its first run. `/usr/local/sbin/sandbar-vpn` is the
+whole interface:
+
+```sh
+sandbar-vpn issue tojins-laptop > tojins-laptop.ovpn   # one device
+sandbar-vpn revoke tojins-laptop                       # that device alone
+```
+
+Profiles are named `<person>-<machine>` and carry everything inline. Hand one
+over out of band and import it; the UI is then at
+`http://10.8.0.1/` with one link per installation. Devices are never inventory
+data — `Tojins/sandbar` is public and `inventory.yml` is committed there — so
+the reachable set grows by issuing another profile, never by a role or
+inventory change. A revocation takes effect on that device's next connection;
+restart `openvpn-server@sandbar` to drop a session already up.
+
+The role initialises the PKI once, guarded by the server certificate it
+creates, so a repeat play does no work. Removing `/etc/openvpn/sandbar/pki`
+means a new CA and dead profiles for every device; reissue them all.
 
 ## Inventory
 
@@ -117,6 +154,9 @@ Then rerun the play. It copies configured installation sources, checks the
 hand-placed env files, clones/updates both consumers, installs and enables both
 unit pairs. It never starts or restarts a daemon during a deploy.
 
+Issue one VPN profile per device as root, once each, and hand it over out of
+band; nothing reaches the run UI before that. See *Reaching the run UI* above.
+
 ## Operating an installation
 
 SSH as the installation user, then:
@@ -145,6 +185,11 @@ ansible-playbook -i inventory.yml --check site.yml
 ```
 
 `src/deploy-unit.test.ts` renders both unit templates for the two real
-installation shapes. `src/deploy-driver-install.test.ts` pins the matching,
-changed, and failed stamp paths. A third play against a configured box must
-report `changed=0`.
+installation shapes, and pins the site address Caddy answers on together with
+the reach the VPN server grants. It also RUNS `sandbar-vpn` as the role
+renders it, against stub easy-rsa, openssl, openvpn and install commands in a
+throwaway tunnel directory, so the device lifecycle and the profile it prints
+are exercised rather than read. `src/deploy-driver-install.test.ts` pins the
+matching, changed, and failed stamp paths. A third play against a configured
+box must report `changed=0`; PKI initialisation and device profiles are
+one-time actions guarded out of that count.
