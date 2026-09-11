@@ -505,9 +505,8 @@ outcomes.
   overwritten. Every gate-1 result is filed from that same sequence as the
   attempt's `attempt-<n>-gate.log`, green as well as red, so the red a run
   failed on can be read against the green before it (#153). Those records,
-  gate artefacts, merger logs and resolve
-  transcripts stay as files through `src/logs.ts`; they are artefacts, not a
-  second event stream.
+  gate artefacts, merger logs and resolve transcripts stay as files through
+  `src/logs.ts`; they are artefacts, not a second event stream.
   `run()` hosts the file-fed UI and writes its URL—and nothing else—to stdout.
   The internal-failure banner is the sole post-record stderr rendering.
 - **The UI is a projection, never scheduler state (#132).** `src/run-state.ts`
