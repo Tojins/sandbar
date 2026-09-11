@@ -1407,6 +1407,14 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
+  // A short idle timeout is what gives this test its teeth: a timer left armed
+  // across the post-run probe fires well inside the probe's own 10s bound and
+  // rejects the run. It must still outlast the wait for the FIRST line of a
+  // freshly spawned agent, which is what that timer is armed against — at
+  // 0.05s the margin was process-spawn latency, so the whole suite on a loaded
+  // machine failed here with "Agent idle for 0.05 seconds". Two seconds keeps
+  // both halves: a spawn that slow is a broken host, and an uncleared timer
+  // still has eight seconds of hang to fire in.
   it("preserves a completed Codex answer when the rollout probe never settles", async () => {
     const branch = "sandbar/issue-109-codex-probe-timeout";
     await git(["branch", branch], dir);
@@ -1420,7 +1428,7 @@ describe("createSandbox integration (local provider)", () => {
         })}'`),
         prompt: "go",
         completionSignal: [],
-        idleTimeoutSeconds: 0.05,
+        idleTimeoutSeconds: 2,
       });
       expect(run.stdout).toBe("done");
       expect(run.rateLimit).toBeUndefined();
