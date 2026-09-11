@@ -18,6 +18,7 @@ describe("agent invocation records (#135)", () => {
       "attempt-3-reviewer-quality-1.log"],
     [{ role: "reviewer", attempt: 3, pass: "correctness", invocation: 2 },
       "attempt-3-reviewer-correctness-2.log"],
+    [{ role: "gate", attempt: 3 }, "attempt-3-gate.log"],
     [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
   ] as const)("names %j as %s", (identity, expected) => {
     expect(agentInvocationFilename(identity)).toBe(expected);
@@ -66,6 +67,40 @@ describe("raw transcript tree", () => {
     })).rejects.toMatchObject({ code: "EEXIST" });
     expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8"))
       .toContain("implementer speech");
+  });
+
+  it("files every gate-1 result beside the attempt that produced it (#153)", async () => {
+    const tree = await makeRun();
+    const issue = await tree.issue("153");
+    await issue.writeGate("attempt-1-gate.log", {
+      ok: false,
+      stdout: "=== check ===\ntype error",
+      stderr: "tsc said so",
+      failedStep: "check",
+      exitCode: 2,
+      containerLogs: "--- container db (last 40 lines) ---\nconnection refused",
+    });
+    expect(await readFile(join(issue.dir, "attempt-1-gate.log"), "utf8")).toBe(
+      "result:     red\nfailed:     check\nexit code:  2\n\n" +
+      "--- stdout ---\n=== check ===\ntype error\n" +
+      "--- stderr ---\ntsc said so\n" +
+      "--- container logs ---\n--- container db (last 40 lines) ---\nconnection refused\n",
+    );
+
+    // Green too, and with the same sections, so the next red diffs against it.
+    await issue.writeGate("attempt-2-gate.log", {
+      ok: true, stdout: "=== check ===\n", stderr: "", failedStep: null,
+      exitCode: 0, containerLogs: "",
+    });
+    expect(await readFile(join(issue.dir, "attempt-2-gate.log"), "utf8")).toBe(
+      "result:     green\nfailed:     -\nexit code:  0\n\n" +
+      "--- stdout ---\n=== check ===\n\n--- stderr ---\n\n--- container logs ---\n\n",
+    );
+
+    await expect(issue.writeGate("attempt-2-gate.log", {
+      ok: true, stdout: "replacement", stderr: "", failedStep: null,
+      exitCode: 0, containerLogs: "",
+    })).rejects.toMatchObject({ code: "EEXIST" });
   });
 
   it("keeps merger and resolve transcripts as raw artefacts", async () => {

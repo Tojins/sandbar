@@ -111,6 +111,7 @@ const runInnerLoop = (
     ...opts,
     attemptLogger: {
       writeInvocation: vi.fn(),
+      writeGate: vi.fn(),
       startInvocationCycle: () => invocationSequencer.startCycle(),
     },
     gateSemaphore: createGateSemaphore(undefined),

@@ -67,7 +67,9 @@
 // HARD-ERROR cycles and later admissions: the state machine's attempt and
 // UI-check counters restart at both boundaries, but an earlier invocation
 // record must never be overwritten (#135). The cached IssueLogger owns that
-// sequence beside the directory whose names it allocates.
+// sequence beside the directory whose names it allocates, and every gate-1
+// result — green as well as red — is filed from it as that attempt's
+// `attempt-<n>-gate.log` (#153).
 // Sandbox close defers clone reclamation silently to run.ts's next origin-lease
 // barrier; this is distinct from the human-inspection preservation channel and
 // therefore cannot overwrite or manufacture an operator-facing reason (#139).
@@ -1720,6 +1722,20 @@ export async function runGate1(
   const { issue, opts, gateStack } = ctx;
   const admitted = await opts.gateSemaphore.run(() => gateStack.runGate());
   const gate1 = admitted.value;
+  // Before the verdict is classified, for #135's reason: the re-prompt is the
+  // only other reader of this output, and a green gate has no re-prompt at all
+  // (#153). The `gate` event keeps the timings; this file keeps the bytes.
+  await opts.attemptLogger.writeGate(
+    ctx.invocationSequence.filename({ role: "gate", attempt: action.attempt }),
+    {
+      ok: gate1.ok,
+      stdout: gate1.stdout,
+      stderr: gate1.stderr,
+      failedStep: gate1.failedStep,
+      exitCode: gate1.exitCode,
+      containerLogs: gate1.containerLogs,
+    },
+  );
   await opts.onEvent({
     kind: "gate",
     issue: Number(issue.id),

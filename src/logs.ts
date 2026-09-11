@@ -11,7 +11,9 @@
 // so a later admission in the same run continues after every file already
 // allocated for that issue. Invocation writes are create-only: a naming
 // collision must fail rather than erase the earlier invocation's evidence
-// (#135).
+// (#135), and an attempt's gate artefact is written the same way from the same
+// sequence (#153) — a red gate-1 is the commonest way an inner loop fails and
+// used to survive only inside the next implementer's prompt.
 // Duration headers for container-backed invocations and resolve attempts also
 // render their available peak-memory/OOM facts (#141), so the raw artefact a
 // human opens says OOMKilled even without consulting events.jsonl.
@@ -28,9 +30,14 @@ import { formatContainerResources } from "./container-resources.js";
 
 export type AttemptLogger = {
   writeInvocation(filename: string, record: AgentInvocationRecord): Promise<void>;
+  writeGate(filename: string, gate: AttemptGateRecord): Promise<void>;
   startInvocationCycle(): AgentInvocationSequence;
 };
 
+// The `gate` role is not an agent invocation, but it is an artefact OF one
+// attempt and must carry that attempt's number: a fresh HARD-ERROR cycle
+// renumbers its attempts from 1, and a gate log numbered outside the sequence
+// would sit beside `attempt-7.log` calling itself attempt 1.
 export type AgentInvocationIdentity =
   | { readonly role: "implementer"; readonly attempt: number; readonly nudge: boolean }
   | {
@@ -39,6 +46,7 @@ export type AgentInvocationIdentity =
       readonly pass: "quality" | "correctness";
       readonly invocation: number;
     }
+  | { readonly role: "gate"; readonly attempt: number }
   | { readonly role: "ui-check"; readonly invocation: number };
 
 export type AgentInvocationSequence = {
@@ -51,6 +59,8 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
       return `attempt-${identity.attempt}${identity.nudge ? "-nudge" : ""}.log`;
     case "reviewer":
       return `attempt-${identity.attempt}-reviewer-${identity.pass}-${identity.invocation}.log`;
+    case "gate":
+      return `attempt-${identity.attempt}-gate.log`;
     case "ui-check":
       return `ui-check-${identity.invocation}.log`;
   }
@@ -81,9 +91,15 @@ export function createAgentInvocationSequencer(): {
   };
 }
 
+// The evidence either gate hands its artefact writer — the narrowing of
+// `GateResult` that describes the run rather than times it. One type for both
+// because gate-1 and gate-2 run the same stack and a reader wants the same
+// bytes; the timings stay in the `gate` event, where nothing has to be
+// reconstructed from a file.
+//
 // `failedStep` is the name of the gate step that went red — free-form since
 // #24, since the steps are the consumer's.
-export type MergerGateRecord = {
+export type GateRecord = {
   readonly stdout: string;
   readonly stderr: string;
   readonly failedStep: string | null;
@@ -95,6 +111,12 @@ export type MergerGateRecord = {
   readonly containerLogs: string;
 };
 
+// Gate-1's artefact carries the verdict as well as the evidence. Gate-2's sink
+// is `onGateRed` and sees nothing else, so its files need no such field; gate-1
+// files green runs too and would otherwise have to infer the verdict from
+// `failedStep`, restating a `gate-stack.ts` invariant in a log writer.
+export type AttemptGateRecord = GateRecord & { readonly ok: boolean };
+
 export type IssueLogger = AttemptLogger & {
   readonly dir: string;
 };
@@ -102,7 +124,7 @@ export type IssueLogger = AttemptLogger & {
 export type LandingLogger = {
   readonly dir: string;
   appendMerger(line: string): Promise<void>;
-  writeMergerGate(issueId: string, gate: MergerGateRecord): Promise<void>;
+  writeMergerGate(issueId: string, gate: GateRecord): Promise<void>;
   // One resolve-loop attempt's captured stdout and stderr (#67), keyed like the
   // gate artefact beside it: an issue id for an issue branch, `chunk-<root>`
   // for a chunk, `verify-round-<n>` for a forge-red round — so a chunk and its
@@ -171,6 +193,32 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
         `${header}\n--- speech ---\n${record.speech}\n` +
           `--- stdout tail ---\n${record.stdout}\n` +
           `--- stderr tail ---\n${record.stderr}\n`,
+        { flag: "wx" },
+      );
+    },
+    // One file per attempt, beside that attempt's invocation records (#153).
+    // Green gates included: the artefact a red gate has to be read against is
+    // the last green one, and a run that only kept the reds has nothing to
+    // diff. The section layout is therefore FIXED — an empty `containerLogs`
+    // still gets its heading, so two attempts' files differ only where the
+    // gate did.
+    //
+    // Unlike gate-2's four-file spread, which is read by a human already
+    // standing in a landing directory, an attempt's gate log competes for
+    // attention with the attempt logs around it: one file that `cat` answers
+    // completely is worth more here than separable streams.
+    async writeGate(filename, gate) {
+      const header = [
+        `result:     ${gate.ok ? "green" : "red"}`,
+        `failed:     ${gate.failedStep ?? "-"}`,
+        `exit code:  ${gate.exitCode}`,
+        "",
+      ].join("\n");
+      await writeFile(
+        join(dir, filename),
+        `${header}\n--- stdout ---\n${gate.stdout}\n` +
+          `--- stderr ---\n${gate.stderr}\n` +
+          `--- container logs ---\n${gate.containerLogs}\n`,
         { flag: "wx" },
       );
     },
