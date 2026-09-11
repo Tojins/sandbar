@@ -1,0 +1,119 @@
+#!/bin/sh
+# The operator VPN's certificate authority, on the box it protects (#155).
+#
+# The run UI is an operator surface: Caddy answers on the tunnel address only,
+# so reaching it means holding a profile issued here. Three root-only actions:
+#
+#   init                      the CA, the server's own certificate, the
+#                             tls-crypt key and an empty revocation list. The
+#                             role runs it once, guarded by what it creates.
+#   issue <person>-<machine>  one device's profile, on stdout.
+#   revoke <person>-<machine> that device alone, through the list the running
+#                             server re-reads on every connection.
+#
+# The CA key is born here and never leaves: profiles are the only thing that
+# travels, and they travel out of band. Devices are deliberately not inventory
+# data — Tojins/sandbar is public and deploy/ansible/inventory.yml is committed
+# there — so issuing and revoking are operator actions, never play state, and
+# a lost laptop is revoked without touching any other device.
+set -eu
+
+SETTINGS=/etc/openvpn/sandbar/vpn.env
+EASYRSA=/usr/share/easy-rsa
+
+die() {
+	echo "sandbar-vpn: $1" >&2
+	exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || die "run as root"
+[ -f "$SETTINGS" ] || die "no $SETTINGS; run the sandbar Ansible role on this box first"
+. "$SETTINGS"
+
+EASYRSA_PKI="$SANDBAR_VPN_DIR/pki"
+CRL="$SANDBAR_VPN_DIR/crl.pem"
+# Elliptic-curve keys throughout, so the server needs no Diffie-Hellman
+# parameter file. A decade of list validity because an EXPIRED revocation list
+# rejects every client: the only thing that rewrites it is a revocation.
+export EASYRSA EASYRSA_PKI EASYRSA_BATCH=1 EASYRSA_ALGO=ec \
+	EASYRSA_CURVE=prime256v1 EASYRSA_CRL_DAYS=3650
+
+easyrsa() {
+	"$EASYRSA/easyrsa" "$@"
+}
+
+# The server drops to `nobody` and re-reads the list per connection, so the
+# published copy lives outside the root-only PKI.
+publish_crl() {
+	easyrsa gen-crl >&2
+	install -m 0644 -o root -g root "$EASYRSA_PKI/crl.pem" "$CRL"
+}
+
+check_device() {
+	case ${1:-} in
+		"" | *[!A-Za-z0-9_-]*)
+			die "device name is <person>-<machine>, letters digits _ - only"
+			;;
+		server)
+			die "server names the server's own certificate"
+			;;
+	esac
+}
+
+case ${1:-} in
+	init)
+		[ ! -e "$EASYRSA_PKI" ] \
+			|| die "$EASYRSA_PKI exists; remove it only to start a new CA, which kills every profile issued by the old one"
+		easyrsa init-pki >&2
+		easyrsa --req-cn=sandbar-vpn build-ca nopass >&2
+		easyrsa build-server-full server nopass >&2
+		openvpn --genkey secret "$EASYRSA_PKI/private/ta.key" >&2
+		publish_crl
+		;;
+	issue)
+		name=${2:-}
+		check_device "$name"
+		[ ! -f "$EASYRSA_PKI/issued/$name.crt" ] \
+			|| die "$name already has a profile; revoke it before issuing another"
+		easyrsa build-client-full "$name" nopass >&2
+		# Everything inline, so one file is the whole profile. stdout is that
+		# file and nothing else: the operator redirects it where it is going
+		# rather than leaving a key behind on the box's filesystem.
+		cat <<-PROFILE
+			client
+			dev tun
+			proto ${SANDBAR_VPN_PROTO}-client
+			remote $SANDBAR_VPN_ENDPOINT $SANDBAR_VPN_PORT
+			resolv-retry infinite
+			nobind
+			persist-key
+			persist-tun
+			remote-cert-tls server
+			verb 3
+		PROFILE
+		echo "<ca>"
+		openssl x509 -in "$EASYRSA_PKI/ca.crt"
+		echo "</ca>"
+		echo "<cert>"
+		openssl x509 -in "$EASYRSA_PKI/issued/$name.crt"
+		echo "</cert>"
+		echo "<key>"
+		cat "$EASYRSA_PKI/private/$name.key"
+		echo "</key>"
+		echo "<tls-crypt>"
+		cat "$EASYRSA_PKI/private/ta.key"
+		echo "</tls-crypt>"
+		;;
+	revoke)
+		name=${2:-}
+		check_device "$name"
+		[ -f "$EASYRSA_PKI/issued/$name.crt" ] || die "no profile named $name was issued"
+		easyrsa revoke "$name" >&2
+		publish_crl
+		echo "sandbar-vpn: revoked $name; the server rejects it on its next connection." >&2
+		echo "sandbar-vpn: run 'systemctl restart openvpn-server@sandbar' to drop a session already up." >&2
+		;;
+	*)
+		die "usage: sandbar-vpn init | issue <person>-<machine> | revoke <person>-<machine>"
+		;;
+esac

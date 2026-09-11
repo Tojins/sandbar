@@ -19,7 +19,9 @@
 // Both production callers omit `host`: the production bind contract is
 // loopback only, and the page deliberately has no authentication. A server
 // exposes it through a same-box reverse proxy, never by moving this bind
-// onto a public interface. There, the standalone `sandbar ui` is the always-on
+// onto a public interface — and that proxy is itself on a private interface,
+// since an unauthenticated projection of the record is an operator surface
+// (#155; deploy/ansible/README.md owns the box's side). There, the standalone `sandbar ui` is the always-on
 // reader: unlike run()'s in-process host, it survives a daemon crash and can
 // render that crashed state (#138).
 

@@ -16,10 +16,31 @@ sandbar_driver_tag: github:Tojins/sandbar#v0.39.7
 
 sandbar_stop_timeout_sec: 900
 
-# Caddy serves an installation index at `/` and each reader at `/<project>/`.
+# The operator VPN the run UI lives behind (#155). The box hosts it, forwards
+# nothing and pushes no route, so a client's only reach is this subnet and the
+# only thing answering on it is Caddy. `server` hands the first host of the
+# network to the tunnel interface, which is why the two are declared together.
+sandbar_vpn_dir: /etc/openvpn/sandbar
+sandbar_vpn_network: 10.8.0.0
+sandbar_vpn_netmask: 255.255.255.0
+sandbar_vpn_address: 10.8.0.1
+# TCP on 443 is what a hotel or guest network is least likely to block.
+sandbar_vpn_proto: tcp
+sandbar_vpn_port: 443
+# What an issued profile dials. The box has no DNS name; a later one belongs
+# in the inventory, not here.
+sandbar_vpn_endpoint: "{{ ansible_facts['default_ipv4']['address'] | default('') }}"
+
+# Caddy serves an installation index at `/` and each reader at `/<project>/`,
+# on the tunnel address alone: the page and `state.json` carry issue titles,
+# branch names, agent speech and attempt log paths, which is operator
+# material (#155). The readers themselves stay on loopback as before.
+sandbar_ui_bind: "{{ sandbar_vpn_address }}"
 sandbar_ui_http_port: 80
 # The static index page lives here; every other path is an installation route.
 sandbar_ui_root: /var/www/sandbar
+# Successful requests included, so the next incident has a who-fetched-what.
+sandbar_ui_access_log: /var/log/caddy/sandbar-ui.log
 
 # An installation may override either identity in its inventory entry.
 sandbar_git_name: sandbar-bot

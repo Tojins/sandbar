@@ -21,3 +21,8 @@
 - name: Reload the pasta AppArmor profile
   ansible.builtin.command: apparmor_parser --replace /etc/apparmor.d/usr.bin.pasta
   changed_when: true
+
+- name: Restart OpenVPN
+  ansible.builtin.systemd_service:
+    name: openvpn-server@sandbar
+    state: restarted

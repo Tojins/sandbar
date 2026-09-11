@@ -1,0 +1,28 @@
+# The operator VPN the run UI lives behind (#155), managed by the sandbar
+# Ansible role. Its only reach is this box: no pushed route beyond the tunnel
+# subnet, no redirected gateway, no DNS, no client-to-client, and the host
+# forwards nothing. Caddy answers on {{ sandbar_vpn_address }}; the readers
+# it proxies stay on loopback.
+port {{ sandbar_vpn_port }}
+proto {{ sandbar_vpn_proto }}-server
+dev tun
+topology subnet
+server {{ sandbar_vpn_network }} {{ sandbar_vpn_netmask }}
+
+ca {{ sandbar_vpn_dir }}/pki/ca.crt
+cert {{ sandbar_vpn_dir }}/pki/issued/server.crt
+key {{ sandbar_vpn_dir }}/pki/private/server.key
+tls-crypt {{ sandbar_vpn_dir }}/pki/private/ta.key
+# Re-read per connection, after the daemon has dropped to `nobody`, which is
+# why sandbar-vpn publishes this copy outside the root-only PKI.
+crl-verify {{ sandbar_vpn_dir }}/crl.pem
+# Elliptic-curve keys: the TLS handshake is ECDHE and needs no parameter file.
+dh none
+remote-cert-tls client
+
+keepalive 10 120
+persist-key
+persist-tun
+user nobody
+group nogroup
+verb 3

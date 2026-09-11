@@ -46,6 +46,20 @@
       reader_port; duplicates would overwrite one home and unit pair, route
       one prefix to multiple readers, or prevent readers binding concurrently.
 
+- name: Refuse a run UI that would answer on a public interface
+  ansible.builtin.assert:
+    that:
+      - sandbar_ui_bind | length > 0
+      - sandbar_ui_bind not in ['0.0.0.0', '::', '*']
+      - sandbar_vpn_endpoint | length > 0
+      - sandbar_vpn_proto in ['tcp', 'udp']
+    fail_msg: >-
+      sandbar_ui_bind is the one address Caddy answers the run UI on and must
+      be this box's tunnel address (#155): the page carries issue titles,
+      branch names, agent speech and attempt log paths. sandbar_vpn_endpoint
+      is what an issued profile dials — it defaults to this host's primary
+      IPv4 and must be set when that fact is unavailable.
+
 - name: Refuse a host that is not Ubuntu 24.04 or 26.04
   ansible.builtin.assert:
     that:
@@ -74,6 +88,9 @@
 
 - name: Configure unattended upgrades
   ansible.builtin.import_tasks: upgrades.yml
+
+- name: Provide the operator VPN the run UI answers on
+  ansible.builtin.import_tasks: vpn.yml
 
 - name: Configure Caddy installation routes
   ansible.builtin.import_tasks: caddy.yml

@@ -4,6 +4,17 @@
     name: caddy
     state: present
 
+# Caddy 2.6 logs only errors by default. Successful requests are what #154's
+# twenty minutes had no record of, so the site logs them as the package's own
+# user; rolling is Caddy's default and bounds the file.
+- name: Create the access log directory
+  ansible.builtin.file:
+    path: "{{ sandbar_ui_access_log | dirname }}"
+    state: directory
+    owner: caddy
+    group: caddy
+    mode: "0750"
+
 - name: Create the installation index directory
   ansible.builtin.file:
     path: "{{ sandbar_ui_root }}"

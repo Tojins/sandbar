@@ -1,7 +1,8 @@
 // The per-installation systemd units and host-global role shipped by
-// deploy/ansible (#149). Tests parse the committed inventories, render the
-// units from the real entries, and inspect bounded Ansible tasks so deleting
-// one loop or include cannot be hidden by a later task with similar text.
+// deploy/ansible (#149, #155). Tests parse the committed inventories, render
+// the units, the Caddy site and the VPN server from the real entries, and
+// inspect bounded Ansible tasks so deleting one loop or include cannot be
+// hidden by a later task with similar text.
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,12 @@ const accountTasks = readFileSync(new URL("tasks/account.yml", ROLE), "utf8");
 const installationTasks = readFileSync(new URL("tasks/installation.yml", ROLE), "utf8");
 const prepareTasks = readFileSync(new URL("tasks/prepare-installation.yml", ROLE), "utf8");
 const caddyTasks = readFileSync(new URL("tasks/caddy.yml", ROLE), "utf8");
+const vpnTasks = readFileSync(new URL("tasks/vpn.yml", ROLE), "utf8");
+const handlers = readFileSync(new URL("handlers/main.yml", ROLE), "utf8");
+const vpnServerTemplate = readFileSync(new URL("templates/openvpn-server.conf.j2", ROLE), "utf8");
+const vpnEnvTemplate = readFileSync(new URL("templates/vpn.env.j2", ROLE), "utf8");
+const vpnScript = readFileSync(new URL("files/sandbar-vpn", ROLE), "utf8");
+const roleDefaults = parse(readFileSync(new URL("defaults/main.yml", ROLE), "utf8")) as Record<string, unknown>;
 const exampleInventorySource = readFileSync(new URL("inventory.example.yml", DEPLOY_ROOT), "utf8");
 const realInventorySource = readFileSync(new URL("inventory.yml", DEPLOY_ROOT), "utf8");
 const outdoorConfigPath = new URL("installations/outdoor/sandbar.config.mjs", DEPLOY_ROOT);
@@ -86,7 +93,12 @@ function renderCaddy(
       "installation.project": row.project,
       "installation.reader_port": String(row.reader_port),
     })).join(""));
-  return render(expanded, { sandbar_ui_http_port: httpPort, sandbar_ui_root: "/var/www/sandbar" });
+  return render(expanded, {
+    sandbar_ui_bind: VPN_ADDRESS,
+    sandbar_ui_http_port: httpPort,
+    sandbar_ui_root: "/var/www/sandbar",
+    sandbar_ui_access_log: "/var/log/caddy/sandbar-ui.log",
+  });
 }
 
 function directives(unit: string): string[] {
@@ -108,6 +120,8 @@ function taskNamed(source: string, name: string): string {
   const end = relativeEnd === -1 ? lines.length : start + 1 + relativeEnd;
   return lines.slice(start, end).join("\n");
 }
+
+const VPN_ADDRESS = "10.8.0.1";
 
 const realInventory = inventoryVars(realInventorySource);
 const installations = realInventory.sandbar_installations.map((entry) => ({
@@ -286,6 +300,10 @@ describe("multi-installation role orchestration", () => {
 
   it("renders one stripped-prefix route per reader and serves the static index", () => {
     expect(renderCaddy(caddyTemplate, installations, "80")).toBe(`:80 {
+\tbind ${VPN_ADDRESS}
+\tlog {
+\t\toutput file /var/log/caddy/sandbar-ui.log
+\t}
 \thandle_path /outdoor/* {
 \t\treverse_proxy 127.0.0.1:7332
 \t}
@@ -333,6 +351,118 @@ describe("multi-installation role orchestration", () => {
     expect(renderTask).toContain('dest: "{{ sandbar_ui_root }}/index.html"');
     expect(caddyTasks.indexOf("- name: Render the installation index"))
       .toBeLessThan(caddyTasks.indexOf("- name: Configure Caddy installation routes and index"));
+  });
+});
+
+describe("the operator VPN the run UI answers on (#155)", () => {
+  it("binds the UI to the tunnel address and refuses a public one", () => {
+    expect(roleDefaults["sandbar_vpn_address"]).toBe(VPN_ADDRESS);
+    expect(roleDefaults["sandbar_ui_bind"]).toBe("{{ sandbar_vpn_address }}");
+    expect(directives(caddyTemplate)[1]).toBe("bind {{ sandbar_ui_bind }}");
+    const refusal = taskNamed(mainTasks, "Refuse a run UI that would answer on a public interface");
+    expect(refusal).toContain("sandbar_ui_bind | length > 0");
+    expect(refusal).toContain("sandbar_ui_bind not in ['0.0.0.0', '::', '*']");
+    expect(refusal).toContain("sandbar_vpn_endpoint | length > 0");
+    expect(mainTasks.indexOf("Refuse a run UI that would answer on a public interface"))
+      .toBeLessThan(mainTasks.indexOf("Install host packages"));
+  });
+
+  it("logs every request, successful ones included", () => {
+    expect(roleDefaults["sandbar_ui_access_log"]).toBe("/var/log/caddy/sandbar-ui.log");
+    const directory = taskNamed(caddyTasks, "Create the access log directory");
+    expect(directory).toContain('path: "{{ sandbar_ui_access_log | dirname }}"');
+    expect(directory).toContain("owner: caddy");
+    expect(caddyTasks.indexOf("- name: Create the access log directory"))
+      .toBeLessThan(caddyTasks.indexOf("- name: Configure Caddy installation routes and index"));
+  });
+
+  it("grants a client the tunnel subnet and nothing else", () => {
+    const server = render(vpnServerTemplate, {
+      sandbar_vpn_port: "443",
+      sandbar_vpn_proto: "tcp",
+      sandbar_vpn_network: "10.8.0.0",
+      sandbar_vpn_netmask: "255.255.255.0",
+      sandbar_vpn_address: VPN_ADDRESS,
+      sandbar_vpn_dir: "/etc/openvpn/sandbar",
+    });
+    expect(server).not.toMatch(/\{\{|\}\}/);
+    expect(directives(server)).toContain("server 10.8.0.0 255.255.255.0");
+    expect(directives(server)).toContain("proto tcp-server");
+    for (const reach of ["push", "redirect-gateway", "client-to-client"]) {
+      expect(directives(server).join("\n")).not.toContain(reach);
+    }
+    const forwarding = taskNamed(vpnTasks, "Forward nothing between this box's interfaces");
+    expect(forwarding).toContain("name: net.ipv4.ip_forward");
+    expect(forwarding).toContain('value: "0"');
+  });
+
+  it("verifies every certificate against a revocation list the server can read", () => {
+    expect(directives(vpnServerTemplate))
+      .toContain("crl-verify {{ sandbar_vpn_dir }}/crl.pem");
+    expect(directives(vpnServerTemplate)).toContain("user nobody");
+    // The list is published outside the root-only PKI the rest is read from.
+    expect(vpnScript).toContain('CRL="$SANDBAR_VPN_DIR/crl.pem"');
+    expect(vpnScript).toContain('install -m 0644 -o root -g root "$EASYRSA_PKI/crl.pem" "$CRL"');
+    expect(vpnScript).toContain("EASYRSA_CRL_DAYS=3650");
+  });
+
+  it("initialises one certificate authority on the box and repeats no work", () => {
+    const init = taskNamed(vpnTasks, "Initialise the certificate authority");
+    expect(init).toContain("ansible.builtin.command: /usr/local/sbin/sandbar-vpn init");
+    expect(init).toContain('creates: "{{ sandbar_vpn_dir }}/pki/issued/server.crt"');
+    // A second init would issue a new CA under the profiles already handed out.
+    expect(vpnScript).toContain('[ ! -e "$EASYRSA_PKI" ]');
+    const script = taskNamed(vpnTasks, "Install the certificate authority script");
+    expect(script).toContain("src: sandbar-vpn");
+    expect(script).toContain('mode: "0700"');
+    expect(vpnTasks.indexOf("- name: Install the certificate authority script"))
+      .toBeLessThan(vpnTasks.indexOf("- name: Initialise the certificate authority"));
+  });
+
+  it("keeps devices out of play state and out of the public inventory", () => {
+    expect(vpnScript).toContain("\tissue)");
+    expect(vpnScript).toContain("\trevoke)");
+    const commands = vpnTasks.split("\n")
+      .filter((line) => line.trimStart().startsWith("ansible.builtin.command:"));
+    expect(commands).toEqual(["  ansible.builtin.command: /usr/local/sbin/sandbar-vpn init"]);
+    for (const source of [exampleInventorySource, realInventorySource]) {
+      expect(source).not.toContain("sandbar-vpn");
+      expect(source).not.toContain(".ovpn");
+    }
+  });
+
+  it("renders one set of dial-in facts for the server and the profiles", () => {
+    const vars = {
+      sandbar_vpn_dir: "/etc/openvpn/sandbar",
+      sandbar_vpn_endpoint: "203.0.113.5",
+      sandbar_vpn_port: "443",
+      sandbar_vpn_proto: "tcp",
+    };
+    expect(directives(render(vpnEnvTemplate, vars))).toEqual([
+      "SANDBAR_VPN_DIR=/etc/openvpn/sandbar",
+      "SANDBAR_VPN_ENDPOINT=203.0.113.5",
+      "SANDBAR_VPN_PORT=443",
+      "SANDBAR_VPN_PROTO=tcp",
+    ]);
+    expect(roleDefaults["sandbar_vpn_endpoint"])
+      .toBe("{{ ansible_facts['default_ipv4']['address'] | default('') }}");
+    expect(vpnScript).toContain("remote $SANDBAR_VPN_ENDPOINT $SANDBAR_VPN_PORT");
+    expect(vpnScript).toContain("proto ${SANDBAR_VPN_PROTO}-client");
+  });
+
+  it("starts the server the rendered configuration names", () => {
+    const configure = taskNamed(vpnTasks, "Configure the VPN server");
+    expect(configure).toContain("dest: /etc/openvpn/server/sandbar.conf");
+    expect(configure).toContain("notify: Restart OpenVPN");
+    const start = taskNamed(vpnTasks, "Enable and start the VPN server");
+    expect(start).toContain("name: openvpn-server@sandbar");
+    expect(start).toContain("enabled: true");
+    expect(start).toContain("state: started");
+    expect(taskNamed(handlers, "Restart OpenVPN")).toContain("name: openvpn-server@sandbar");
+    expect(taskNamed(mainTasks, "Provide the operator VPN the run UI answers on"))
+      .toContain("ansible.builtin.import_tasks: vpn.yml");
+    expect(mainTasks.indexOf("import_tasks: vpn.yml"))
+      .toBeLessThan(mainTasks.indexOf("import_tasks: caddy.yml"));
   });
 });
 

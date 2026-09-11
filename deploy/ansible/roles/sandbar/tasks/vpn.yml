@@ -1,0 +1,90 @@
+---
+# The run UI is an operator surface, not a public one (#155), so the box hosts
+# the private interface it is reachable on and the public interface answers on
+# SSH and this server alone. OpenVPN because both people already run its
+# client; an address allowlist or a cloud private network cannot serve a
+# laptop on hotel wifi, and basic auth over HTTPS would leave the UI a public
+# listener one directive away from the next leak — on a box with no DNS name
+# to get a certificate for. SSH stays public on purpose: a broken VPN must not
+# lock the operator out of the box that would repair it.
+- name: Install OpenVPN and easy-rsa
+  ansible.builtin.apt:
+    name:
+      - openvpn
+      - easy-rsa
+    state: present
+
+- name: Create the VPN directory
+  ansible.builtin.file:
+    path: "{{ sandbar_vpn_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the certificate authority script
+  ansible.builtin.copy:
+    src: sandbar-vpn
+    dest: /usr/local/sbin/sandbar-vpn
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Render what that script and a profile need to know about this box
+  ansible.builtin.template:
+    src: vpn.env.j2
+    dest: "{{ sandbar_vpn_dir }}/vpn.env"
+    owner: root
+    group: root
+    mode: "0644"
+
+# Guarded by what it creates, so a repeat play does no work and the CA key
+# stays the one it issued every live profile from. Issuing and revoking
+# devices are operator actions and never play state: inventory.yml is
+# committed to a public repository, and the set of devices grows by running
+# `sandbar-vpn issue` here, not by editing it.
+- name: Initialise the certificate authority
+  ansible.builtin.command: /usr/local/sbin/sandbar-vpn init
+  args:
+    creates: "{{ sandbar_vpn_dir }}/pki/issued/server.crt"
+
+- name: Forward nothing between this box's interfaces
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "0"
+    sysctl_file: /etc/sysctl.d/60-sandbar-vpn.conf
+    state: present
+    reload: true
+
+# Caddy binds the tunnel address, and at boot it can win the race against
+# OpenVPN creating tun0. Non-local binding decouples the two rather than
+# ordering one unit behind the other, which a later OpenVPN restart would
+# break anyway. Rootless podman is unaffected: forwarding is per-netns and
+# every container has its own.
+- name: Allow binding an address the tunnel has not brought up yet
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_nonlocal_bind
+    value: "1"
+    sysctl_file: /etc/sysctl.d/60-sandbar-vpn.conf
+    state: present
+    reload: true
+
+- name: Configure the VPN server
+  ansible.builtin.template:
+    src: openvpn-server.conf.j2
+    dest: /etc/openvpn/server/sandbar.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart OpenVPN
+
+- name: Enable and start the VPN server
+  ansible.builtin.systemd_service:
+    name: openvpn-server@sandbar
+    enabled: true
+    state: started
+
+# Caddy is configured next and reloads onto the tunnel address; a handler
+# deferred past a later installation refusal would be lost.
+- name: Apply the VPN configuration before Caddy is pointed at its address
+  ansible.builtin.meta: flush_handlers
