@@ -37,6 +37,25 @@ async function runTree(withPid: boolean): Promise<{ logsDir: string; runDir: str
   return { logsDir, runDir };
 }
 
+// The whole #69 identity line, as `formatDriverIdentity` spells it.
+const DRIVER_LINE =
+  "Driver: sandbar 0.42.5 · built from /opt/driver @abc123 clean" +
+  " · config /opt/installation/sandbar.config.mjs @def456 dirty";
+
+// The row the screenshot in #156 blamed: a parked issue whose reason is one
+// unbroken line of reviewer prose. A nowrap cell this long is what stretched
+// the page column — and with the wrap in place it is what has to be clamped
+// and reachable on hover instead.
+const PARKED_WHY =
+  "parked · NEEDS-HUMAN-REVIEW · the reviewer wrote to the managed clone" +
+  " during a read-only pass, so the issue is held for human inspection rather" +
+  " than retried: the clone is preserved at" +
+  " .sandbar/worktrees/sandbar-issue-249-long-reason with its branch published" +
+  " and an off-branch HEAD pinned in the cache, and the gate-1 trace from the" +
+  " attempt before it is filed beside that attempt log; push a fix on the" +
+  " branch and re-apply ready-for-agent to resume, or delete the branch on" +
+  " origin to abandon what the attempt accumulated there · this run";
+
 describe("run UI server", () => {
   it("renders, polls repeatedly, and retains the last state after a network failure", async () => {
     const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
@@ -46,13 +65,13 @@ describe("run UI server", () => {
     let interval: (() => Promise<void>) | undefined;
     const state = {
       now: "2026-09-07T10:00:00Z",
-      run: { startedAt: "2026-09-07T09:00:00Z", status: "live", driver: "sandbar test",
+      run: { startedAt: "2026-09-07T09:00:00Z", status: "live", driver: DRIVER_LINE,
         slots: { used: 1, max: 2 }, lastRecompute: { n: 2, trigger: "slot freed", at: "2026-09-07T09:30:00Z" },
         exit: null, complaints: [] },
       pool: [{ issue: 2, title: "Pool title", phase: "implementer",
         phaseSince: "2026-09-07T09:50:00Z", attempt: 1,
         spans: [{ kind: "impl", from: "2026-09-07T09:50:00Z", to: null, label: "a1" }] }],
-      waiting: [{ issue: 3, title: "Waiting title", why: "blocked by #2" }],
+      waiting: [{ issue: 3, title: "Waiting title", why: PARKED_WHY, parked: true }],
       finished: [{ issue: 1, title: "Finished title", outcome: "HARD-ERROR",
         reason: "provider cause\n(codex exited with code 1)", attempts: 1,
         rounds: 1, ms: 60_000, landed: "main", at: "2026-09-07T09:40:00Z" }],
@@ -76,9 +95,28 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("<details id=\"events\"><summary>Events");
     expect(app.innerHTML).toContain("Pool title");
     expect(app.innerHTML).toContain("Waiting title");
-    expect(app.innerHTML).toContain("Finished title");
-    expect(app.innerHTML).toContain("HARD-ERROR · provider cause");
-    expect(app.innerHTML).not.toContain("codex exited with code 1");
+    // One long line, and nothing about it may widen the page: the parked
+    // reason is clamped in its column and carried whole on the hover.
+    expect(PARKED_WHY).toMatch(/^[^\n]{500,}$/);
+    expect(app.innerHTML).toContain(
+      `<span class="why clamp bad" title="${PARKED_WHY}">${PARKED_WHY}</span>`,
+    );
+    // Titles ellipsize, so the whole title is the hover's too.
+    expect(app.innerHTML).toContain(
+      `<span class="ellip" title="Finished title">Finished title</span>`,
+    );
+    // Only the first line is rendered; the rest of the cause is the title's.
+    expect(app.innerHTML).toContain(">HARD-ERROR · provider cause</span>");
+    expect(app.innerHTML).toContain(
+      `title="provider cause\n(codex exited with code 1)"`,
+    );
+    // The header is the driver's name and version, with the identity line
+    // (#69) reachable on it, and the slots belong to the pool's heading.
+    expect(app.innerHTML).toContain(
+      `<span class="name" title="${DRIVER_LINE}">sandbar 0.42.5</span>`,
+    );
+    expect(app.innerHTML).toContain("In the pool · 1/2 slots");
+    expect(app.innerHTML.match(/slots/g)).toHaveLength(1);
     expect(app.innerHTML).toContain("attempt started");
     // A feed the reader opened stays open across the next poll's re-render.
     (app as { open?: boolean }).open = true;
