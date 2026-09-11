@@ -1081,9 +1081,11 @@ describe("runGate1 admission (#142)", () => {
       issue: { id, title: `Issue ${id}` },
       opts: {
         gateSemaphore,
+        attemptLogger: { writeGate: vi.fn() },
         onEvent: (event: EventInput) => events.push(event),
       },
       gateStack: { runGate },
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
     }) as unknown as Parameters<typeof runGate1>[1];
 
     const first = runGate1(
@@ -1115,6 +1117,44 @@ describe("runGate1 admission (#142)", () => {
       }),
     ]);
     expect(events[0]).not.toHaveProperty("queuedMs");
+  });
+
+  it("files the gate output as the attempt's artefact before reporting it (#153)", async () => {
+    const writeGate = vi.fn();
+    const gate: GateResult = {
+      ok: false,
+      stdout: "=== test ===\nfail",
+      stderr: "boom",
+      exitCode: 1,
+      failedStep: "test",
+      durationMs: 9,
+      steps: [],
+      containerLogs: "db tail",
+    };
+    const ctx = {
+      issue: { id: "153", title: "gate log" },
+      opts: {
+        gateSemaphore: createGateSemaphore(undefined),
+        attemptLogger: { writeGate },
+        onEvent: () => undefined,
+      },
+      gateStack: { runGate: async () => gate },
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+    } as unknown as Parameters<typeof runGate1>[1];
+
+    const result = await runGate1(
+      { kind: "run-gate-and-reviewer", attempt: 2, reviewRound: 2 },
+      ctx,
+    );
+    expect(result.ok).toBe(false);
+    expect(writeGate).toHaveBeenCalledWith("attempt-2-gate.log", {
+      ok: false,
+      stdout: "=== test ===\nfail",
+      stderr: "boom",
+      failedStep: "test",
+      exitCode: 1,
+      containerLogs: "db tail",
+    });
   });
 });
 

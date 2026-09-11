@@ -502,7 +502,10 @@ outcomes.
   speech, and raw stdout/stderr tails. The run-cached per-issue logger owns
   invocation names, so they remain sequenced across fresh HARD-ERROR sandboxes
   and later admissions of the same issue; an existing name is never
-  overwritten. Those records, gate artefacts, merger logs and resolve
+  overwritten. Every gate-1 result is filed from that same sequence as the
+  attempt's `attempt-<n>-gate.log`, green as well as red, so the red a run
+  failed on can be read against the green before it (#153). Those records,
+  gate artefacts, merger logs and resolve
   transcripts stay as files through `src/logs.ts`; they are artefacts, not a
   second event stream.
   `run()` hosts the file-fed UI and writes its URL—and nothing else—to stdout.
