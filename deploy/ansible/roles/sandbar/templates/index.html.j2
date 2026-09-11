@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sandbar installations</title>
+</head>
+<body>
+<h1>Sandbar installations</h1>
+<ul>
+{% for installation in sandbar_installations %}
+<li><a href="/{{ installation.project }}/">{{ installation.project }}</a></li>
+{% endfor %}
+</ul>
+</body>
+</html>

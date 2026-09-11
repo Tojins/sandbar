@@ -18,6 +18,8 @@ sandbar_stop_timeout_sec: 900
 
 # Caddy serves an installation index at `/` and each reader at `/<project>/`.
 sandbar_ui_http_port: 80
+# The static index page lives here; every other path is an installation route.
+sandbar_ui_root: /var/www/sandbar
 
 # An installation may override either identity in its inventory entry.
 sandbar_git_name: sandbar-bot

@@ -4,6 +4,24 @@
     name: caddy
     state: present
 
+- name: Create the installation index directory
+  ansible.builtin.file:
+    path: "{{ sandbar_ui_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# A static file rather than a `respond` heredoc: Ubuntu's packaged Caddy
+# (2.6.2 on 24.04 and 26.04) predates heredoc support, which arrived in 2.7.
+- name: Render the installation index
+  ansible.builtin.template:
+    src: index.html.j2
+    dest: "{{ sandbar_ui_root }}/index.html"
+    owner: root
+    group: root
+    mode: "0644"
+
 - name: Configure Caddy installation routes and index
   ansible.builtin.template:
     src: Caddyfile.j2

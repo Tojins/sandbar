@@ -15,6 +15,7 @@ const DEPLOY_ROOT = new URL("../deploy/ansible/", import.meta.url);
 const daemonTemplate = readFileSync(new URL("templates/sandbar.service.j2", ROLE), "utf8");
 const uiTemplate = readFileSync(new URL("templates/sandbar-ui.service.j2", ROLE), "utf8");
 const caddyTemplate = readFileSync(new URL("templates/Caddyfile.j2", ROLE), "utf8");
+const indexTemplate = readFileSync(new URL("templates/index.html.j2", ROLE), "utf8");
 const mainTasks = readFileSync(new URL("tasks/main.yml", ROLE), "utf8");
 const accountTasks = readFileSync(new URL("tasks/account.yml", ROLE), "utf8");
 const installationTasks = readFileSync(new URL("tasks/installation.yml", ROLE), "utf8");
@@ -85,7 +86,7 @@ function renderCaddy(
       "installation.project": row.project,
       "installation.reader_port": String(row.reader_port),
     })).join(""));
-  return render(expanded, { sandbar_ui_http_port: httpPort });
+  return render(expanded, { sandbar_ui_http_port: httpPort, sandbar_ui_root: "/var/www/sandbar" });
 }
 
 function directives(unit: string): string[] {
@@ -283,7 +284,7 @@ describe("multi-installation role orchestration", () => {
       .toBeLessThan(mainTasks.indexOf("Install host packages"));
   });
 
-  it("renders an ordered installation index and one stripped-prefix route per reader", () => {
+  it("renders one stripped-prefix route per reader and serves the static index", () => {
     expect(renderCaddy(caddyTemplate, installations, "80")).toBe(`:80 {
 \thandle_path /outdoor/* {
 \t\treverse_proxy 127.0.0.1:7332
@@ -291,25 +292,11 @@ describe("multi-installation role orchestration", () => {
 \thandle_path /sandbar/* {
 \t\treverse_proxy 127.0.0.1:7333
 \t}
-\theader / Content-Type text/html
-\trespond / <<HTML
-\t\t<!doctype html>
-\t\t<html lang="en">
-\t\t<head>
-\t\t<meta charset="utf-8">
-\t\t<title>Sandbar installations</title>
-\t\t</head>
-\t\t<body>
-\t\t<h1>Sandbar installations</h1>
-\t\t<ul>
-\t\t<li><a href="/outdoor/">outdoor</a></li>
-\t\t<li><a href="/sandbar/">sandbar</a></li>
-\t\t</ul>
-\t\t</body>
-\t\t</html>
-\t\tHTML 200
+\troot * /var/www/sandbar
+\tfile_server
 }
 `);
+    expect(caddyTemplate).not.toContain("<<");
     expect(taskNamed(caddyTasks, "Configure Caddy installation routes and index"))
       .toContain("notify: Reload Caddy");
     const startName = "Enable and start Caddy";
@@ -323,6 +310,29 @@ describe("multi-installation role orchestration", () => {
     expect(flush).toContain("ansible.builtin.meta: flush_handlers");
     expect(caddyTasks.indexOf(`- name: ${startName}`))
       .toBeLessThan(caddyTasks.indexOf(`- name: ${flushName}`));
+  });
+
+  it("renders an ordered installation index as a file Caddy 2.6 can serve", () => {
+    expect(renderCaddy(indexTemplate, installations, "80")).toBe(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sandbar installations</title>
+</head>
+<body>
+<h1>Sandbar installations</h1>
+<ul>
+<li><a href="/outdoor/">outdoor</a></li>
+<li><a href="/sandbar/">sandbar</a></li>
+</ul>
+</body>
+</html>
+`);
+    const renderTask = taskNamed(caddyTasks, "Render the installation index");
+    expect(renderTask).toContain("src: index.html.j2");
+    expect(renderTask).toContain('dest: "{{ sandbar_ui_root }}/index.html"');
+    expect(caddyTasks.indexOf("- name: Render the installation index"))
+      .toBeLessThan(caddyTasks.indexOf("- name: Configure Caddy installation routes and index"));
   });
 });
 

@@ -4,22 +4,6 @@
 		reverse_proxy 127.0.0.1:{{ installation.reader_port }}
 	}
 {% endfor %}
-	header / Content-Type text/html
-	respond / <<HTML
-		<!doctype html>
-		<html lang="en">
-		<head>
-		<meta charset="utf-8">
-		<title>Sandbar installations</title>
-		</head>
-		<body>
-		<h1>Sandbar installations</h1>
-		<ul>
-{% for installation in sandbar_installations %}
-		<li><a href="/{{ installation.project }}/">{{ installation.project }}</a></li>
-{% endfor %}
-		</ul>
-		</body>
-		</html>
-		HTML 200
+	root * {{ sandbar_ui_root }}
+	file_server
 }

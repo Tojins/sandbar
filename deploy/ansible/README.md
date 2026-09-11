@@ -56,8 +56,9 @@ Each installation config must also give the daemon's in-process `uiPort` its
 own host port, distinct from every reader; the two committed configs use 7331
 and 7334 around their inventory's 7332 and 7333.
 Both units use `Restart=no`; exits 2 and 4 remain stops for a human to inspect.
-Caddy serves a browser-default index of installation projects at `/`; each link
-opens that installation's reader at `/<project>/`.
+Caddy serves a static index of installation projects at `/` (a rendered file,
+since Ubuntu's packaged Caddy 2.6 has no heredocs); each link opens that
+installation's reader at `/<project>/`.
 
 ## Inventory
 
