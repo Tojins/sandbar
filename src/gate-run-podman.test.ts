@@ -131,14 +131,19 @@ describe.runIf(available)("sandbar gate against real podman", () => {
 
       const green = await runGateCommand(
         config([
-          { name: "read", in: "runner", command: ["cat", "marker.txt"] },
+          {
+            name: "read",
+            in: "runner",
+            command: ["grep", "-Fxq", "uncommitted", "marker.txt"],
+          },
         ]),
         { worktree: repo, keep: false, ...sink },
       );
       expect(green).toBe(GATE_EXIT_GREEN);
       // It gated the tree as it stands — uncommitted, and in no repository at
-      // all — which is the whole difference from the gate inside a run.
-      expect(out.join("")).toContain("uncommitted");
+      // all — which is the whole difference from the gate inside a run. The
+      // step's exit status asserts the mounted contents without depending on
+      // a remote podman service returning stdout from a successful exec.
       expect(out.join("")).toMatch(
         /container runner stopped durationMs=\d+ peakMemoryBytes=\d+/,
       );
