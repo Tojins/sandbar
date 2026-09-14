@@ -1432,7 +1432,11 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
 
       await expect(runInnerLoop(
         { id: "135", title: "records", branch: "sandbar/issue-135-records" },
-        { attemptLogger: issueLogger, onEvent: () => undefined } as Parameters<
+        {
+          config: { partitionCheck: false },
+          attemptLogger: issueLogger,
+          onEvent: () => undefined,
+        } as unknown as Parameters<
           typeof runInnerLoop
         >[1],
         runCycle,
@@ -1441,7 +1445,11 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       expect(readmittedLogger).toBe(issueLogger);
       await expect(runInnerLoop(
         { id: "135", title: "records", branch: "sandbar/issue-135-records" },
-        { attemptLogger: readmittedLogger, onEvent: () => undefined } as Parameters<
+        {
+          config: { partitionCheck: false },
+          attemptLogger: readmittedLogger,
+          onEvent: () => undefined,
+        } as unknown as Parameters<
           typeof runInnerLoop
         >[1],
         runCycle,
@@ -1504,6 +1512,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         runInnerLoop(
           { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
           {
+            config: { partitionCheck: false },
             attemptLogger: {
               writeInvocation: vi.fn(),
               startInvocationCycle: createAgentInvocationSequencer().startCycle,
@@ -1533,12 +1542,13 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       runInnerLoop(
         { id: "115", title: "logging", branch: "sandbar/issue-115-logging" },
         {
+          config: { partitionCheck: false },
           attemptLogger: {
             writeInvocation: vi.fn(),
             startInvocationCycle: createAgentInvocationSequencer().startCycle,
           },
           onEvent: () => undefined,
-        } as Parameters<typeof runInnerLoop>[1],
+        } as unknown as Parameters<typeof runInnerLoop>[1],
         runCycle,
       ),
     ).resolves.toEqual({

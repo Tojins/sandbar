@@ -484,14 +484,20 @@ export const credentialVerdict = (err: AgentCredentialError): Verdict => ({
 class PartitionRequiredError extends Error {
   readonly verdict: Extract<Verdict, { readonly type: "NEEDS-PARTITION" }>;
   constructor(
-    cause: "measured" | "provider-refused",
     slot: ContextSlot,
     size: number,
     budget: number,
     detail: string,
   ) {
     super(detail);
-    this.verdict = { type: "NEEDS-PARTITION", cause, slot, size, budget, detail };
+    this.verdict = {
+      type: "NEEDS-PARTITION",
+      cause: "provider-refused",
+      slot,
+      size,
+      budget,
+      detail,
+    };
   }
 }
 
@@ -503,7 +509,6 @@ const providerSizeRefusal = (
 ): unknown => {
   if (err instanceof AgentInputTooLargeError) {
     return new PartitionRequiredError(
-      "provider-refused",
       slot,
       size,
       budget,
@@ -649,7 +654,7 @@ export async function runInnerLoop(
   let retriesUsed = 0;
   const specGaps: SpecGap[] = [];
   let admitted = false;
-  let partitionCheckPending = opts.config?.partitionCheck ?? false;
+  let partitionCheckPending = opts.config.partitionCheck;
   const cycleOptions: InnerLoopOptions = {
     ...opts,
     onEvent: async (event) => {
@@ -1385,7 +1390,7 @@ export async function runPartitionCheck(
     const before = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
     const timer = startTimer();
     const log = async (
-      result: Extract<EventInput, { kind: "partition-check" }> ["result"],
+      result: Extract<EventInput, { kind: "partition-check" }>["result"],
       durationMs: number,
       usage: AgentUsage | undefined,
       toolCalls: number | undefined,
