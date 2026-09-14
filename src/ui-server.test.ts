@@ -143,6 +143,53 @@ describe("run UI server", () => {
     expect(fetch).toHaveBeenNthCalledWith(1, "state.json", { cache: "no-store" });
   });
 
+  it("widens timeline tick spacing at the two- and eight-hour thresholds", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    const baseState = {
+      run: { startedAt: "2026-09-01T00:00:00Z", status: "live", driver: "sandbar test",
+        slots: { used: 1, max: 1 }, lastRecompute: { n: 1, trigger: "startup", at: "2026-09-07T00:00:00Z" },
+        exit: null, complaints: [] },
+      pool: [{ issue: 1, title: "Pool title", phase: "implementer",
+        phaseSince: "2026-09-07T00:00:00Z", attempt: 1,
+        spans: [{ kind: "impl", from: "2026-09-07T00:00:00Z", to: null, label: "a1" }] }],
+      waiting: [], finished: [], eventCount: 0, events: [],
+    };
+    const cases = [
+      { now: "2026-09-07T01:54:00Z", labels: [
+        "00:00", "00:10", "00:20", "00:30", "00:40", "00:50",
+        "01:00", "01:10", "01:20", "01:30", "01:40", "01:50",
+      ] },
+      { now: "2026-09-07T01:55:00Z", labels: [
+        "00:00", "00:30", "01:00", "01:30",
+      ] },
+      { now: "2026-09-07T07:54:00Z", labels: [
+        "00:00", "00:30", "01:00", "01:30", "02:00", "02:30", "03:00", "03:30",
+        "04:00", "04:30", "05:00", "05:30", "06:00", "06:30", "07:00", "07:30",
+      ] },
+      { now: "2026-09-07T07:55:00Z", labels: [
+        "00:00", "02:00", "04:00", "06:00",
+      ] },
+    ];
+
+    for (const testCase of cases) {
+      const app = { innerHTML: "" };
+      const state = { ...baseState, now: testCase.now };
+      runInNewContext(script!, {
+        document: { getElementById: () => app },
+        fetch: async () => ({ ok: true, status: 200, json: async () => state }),
+        setInterval: () => 1,
+        Date, Intl, Math, String, Error, TypeError,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      const axis = app.innerHTML.match(/<div class="axis">([\s\S]*?)<\/div>/)?.[1] ?? "";
+      const labels = [...axis.matchAll(/<span style="left:[^"]+">([^<]+)<\/span>/g)]
+        .map((match) => match[1]);
+      expect(labels, testCase.now).toEqual(testCase.labels);
+    }
+  });
+
   it("renders a failed state request, with or without a last state", async () => {
     const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
     const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
