@@ -22,6 +22,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
@@ -277,15 +278,28 @@ describe.runIf(available)("sandbar gate against real podman", () => {
         await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", dbName])
           .then((r) => r.stdout.trim())
           .catch(() => null);
+      const seededValue = async (): Promise<string> => {
+        // A successful read of this file cannot be empty: its writer emits a
+        // timestamp, and the test never truncates it. Remote podman can still
+        // transiently return empty stdout from a successful exec, so retry
+        // only that impossible observation without weakening the value check.
+        let value = "";
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          value = (
+            await exec(RUNTIME, ["exec", dbName, "cat", "/tmp/seeded"])
+          ).stdout.trim();
+          if (value) return value;
+          if (attempt < 19) await delay(250);
+        }
+        return value;
+      };
 
       expect(
         await runGateCommand(withDb, { worktree: repo, keep: true, ...sink }),
       ).toBe(GATE_EXIT_GREEN);
       const keptPod = await podId();
       const keptDb = await dbId();
-      const seeded = (
-        await exec(RUNTIME, ["exec", dbName, "cat", "/tmp/seeded"])
-      ).stdout.trim();
+      const seeded = await seededValue();
       expect(keptPod).not.toBeNull();
       expect(seeded).not.toBe("");
 
@@ -305,11 +319,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
       // alone says nothing about what is inside it.
       expect(await podId()).toBe(keptPod);
       expect(await dbId()).toBe(keptDb);
-      expect(
-        (
-          await exec(RUNTIME, ["exec", dbName, "cat", "/tmp/seeded"])
-        ).stdout.trim(),
-      ).toBe(seeded);
+      expect(await seededValue()).toBe(seeded);
 
       // …and it is described as what it is. Both negatives are the assertion:
       // each is the sentence a notice reasoning from the null stack handle
