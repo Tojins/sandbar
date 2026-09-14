@@ -190,6 +190,32 @@ describe("run UI server", () => {
     }
   });
 
+  it("keeps the timeline finite before an admitted issue has a span", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    const app = { innerHTML: "" };
+    const state = {
+      now: "2026-09-07T10:29:00Z",
+      run: { startedAt: "2026-09-04T21:35:00Z", status: "live", driver: "sandbar test",
+        slots: { used: 1, max: 1 }, lastRecompute: { n: 1, trigger: "startup", at: "2026-09-07T10:29:00Z" },
+        exit: null, complaints: [] },
+      pool: [{ issue: 1, title: "Pool title", phase: "setup",
+        phaseSince: "2026-09-07T10:29:00Z", attempt: 1, spans: [] }],
+      waiting: [], finished: [], eventCount: 0, events: [],
+    };
+    runInNewContext(script!, {
+      document: { getElementById: () => app },
+      fetch: async () => ({ ok: true, status: 200, json: async () => state }),
+      setInterval: () => 1,
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(app.innerHTML).not.toContain("NaN%");
+    expect(app.innerHTML).toContain('<span class="nowlab" style="left:0.00%">now</span>');
+    expect(app.innerHTML).toContain('<span class="nowline" style="left:0.00%"></span>');
+  });
+
   it("renders a failed state request, with or without a last state", async () => {
     const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
     const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];

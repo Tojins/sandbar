@@ -46,7 +46,7 @@ function render(state, serverNotice=null) {
   // A run is a daemon, but its process lifetime is not work in the pool. Scale
   // the lanes from their earliest span and keep ticks sparse as that visible
   // interval grows (#159).
-  lastState=state; const r=state.run, now=parse(state.now), t0=Math.min(...state.pool.flatMap(p=>p.spans.map(sp=>parse(sp.from)))), t1=Math.max(now+300000,t0+300000), width=t1-t0;
+  lastState=state; const r=state.run, now=parse(state.now), spanStarts=state.pool.flatMap(p=>p.spans.map(sp=>parse(sp.from))), t0=spanStarts.length?Math.min(...spanStarts):now, t1=Math.max(now+300000,t0+300000), width=t1-t0;
   const tickMs=width<7200000?600000:width<28800000?1800000:7200000;
   const x=iso => Math.max(0,Math.min(100,(parse(iso)-t0)/width*100)).toFixed(2)+"%";
   const w=(from,to) => Math.max(.2,((to?parse(to):now)-parse(from))/width*100).toFixed(2)+"%";
