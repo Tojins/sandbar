@@ -187,13 +187,23 @@ describe.runIf(available)("the sandbox container against real podman", () => {
   };
 
   const pid1Comm = async (name: string): Promise<string> => {
-    const { stdout } = await exec(RUNTIME, [
-      "exec",
-      name,
-      "cat",
-      "/proc/1/comm",
-    ]);
-    return stdout.trim();
+    // A live process's comm is never empty, but the remote podman service can
+    // transiently return an empty successful exec immediately after a
+    // detached start. Poll that impossible observation so neither half of the
+    // control pair can pass or fail on transport timing.
+    let comm = "";
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const { stdout } = await exec(RUNTIME, [
+        "exec",
+        name,
+        "cat",
+        "/proc/1/comm",
+      ]);
+      comm = stdout.trim();
+      if (comm) return comm;
+      if (attempt < 19) await delay(250);
+    }
+    return comm;
   };
 
   it.concurrent(
