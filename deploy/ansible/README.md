@@ -191,8 +191,9 @@ dir ... permission denied` on every `podman` call, and `podman system migrate`
 re-owns nothing). The slot is explicit inventory data rather than the list index
 for exactly that reason, and the role refuses a slot change while the storage
 directory exists. To change one anyway, stop the installation's units, remove
-`/home/<user>/.local/share/containers/storage`, and let the next run rebuild its
-images.
+`/home/<user>/.local/share/containers/storage`, and let the next pull write the
+range, restart the user's rootless pause process (which otherwise keeps the
+old uid map for as long as it lives) and rebuild the images at the next run.
 
 ```yaml
 sandbar_installations:

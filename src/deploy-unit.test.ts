@@ -618,7 +618,15 @@ describe("multi-installation role orchestration", () => {
     const write = "- name: Give the installation user disjoint subordinate id ranges";
     expect(userTasks.indexOf("Refuse to move a subordinate id range under existing podman storage"))
       .toBeLessThan(userTasks.indexOf(write));
-    expect(userTasks).not.toContain("command: podman system migrate");
+    const migrate = taskNamed(
+      userTasks,
+      "Restart the installation user's rootless pause process after a range change",
+    );
+    expect(migrate).toContain("podman system migrate");
+    expect(migrate).toContain("when: sandbar_subids is changed");
+    expect(userTasks.indexOf(write)).toBeLessThan(userTasks.indexOf(
+      "Restart the installation user's rootless pause process after a range change",
+    ));
   });
 
   it("renders one stripped-prefix route per reader and serves the static index", () => {
