@@ -64,13 +64,16 @@ describe("run UI server", () => {
     const app = { innerHTML: "" };
     let interval: (() => Promise<void>) | undefined;
     const state = {
-      now: "2026-09-07T10:00:00Z",
-      run: { startedAt: "2026-09-07T09:00:00Z", status: "live", driver: DRIVER_LINE,
+      now: "2026-09-07T10:29:00Z",
+      run: { startedAt: "2026-09-04T21:35:00Z", status: "live", driver: DRIVER_LINE,
         slots: { used: 1, max: 2 }, lastRecompute: { n: 2, trigger: "slot freed", at: "2026-09-07T09:30:00Z" },
         exit: null, complaints: [] },
       pool: [{ issue: 2, title: "Pool title", phase: "implementer",
-        phaseSince: "2026-09-07T09:50:00Z", attempt: 1,
-        spans: [{ kind: "impl", from: "2026-09-07T09:50:00Z", to: null, label: "a1" }] }],
+        phaseSince: "2026-09-07T10:21:00Z", attempt: 2,
+        spans: [
+          { kind: "impl", from: "2026-09-07T09:31:00Z", to: "2026-09-07T09:32:00Z", label: "a1" },
+          { kind: "impl", from: "2026-09-07T10:21:00Z", to: null, label: "a2" },
+        ] }],
       waiting: [{ issue: 3, title: "Waiting title", why: PARKED_WHY, parked: true }],
       finished: [{ issue: 1, title: "Finished title", outcome: "HARD-ERROR",
         reason: "provider cause\n(codex exited with code 1)", attempts: 1,
@@ -95,6 +98,16 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("<details id=\"events\"><summary>Events");
     expect(app.innerHTML).toContain("Pool title");
     expect(app.innerHTML).toContain("Waiting title");
+    // This run has been live for 60h54, but the timeline begins at the first
+    // pool span. Ten-minute ticks stay readable and the eight-minute current
+    // span occupies useful width instead of being crushed against `now`.
+    const axis = app.innerHTML.match(/<div class="axis">([\s\S]*?)<\/div>/)?.[1];
+    expect(axis?.match(/<span/g)).toHaveLength(7);
+    expect(axis).toContain(">09:40</span>");
+    expect(axis).toContain(">10:30</span>");
+    expect(app.innerHTML).toContain(
+      'class="bar impl  running" style="left:79.37%;width:12.70%" title="a2"',
+    );
     // One long line, and nothing about it may widen the page: the parked
     // reason is clamped in its column and carried whole on the hover.
     expect(PARKED_WHY).toMatch(/^[^\n]{500,}$/);
