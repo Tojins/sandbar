@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const innerLoopMocks = vi.hoisted(() => ({
   buildPrompt: vi.fn(async () => "implementer prompt"),
@@ -9,6 +9,15 @@ const innerLoopMocks = vi.hoisted(() => ({
   buildUiCheckPrompt: vi.fn(async () => "ui check prompt"),
   buildReviewerPrompts: vi.fn(),
   measureNetDiffChars: vi.fn(async () => 0),
+  branchIsAheadOfSeed: vi.fn(async () => false),
+  ensureIssueBranch: vi.fn(async () => ({
+    ref: "origin/main",
+    sha: "base-sha",
+  })),
+  prepareWorktree: vi.fn(async () => "/worktree"),
+  createSandbox: vi.fn(),
+  resolveSandboxImage: vi.fn(async () => "sandbox-image"),
+  startStack: vi.fn(),
   branchTip: vi.fn(async () => "tip-a" as string | null),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
   fastForwardOffBranchHead: vi.fn(),
@@ -23,6 +32,23 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   buildUiCheckPrompt: innerLoopMocks.buildUiCheckPrompt,
   buildReviewerPrompts: innerLoopMocks.buildReviewerPrompts,
   measureNetDiffChars: innerLoopMocks.measureNetDiffChars,
+  branchIsAheadOfSeed: innerLoopMocks.branchIsAheadOfSeed,
+}));
+
+vi.mock("./agent-sandbox.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./agent-sandbox.js")>()),
+  prepareWorktree: innerLoopMocks.prepareWorktree,
+  createSandbox: innerLoopMocks.createSandbox,
+}));
+
+vi.mock("./agent-tools.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./agent-tools.js")>()),
+  resolveSandboxImage: innerLoopMocks.resolveSandboxImage,
+}));
+
+vi.mock("./gate-stack.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./gate-stack.js")>()),
+  startStack: innerLoopMocks.startStack,
 }));
 
 vi.mock("./git-ops.js", async (importOriginal) => ({
@@ -32,6 +58,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   fastForwardOffBranchHead: innerLoopMocks.fastForwardOffBranchHead,
   headMismatch: innerLoopMocks.headMismatch,
   symbolicHeadRef: innerLoopMocks.symbolicHeadRef,
+  ensureIssueBranch: innerLoopMocks.ensureIssueBranch,
 }));
 
 import {
@@ -1045,6 +1072,10 @@ describe("runGateAndReviewer (#123)", () => {
       durationMs: 10,
     },
   };
+  const prepareReview = vi.fn(async () => ({
+    prompts: { quality: "quality", correctness: "correctness" },
+    netDiffChars: 0,
+  }));
   const context = (events: EventInput[] = []) =>
     ({
       issue: { id: "123" },
@@ -1059,6 +1090,7 @@ describe("runGateAndReviewer (#123)", () => {
           maxGateRounds: 4,
           maxReviewRounds: 4,
           uiPrototypeCheck: false,
+          partitionCheck: false,
         }),
         attempt: 2,
         phase: "needs-gate-and-reviewer",
@@ -1079,8 +1111,10 @@ describe("runGateAndReviewer (#123)", () => {
         started.push("reviewer");
         return reviewer.promise;
       }),
+      prepareReview,
     });
 
+    await Promise.resolve();
     expect(started).toEqual(["gate", "reviewer"]);
     gate.resolve({ ok: true, failureTrace: "" });
     let finished = false;
@@ -1110,6 +1144,7 @@ describe("runGateAndReviewer (#123)", () => {
     await runGateAndReviewer(action, ctx, {
       gate: vi.fn(async () => ({ ok: true, failureTrace: "" })),
       reviewer: vi.fn(async () => reviewer),
+      prepareReview,
     });
     expect(ctx.specGaps).toEqual([
       { round: 1, text: "Which clock applies? Use the request clock." },
@@ -1117,6 +1152,7 @@ describe("runGateAndReviewer (#123)", () => {
     await runGateAndReviewer({ ...action, reviewRound: 2 }, ctx, {
       gate: vi.fn(async () => ({ ok: true, failureTrace: "" })),
       reviewer: vi.fn(async () => approved),
+      prepareReview,
     });
     expect(ctx.specGaps).toEqual([
       { round: 1, text: "Which clock applies? Use the request clock." },
@@ -1129,6 +1165,7 @@ describe("runGateAndReviewer (#123)", () => {
     await runGateAndReviewer(action, ctx, {
       gate: vi.fn(async () => ({ ok: true, failureTrace: "" })),
       reviewer: vi.fn(async () => ({ ...approved, specGap: "" })),
+      prepareReview,
     });
     expect(ctx.specGaps).toEqual([]);
   });
@@ -1144,6 +1181,7 @@ describe("runGateAndReviewer (#123)", () => {
     const result = runGateAndReviewer(action, ctx, {
       gate: vi.fn(async () => ({ ok: false, failureTrace: "tests failed" })),
       reviewer: vi.fn(() => reviewer.promise),
+      prepareReview,
     });
     let finished = false;
     void result.then(() => {
@@ -1311,6 +1349,237 @@ const harnessFailed: ReviewerOutcome = {
   transcript: "",
   invocations: 2,
 };
+
+describe("runInnerLoop context terminals (#158)", () => {
+  const issue = {
+    id: "158",
+    title: "context budget",
+    branch: "sandbar/issue-158-context-budget",
+  };
+  const completeRun = {
+    stdout: "<promise>COMPLETE</promise>",
+    commits: [{ sha: "head123" }],
+    durationMs: 1,
+    silent: false,
+    maxGapMs: 1,
+    toolCalls: 0,
+  };
+  const approvedReview = {
+    stdout: "<verdict>APPROVED</verdict>",
+    commits: [],
+    durationMs: 1,
+    silent: false,
+    maxGapMs: 1,
+    toolCalls: 0,
+  };
+
+  const harness = (
+    run: Sandbox["run"],
+    overrides: Partial<Parameters<typeof runInnerLoop>[1]["config"]> = {},
+  ) => {
+    const events: EventInput[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(run),
+      syncBranchToCache: vi.fn(async () => undefined),
+      preserveWorktree: vi.fn(),
+      deferWorktreeReclaim: vi.fn(),
+      close: vi.fn(async () => undefined),
+    } as unknown as Sandbox;
+    const stack = {
+      runGate: vi.fn(async () => ({
+        ok: true,
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        failedStep: null,
+        durationMs: 1,
+        steps: [],
+        containerLogs: "",
+      })),
+      stop: vi.fn(async () => undefined),
+    };
+    innerLoopMocks.createSandbox.mockResolvedValue(sandbox);
+    innerLoopMocks.startStack.mockResolvedValue(stack);
+    const opts = {
+      config: {
+        layout: {
+          repoDir: "/repo",
+          worktreesDir: "/worktrees",
+          logsDir: "/logs",
+        },
+        repo: { owner: "owner", name: "repo" },
+        sourceBranch: "main",
+        env: {},
+        implementerModelId: "implementer-model",
+        reviewerModelId: "correctness-model",
+        reviewerQualityModelId: "quality-model",
+        uiCheckModelId: "ui-model",
+        implementerAgent: "codex",
+        reviewerAgent: "codex",
+        reviewerQualityAgent: "codex",
+        uiCheckAgent: "codex",
+        uiPrototypeCheck: false,
+        partitionCheck: false,
+        maxContextChars: 600_000,
+        maxQualityRounds: 4,
+        maxGateRounds: 4,
+        maxReviewRounds: 4,
+        sandboxImage: "sandbox-image",
+        agentImages: {},
+        scope: "w12345678",
+        gateStack: { containers: [], steps: [] },
+        claudeMdPath: "CLAUDE.md",
+        ...overrides,
+      },
+      hooks: {},
+      copyToWorktree: [],
+      attemptLogger: {
+        startInvocationCycle: createAgentInvocationSequencer().startCycle,
+        writeInvocation: vi.fn(async () => undefined),
+        writeGate: vi.fn(async () => undefined),
+      },
+      gateSemaphore: createGateSemaphore(undefined),
+      onEvent: (event: EventInput) => events.push(event),
+    } as unknown as Parameters<typeof runInnerLoop>[1];
+    return { sandbox, stack, opts, events };
+  };
+
+  beforeEach(() => {
+    innerLoopMocks.ensureIssueBranch.mockReset().mockResolvedValue({
+      ref: "origin/main",
+      sha: "base-sha",
+    });
+    innerLoopMocks.prepareWorktree.mockReset().mockResolvedValue("/worktree");
+    innerLoopMocks.createSandbox.mockReset();
+    innerLoopMocks.resolveSandboxImage.mockReset().mockResolvedValue("sandbox-image");
+    innerLoopMocks.startStack.mockReset();
+    innerLoopMocks.branchIsAheadOfSeed.mockReset().mockResolvedValue(false);
+    innerLoopMocks.buildPrompt.mockReset().mockResolvedValue("implementer prompt");
+    innerLoopMocks.buildPartitionCheckPrompt.mockReset()
+      .mockResolvedValue("partition check prompt");
+    innerLoopMocks.buildUiCheckPrompt.mockReset().mockResolvedValue("ui check prompt");
+    innerLoopMocks.buildReviewerPrompts.mockReset().mockResolvedValue({
+      quality: "quality prompt",
+      correctness: "correctness prompt",
+    });
+    innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("head123");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
+      `refs/heads/${issue.branch}`,
+    );
+    innerLoopMocks.headMismatch.mockReset().mockResolvedValue(null);
+  });
+
+  it.each([
+    ["ui-check", { uiPrototypeCheck: true }],
+    ["implementer", {}],
+    ["review-quality", {}],
+    ["review-correctness", {}],
+  ] as const)(
+    "parks a %s provider refusal after one sandbox cycle",
+    async (slot, overrides) => {
+      const refused = new AgentInputTooLargeError("actual_chars=1064340");
+      const { sandbox, opts, events } = harness(async (options) => {
+        const name = options.name ?? "";
+        if (
+          (slot === "ui-check" && name.startsWith("ui-check-")) ||
+          (slot === "implementer" && name.startsWith("implementer-")) ||
+          (slot === "review-quality" && name.endsWith("-quality")) ||
+          (slot === "review-correctness" && name.endsWith("-correctness"))
+        ) {
+          throw refused;
+        }
+        if (name.endsWith("-quality")) return approvedReview;
+        return completeRun;
+      }, overrides);
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+        type: "NEEDS-PARTITION",
+        cause: "provider-refused",
+        slot,
+        detail: "actual_chars=1064340",
+      });
+      expect(innerLoopMocks.createSandbox).toHaveBeenCalledTimes(1);
+      expect(events).not.toContainEqual(expect.objectContaining({ kind: "hard-error" }));
+      if (slot.startsWith("review-")) {
+        expect(vi.mocked(sandbox.run).mock.calls.filter(([options]) =>
+          (options.name ?? "").includes(slot.slice("review-".length)),
+        )).toHaveLength(1);
+      }
+    },
+  );
+
+  it("parks an oversized resumed branch before any agent invocation", async () => {
+    innerLoopMocks.branchIsAheadOfSeed.mockResolvedValue(true);
+    innerLoopMocks.buildPrompt.mockResolvedValue("0123456789");
+    innerLoopMocks.measureNetDiffChars.mockResolvedValue(91);
+    const { sandbox, opts } = harness(vi.fn(), {
+      partitionCheck: true,
+      maxContextChars: 100,
+    });
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+      type: "NEEDS-PARTITION",
+      cause: "measured",
+      slot: "implementer",
+      size: 101,
+      budget: 100,
+    });
+    expect(sandbox.run).not.toHaveBeenCalled();
+    expect(innerLoopMocks.buildPartitionCheckPrompt).not.toHaveBeenCalled();
+  });
+
+  it("admits a resumed branch at budget and skips the partition classifier", async () => {
+    innerLoopMocks.branchIsAheadOfSeed.mockResolvedValue(true);
+    innerLoopMocks.buildPrompt.mockResolvedValue("0123456789");
+    innerLoopMocks.measureNetDiffChars.mockResolvedValue(90);
+    const { sandbox, opts } = harness(async () => ({
+      ...completeRun,
+      stdout: "<promise>NEEDS-INFO</promise><questions>Which API?</questions>",
+      commits: [],
+    }), {
+      partitionCheck: true,
+      maxContextChars: 100,
+    });
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+      type: "NEEDS-INFO",
+      questions: "Which API?",
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(1);
+    expect(innerLoopMocks.buildPartitionCheckPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(["completed", "failed"] as const)(
+    "parks when a %s partition check mutates the repository",
+    async (outcome) => {
+      innerLoopMocks.branchTip
+        .mockResolvedValueOnce("base-sha")
+        .mockResolvedValueOnce("mutated-sha");
+      const failure = withPartialOutput(new Error("provider disconnected"), "partial");
+      const { sandbox, opts } = harness(async () => {
+        if (outcome === "failed") throw failure;
+        return {
+          ...approvedReview,
+          stdout: "<partition-check>CLEAR</partition-check>",
+        };
+      }, { partitionCheck: true });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "partition-checker-wrote",
+      });
+      expect(sandbox.run).toHaveBeenCalledTimes(1);
+      expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
+        expect.stringContaining("partition checker changed the repository"),
+      );
+      expect(sandbox.syncBranchToCache).toHaveBeenCalledTimes(1);
+      expect(innerLoopMocks.buildPrompt).not.toHaveBeenCalled();
+    },
+  );
+});
 
 describe("runInnerLoop HARD-ERROR logging (#115)", () => {
   it("runs the partition classifier once per admission across fresh-sandbox retries", async () => {

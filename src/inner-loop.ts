@@ -1653,7 +1653,7 @@ export async function runUiCheck(
 type GateAndReviewerJobs = {
   readonly gate: typeof runGate1;
   readonly reviewer: typeof runReviewer;
-  readonly prepareReview?: (
+  readonly prepareReview: (
     ctx: ExecuteActionCtx,
   ) => Promise<{
     readonly prompts: Readonly<Record<ReviewerPass, string>>;
@@ -1677,27 +1677,23 @@ export async function runGateAndReviewer(
 ): Promise<Extract<LoopEvent, {
   kind: "gate-and-reviewer-result" | "context-over-budget";
 }>> {
-  const prepared = jobs.prepareReview === undefined
-    ? undefined
-    : await jobs.prepareReview(ctx);
-  if (prepared !== undefined) {
-    const sizes = {
-      quality: contextChars(prepared.prompts.quality, prepared.netDiffChars),
-      correctness: contextChars(prepared.prompts.correctness, prepared.netDiffChars),
+  const prepared = await jobs.prepareReview(ctx);
+  const sizes = {
+    quality: contextChars(prepared.prompts.quality, prepared.netDiffChars),
+    correctness: contextChars(prepared.prompts.correctness, prepared.netDiffChars),
+  };
+  const over = (["quality", "correctness"] as const)
+    .map((pass) => ({ pass, size: sizes[pass] }))
+    .filter(({ size }) => size > ctx.config.maxContextChars)
+    .sort((a, b) => b.size - a.size)[0];
+  if (over !== undefined) {
+    return {
+      kind: "context-over-budget",
+      slot: over.pass === "quality" ? "review-quality" : "review-correctness",
+      size: over.size,
+      budget: ctx.config.maxContextChars,
+      detail: "The completed branch exceeds the configured context budget before review.",
     };
-    const over = (["quality", "correctness"] as const)
-      .map((pass) => ({ pass, size: sizes[pass] }))
-      .filter(({ size }) => size > ctx.config.maxContextChars)
-      .sort((a, b) => b.size - a.size)[0];
-    if (over !== undefined) {
-      return {
-        kind: "context-over-budget",
-        slot: over.pass === "quality" ? "review-quality" : "review-correctness",
-        size: over.size,
-        budget: ctx.config.maxContextChars,
-        detail: "The completed branch exceeds the configured context budget before review.",
-      };
-    }
   }
   // Wait for both jobs before cycle teardown can remove resources either one
   // is still using. If both reject, the gate remains the first surfaced error.

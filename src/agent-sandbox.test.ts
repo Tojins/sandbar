@@ -36,6 +36,7 @@ import {
   SANDBOX_REPO_DIR,
   AgentCredentialError,
   AgentError,
+  AgentInputTooLargeError,
   AgentQuotaError,
   AgentIdleTimeoutError,
   agentFailureMessage,
@@ -1503,6 +1504,34 @@ describe("createSandbox integration (local provider)", () => {
       }
     },
   );
+
+  it("turns a Codex input_too_large failure into its terminal error class", async () => {
+    const branch = "sandbar/issue-158-codex-input-too-large";
+    await git(["branch", branch], dir);
+    const line = JSON.stringify({
+      type: "turn.failed",
+      error: {
+        message: "Input exceeds the maximum length of 1048576 characters.",
+        data: { input_error_code: "input_too_large", actual_chars: 1_064_340 },
+      },
+    });
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+    });
+    try {
+      const err = await sandbox.run({
+        agent: scriptedCodexAgent(`printf '%s\\n' '${line}'; exit 1`),
+        prompt: "go",
+        completionSignal: [],
+      }).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(AgentInputTooLargeError);
+      expect(err).toMatchObject({
+        detail: "Input exceeds the maximum length of 1048576 characters.",
+      });
+    } finally {
+      await sandbox.close();
+    }
+  });
 
   it("turns a failed Codex invocation with a reached rollout window into quota", async () => {
     const branch = "sandbar/issue-109-codex-rejected";

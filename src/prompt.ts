@@ -11,7 +11,7 @@
 // Both prompts are self-sufficient because neither pass resumes the other's
 // session — which is what lets the two sit on different vendors (#121).
 // After its first whole-branch quality listing, that history also anchors a
-// strict review of only the files no quality pass has seen yet (#107).
+// strict review of only the lines no quality pass has seen yet (#107).
 // The UI and partition checkers (#126/#158) are intentionally smaller: issue
 // anchor plus their own decision contracts, with no project standards, diff or
 // prior-round history. The partition check receives the context budget only as
@@ -704,8 +704,9 @@ export function renderReviewerQualitySlot(inputs: ReviewerSlotRender): string {
 
 // The two #107 slots of the quality template. Listing mode until an entry
 // in #88's history carries a quality verdict; verify mode anchored at the
-// newest one that does, with the files changed since it as a second stat. The
-// stat payload is the one thing the async builder alone can supply, so its
+// newest one that does, with the changed files as a navigation stat for the
+// line-restricted diff. The stat payload is the one thing the async builder
+// alone can supply, so its
 // absence in verify mode is a caller error and throws — an empty stat means
 // git said nothing changed, never that nothing was read.
 function renderQualitySlots(
