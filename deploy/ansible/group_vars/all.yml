@@ -26,16 +26,19 @@ sandbar_operator_ssh_keys:
 sandbar_installations:
   - user: outdoor
     project: outdoor
+    subid_slot: 0
     clone_url: https://github.com/Tojins/outdoor.git
     reader_port: 7332
     config_src: "{{ playbook_dir }}/installations/outdoor"
   - user: outdoorpub
     project: outdoorpub
+    subid_slot: 2
     clone_url: https://github.com/Tojins/outdoorpub.git
     reader_port: 7336
     config_src: "{{ playbook_dir }}/installations/outdoorpub"
   - user: sandbar
     project: sandbar
+    subid_slot: 1
     clone_url: https://github.com/Tojins/sandbar.git
     reader_port: 7333
     config_src: "{{ playbook_dir }}/installations/sandbar"

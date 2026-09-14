@@ -82,7 +82,9 @@ sandbar_operator_ssh_keys: []
 sandbar_node_major: 24
 sandbar_swap_size_mb: 4096
 
-# Each installation gets `base + installation index * count`.
+# Each installation gets `base + its subid_slot * count`. The slot is inventory
+# data rather than the list index because the range is baked into every file of
+# the user's podman storage (tasks/user.yml); reordering the list must not move it.
 sandbar_subid_base: 200000
 sandbar_subid_count: 65536
 

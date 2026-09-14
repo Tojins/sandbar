@@ -177,14 +177,28 @@ has no `inventory_dir` to anchor anything to. Ansible loads playbook-adjacent
 `group_vars/` in both channels, so both read the same list.
 
 Every entry requires a safe Linux `user`, a single path-component `project`,
-`clone_url`, and a unique integer `reader_port` from 1 through 65535. Users and
-projects are unique too — each project names a Caddy route. `config_src` is
-optional and is anchored at `playbook_dir`.
+`clone_url`, a unique integer `reader_port` from 1 through 65535 and a unique
+non-negative integer `subid_slot`. Users and projects are unique too — each
+project names a Caddy route. `config_src` is optional and is anchored at
+`playbook_dir`.
+
+`subid_slot` picks the user's subordinate uid/gid range
+(`sandbar_subid_base + slot * sandbar_subid_count`) and is **permanent for the
+life of that user's Podman storage**: every file in a rootless layer store is
+owned by a host uid inside the range, so a range that moves leaves a store the
+new user namespace can neither read nor delete from (`error removing stale temp
+dir ... permission denied` on every `podman` call, and `podman system migrate`
+re-owns nothing). The slot is explicit inventory data rather than the list index
+for exactly that reason, and the role refuses a slot change while the storage
+directory exists. To change one anyway, stop the installation's units, remove
+`/home/<user>/.local/share/containers/storage`, and let the next run rebuild its
+images.
 
 ```yaml
 sandbar_installations:
   - user: outdoor
     project: outdoor
+    subid_slot: 0
     clone_url: https://github.com/Tojins/outdoor.git
     reader_port: 7332
     config_src: "{{ playbook_dir }}/installations/outdoor"

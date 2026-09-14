@@ -28,6 +28,7 @@ const indexTemplate = readFileSync(new URL("templates/index.html.j2", ROLE), "ut
 const roleDefaultsSource = readFileSync(new URL("defaults/main.yml", ROLE), "utf8");
 const mainTasks = readFileSync(new URL("tasks/main.yml", ROLE), "utf8");
 const accountTasks = readFileSync(new URL("tasks/account.yml", ROLE), "utf8");
+const userTasks = readFileSync(new URL("tasks/user.yml", ROLE), "utf8");
 const installationTasks = readFileSync(new URL("tasks/installation.yml", ROLE), "utf8");
 const prepareTasks = readFileSync(new URL("tasks/prepare-installation.yml", ROLE), "utf8");
 const caddyTasks = readFileSync(new URL("tasks/caddy.yml", ROLE), "utf8");
@@ -70,6 +71,7 @@ type InventoryInstallation = {
   readonly project: string;
   readonly clone_url: string;
   readonly reader_port: number;
+  readonly subid_slot: number;
   readonly config_src?: string;
 };
 
@@ -572,19 +574,51 @@ describe("multi-installation role orchestration", () => {
     expect(entry).toContain("(item.reader_port | default(none)) is integer");
     expect(entry).toContain("(item.reader_port | default(0) | int) >= 1");
     expect(entry).toContain("(item.reader_port | default(0) | int) <= 65535");
+    expect(entry).toContain("(item.subid_slot | default(none)) is integer");
+    expect(entry).toContain("(item.subid_slot | default(-1) | int) >= 0");
     const unique = taskNamed(
       mainTasks,
-      "Refuse installation identities, routes or reader ports that are not unique",
+      "Refuse installation identities, routes, reader ports or subid slots that are not unique",
     );
     expect(unique).toContain("map(attribute='user')");
     expect(unique).toContain("map(attribute='project')");
     expect(unique).toContain("map(attribute='reader_port')");
+    expect(unique).toContain("map(attribute='subid_slot')");
     expect(mainTasks.indexOf("Validate every installation inventory entry"))
       .toBeLessThan(mainTasks.indexOf("Install host packages"));
     expect(mainTasks.indexOf(
-      "Refuse installation identities, routes or reader ports that are not unique",
+      "Refuse installation identities, routes, reader ports or subid slots that are not unique",
     ))
       .toBeLessThan(mainTasks.indexOf("Install host packages"));
+  });
+
+  it("derives the subordinate id range from the entry's slot, never the list index", () => {
+    expect(mainTasks).toContain(
+      'sandbar_subid_start: "{{ sandbar_subid_base + (sandbar_installation.subid_slot | int) * sandbar_subid_count }}"',
+    );
+    expect(mainTasks).not.toContain("sandbar_installation_index");
+    const slots = installations.map((row) => row.subid_slot);
+    expect(new Set(slots).size).toBe(slots.length);
+    for (const slot of slots) {
+      expect(Number.isInteger(slot) && slot >= 0).toBe(true);
+    }
+  });
+
+  it("refuses to move a subordinate id range under existing podman storage", () => {
+    const read = taskNamed(userTasks, "Read the installation user's recorded subordinate id ranges");
+    expect(read).toContain('grep -h "^{{ sandbar_user }}:" /etc/subuid /etc/subgid');
+    expect(read).toContain("changed_when: false");
+    const storage = taskNamed(userTasks, "Check for the installation user's rootless podman storage");
+    expect(storage).toContain('path: "{{ sandbar_home }}/.local/share/containers/storage"');
+    const refusal = taskNamed(userTasks, "Refuse to move a subordinate id range under existing podman storage");
+    expect(refusal).toContain("not sandbar_podman_storage.stat.exists");
+    expect(refusal).toContain(
+      "reject('equalto', sandbar_user ~ ':' ~ sandbar_subid_start ~ ':' ~ sandbar_subid_count)",
+    );
+    const write = "- name: Give the installation user disjoint subordinate id ranges";
+    expect(userTasks.indexOf("Refuse to move a subordinate id range under existing podman storage"))
+      .toBeLessThan(userTasks.indexOf(write));
+    expect(userTasks).not.toContain("command: podman system migrate");
   });
 
   it("renders one stripped-prefix route per reader and serves the static index", () => {

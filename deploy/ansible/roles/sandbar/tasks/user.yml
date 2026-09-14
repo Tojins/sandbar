@@ -8,6 +8,38 @@
     state: present
   register: sandbar_user_result
 
+# The range is written into every file a rootless layer store holds: an image
+# layer's files are owned by host uids inside it. A range that moves under an
+# existing store therefore leaves files the new user namespace can neither
+# read as its own nor unlink -- podman fails on `error removing stale temp dir
+# ... permission denied` at the next storage open, and `podman system migrate`
+# re-owns nothing. So the slot is permanent for the life of the store, and a
+# change is refused while the store exists rather than half-applied.
+- name: Read the installation user's recorded subordinate id ranges
+  ansible.builtin.command: grep -h "^{{ sandbar_user }}:" /etc/subuid /etc/subgid
+  register: sandbar_subid_lines
+  changed_when: false
+  failed_when: sandbar_subid_lines.rc not in [0, 1, 2]
+
+- name: Check for the installation user's rootless podman storage
+  ansible.builtin.stat:
+    path: "{{ sandbar_home }}/.local/share/containers/storage"
+  register: sandbar_podman_storage
+
+- name: Refuse to move a subordinate id range under existing podman storage
+  ansible.builtin.assert:
+    that:
+      - not sandbar_podman_storage.stat.exists
+        or (sandbar_subid_lines.stdout_lines | reject('equalto', sandbar_user ~ ':' ~ sandbar_subid_start ~ ':' ~ sandbar_subid_count) | list | length) == 0
+    fail_msg: >-
+      {{ sandbar_user }}'s subordinate id range is recorded as
+      {{ sandbar_subid_lines.stdout_lines | join(' and ') }} but subid_slot now
+      asks for {{ sandbar_user }}:{{ sandbar_subid_start }}:{{ sandbar_subid_count }},
+      and {{ sandbar_home }}/.local/share/containers/storage still holds files
+      owned inside the recorded range. Either restore the entry's previous
+      subid_slot, or stop the installation's units and remove that storage
+      directory (its images are rebuilt at the next run) before changing it.
+
 - name: Give the installation user disjoint subordinate id ranges
   ansible.builtin.lineinfile:
     path: "{{ item }}"
@@ -20,7 +52,6 @@
   loop:
     - /etc/subuid
     - /etc/subgid
-  register: sandbar_subids
 
 - name: Enable linger for the installation user
   ansible.builtin.command: loginctl enable-linger {{ sandbar_user }}
@@ -31,15 +62,6 @@
   ansible.builtin.wait_for:
     path: "/run/user/{{ sandbar_user_result.uid }}/bus"
     timeout: 30
-
-- name: Migrate the installation user's podman storage after a range change
-  ansible.builtin.command: podman system migrate
-  become: true
-  become_user: "{{ sandbar_user }}"
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_result.uid }}"
-  changed_when: true
-  when: sandbar_subids is changed
 
 - name: Authorize the operator's keys for the installation user, and no others
   ansible.posix.authorized_key:
