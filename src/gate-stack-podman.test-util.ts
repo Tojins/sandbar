@@ -101,6 +101,13 @@ export const runExit = async (
 // and an alias would make "a changed image recreates the issue container" a
 // test of nothing. One `RUN` layer on an image already on the host is what a
 // changed image actually looks like, and is a few seconds.
+//
+// Do not reuse an EXISTING cached result for that layer. Every concurrent test
+// builds the same recipe under a private tag and removes that tag at teardown;
+// one teardown can otherwise remove the cached image after another build found
+// it but before Buildah inspected its top layer (`layer not known`). The base
+// remains local, and rerunning this one marker instruction is the fixture's
+// intended cost.
 export const buildVariantImage = async (tag: string): Promise<void> => {
   const dir = await mkdtemp(join(tmpdir(), "sandbar-variant-"));
   try {
@@ -110,6 +117,7 @@ export const buildVariantImage = async (tag: string): Promise<void> => {
     );
     await exec(RUNTIME, [
       "build",
+      "--no-cache",
       "-t",
       tag,
       "-f",

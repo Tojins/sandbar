@@ -15,7 +15,9 @@
      now wraps, breaking mid-word where it must, inside a column that cannot
      grow past the page; what is still kept to one line is either ellipsized
      (.ellip) or absolutely positioned and clipped (.bar, the axis labels),
-     none of which contributes width. */
+     none of which contributes width. The axis's time range likewise starts
+     at the earliest pool span rather than the daemon's run start, so a
+     long-lived process cannot multiply labels or crush current work (#159). */
   .page { max-width:1700px;margin:auto;padding:28px 24px 60px;display:grid;grid-template-columns:minmax(0,1fr);gap:28px }.mono,.id { font-family:var(--mono) }.id { font-weight:600 }.dim { color:var(--ink3) }.good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}
   h2 { margin:0 0 6px;font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3) }.ellip{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.clamp{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;overflow:hidden}
   .top { display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;color:var(--ink2) }.name{font-size:16px;font-weight:600;color:var(--ink)}.pill{display:inline-flex;align-items:center;gap:6px;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:500}.pill.live{background:var(--goodsoft);color:var(--good)}.pill.ended{background:var(--soft)}.pill.crashed{background:color-mix(in srgb,var(--bad) 14%,transparent);color:var(--bad)}.pill.restart{background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)}.dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 1.6s ease-in-out infinite}@keyframes pulse{50%{opacity:.3}}@media(prefers-reduced-motion:reduce){.dot{animation:none}}.warnline,.gone{flex-basis:100%;color:var(--warn);font-size:13px}.gone{padding:7px 10px;border:1px solid var(--warn);border-radius:4px}
@@ -41,10 +43,14 @@ const driverName = line => String(line).replace(/^Driver: /,"").split(" · ",1)[
 const outcomeClass = value => value === "DONE" ? "good" : value === "NEEDS-INFO" ? "warn" : "bad";
 function notice(text) { return `<div class="gone">${esc(text)}</div>` }
 function render(state, serverNotice=null) {
-  lastState=state; const r=state.run, now=parse(state.now), t0=parse(r.startedAt), t1=Math.max(now+300000,t0+300000), width=t1-t0;
+  // A run is a daemon, but its process lifetime is not work in the pool. Scale
+  // the lanes from their earliest span and keep ticks sparse as that visible
+  // interval grows (#159).
+  lastState=state; const r=state.run, now=parse(state.now), spanStarts=state.pool.flatMap(p=>p.spans.map(sp=>parse(sp.from))), t0=spanStarts.length?Math.min(...spanStarts):now, t1=Math.max(now+300000,t0+300000), width=t1-t0;
+  const tickMs=width<7200000?600000:width<28800000?1800000:7200000;
   const x=iso => Math.max(0,Math.min(100,(parse(iso)-t0)/width*100)).toFixed(2)+"%";
   const w=(from,to) => Math.max(.2,((to?parse(to):now)-parse(from))/width*100).toFixed(2)+"%";
-  const ticks=[]; for(let t=Math.ceil(t0/1800000)*1800000;t<t1;t+=1800000) ticks.push(`<span style="left:${((t-t0)/width*100).toFixed(2)}%">${hhmm(new Date(t).toISOString())}</span>`);
+  const ticks=[]; for(let t=Math.ceil(t0/tickMs)*tickMs;t<t1;t+=tickMs) ticks.push(`<span style="left:${((t-t0)/width*100).toFixed(2)}%">${hhmm(new Date(t).toISOString())}</span>`);
   const pill=r.status==="live"?`<span class="pill live"><span class="dot"></span>live · ${since(r.startedAt,state.now)}</span>`:`<span class="pill ${r.status}">${r.status}${r.exit?` · ${esc(r.exit.tag)}`:""}</span>`;
   // A restart request stops admission while landing continues, so a reader
   // looking at a shrinking pool is told why it is shrinking (#146).

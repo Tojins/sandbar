@@ -64,13 +64,16 @@ describe("run UI server", () => {
     const app = { innerHTML: "" };
     let interval: (() => Promise<void>) | undefined;
     const state = {
-      now: "2026-09-07T10:00:00Z",
-      run: { startedAt: "2026-09-07T09:00:00Z", status: "live", driver: DRIVER_LINE,
+      now: "2026-09-07T10:29:00Z",
+      run: { startedAt: "2026-09-04T21:35:00Z", status: "live", driver: DRIVER_LINE,
         slots: { used: 1, max: 2 }, lastRecompute: { n: 2, trigger: "slot freed", at: "2026-09-07T09:30:00Z" },
         exit: null, complaints: [] },
       pool: [{ issue: 2, title: "Pool title", phase: "implementer",
-        phaseSince: "2026-09-07T09:50:00Z", attempt: 1,
-        spans: [{ kind: "impl", from: "2026-09-07T09:50:00Z", to: null, label: "a1" }] }],
+        phaseSince: "2026-09-07T10:21:00Z", attempt: 2,
+        spans: [
+          { kind: "impl", from: "2026-09-07T09:31:00Z", to: "2026-09-07T09:32:00Z", label: "a1" },
+          { kind: "impl", from: "2026-09-07T10:21:00Z", to: null, label: "a2" },
+        ] }],
       waiting: [{ issue: 3, title: "Waiting title", why: PARKED_WHY, parked: true }],
       finished: [{ issue: 1, title: "Finished title", outcome: "HARD-ERROR",
         reason: "provider cause\n(codex exited with code 1)", attempts: 1,
@@ -95,6 +98,16 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("<details id=\"events\"><summary>Events");
     expect(app.innerHTML).toContain("Pool title");
     expect(app.innerHTML).toContain("Waiting title");
+    // This run has been live for 60h54, but the timeline begins at the first
+    // pool span. Ten-minute ticks stay readable and the eight-minute current
+    // span occupies useful width instead of being crushed against `now`.
+    const axis = app.innerHTML.match(/<div class="axis">([\s\S]*?)<\/div>/)?.[1];
+    expect(axis?.match(/<span/g)).toHaveLength(7);
+    expect(axis).toContain(">09:40</span>");
+    expect(axis).toContain(">10:30</span>");
+    expect(app.innerHTML).toContain(
+      'class="bar impl  running" style="left:79.37%;width:12.70%" title="a2"',
+    );
     // One long line, and nothing about it may widen the page: the parked
     // reason is clamped in its column and carried whole on the hover.
     expect(PARKED_WHY).toMatch(/^[^\n]{500,}$/);
@@ -128,6 +141,79 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("sandbar updated");
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(fetch).toHaveBeenNthCalledWith(1, "state.json", { cache: "no-store" });
+  });
+
+  it("widens timeline tick spacing at the two- and eight-hour thresholds", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    const baseState = {
+      run: { startedAt: "2026-09-01T00:00:00Z", status: "live", driver: "sandbar test",
+        slots: { used: 1, max: 1 }, lastRecompute: { n: 1, trigger: "startup", at: "2026-09-07T00:00:00Z" },
+        exit: null, complaints: [] },
+      pool: [{ issue: 1, title: "Pool title", phase: "implementer",
+        phaseSince: "2026-09-07T00:00:00Z", attempt: 1,
+        spans: [{ kind: "impl", from: "2026-09-07T00:00:00Z", to: null, label: "a1" }] }],
+      waiting: [], finished: [], eventCount: 0, events: [],
+    };
+    const cases = [
+      { now: "2026-09-07T01:54:00Z", labels: [
+        "00:00", "00:10", "00:20", "00:30", "00:40", "00:50",
+        "01:00", "01:10", "01:20", "01:30", "01:40", "01:50",
+      ] },
+      { now: "2026-09-07T01:55:00Z", labels: [
+        "00:00", "00:30", "01:00", "01:30",
+      ] },
+      { now: "2026-09-07T07:54:00Z", labels: [
+        "00:00", "00:30", "01:00", "01:30", "02:00", "02:30", "03:00", "03:30",
+        "04:00", "04:30", "05:00", "05:30", "06:00", "06:30", "07:00", "07:30",
+      ] },
+      { now: "2026-09-07T07:55:00Z", labels: [
+        "00:00", "02:00", "04:00", "06:00",
+      ] },
+    ];
+
+    for (const testCase of cases) {
+      const app = { innerHTML: "" };
+      const state = { ...baseState, now: testCase.now };
+      runInNewContext(script!, {
+        document: { getElementById: () => app },
+        fetch: async () => ({ ok: true, status: 200, json: async () => state }),
+        setInterval: () => 1,
+        Date, Intl, Math, String, Error, TypeError,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      const axis = app.innerHTML.match(/<div class="axis">([\s\S]*?)<\/div>/)?.[1] ?? "";
+      const labels = [...axis.matchAll(/<span style="left:[^"]+">([^<]+)<\/span>/g)]
+        .map((match) => match[1]);
+      expect(labels, testCase.now).toEqual(testCase.labels);
+    }
+  });
+
+  it("keeps the timeline finite before an admitted issue has a span", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    const app = { innerHTML: "" };
+    const state = {
+      now: "2026-09-07T10:29:00Z",
+      run: { startedAt: "2026-09-04T21:35:00Z", status: "live", driver: "sandbar test",
+        slots: { used: 1, max: 1 }, lastRecompute: { n: 1, trigger: "startup", at: "2026-09-07T10:29:00Z" },
+        exit: null, complaints: [] },
+      pool: [{ issue: 1, title: "Pool title", phase: "setup",
+        phaseSince: "2026-09-07T10:29:00Z", attempt: 1, spans: [] }],
+      waiting: [], finished: [], eventCount: 0, events: [],
+    };
+    runInNewContext(script!, {
+      document: { getElementById: () => app },
+      fetch: async () => ({ ok: true, status: 200, json: async () => state }),
+      setInterval: () => 1,
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(app.innerHTML).not.toContain("NaN%");
+    expect(app.innerHTML).toContain('<span class="nowlab" style="left:0.00%">now</span>');
+    expect(app.innerHTML).toContain('<span class="nowline" style="left:0.00%"></span>');
   });
 
   it("renders a failed state request, with or without a last state", async () => {
