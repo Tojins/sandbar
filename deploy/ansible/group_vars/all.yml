@@ -29,6 +29,11 @@ sandbar_installations:
     clone_url: https://github.com/Tojins/outdoor.git
     reader_port: 7332
     config_src: "{{ playbook_dir }}/installations/outdoor"
+  - user: outdoorpub
+    project: outdoorpub
+    clone_url: https://github.com/Tojins/outdoorpub.git
+    reader_port: 7336
+    config_src: "{{ playbook_dir }}/installations/outdoorpub"
   - user: sandbar
     project: sandbar
     clone_url: https://github.com/Tojins/sandbar.git

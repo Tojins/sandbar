@@ -41,8 +41,10 @@ const roleDefaults = parse(roleDefaultsSource) as Record<string, unknown>;
 const groupVarsSource = readFileSync(new URL("group_vars/all.yml", DEPLOY_ROOT), "utf8");
 const inventorySource = readFileSync(new URL("inventory.yml", DEPLOY_ROOT), "utf8");
 const outdoorConfigPath = new URL("installations/outdoor/sandbar.config.mjs", DEPLOY_ROOT);
+const outdoorpubConfigPath = new URL("installations/outdoorpub/sandbar.config.mjs", DEPLOY_ROOT);
 const sandbarConfigPath = new URL("installations/sandbar/sandbar.config.mjs", DEPLOY_ROOT);
 const outdoorConfig = readFileSync(outdoorConfigPath, "utf8");
+const outdoorpubConfig = readFileSync(outdoorpubConfigPath, "utf8");
 const sandbarConfig = readFileSync(sandbarConfigPath, "utf8");
 const packageVersion = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -251,6 +253,7 @@ afterAll(() => {
 const installations = installationsFrom(groupVarsSource);
 const installationConfigs = new Map([
   ["outdoor", outdoorConfig],
+  ["outdoorpub", outdoorpubConfig],
   ["sandbar", sandbarConfig],
 ]);
 
@@ -598,6 +601,9 @@ describe("multi-installation role orchestration", () => {
 \thandle_path /outdoor/* {
 \t\treverse_proxy 127.0.0.1:7332
 \t}
+\thandle_path /outdoorpub/* {
+\t\treverse_proxy 127.0.0.1:7336
+\t}
 \thandle_path /sandbar/* {
 \t\treverse_proxy 127.0.0.1:7333
 \t}
@@ -626,8 +632,9 @@ describe("multi-installation role orchestration", () => {
       sandbar_deploy_status_file: DEPLOY_STATUS,
     });
     expect(page).not.toMatch(/\{\{|\}\}/);
-    expect(page).toContain('<li><a href="/outdoor/">outdoor</a></li>\n<li><a href="/sandbar/">sandbar</a></li>');
-    expect(page.indexOf('href="/outdoor/"')).toBeLessThan(page.indexOf('href="/sandbar/"'));
+    expect(page).toContain('<li><a href="/outdoor/">outdoor</a></li>\n<li><a href="/outdoorpub/">outdoorpub</a></li>\n<li><a href="/sandbar/">sandbar</a></li>');
+    expect(page.indexOf('href="/outdoor/"')).toBeLessThan(page.indexOf('href="/outdoorpub/"'));
+    expect(page.indexOf('href="/outdoorpub/"')).toBeLessThan(page.indexOf('href="/sandbar/"'));
     expect(page).toContain(`fetch("${DEPLOY_STATUS}", { cache: "no-store" })`);
     expect(page).toContain('document.getElementById("deploy")');
     expect(page).toContain("No convergence recorded yet");
@@ -898,7 +905,7 @@ describe("committed installation data and configs", () => {
   });
 
   it("validates every installation entry", () => {
-    expect(installations).toHaveLength(2);
+    expect(installations).toHaveLength(3);
     const users = new Set<string>();
     const projects = new Set<string>();
     const ports = new Set<number>();
@@ -923,6 +930,7 @@ describe("committed installation data and configs", () => {
 
   it.each([
     ["outdoor", outdoorConfigPath],
+    ["outdoorpub", outdoorpubConfigPath],
     ["sandbar", sandbarConfigPath],
   ])("ships a syntactically loadable %s config", (_name, path) => {
     const result = spawnSync(process.execPath, ["--check", fileURLToPath(path)], {
@@ -938,6 +946,23 @@ describe("committed installation data and configs", () => {
     expect(outdoorConfig).toMatch(/copyToWorktree:[\s\S]*?from:[\s\S]*?to:/);
     expect(outdoorConfig).toContain('const sandboxImage = "localhost/sandbar:outdoor";');
     expect(outdoorConfig).toContain('containerfile: "Containerfile.sandbar"');
+  });
+
+  // outdoorpub has no backend, database or CI: one image serves the agent
+  // and the gate runner, the gate is the checkout's own script, the landing
+  // is direct because no check run exists to verify it, and nothing lands
+  // without review unless an issue opts in.
+  it("ships outdoorpub's one-image gate, direct landing and review lane", () => {
+    expect(outdoorpubConfig).toContain('import { readEnvFile, splitRoleRouting } from "sandbar";');
+    expect(outdoorpubConfig).toContain('const cwd = "/home/outdoorpub/outdoorpub";');
+    expect(outdoorpubConfig).toContain('const sandboxImage = "localhost/sandbar:outdoorpub";');
+    expect(outdoorpubConfig).toContain('containerfile: "Containerfile"');
+    expect(outdoorpubConfig).toMatch(/containers:\s*\[\s*\{ name: "runner", image: sandboxImage,/);
+    expect(outdoorpubConfig).toContain('command: ["bash", "scripts/gate.sh"]');
+    expect(outdoorpubConfig).toContain('mergeMode: { kind: "direct" }');
+    expect(outdoorpubConfig).toContain('defaultLane: "review"');
+    expect(outdoorpubConfig).toContain('claudeMdPath: "AGENTS.md"');
+    expect(outdoorpubConfig).not.toContain("copyToWorktree");
   });
 
   it("ships sandbar's external config", () => {
@@ -960,8 +985,8 @@ describe("committed installation data and configs", () => {
     expect(compareVersions(checkout!, requiredVersion(config))).toBeGreaterThanOrEqual(0);
   });
 
-  it("assigns distinct host ports to both daemons and readers", () => {
-    const daemonPorts = [outdoorConfig, sandbarConfig].map((config) => {
+  it("assigns distinct host ports to every daemon and reader", () => {
+    const daemonPorts = [outdoorConfig, outdoorpubConfig, sandbarConfig].map((config) => {
       const value = config.match(/^\s*uiPort:\s*(\d+),$/m)?.[1];
       if (value === undefined) throw new Error("installation config lacks uiPort");
       return Number(value);
@@ -973,6 +998,7 @@ describe("committed installation data and configs", () => {
 
   it.each([
     ["outdoor", outdoorConfig],
+    ["outdoorpub", outdoorpubConfig],
     ["sandbar", sandbarConfig],
   ])("reads Codex auth only when a %s role routes to Codex", (_name, config) => {
     expect(config).toMatch(/Object\.entries\(routing\)[\s\S]*?field\.endsWith\("Agent"\) && provider === "codex"/);

@@ -25,8 +25,8 @@ The user's private `~/installation/` holds:
 - any files the config maps into worktrees with `{ from, to }` entries; and
 - `restart-requested`, only while a restart the play asked for is pending.
 
-`installations/outdoor/` and `installations/sandbar/` are the real source
-copies deployed by `group_vars/all.yml`. `config_src` is optional: when present
+`installations/outdoor/`, `installations/outdoorpub/` and `installations/sandbar/`
+are the real source copies deployed by `group_vars/all.yml`. `config_src` is optional: when present
 the role copies that directory into `~/installation/`; when absent, `scp`,
 another Ansible role, or a clone may place the same files. The role always
 creates the directory and always asserts `sandbar.config.mjs` and `sandbar.env`
@@ -223,8 +223,8 @@ as that installation's user:
    rotate each other stale.
 
 Then rerun the play. It copies configured installation sources, checks the
-hand-placed env files, clones both consumers, builds the driver, installs and
-enables both unit pairs, and finally installs the convergence timer — last, so
+hand-placed env files, clones every consumer, builds the driver, installs and
+enables every unit pair, and finally installs the convergence timer — last, so
 its first firing cannot land in the middle of the bootstrap. Start each daemon
 once by hand; from then on the box owns both the code and the restarts.
 
