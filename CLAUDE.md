@@ -761,15 +761,18 @@ npm run build && node dist/cli.js --config <path>
   path returned by a local rootless Podman, #141).
 - **`mergeMode` stays `direct` (#39)** — personal project; tests run on host
   machines, not hosted CI.
-- **One issue per change, however many modules it touches.** Do not carve a
-  change into slices to keep an issue's module count or diff small: a chain of
-  slices lands N+1 on top of N without either having driven anything, and each
-  slice is reviewed without the half that gives it its reason. Two issues that
-  are genuinely separate and both touch `run.ts`/`inner-loop`/`merger` are
-  ordered with `## Blocked by`, not run in parallel. Since #146 a landing on
-  main IS the driver within five minutes, so the blast radius of one larger
-  landing is bounded by the gate, the reviewer and a `git revert` through the
-  same channel — still not a reason to split.
+- **One coherent deliverable per issue, however many modules it touches.** Do
+  not carve work into slices from module count or a guessed diff size: a chain
+  of slices lands N+1 on top of N without either having driven anything, and
+  each slice is reviewed without the half that gives it its reason. The #158
+  classifier asks only whether the issue already names independently landable
+  outcomes. Its measured `maxContextChars` enforcer is the exception: once the
+  actual branch picture is over budget, the work must be repartitioned into an
+  ordered `## Blocked by` chain whose members each fit. Genuinely separate
+  issues that both touch `run.ts`/`inner-loop`/`merger` use the same chain, not
+  parallel execution. Since #146 a landing on main IS the driver within five
+  minutes, blast radius alone is still not a reason to split: the gate, reviewer
+  and a `git revert` through the same channel bound it.
 - **The suite must not depend on ambient git config** (the gate runner has no
   global identity) **nor on `process.cwd()` being a repository** (`/workspace/.git`
   is not a repository inside gate containers — name the directory in every git
