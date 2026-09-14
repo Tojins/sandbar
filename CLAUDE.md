@@ -519,7 +519,8 @@ outcomes.
 - **Token contracts.** UI check: `<ui-check>CLEAR|PROTOTYPE-NEEDED</ui-check>`,
   with the latter followed by `<ui-impact>`. Partition check:
   `<partition-check>CLEAR|PARTITION</partition-check>`, with PARTITION followed
-  by `<partition-reason>`. Implementer:
+  by `<partition-reason>` carrying each proposed piece's estimated files and
+  changed lines plus the dependency order. Implementer:
   `<promise>COMPLETE|NEEDS-INFO|NEEDS-UI-PROTOTYPE</promise>`; resolve loop:
   `COMMITTED|ABANDON`; anything
   else re-prompts. Reviewer: optional free-text `<spec-gap>` (correctness pass
