@@ -480,8 +480,9 @@ type FinalizeKindInput =
   // #21 — implementer escalated on non-trivial UI impact with no prototype.
   // Same handoff shape as needs-info (comment + `ready-for-agent` → needsInfo),
   // but the branch is pushed only when structurally ahead of its seed: the
-  // escalation normally fires before code exists, and pushing then would publish a remote
-  // branch identical to the source tip — one junk ref per escalation.
+  // escalation normally fires before code exists, and pushing then would
+  // publish a remote branch identical to the source tip — one junk ref per
+  // escalation.
   | {
       readonly kind: "needs-ui-prototype";
       readonly issue: IssueRef;
@@ -899,9 +900,9 @@ export async function finalizeOne(
       // is not permission to force: it also refuses when the
       // local source branch merely trails the origin tip we seeded from. And
       // The structural ahead check sees previous HARD-ERROR cycles and branches
-      // left by interrupted earlier runs. So escalate to `-D` only once the branch is
-      // *verified* to contain nothing that isn't already on origin; otherwise
-      // keep it and report the failure. The other force-deleting arms own that
+      // left by interrupted earlier runs. So escalate to `-D` only once the
+      // branch is *verified* to contain nothing that isn't already on origin;
+      // otherwise keep it and report the failure. The other force-deleting arms own that
       // certainty by construction (the merger just landed the work, or the
       // silent-noop path deliberately discards it) — this one does not.
       const d = await adapter.deleteBranch(input.issue.branch);

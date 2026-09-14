@@ -828,8 +828,9 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   // Usage is read independently of whether `result` is a string: an
   // error-terminated turn keeps its text in `errors[]` and still reports what
   // it spent, so the invocation that burned the budget is not recorded as
-  // having spent nothing (#85). No `failure` event is emitted here — that
-  // would change what reaches NEEDS-HUMAN, which this register may not do.
+  // having spent nothing (#85). Prompt-size terminal reasons are the one
+  // structural `failure` emitted here (#158); other result errors remain
+  // speech/usage and retain their existing classification.
   if (obj.type === "result") {
     const measurement = normalizeClaudeResult(obj);
     return [
@@ -2513,8 +2514,9 @@ const invokeAgent = async (
           // credential failure actually takes (it exits 1) — whose stderr is a
           // dozen timestamped `ERROR codex_api::…` retry lines that bury the
           // one sentence a human needs. A provider that reports nothing in-band
-          // is unaffected: claudeCode never emits `failure`, so stderr still
-          // leads for it, exactly as before #72.
+          // is unaffected: Claude emits `failure` only for #158's two
+          // prompt-size terminal reasons, so stderr still leads for its other
+          // failures, exactly as before #72.
           settleReject(
             new AgentError(
               agentFailureMessage(
