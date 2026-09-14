@@ -91,8 +91,19 @@ export function terminalFinalizeInputs(
           kind: "needs-ui-prototype",
           issue: o.issue,
           uiImpact: t.uiImpact,
-          hasCommits: t.commits.length > 0,
           strandedHead: t.strandedHead,
+          specGaps: t.specGaps,
+        });
+        break;
+      case "NEEDS-PARTITION":
+        inputs.push({
+          kind: "needs-partition",
+          issue: o.issue,
+          cause: t.cause,
+          slot: t.slot,
+          size: t.size,
+          budget: t.budget,
+          detail: t.detail,
           specGaps: t.specGaps,
         });
         break;
@@ -127,7 +138,11 @@ export function terminalFinalizeInputs(
             kind: "read-only-agent-wrote",
             issue: o.issue,
             latestReviewerProse: t.latestReviewerProse,
-            actor: t.cause === "reviewer-wrote" ? "reviewer" : "UI checker",
+            actor: t.cause === "reviewer-wrote"
+              ? "reviewer"
+              : t.cause === "ui-checker-wrote"
+                ? "UI checker"
+                : "partition checker",
             specGaps: t.specGaps,
           });
         }
@@ -136,7 +151,6 @@ export function terminalFinalizeInputs(
         inputs.push({
           kind: "hard-error",
           issue: o.issue,
-          hasCommits: t.commits.length > 0,
           specGaps: t.specGaps,
         });
         break;

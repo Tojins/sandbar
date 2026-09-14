@@ -2471,7 +2471,11 @@ export function parseCapturedAgentRun(
     // parser classified as agent speech may reach parseResolveSignal (#74).
     output: speech.spoken,
     cause: classification.cause,
-    verdict: classification.verdict,
+    // Resolve's conflict digest is explicitly outside #158's issue-loop
+    // partition terminal. A size refusal here remains an infrastructure halt.
+    verdict: classification.verdict === "input-too-large"
+      ? "infra"
+      : classification.verdict,
     ...(classification.detail === undefined ? {} : { detail: classification.detail }),
     ...(speech.usage === undefined ? {} : { usage: speech.usage }),
     ...(speech.peakContext === undefined ? {} : { peakContext: speech.peakContext }),

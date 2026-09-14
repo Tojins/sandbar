@@ -28,6 +28,10 @@ describe("finalize real adapter git classifications", () => {
   let cache: string;
   const merged = "sandbar/issue-1-merged";
   const unmerged = "sandbar/issue-2-unmerged";
+  const chunkBranch = "sandbar/chunk-3-root";
+  const chunkMember = "sandbar/issue-4-chunk-member";
+  const chunkSeedOnly = "sandbar/issue-5-chunk-seed-only";
+  const absent = "sandbar/issue-6-never-created";
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "sandbar-finalize-git-"));
@@ -47,12 +51,19 @@ describe("finalize real adapter git classifications", () => {
     await writeFile(join(seed, "b.txt"), "work\n");
     await git(seed, "add", ".");
     await git(seed, "commit", "-m", "work");
+    await git(seed, "push", "-q", "origin", `HEAD:${chunkBranch}`);
+    await git(seed, "checkout", "-qb", chunkMember);
+    await writeFile(join(seed, "c.txt"), "member work\n");
+    await git(seed, "add", ".");
+    await git(seed, "commit", "-m", "member work");
 
     await exec("git", ["clone", "--bare", "--quiet", origin, cache], { env: GIT_ENV });
     await git(cache, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
     await git(cache, "fetch", "origin", "--quiet");
     await git(cache, "branch", merged, "origin/main");
     await git(cache, "fetch", seed, `${unmerged}:${unmerged}`);
+    await git(cache, "fetch", seed, `${chunkMember}:${chunkMember}`);
+    await git(cache, "branch", chunkSeedOnly, `origin/${chunkBranch}`);
     await git(
       cache,
       "worktree",
@@ -77,6 +88,39 @@ describe("finalize real adapter git classifications", () => {
   it("classifies branches by containment in origin/main", async () => {
     expect(await adapter().branchIsContainedInOrigin(merged)).toBe(true);
     expect(await adapter().branchIsContainedInOrigin(unmerged)).toBe(false);
+  });
+
+  it("measures unpublished work from the source or chunk seed", async () => {
+    expect(await adapter().branchIsAheadOfSeed({
+      id: "1", title: "source seed", branch: merged,
+    })).toBe(false);
+    expect(await adapter().branchIsAheadOfSeed({
+      id: "2", title: "source work", branch: unmerged,
+    })).toBe(true);
+    expect(await adapter().branchIsAheadOfSeed({
+      id: "4", title: "chunk work", branch: chunkMember,
+      chunk: { root: 3, branch: chunkBranch },
+    })).toBe(true);
+    expect(await adapter().branchIsAheadOfSeed({
+      id: "5", title: "chunk seed", branch: chunkSeedOnly,
+      chunk: { root: 3, branch: chunkBranch },
+    })).toBe(false);
+    expect(await adapter().branchIsAheadOfSeed({
+      id: "6", title: "absent issue branch", branch: absent,
+    })).toBe(false);
+  });
+
+  it("propagates a broken seed lookup for an existing issue branch", async () => {
+    const brokenSeedAdapter = realAdapter({
+      layout: repoLayout(root, ".sandbar"),
+      repo: { owner: "o", name: "r" },
+      sourceBranch: "missing-source-branch",
+      beforeOriginWrite: async () => undefined,
+    });
+
+    await expect(brokenSeedAdapter.branchIsAheadOfSeed({
+      id: "1", title: "existing issue branch", branch: merged,
+    })).rejects.toThrow();
   });
 
   // #98 made the issue tree a marked clone and `reclaimIssueClone` the one

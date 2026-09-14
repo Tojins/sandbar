@@ -69,7 +69,7 @@ export type TitledEventIssue = {
   readonly title: string;
 };
 
-export type IssuePhase = "ui-check" | "implementer" | "gate-1" | "review";
+export type IssuePhase = "partition-check" | "ui-check" | "implementer" | "gate-1" | "review";
 
 export type WaitingReason =
   | { readonly kind: "blocked"; readonly by: readonly number[] }
@@ -106,6 +106,7 @@ export type UsageFields = {
   readonly terminalReason?: string;
   readonly toolCalls?: number;
   readonly peakContext?: number;
+  readonly contextChars?: number;
   readonly quota?: {
     readonly status: "allowed" | "allowed_warning" | "rejected";
     readonly window: string;
@@ -157,17 +158,18 @@ export type EventInput =
   | (EventIssue & { readonly kind: "origin-sync"; readonly outcome: IssueBranchOriginSync["kind"]; readonly detail: string })
   | (EventIssue & { readonly kind: "phase"; readonly attempt: number; readonly phases: readonly IssuePhase[] })
   | (EventIssue & { readonly kind: "setup"; readonly durationMs: number; readonly worktreeMs?: number; readonly sandboxMs?: number; readonly stackMs?: number; readonly detail?: string })
-  | (EventIssue & ContainerResources & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "partition-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly result: "CLEAR" | "PARTITION" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventIssue & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
-  | (EventIssue & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly pass: "quality" | "correctness"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "quota" | "credential"; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly pass: "quality" | "correctness"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number })
   | (ContainerResources & { readonly kind: "container"; readonly stack: "gate" | "sandbox"; readonly name: string; readonly container: string; readonly lifecycle: "issue" | "attempt"; readonly durationMs: number; readonly issue?: number; readonly title?: string })
   | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly qualityMode: "list" | "verify"; readonly gateOk: boolean; readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED"; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "quality" | "correctness" | null; readonly qualityFailures: number; readonly gateFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
   | (EventIssue & { readonly kind: "repair"; readonly attempt: number; readonly action: "fast-forward" | "re-prompt" | "promise-nudge"; readonly detail: string })
   | (EventIssue & { readonly kind: "hard-error"; readonly retry: number; readonly max: number; readonly reason: string })
-  | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "HARD-ERROR" | "QUOTA" | "CREDENTIAL" | "REJECTED"; readonly reason: string | null; readonly durationMs: number })
+  | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-PARTITION" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "HARD-ERROR" | "QUOTA" | "CREDENTIAL" | "REJECTED"; readonly reason: string | null; readonly durationMs: number })
   | (EventIssue & { readonly kind: "landed"; readonly outcome: "merged" | "chunk-landed" | "skipped"; readonly branch: string; readonly target: string | null; readonly reason: string | null; readonly durationMs: number })
   | { readonly kind: "landed"; readonly outcome: "chunk-on-source" | "chunk-parked" | "chunk-deferred"; readonly branch: string; readonly target: string | null; readonly reason: string | null; readonly durationMs: number }
   | (EventIssue & { readonly kind: "finalise"; readonly finaliseKind: FinalizeInput["kind"]; readonly outcome: FinalizeAction["kind"]; readonly detail?: string });

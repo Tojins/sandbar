@@ -23,7 +23,7 @@ is what is checked after every attempt.
 Commit each coherent unit of work as soon as it holds together — don't save
 everything for one final commit at the end. If this session dies mid-task
 (context limit, timeout), only commits survive: the next attempt is shown the
-branch's commits as its "work done so far" diff, while uncommitted changes are
+branch's commit list and diff stat, while uncommitted changes are
 left behind unexplained. Small, frequent commits make an interrupted attempt
 cheap to resume.
 

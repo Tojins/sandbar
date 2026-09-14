@@ -32,6 +32,7 @@ function drive(
     maxGateRounds?: number;
     maxReviewRounds: number;
     uiPrototypeCheck?: boolean;
+    partitionCheck?: boolean;
     issueBranch?: string;
   },
   script: readonly LoopEvent[],
@@ -42,6 +43,7 @@ function drive(
     maxGateRounds: opts.maxGateRounds ?? DEFAULT_MAX_GATE_ROUNDS,
     maxReviewRounds: opts.maxReviewRounds,
     uiPrototypeCheck: opts.uiPrototypeCheck ?? false,
+    partitionCheck: opts.partitionCheck ?? false,
   });
   const actions: LoopAction[] = [initialAction(state)];
   for (const event of script) {
@@ -147,6 +149,7 @@ const defaultOpts = {
   maxGateRounds: 4,
   maxReviewRounds: 3,
   uiPrototypeCheck: false,
+  partitionCheck: false,
 } as const;
 
 const asImpl = (a: LoopAction) =>
@@ -208,6 +211,66 @@ describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
         type: "NEEDS-HUMAN-REVIEW",
         cause: "ui-checker-wrote",
         latestReviewerProse: "UI checker changed git state",
+      },
+    });
+  });
+});
+
+describe("inner-loop-machine — issue partition check (#158)", () => {
+  it("runs before UI and attempt 1, then proceeds on CLEAR", () => {
+    const state = initialState({
+      ...defaultOpts,
+      partitionCheck: true,
+      uiPrototypeCheck: true,
+    });
+    expect(initialAction(state)).toEqual({ kind: "run-partition-check" });
+    const checked = step(state, {
+      kind: "partition-check-result",
+      result: { kind: "CLEAR" },
+      size: 12_000,
+      budget: 600_000,
+    });
+    expect(checked.action).toEqual({ kind: "run-ui-check" });
+    expect(checked.state.attempt).toBe(1);
+  });
+
+  it("terminates with structured classifier evidence", () => {
+    const state = initialState({ ...defaultOpts, partitionCheck: true });
+    const checked = step(state, {
+      kind: "partition-check-result",
+      result: { kind: "PARTITION", reason: "API and UI can land alone." },
+      size: 13_000,
+      budget: 600_000,
+    });
+    expect(checked.action).toEqual({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-PARTITION",
+        cause: "classifier",
+        slot: "partition-check",
+        size: 13_000,
+        budget: 600_000,
+        detail: "API and UI can land alone.",
+      },
+    });
+  });
+
+  it("parks a measured overage before gate/review dispatch", () => {
+    let state = initialState(defaultOpts);
+    state = step(state, impl(complete)).state;
+    const measured = step(state, {
+      kind: "context-over-budget",
+      slot: "review-correctness",
+      size: 700_000,
+      budget: 600_000,
+      detail: "completed branch is too large",
+    });
+    expect(measured.action).toMatchObject({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-PARTITION",
+        cause: "measured",
+        slot: "review-correctness",
       },
     });
   });

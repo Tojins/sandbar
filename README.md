@@ -311,7 +311,23 @@ the consumer's development tree, and a daemon restarts only when it has been
 asked to and has finished draining.
 [`deploy/ansible/README.md`](deploy/ansible/README.md) has the by-hand steps.
 
-### The three inner-loop budgets
+### Context and convergence budgets
+
+Before attempt 1, `partitionCheck` (default `true`) makes one cold,
+read-only classification of whether the issue already names multiple
+independently landable deliverables. Disable it only when work is partitioned
+before it reaches Sandbar.
+
+`maxContextChars` (default 600,000) bounds the complete working picture for an
+issue-loop role: its rendered prompt plus the seed-anchored net diff it is told
+to read from the worktree. Sandbar measures resumed work at admission and every
+completed attempt before starting gate-1 or review. An oversize issue parks as
+`NEEDS-PARTITION` under `labels.needsInfo`; the comment asks for a `## Blocked
+by` chain whose independently landable members each fit the budget. This is a
+useful-context budget, not a provider input limit. A provider size refusal maps
+to the same terminal instead of rebuilding a sandbox and replaying the prompt.
+
+The three convergence budgets remain independent:
 
 `maxQualityRounds` (default 4) bounds consecutive quality
 `CHANGES-REQUESTED` verdicts and pre-gate re-prompts: NO-SIGNAL, a dirty tree,

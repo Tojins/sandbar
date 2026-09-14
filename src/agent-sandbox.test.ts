@@ -36,6 +36,7 @@ import {
   SANDBOX_REPO_DIR,
   AgentCredentialError,
   AgentError,
+  AgentInputTooLargeError,
   AgentQuotaError,
   AgentIdleTimeoutError,
   agentFailureMessage,
@@ -321,6 +322,22 @@ describe("parseStreamJsonLine", () => {
     }))).toEqual([{ type: "usage", usage: {
       inputTokens: 4, resolvedModel: "claude-opus", terminalReason: "blocking_limit",
     } }]);
+  });
+
+  it("classifies Claude prompt-size refusals as terminal provider failures", () => {
+    for (const terminalReason of ["prompt_too_long", "blocking_limit"]) {
+      expect(parseStreamJsonLine(JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        terminal_reason: terminalReason,
+        result: "Prompt is too long",
+      }))).toContainEqual({
+        type: "failure",
+        kind: "input-too-large",
+        message: "Prompt is too long",
+      });
+    }
   });
 
   // #85 reads usage independently of the speech guard; the guard itself is
@@ -616,6 +633,20 @@ describe("parseCodexJsonLine", () => {
         '{"type":"turn.failed","error":{"message":"unexpected status 401"}}',
       ),
     ).toEqual([{ type: "failure", kind: "provider", message: "unexpected status 401" }]);
+  });
+
+  it("classifies Codex input_too_large structurally", () => {
+    expect(parseCodexJsonLine(JSON.stringify({
+      type: "turn.failed",
+      error: {
+        message: "Input exceeds the maximum length",
+        data: { input_error_code: "input_too_large", actual_chars: 1_064_340 },
+      },
+    }))).toEqual([{
+      type: "failure",
+      kind: "input-too-large",
+      message: "Input exceeds the maximum length",
+    }]);
   });
 
   // The give-up `error` event is shaped identically to the retries above it —
@@ -1473,6 +1504,34 @@ describe("createSandbox integration (local provider)", () => {
       }
     },
   );
+
+  it("turns a Codex input_too_large failure into its terminal error class", async () => {
+    const branch = "sandbar/issue-158-codex-input-too-large";
+    await git(["branch", branch], dir);
+    const line = JSON.stringify({
+      type: "turn.failed",
+      error: {
+        message: "Input exceeds the maximum length of 1048576 characters.",
+        data: { input_error_code: "input_too_large", actual_chars: 1_064_340 },
+      },
+    });
+    const sandbox = await createSandbox({
+      env: {}, branch, sandbox: makeLocalProvider(), layout: layoutFor(dir),
+    });
+    try {
+      const err = await sandbox.run({
+        agent: scriptedCodexAgent(`printf '%s\\n' '${line}'; exit 1`),
+        prompt: "go",
+        completionSignal: [],
+      }).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(AgentInputTooLargeError);
+      expect(err).toMatchObject({
+        detail: "Input exceeds the maximum length of 1048576 characters.",
+      });
+    } finally {
+      await sandbox.close();
+    }
+  });
 
   it("turns a failed Codex invocation with a reached rollout window into quota", async () => {
     const branch = "sandbar/issue-109-codex-rejected";

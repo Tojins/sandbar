@@ -8,12 +8,16 @@ copies only `origin/*` for the source repository, so the bare local name
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diff}}{{priorRounds}}{{projectStandards}}## Review process
+{{chunkBase}}{{commits}}{{diffStat}}{{priorRounds}}{{projectStandards}}## Review process
 
 Gate-1 is green and this round's tests-and-standards pass has already approved.
 Review these two dimensions, using the project conventions in
 {{conventionsRef}} to understand the implementation's invariants and settled
 choices:
+
+Read the entire branch diff before deciding: run `git diff {{baseRef}}...HEAD`
+and inspect every changed file named by the stat above. The stat is navigation,
+not the review surface.
 
 1. Correctness of logic: does the implementation actually work? Look for
    correctness gaps the tests miss: edge cases, off-by-one errors, broken error

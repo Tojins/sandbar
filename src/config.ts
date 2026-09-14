@@ -629,6 +629,10 @@ export type RunConfig = {
   // implementer unless explicitly split, while the check itself defaults on.
   readonly uiPrototypeCheck?: boolean;
   readonly uiCheckModelId?: string;
+  // Cold qualitative fan-out check before attempt 1 (#158). It uses the
+  // implementer routing, runs only while the branch is still at its seed, and
+  // may be disabled for hosts that partition work before queueing it.
+  readonly partitionCheck?: boolean;
   // The correctness pass — the one that ends an issue (#121). `reviewerAgent`
   // is its CLI.
   readonly reviewerModelId?: string;
@@ -718,6 +722,10 @@ export type RunConfig = {
   readonly maxQualityRounds?: number;
   readonly maxGateRounds?: number;
   readonly maxReviewRounds?: number;
+  // Maximum prompt characters plus the net branch diff a role is instructed
+  // to read on demand (#158). This is the model's useful-context budget, not a
+  // provider protocol cap.
+  readonly maxContextChars?: number;
   // Delay between tracker refreshes while the daemon has capacity. Default:
   // 60 seconds. A poll fetches source plus issue, chunk and member refs before
   // planning.
@@ -886,6 +894,8 @@ export const DEFAULT_SOURCE_BRANCH = "main";
 export const DEFAULT_CONTAINERFILE_PATH = "Containerfile";
 export const DEFAULT_IMPLEMENTER_MODEL_ID = "opus";
 export const DEFAULT_UI_PROTOTYPE_CHECK = true;
+export const DEFAULT_PARTITION_CHECK = true;
+export const DEFAULT_MAX_CONTEXT_CHARS = 600_000;
 export const DEFAULT_REVIEWER_MODEL_ID = "opus";
 export const DEFAULT_REVIEWER_QUALITY_MODEL_ID = "opus";
 export const DEFAULT_MERGER_MODEL_ID = "opus";
@@ -1976,6 +1986,12 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       `config.uiPrototypeCheck must be a boolean, got ${JSON.stringify(config.uiPrototypeCheck)}.`,
     );
   }
+  const partitionCheck = config.partitionCheck ?? DEFAULT_PARTITION_CHECK;
+  if (typeof partitionCheck !== "boolean") {
+    throw new SandbarError(
+      `config.partitionCheck must be a boolean, got ${JSON.stringify(config.partitionCheck)}.`,
+    );
+  }
   const keepAwakeWhileIdle =
     config.keepAwakeWhileIdle ?? DEFAULT_KEEP_AWAKE_WHILE_IDLE;
   if (typeof keepAwakeWhileIdle !== "boolean") {
@@ -2070,6 +2086,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     images,
     implementerModelId: config.implementerModelId ?? DEFAULT_IMPLEMENTER_MODEL_ID,
     uiPrototypeCheck,
+    partitionCheck,
     uiCheckModelId:
       config.uiCheckModelId ??
       inheritedUiCheckModelId ??
@@ -2107,6 +2124,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     maxReviewRounds: requirePositiveInteger(
       "maxReviewRounds",
       config.maxReviewRounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
+    ),
+    maxContextChars: requirePositiveInteger(
+      "maxContextChars",
+      config.maxContextChars ?? DEFAULT_MAX_CONTEXT_CHARS,
     ),
     pollIntervalMs: requirePositiveInteger(
       "pollIntervalMs",

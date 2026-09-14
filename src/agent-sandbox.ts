@@ -68,6 +68,11 @@
 //         (#141). The cumulative OOM counter is snapshotted at both edges, and
 //         the invocation duration stops before the teardown read. Failed runs
 //         retain the same facts beside their partial speech/usage.
+//   F13 — a provider-declared prompt-size refusal has its own failure kind.
+//         Codex reports `turn.failed` + `input_too_large`; Claude reports an
+//         error `result` with `prompt_too_long` or `blocking_limit`. The inner
+//         loop parks these for partitioning instead of replaying them as infra
+//         failures in fresh sandboxes (#158).
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
@@ -575,6 +580,14 @@ export class AgentCredentialError extends Error {
   }
 }
 
+export class AgentInputTooLargeError extends Error {
+  readonly detail: string;
+  constructor(detail: string) {
+    super(`provider refused oversized input: ${detail}`);
+    this.detail = detail;
+  }
+}
+
 export class AgentIdleTimeoutError extends Error {
   readonly timeoutMs: number;
   constructor(message: string, timeoutMs: number) {
@@ -815,11 +828,23 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   // Usage is read independently of whether `result` is a string: an
   // error-terminated turn keeps its text in `errors[]` and still reports what
   // it spent, so the invocation that burned the budget is not recorded as
-  // having spent nothing (#85). No `failure` event is emitted here — that
-  // would change what reaches NEEDS-HUMAN, which this register may not do.
+  // having spent nothing (#85). Prompt-size terminal reasons are the one
+  // structural `failure` emitted here (#158); other result errors remain
+  // speech/usage and retain their existing classification.
   if (obj.type === "result") {
     const measurement = normalizeClaudeResult(obj);
     return [
+      ...(obj.is_error === true &&
+        (obj.terminal_reason === "prompt_too_long" ||
+          obj.terminal_reason === "blocking_limit")
+        ? [{
+            type: "failure" as const,
+            kind: "input-too-large" as const,
+            message: typeof obj.result === "string" && obj.result.trim()
+              ? obj.result
+              : `Claude refused the prompt (${obj.terminal_reason}).`,
+          }]
+        : []),
       ...(typeof obj.result === "string"
         ? [{ type: "result" as const, result: obj.result }]
         : []),
@@ -966,11 +991,15 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   // still trying.
   if (obj.type === "turn.failed") {
     const message = codexErrorMessage(obj.error);
+    const inputErrorCode = obj.error?.data?.input_error_code ??
+      obj.error?.input_error_code ?? obj.data?.input_error_code;
     return [{
       type: "failure",
-      kind: message.startsWith(CODEX_REFRESH_FAILURE_PREFIX)
-        ? "credential"
-        : "provider",
+      kind: inputErrorCode === "input_too_large"
+        ? "input-too-large"
+        : message.startsWith(CODEX_REFRESH_FAILURE_PREFIX)
+          ? "credential"
+          : "provider",
       message,
     }];
   }
@@ -2472,6 +2501,12 @@ const invokeAgent = async (
           ));
           return;
         }
+        if (classification.verdict === "input-too-large") {
+          settleReject(new AgentInputTooLargeError(
+            classification.detail ?? "input exceeds the provider limit",
+          ));
+          return;
+        }
         if (execResult.exitCode !== 0 || classification.verdict === "infra") {
           // Four-tier detail: the reported failure → stderr → parsed speech →
           // last 20 stdout lines. The reported failure leads because it is the
@@ -2479,8 +2514,9 @@ const invokeAgent = async (
           // credential failure actually takes (it exits 1) — whose stderr is a
           // dozen timestamped `ERROR codex_api::…` retry lines that bury the
           // one sentence a human needs. A provider that reports nothing in-band
-          // is unaffected: claudeCode never emits `failure`, so stderr still
-          // leads for it, exactly as before #72.
+          // is unaffected: Claude emits `failure` only for #158's two
+          // prompt-size terminal reasons, so stderr still leads for its other
+          // failures, exactly as before #72.
           settleReject(
             new AgentError(
               agentFailureMessage(

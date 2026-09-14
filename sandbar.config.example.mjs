@@ -80,6 +80,14 @@ export default {
   // attempt 1. Disable this in hosts that cannot ship user-visible UI.
   // uiPrototypeCheck: true,
 
+  // Run one cold, qualitative fan-out classification at the branch seed.
+  // Disable only when issues are partitioned before entering this queue.
+  // partitionCheck: true,
+
+  // Useful-context budget: rendered prompt plus the seed-anchored net diff a
+  // role is told to inspect on demand. Oversize work parks for partitioning.
+  // maxContextChars: 600000,
+
   // Undefined derives `Co-authored-by: ...` from botName and botEmail.
   // coauthorTrailer: undefined,
 

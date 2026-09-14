@@ -19,10 +19,10 @@
 // leading explanation.
 
 export type AgentRunEnd = "exit" | "timeout" | "signal" | "spawn-error";
-export type AgentRunCause = "clean" | "silent" | "provider-failure" | "quota" | "credential" | "spawn-error" | "timeout" | "signal" | "parse-error";
+export type AgentRunCause = "clean" | "silent" | "provider-failure" | "input-too-large" | "quota" | "credential" | "spawn-error" | "timeout" | "signal" | "parse-error";
 export type SilentRunRecovery = "retryable" | "infra";
 export type AgentFailure = {
-  readonly kind: "provider" | "credential";
+  readonly kind: "provider" | "credential" | "input-too-large";
   readonly message: string;
 };
 
@@ -42,7 +42,7 @@ export const formatRateLimitFields = (
 
 export type AgentRunClassification = {
   readonly cause: AgentRunCause;
-  readonly verdict: "answer" | "infra" | "quota" | "credential";
+  readonly verdict: "answer" | "infra" | "input-too-large" | "quota" | "credential";
   readonly rateLimit?: RateLimitMeasurement;
   // A provider or runtime's own narrow explanation. Consumers may add their
   // own presentation around it without accidentally embedding raw streams.
@@ -93,6 +93,13 @@ export function classifyAgentRunEnd(input: AgentRunEndInput): AgentRunClassifica
     return {
       cause: "credential",
       verdict: "credential",
+      ...(input.failure.message.trim() ? { detail: input.failure.message } : {}),
+    };
+  }
+  if (input.failure?.kind === "input-too-large") {
+    return {
+      cause: "input-too-large",
+      verdict: "input-too-large",
       ...(input.failure.message.trim() ? { detail: input.failure.message } : {}),
     };
   }

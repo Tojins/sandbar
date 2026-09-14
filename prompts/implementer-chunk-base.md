@@ -10,8 +10,8 @@ What follows from that:
   branch and nowhere else. It is not on the source branch and will not be until
   a human has reviewed the whole chunk, so do not go looking for it there and do
   not re-implement it.
-- **Everything already on `{{chunkBranch}}` is out of scope.** The diff below is
-  measured from that tip, so it shows your commits and only yours. Add to it;
+- **Everything already on `{{chunkBranch}}` is out of scope.** The summary below
+  is measured from that tip, so it shows your commits and only yours. Add to it;
   don't restate it.
 - **Any range of your own should start there too.** `{{baseRef}}..HEAD` is your
   work; `{{baseRef}}` is what the rest of the chunk looks like.

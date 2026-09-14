@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
 
 describe("classifyAgentRunEnd (#114)", () => {
-  const failure = (message: string, kind: "provider" | "credential" = "provider") => ({
+  const failure = (message: string, kind: "provider" | "credential" | "input-too-large" = "provider") => ({
     kind,
     message,
   });
@@ -113,6 +113,21 @@ describe("classifyAgentRunEnd (#114)", () => {
         detail: "Your access token could not be refreshed",
       });
     }
+  });
+
+  it("classifies input size ahead of quota and partial speech", () => {
+    expect(classifyAgentRunEnd({
+      end: "exit",
+      exitCode: 1,
+      spoken: "partial",
+      failure: failure("Input exceeds 1048576 characters", "input-too-large"),
+      rateLimit: { status: "rejected", window: "five_hour" },
+      silentRunRecovery: "retryable",
+    })).toEqual({
+      cause: "input-too-large",
+      verdict: "input-too-large",
+      detail: "Input exceeds 1048576 characters",
+    });
   });
 
   it("uses the provider, stderr, speech, stdout-tail detail ladder", () => {

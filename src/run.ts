@@ -374,6 +374,8 @@ export function terminalReason(terminal: Terminal): string | null {
     case "DONE": return null;
     case "NEEDS-INFO": return terminal.questions;
     case "NEEDS-UI-PROTOTYPE": return terminal.uiImpact;
+    case "NEEDS-PARTITION":
+      return `${terminal.cause} ${terminal.slot} ${terminal.size}/${terminal.budget}: ${terminal.detail}`;
     case "NEEDS-HUMAN": return `${terminal.cause}: ${terminal.failureTrace}`;
     case "NEEDS-HUMAN-REVIEW": return `${terminal.cause}: ${terminal.latestReviewerProse}`;
     case "HARD-ERROR": return terminal.reason;
@@ -1320,6 +1322,8 @@ export async function run(
     env: sandboxEnv,
     implementerModelId: config.implementerModelId,
     uiPrototypeCheck: config.uiPrototypeCheck,
+    partitionCheck: config.partitionCheck,
+    maxContextChars: config.maxContextChars,
     uiCheckModelId: config.uiCheckModelId,
     reviewerModelId: config.reviewerModelId,
     reviewerQualityModelId: config.reviewerQualityModelId,

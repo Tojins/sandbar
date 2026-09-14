@@ -1,4 +1,4 @@
-// #40 — the diff and commit-list slots, against the layout the agents really
+// #40/#158 — the stat and commit-list slots, against the layout the agents really
 // see: a linked worktree of the BARE object cache.
 //
 // This is the fixture the bug needed and did not have. Every prompt test before
@@ -14,15 +14,22 @@
 // property under test is that a ref resolves in a repo git constructed, and a
 // fixture that adds a local `main` of its own passes with the bug restored.
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { SandbarError } from "./errors.js";
 import { ensureIssueBranch, sourceBranchBase } from "./git-ops.js";
-import { buildPrompt, buildReviewerPrompts, readGit } from "./prompt.js";
+import {
+  branchIsAheadOfSeed,
+  buildPrompt,
+  buildReviewerPrompts,
+  contextChars,
+  measureNetDiffChars,
+  readGit,
+} from "./prompt.js";
 import { repoLayout, worktreePathFor } from "./repo-cache.js";
 import { ensureRepoCache } from "./repo-cache.js";
 
@@ -34,11 +41,13 @@ const REPO = { owner: "acme", name: "app" };
 const BRANCH = "sandbar/issue-7-widget";
 const ISSUE = { id: "7", title: "widget", branch: BRANCH };
 
-// Content the assertions look for. Distinct strings for the commit subject and
-// for the line the commit adds, so "the diff is there" cannot pass on the
-// commit list alone.
+// Content the assertions look for. The line itself must stay out of prompt
+// slots; its filename in the stat proves progressive disclosure is wired.
 const SUBJECT = "commit-on-the-issue-branch";
 const ADDED_LINE = "the-line-only-the-branch-has";
+const LONG_PATH =
+  "src/app/features/visit-editing/components/visit-version-diff/" +
+  "visit-version-diff.component.ts";
 
 let root: string;
 let origin: string;
@@ -97,6 +106,14 @@ async function commitOnBranch(): Promise<void> {
   await git(worktree, "commit", "-qm", SUBJECT);
 }
 
+async function commitLongPath(subject: string): Promise<void> {
+  const path = join(worktree, LONG_PATH);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${ADDED_LINE}\n`);
+  await git(worktree, "add", "-A");
+  await git(worktree, "commit", "-qm", subject);
+}
+
 const anchorOpts = (sourceBranch = "main") => ({
   repo: REPO,
   repoDir,
@@ -145,7 +162,8 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     const prompt = await buildPrompt(implementerInputs(), anchorOpts());
 
     expect(prompt).toContain(SUBJECT);
-    expect(prompt).toContain(ADDED_LINE);
+    expect(prompt).toContain("b.txt");
+    expect(prompt).not.toContain(ADDED_LINE);
     expect(prompt).not.toContain("No commits yet on this branch.");
   });
 
@@ -157,17 +175,65 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     expect(prompt).toContain("No commits yet on this branch.");
   });
 
-  it("hands the reviewer both the commit list and the diff", async () => {
+  it("hands the reviewer the commit list and diff stat, not the patch", async () => {
     await commitOnBranch();
 
     const prompt = (await buildReviewerPrompts(reviewerInputs())).correctness;
 
     expect(prompt).toContain(SUBJECT);
-    expect(prompt).toContain(ADDED_LINE);
+    expect(prompt).toContain("b.txt");
+    expect(prompt).not.toContain(ADDED_LINE);
     expect(prompt).not.toContain("(empty — no changes against");
   });
 
-  it("anchors the verify diff at the newest quality-reviewed head", async () => {
+  it("keeps long filenames exact in every progressive-disclosure stat", async () => {
+    await commitLongPath("long-path-on-the-issue-branch");
+    const listingHead = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
+
+    const implementer = await buildPrompt(implementerInputs(), anchorOpts());
+    const listing = await buildReviewerPrompts(reviewerInputs());
+    expect(implementer).toContain(LONG_PATH);
+    expect(listing.quality).toContain(LONG_PATH);
+    expect(listing.correctness).toContain(LONG_PATH);
+    expect(implementer).not.toContain(".../components/visit-version-diff");
+
+    const laterPath = `after-review/${LONG_PATH}`;
+    const path = join(worktree, laterPath);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, "later\n");
+    await git(worktree, "add", "-A");
+    await git(worktree, "commit", "-qm", "long-path-after-listing");
+
+    const verify = (await buildReviewerPrompts({
+      ...reviewerInputs(),
+      priorRounds: [{
+        round: 1,
+        head: listingHead,
+        quality: {
+          verdict: "APPROVED",
+          prose: "<verdict>APPROVED</verdict>",
+        },
+      }],
+    })).quality;
+    const changedSince = verify.slice(
+      verify.indexOf("## Changed since the last quality review"),
+      verify.indexOf("## Coding standards"),
+    );
+    expect(changedSince).toContain(laterPath);
+    expect(changedSince).not.toContain(".../visit-version-diff");
+  });
+
+  it("measures the on-demand net diff separately from the rendered prompt", async () => {
+    expect(await branchIsAheadOfSeed(worktree, "origin/main")).toBe(false);
+    await commitOnBranch();
+
+    const diff = (await git(worktree, "diff", "origin/main...HEAD")).stdout;
+    expect(await branchIsAheadOfSeed(worktree, "origin/main")).toBe(true);
+    expect(await measureNetDiffChars(worktree, "origin/main")).toBe(diff.length);
+    expect(contextChars("prompt", diff.length)).toBe(6 + diff.length);
+  });
+
+  it("anchors the verify stat at the newest quality-reviewed head", async () => {
     await commitOnBranch();
     const listingHead = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
     const laterLine = "the-line-added-after-the-listing";
@@ -191,8 +257,9 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
       prompt.indexOf("## Changed since the last quality review"),
       prompt.indexOf("## Coding standards"),
     );
-    expect(changedSince).toContain(laterLine);
-    expect(changedSince).not.toContain(ADDED_LINE);
+    expect(changedSince).toContain("c.txt");
+    expect(changedSince).not.toContain("b.txt");
+    expect(changedSince).not.toContain(laterLine);
   });
 });
 
@@ -208,7 +275,7 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
     );
 
     await expect(built).rejects.toBeInstanceOf(SandbarError);
-    await expect(built).rejects.toThrow(/work done so far/);
+    await expect(built).rejects.toThrow(/commit list/);
   });
 
   // Asserted on the message, not just the class: swallow the read and the
@@ -324,7 +391,8 @@ describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
     );
 
     expect(prompt).toContain(MEMBER_SUBJECT);
-    expect(prompt).toContain(MEMBER_LINE);
+    expect(prompt).toContain("member.txt");
+    expect(prompt).not.toContain(MEMBER_LINE);
     expect(prompt).not.toContain(CHUNK_SUBJECT);
     expect(prompt).not.toContain(CHUNK_LINE);
     // And it is told why, so an empty-looking tree is not a mystery.
@@ -339,7 +407,8 @@ describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
     })).correctness;
 
     expect(prompt).toContain(MEMBER_SUBJECT);
-    expect(prompt).toContain(MEMBER_LINE);
+    expect(prompt).toContain("member.txt");
+    expect(prompt).not.toContain(MEMBER_LINE);
     expect(prompt).not.toContain(CHUNK_SUBJECT);
     expect(prompt).not.toContain(CHUNK_LINE);
     expect(prompt).toContain(CHUNK.branch);
@@ -359,6 +428,7 @@ describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
     );
 
     expect(prompt).toContain(CHUNK_SUBJECT);
-    expect(prompt).toContain(CHUNK_LINE);
+    expect(prompt).toContain("chunk.txt");
+    expect(prompt).not.toContain(CHUNK_LINE);
   });
 });

@@ -14,10 +14,14 @@
 // container's netns, so it must exist first, and they must be up before a
 // consumer's `onSandboxReady` hook runs.
 //
-// The UI-prototype decision (#126) is its own first action when enabled. It is
-// a cold agent call in the existing issue sandbox and spends neither failure
-// budget. A fresh HARD-ERROR cycle rebuilds
-// the state and therefore asks again. Two deliberate exceptions to "all
+// The partition and UI-prototype decisions (#158/#126) are cold agent calls in
+// the existing issue sandbox and spend no convergence budget. Partition runs
+// once per admission and only at the seed; UI runs once per sandbox cycle, so
+// a fresh HARD-ERROR asks it again. Before review dispatch, the complete role
+// picture (rendered prompt plus seed-anchored net diff) is measured against the
+// configured useful-context budget; a resumed branch gets the same enforcement
+// at admission. A provider size refusal maps to the same partition terminal
+// instead of entering HARD-ERROR replay. Two deliberate exceptions to "all
 // branching lives in the SM" stay within one action each. The promise nudge
 // in runImplementer gives an implementer
 // that ends with no `<promise>` tag at all one `--continue` follow-up before
@@ -61,7 +65,7 @@
 // A red gate keeps the quality result and reviewer history, while correctness
 // is not dispatched until both quality and gate-1 approve (#143). Reviewer
 // mutation still parks regardless of the gate result.
-// UI-check and reviewer invocations snapshot the tip and status; any mutation
+// Partition-check, UI-check and reviewer invocations snapshot tip and status; any mutation
 // parks the issue and preserves the clone rather than trusting that call.
 // Invocation filenames use one run-owned, per-issue sequence across fresh
 // HARD-ERROR cycles and later admissions: the state machine's attempt and
@@ -90,6 +94,7 @@ import * as agentSandbox from "./agent-sandbox.js";
 import {
   AgentCredentialError,
   AgentError,
+  AgentInputTooLargeError,
   AgentQuotaError,
   agentPartialContainerResources,
   agentPartialDurationMs,
@@ -118,6 +123,7 @@ import {
 import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import type { EventInput, UsageFields } from "./events.js";
+import { parsePartitionCheck } from "./partition-check-parser.js";
 import { summarizeGateFailure } from "./gate.js";
 import type { GateSemaphore } from "./gate-semaphore.js";
 import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
@@ -135,6 +141,7 @@ import {
 import {
   HARD_ERROR_MAX_RETRIES,
   type Gate1Result,
+  type ContextSlot,
   type LoopAction,
   type LoopEvent,
   type LoopState,
@@ -180,8 +187,12 @@ import {
   type ProjectAnchorOptions,
   type PriorReviewRound,
   buildPrompt,
+  buildPartitionCheckPrompt,
   buildReviewerPrompts,
   buildUiCheckPrompt,
+  contextChars,
+  measureNetDiffChars,
+  branchIsAheadOfSeed,
   qualityReviewContext,
 } from "./prompt.js";
 
@@ -357,7 +368,17 @@ export type Terminal =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause: "reviewer-wrote" | "ui-checker-wrote";
+      readonly cause: "reviewer-wrote" | "ui-checker-wrote" | "partition-checker-wrote";
+      readonly commits: readonly { sha: string }[];
+      readonly specGaps: readonly SpecGap[];
+    }
+  | {
+      readonly type: "NEEDS-PARTITION";
+      readonly cause: "classifier" | "measured" | "provider-refused";
+      readonly slot: ContextSlot;
+      readonly size: number;
+      readonly budget: number;
+      readonly detail: string;
       readonly commits: readonly { sha: string }[];
       readonly specGaps: readonly SpecGap[];
     }
@@ -460,6 +481,43 @@ export const credentialVerdict = (err: AgentCredentialError): Verdict => ({
   detail: err.detail,
 });
 
+class PartitionRequiredError extends Error {
+  readonly verdict: Extract<Verdict, { readonly type: "NEEDS-PARTITION" }>;
+  constructor(
+    slot: ContextSlot,
+    size: number,
+    budget: number,
+    detail: string,
+  ) {
+    super(detail);
+    this.verdict = {
+      type: "NEEDS-PARTITION",
+      cause: "provider-refused",
+      slot,
+      size,
+      budget,
+      detail,
+    };
+  }
+}
+
+const providerSizeRefusal = (
+  err: unknown,
+  slot: ContextSlot,
+  size: number,
+  budget: number,
+): unknown => {
+  if (err instanceof AgentInputTooLargeError) {
+    return new PartitionRequiredError(
+      slot,
+      size,
+      budget,
+      err.detail,
+    );
+  }
+  return err;
+};
+
 export type InnerLoopConfig = {
   // Every directory this loop touches, as one object (#38). The issue branch it
   // seeds, the managed worktree it prepares and the anchor layers' `git log` /
@@ -501,6 +559,8 @@ export type InnerLoopConfig = {
   readonly reviewerQualityEffort?: string | undefined;
   readonly uiCheckEffort?: string | undefined;
   readonly uiPrototypeCheck: boolean;
+  readonly partitionCheck: boolean;
+  readonly maxContextChars: number;
   readonly maxQualityRounds: number;
   readonly maxGateRounds: number;
   readonly maxReviewRounds: number;
@@ -555,6 +615,7 @@ function eventUsage(
   toolCalls: number | undefined,
   peakContext: number | undefined,
   quota?: RateLimitMeasurement,
+  measuredContextChars?: number,
 ): UsageFields | undefined {
   const fields: UsageFields = {
     ...(usage?.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
@@ -568,6 +629,7 @@ function eventUsage(
     ...(usage?.terminalReason === undefined ? {} : { terminalReason: usage.terminalReason }),
     ...(toolCalls === undefined ? {} : { toolCalls }),
     ...(peakContext === undefined ? {} : { peakContext }),
+    ...(measuredContextChars === undefined ? {} : { contextChars: measuredContextChars }),
     ...(quota === undefined ? {} : { quota }),
   };
   return Object.keys(fields).length === 0 ? undefined : fields;
@@ -592,6 +654,7 @@ export async function runInnerLoop(
   let retriesUsed = 0;
   const specGaps: SpecGap[] = [];
   let admitted = false;
+  let partitionCheckPending = opts.config.partitionCheck;
   const cycleOptions: InnerLoopOptions = {
     ...opts,
     onEvent: async (event) => {
@@ -599,13 +662,22 @@ export async function runInnerLoop(
         if (admitted) return;
         admitted = true;
       }
+      if (
+        event.kind === "partition-check" &&
+        (event.result === "CLEAR" || event.result === "PARTITION")
+      ) {
+        partitionCheckPending = false;
+      }
       await opts.onEvent(event);
     },
   };
   for (;;) {
     const outcome = await runCycle(
       issue,
-      cycleOptions,
+      {
+        ...cycleOptions,
+        config: { ...cycleOptions.config, partitionCheck: partitionCheckPending },
+      },
       opts.attemptLogger.startInvocationCycle(),
     );
     specGaps.push(...outcome.specGaps);
@@ -644,6 +716,17 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
         uiImpact: verdict.uiImpact,
         commits: accumulatedCommits,
         strandedHead: verdict.strandedHead,
+        specGaps,
+      };
+    case "NEEDS-PARTITION":
+      return {
+        type: "NEEDS-PARTITION",
+        cause: verdict.cause,
+        slot: verdict.slot,
+        size: verdict.size,
+        budget: verdict.budget,
+        detail: verdict.detail,
+        commits: accumulatedCommits,
         specGaps,
       };
     case "NEEDS-HUMAN":
@@ -1007,12 +1090,44 @@ async function runSandboxCycle(
       sourceBranch: config.sourceBranch,
     };
 
+    const branchAhead = await branchIsAheadOfSeed(worktreePath, base.ref);
+    if (branchAhead) {
+      const admissionPrompt = await buildPrompt({
+        issue,
+        attempt: 1,
+        worktreePath,
+        lastFailureTrace: "",
+        base,
+        promptExtension: config.promptExtensions?.implementer,
+        sandboxStack: sandboxStatuses,
+      }, anchorOpts);
+      const size = contextChars(
+        admissionPrompt,
+        await measureNetDiffChars(worktreePath, base.ref),
+      );
+      if (size > config.maxContextChars) {
+        return {
+          verdict: {
+            type: "NEEDS-PARTITION",
+            cause: "measured",
+            slot: "implementer",
+            size,
+            budget: config.maxContextChars,
+            detail: "The resumed branch already exceeds the configured context budget.",
+          },
+          accumulatedCommits: accumulated,
+          specGaps,
+        };
+      }
+    }
+
     let state: LoopState = initialState({
       issueBranch: issue.branch,
       maxQualityRounds: config.maxQualityRounds,
       maxGateRounds: config.maxGateRounds,
       maxReviewRounds: config.maxReviewRounds,
       uiPrototypeCheck: config.uiPrototypeCheck,
+      partitionCheck: config.partitionCheck && !branchAhead,
     });
     let action: LoopAction = initialAction(state);
     await opts.onEvent({
@@ -1085,6 +1200,13 @@ async function runSandboxCycle(
 
     return { verdict: action.verdict, accumulatedCommits: accumulated, specGaps };
   } catch (err) {
+    if (err instanceof PartitionRequiredError) {
+      return {
+        verdict: err.verdict,
+        accumulatedCommits: accumulated,
+        specGaps,
+      };
+    }
     if (err instanceof AgentQuotaError) {
       recordProviderClosure(opts.providerState, err);
       return {
@@ -1224,6 +1346,8 @@ async function executeAction(
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
   switch (action.kind) {
+    case "run-partition-check":
+      return runPartitionCheck(action, ctx);
     case "run-ui-check":
       return runUiCheck(action, ctx);
     case "run-implementer":
@@ -1233,6 +1357,154 @@ async function executeAction(
     case "terminate":
       throw new Error("executeAction called with terminate; runner should exit instead");
   }
+}
+
+export async function runPartitionCheck(
+  _action: Extract<LoopAction, { kind: "run-partition-check" }>,
+  ctx: ExecuteActionCtx,
+): Promise<Extract<LoopEvent, {
+  kind: "partition-check-result" | "partition-checker-wrote" | "context-over-budget";
+}>> {
+  const { issue, sandbox, opts, config } = ctx;
+  const basePrompt = await buildPartitionCheckPrompt(
+    issue.id,
+    config.repo,
+    config.maxContextChars,
+  );
+  const size = contextChars(
+    basePrompt,
+    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
+  );
+  if (size > config.maxContextChars) {
+    return {
+      kind: "context-over-budget",
+      slot: "partition-check",
+      size,
+      budget: config.maxContextChars,
+      detail: "The issue anchor alone exceeds the configured context budget.",
+    };
+  }
+
+  let prompt = basePrompt;
+  for (let invocation = 1; invocation <= 2; invocation += 1) {
+    const before = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
+    const timer = startTimer();
+    const log = async (
+      result: Extract<EventInput, { kind: "partition-check" }>["result"],
+      durationMs: number,
+      usage: AgentUsage | undefined,
+      toolCalls: number | undefined,
+      peakContext: number | undefined,
+      resources: ContainerResources,
+    ): Promise<void> => {
+      const usageFields = eventUsage(
+        usage,
+        toolCalls,
+        peakContext,
+        undefined,
+        size,
+      );
+      await opts.onEvent({
+        kind: "partition-check",
+        issue: Number(issue.id),
+        title: issue.title,
+        invocation,
+        provider: config.implementerAgent,
+        model: config.implementerModelId,
+        effort: config.implementerEffort ?? null,
+        durationMs,
+        result,
+        ...(usageFields === undefined ? {} : { usage: usageFields }),
+        ...resources,
+      });
+    };
+
+    const outcome = await runWithProviderState(
+      opts.providerState,
+      config.implementerAgent,
+      () => sandbox.run({
+        name: `partition-check-${issue.id}${invocation === 1 ? "" : "-reprompt"}`,
+        model: config.implementerModelId,
+        agent: buildAgentProvider(config.implementerAgent, config.implementerModelId, {
+          effort: config.implementerEffort,
+        }),
+        prompt,
+        completionSignal: [],
+        ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
+          role: "partition-check",
+          invocation,
+        })),
+      }),
+    ).then(
+      (run) => ({ kind: "completed" as const, run }),
+      (err: unknown) => ({ kind: "failed" as const, err }),
+    );
+    if (outcome.kind === "failed") {
+      const { err } = outcome;
+      const partial = agentPartialUsage(err);
+      await log(
+        err instanceof AgentInputTooLargeError
+          ? "input-too-large"
+          : err instanceof AgentQuotaError
+            ? "quota"
+            : err instanceof AgentCredentialError
+              ? "credential"
+              : "failed",
+        agentPartialDurationMs(err) ?? timer(),
+        partial.usage,
+        partial.toolCalls,
+        partial.peakContext,
+        agentPartialContainerResources(err),
+      );
+      const wrote = await enforceReadOnlyAgentSnapshot(
+        sandbox,
+        before,
+        await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch),
+        "Partition checker",
+        agentPartialOutput(err),
+      );
+      if (wrote !== null) return { kind: "partition-checker-wrote", detail: wrote };
+      throw providerSizeRefusal(
+        err,
+        "partition-check",
+        size,
+        config.maxContextChars,
+      );
+    }
+    const { run } = outcome;
+
+    const wrote = await enforceReadOnlyAgentSnapshot(
+      sandbox,
+      before,
+      await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch),
+      "Partition checker",
+      run.stdout,
+    );
+    if (wrote !== null) {
+      await log("wrote", run.durationMs, run.usage, run.toolCalls, run.peakContext,
+        containerResourcesOf(run));
+      return { kind: "partition-checker-wrote", detail: wrote };
+    }
+    const result = parsePartitionCheck(run.stdout);
+    await log(result.kind, run.durationMs, run.usage, run.toolCalls, run.peakContext,
+      containerResourcesOf(run));
+    if (result.kind !== "NO-SIGNAL") {
+      return {
+        kind: "partition-check-result",
+        result,
+        size,
+        budget: config.maxContextChars,
+      };
+    }
+    if (invocation === 1) {
+      prompt = `${basePrompt}\n\n---\n\n# Required correction\n\n${result.reprompt}`;
+      continue;
+    }
+    throw new AgentError(
+      "Partition checker produced no valid classification after its one re-prompt.",
+    );
+  }
+  throw new Error("unreachable partition-check invocation count");
 }
 
 export async function runUiCheck(
@@ -1301,7 +1573,9 @@ export async function runUiCheck(
       const partial = agentPartialUsage(err);
       const resources = agentPartialContainerResources(err);
       await logInvocation(
-        err instanceof AgentQuotaError
+        err instanceof AgentInputTooLargeError
+          ? "input-too-large"
+          : err instanceof AgentQuotaError
           ? "quota"
           : err instanceof AgentCredentialError
             ? "credential"
@@ -1323,7 +1597,12 @@ export async function runUiCheck(
         agentPartialOutput(err),
       );
       if (wrote !== null) return { kind: "ui-checker-wrote", detail: wrote };
-      throw err;
+      throw providerSizeRefusal(
+        err,
+        "ui-check",
+        prompt.length,
+        config.maxContextChars,
+      );
     }
 
     const wrote = await enforceReadOnlyAgentSnapshot(
@@ -1374,17 +1653,52 @@ export async function runUiCheck(
 type GateAndReviewerJobs = {
   readonly gate: typeof runGate1;
   readonly reviewer: typeof runReviewer;
+  readonly prepareReview: (
+    ctx: ExecuteActionCtx,
+  ) => Promise<{
+    readonly prompts: Readonly<Record<ReviewerPass, string>>;
+    readonly netDiffChars: number;
+  }>;
 };
+
+const prepareReview = async (ctx: ExecuteActionCtx) => ({
+  prompts: await buildReviewerPrompts(inputsForReviewer(ctx)),
+  netDiffChars: await measureNetDiffChars(ctx.sandbox.worktreePath, ctx.base.ref),
+});
 
 export async function runGateAndReviewer(
   action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
-  jobs: GateAndReviewerJobs = { gate: runGate1, reviewer: runReviewer },
-): Promise<Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>> {
+  jobs: GateAndReviewerJobs = {
+    gate: runGate1,
+    reviewer: runReviewer,
+    prepareReview,
+  },
+): Promise<Extract<LoopEvent, {
+  kind: "gate-and-reviewer-result" | "context-over-budget";
+}>> {
+  const prepared = await jobs.prepareReview(ctx);
+  const sizes = {
+    quality: contextChars(prepared.prompts.quality, prepared.netDiffChars),
+    correctness: contextChars(prepared.prompts.correctness, prepared.netDiffChars),
+  };
+  const over = (["quality", "correctness"] as const)
+    .map((pass) => ({ pass, size: sizes[pass] }))
+    .filter(({ size }) => size > ctx.config.maxContextChars)
+    .sort((a, b) => b.size - a.size)[0];
+  if (over !== undefined) {
+    return {
+      kind: "context-over-budget",
+      slot: over.pass === "quality" ? "review-quality" : "review-correctness",
+      size: over.size,
+      budget: ctx.config.maxContextChars,
+      detail: "The completed branch exceeds the configured context budget before review.",
+    };
+  }
   // Wait for both jobs before cycle teardown can remove resources either one
   // is still using. If both reject, the gate remains the first surfaced error.
   const gateJob = jobs.gate(action, ctx);
-  const reviewerJob = jobs.reviewer(action, ctx, gateJob);
+  const reviewerJob = jobs.reviewer(action, ctx, gateJob, prepared);
   const [gateResult, reviewerResult] = await Promise.allSettled([
     gateJob,
     reviewerJob,
@@ -1407,6 +1721,20 @@ export async function runGateAndReviewer(
   };
 }
 
+const inputsForReviewer = (ctx: ExecuteActionCtx) => ({
+  issue: ctx.issue,
+  repo: ctx.config.repo,
+  repoDir: ctx.config.layout.repoDir,
+  worktreePath: ctx.sandbox.worktreePath,
+  sourceBranch: ctx.config.sourceBranch,
+  base: ctx.base,
+  reviewerPromptExtension: ctx.config.promptExtensions?.reviewer,
+  reviewerQualityPromptExtension: ctx.config.promptExtensions?.reviewerQuality,
+  claudeMdPath: ctx.config.claudeMdPath,
+  contextMdPath: ctx.config.contextMdPath,
+  priorRounds: ctx.priorReviewRounds,
+});
+
 export async function runImplementer(
   action: Extract<LoopAction, { kind: "run-implementer" }>,
   ctx: ExecuteActionCtx,
@@ -1427,6 +1755,10 @@ export async function runImplementer(
       sandboxStack: ctx.sandboxStatuses,
     },
     anchorOpts,
+  );
+  const measuredContextChars = contextChars(
+    prompt,
+    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
   );
 
   // Covers the nudge below too, when one runs: the whole cost of the attempt's
@@ -1454,6 +1786,7 @@ export async function runImplementer(
       maxContextDepth(prior?.peakContext, partial.peakContext),
       partial.rateLimit ?? prior?.rateLimit ??
         (err instanceof AgentQuotaError ? err.measurement : undefined),
+      measuredContextChars,
     );
     await opts.onEvent({
       kind: "implementer",
@@ -1491,7 +1824,12 @@ export async function runImplementer(
     }));
   } catch (err) {
     await logFailure(err);
-    throw err;
+    throw providerSizeRefusal(
+      err,
+      "implementer",
+      measuredContextChars,
+      config.maxContextChars,
+    );
   }
   accumulated.push(...run.commits);
 
@@ -1551,7 +1889,12 @@ export async function runImplementer(
       });
     } catch (err) {
       await logFailure(err, run);
-      throw err;
+      throw providerSizeRefusal(
+        err,
+        "implementer",
+        measuredContextChars,
+        config.maxContextChars,
+      );
     }
     accumulated.push(...nudge.commits);
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
@@ -1665,9 +2008,9 @@ export async function runImplementer(
     durationMs: implementerMs,
     ...(run.signalMs === undefined ? {} : { signalMs: run.signalMs }),
     maxGapMs: attemptMaxGapMs,
-    ...(eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit) === undefined
+    ...(eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit, measuredContextChars) === undefined
       ? {}
-      : { usage: eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit) }),
+      : { usage: eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit, measuredContextChars) }),
     ...attemptResources,
   });
   return {
@@ -1792,7 +2135,7 @@ export async function enforceReadOnlyAgentSnapshot(
   sandbox: Pick<Sandbox, "preserveWorktree" | "syncBranchToCache">,
   before: ReadOnlyAgentSnapshot,
   after: ReadOnlyAgentSnapshot,
-  role: "Reviewer" | "UI checker",
+  role: "Reviewer" | "UI checker" | "Partition checker",
   transcript: string,
 ): Promise<string | null> {
   if (!readOnlyAgentSnapshotChanged(before, after)) return null;
@@ -1839,6 +2182,10 @@ export async function runReviewer(
   action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
   gateResult: Promise<Gate1Result>,
+  prepared?: {
+    readonly prompts: Readonly<Record<ReviewerPass, string>>;
+    readonly netDiffChars: number;
+  },
 ): Promise<{
   readonly event: ReviewerResult;
   readonly historyEntry: PriorReviewRound | null;
@@ -1869,25 +2216,15 @@ export async function runReviewer(
     return enforceReviewerSnapshot(sandbox, before, after, transcript);
   };
 
-  const reviewerPromptInputs = {
-    issue,
-    repo: config.repo,
-    repoDir: config.layout.repoDir,
-    worktreePath: sandbox.worktreePath,
-    sourceBranch: config.sourceBranch,
-    base: ctx.base,
-    reviewerPromptExtension: config.promptExtensions?.reviewer,
-    reviewerQualityPromptExtension: config.promptExtensions?.reviewerQuality,
-    claudeMdPath: config.claudeMdPath,
-    contextMdPath: config.contextMdPath,
-    priorRounds: ctx.priorReviewRounds,
-  };
   // The whole round — both passes and every retried invocation inside them.
   // This is the unit every #77 §3.A idea removes, and at 10.2 minutes measured
   // end to end it is ~60% of an issue.
   const roundTimer = startTimer();
   const qualityMode = qualityReviewContext(ctx.priorReviewRounds).mode;
-  const reviewerPrompts = await buildReviewerPrompts(reviewerPromptInputs);
+  const reviewerPrompts = prepared?.prompts ??
+    await buildReviewerPrompts(inputsForReviewer(ctx));
+  const netDiffChars = prepared?.netDiffChars ??
+    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref);
   const routing = reviewerPassRouting(config);
   // Prompt, CLI and model all indexed by the pass name, never passed in
   // parallel: three arguments in the same order at two call sites is how a
@@ -1895,6 +2232,7 @@ export async function runReviewer(
   const runPass = async (pass: ReviewerPass): Promise<ReviewerOutcome> => {
     const { agent, modelId, effort } = routing[pass];
     const prompt = reviewerPrompts[pass];
+    const measuredContextChars = contextChars(prompt, netDiffChars);
     return runReviewerInvocations(
       async (invocation) => {
         const beforeInvocation = await snapshot();
@@ -1913,7 +2251,7 @@ export async function runReviewer(
         // `signalMs` has no reviewer meaning: the reviewer names no completion
         // signal (#83), so the grace phase it measures is unreachable here.
         const logPass = async (
-          result: "completed" | "failed" | "quota" | "credential",
+          result: "completed" | "failed" | "quota" | "credential" | "input-too-large",
           durationMs: number,
           maxGapMs: number | undefined,
           usage: AgentUsage | undefined,
@@ -1936,9 +2274,9 @@ export async function runReviewer(
             result,
             durationMs,
             ...(maxGapMs === undefined ? {} : { maxGapMs }),
-            ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
+            ...(eventUsage(usage, toolCalls, peakContext, rateLimit, measuredContextChars) === undefined
               ? {}
-              : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit) }),
+              : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit, measuredContextChars) }),
             ...resources,
           });
         };
@@ -1983,7 +2321,9 @@ export async function runReviewer(
           const partial = agentPartialUsage(err);
           const resources = agentPartialContainerResources(err);
           await logPass(
-            err instanceof AgentQuotaError
+            err instanceof AgentInputTooLargeError
+              ? "input-too-large"
+              : err instanceof AgentQuotaError
               ? "quota"
               : err instanceof AgentCredentialError
                 ? "credential"
@@ -2000,6 +2340,14 @@ export async function runReviewer(
           const transcript = agentPartialOutput(err);
           const event = await detectWrite(beforeInvocation, transcript);
           if (event !== null) return { kind: "aborted", event, transcript };
+          if (err instanceof AgentInputTooLargeError) {
+            throw providerSizeRefusal(
+              err,
+              pass === "quality" ? "review-quality" : "review-correctness",
+              measuredContextChars,
+              config.maxContextChars,
+            );
+          }
           if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) throw err;
           // The bytes the agent had emitted before it failed ride out on the
           // error (#41, agent-sandbox F9). Without them a reviewer that emitted
