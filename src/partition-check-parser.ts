@@ -1,10 +1,11 @@
 // Pre-attempt issue partition classifier token parser (#158).
 //
-// The classifier answers one qualitative question before implementation: is
-// this one independently landable deliverable, or several such deliverables
-// that need a `## Blocked by` chain? Its token is deliberately distinct from
-// both the UI classifier and the implementer's promise. PARTITION requires the
-// explanation finalise will hand to the human.
+// Before implementation, the classifier decides whether this is one coherent
+// deliverable or at least two independently landable deliverables that are each
+// coarsely estimated as sizeable; the floor itself lives in the prompt template.
+// Its token is deliberately distinct from both the UI classifier and the
+// implementer's promise. PARTITION requires the explanation finalise will hand
+// to the human.
 
 import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 

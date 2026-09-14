@@ -13,6 +13,7 @@
 import { execFile } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
@@ -107,6 +108,21 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
         task.id,
         onTestFinished,
       );
+      const seededValue = async (): Promise<string> => {
+        // A successful read of this file cannot be empty: its writer emits a
+        // timestamp, and the test never truncates it. Remote podman can still
+        // transiently return empty stdout from a successful exec, so retry
+        // only that impossible observation without weakening the value check.
+        let value = "";
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          value = (
+            await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
+          ).stdout.trim();
+          if (value) return value;
+          if (attempt < 19) await delay(250);
+        }
+        return value;
+      };
 
       const first = await startStack({
         stackId: stackId,
@@ -120,9 +136,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       expect(first.reused).toEqual([]);
       expect((await first.runGate()).ok).toBe(true);
       const dbId = await idOf("db");
-      const seeded = (
-        await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
-      ).stdout.trim();
+      const seeded = await seededValue();
       expect(dbId).not.toBeNull();
       expect(seeded).not.toBe("");
 
@@ -147,11 +161,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       });
       expect(second.reused).toEqual(["db"]);
       expect(await idOf("db")).toBe(dbId);
-      expect(
-        (
-          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
-        ).stdout.trim(),
-      ).toBe(seeded);
+      expect(await seededValue()).toBe(seeded);
       // And it still gates: the `attempt` container is recreated as always,
       // so an adopted stack is not a half-built one.
       expect((await second.runGate()).ok).toBe(true);
@@ -172,11 +182,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       });
       expect(third.reused).toEqual([]);
       expect(await idOf("db")).not.toBe(dbId);
-      expect(
-        (
-          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
-        ).stdout.trim(),
-      ).not.toBe(seeded);
+      expect(await seededValue()).not.toBe(seeded);
       await third.stop();
     },
     600_000,

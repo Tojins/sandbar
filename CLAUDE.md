@@ -519,7 +519,8 @@ outcomes.
 - **Token contracts.** UI check: `<ui-check>CLEAR|PROTOTYPE-NEEDED</ui-check>`,
   with the latter followed by `<ui-impact>`. Partition check:
   `<partition-check>CLEAR|PARTITION</partition-check>`, with PARTITION followed
-  by `<partition-reason>`. Implementer:
+  by `<partition-reason>` carrying each proposed piece's estimated files and
+  changed lines plus the dependency order. Implementer:
   `<promise>COMPLETE|NEEDS-INFO|NEEDS-UI-PROTOTYPE</promise>`; resolve loop:
   `COMMITTED|ABANDON`; anything
   else re-prompts. Reviewer: optional free-text `<spec-gap>` (correctness pass
@@ -762,17 +763,20 @@ npm run build && node dist/cli.js --config <path>
 - **`mergeMode` stays `direct` (#39)** — personal project; tests run on host
   machines, not hosted CI.
 - **One coherent deliverable per issue, however many modules it touches.** Do
-  not carve work into slices from module count or a guessed diff size: a chain
-  of slices lands N+1 on top of N without either having driven anything, and
-  each slice is reviewed without the half that gives it its reason. The #158
-  classifier asks only whether the issue already names independently landable
-  outcomes. Its measured `maxContextChars` enforcer is the exception: once the
-  actual branch picture is over budget, the work must be repartitioned into an
-  ordered `## Blocked by` chain whose members each fit. Genuinely separate
-  issues that both touch `run.ts`/`inner-loop`/`merger` use the same chain, not
-  parallel execution. Since #146 a landing on main IS the driver within five
-  minutes, blast radius alone is still not a reason to split: the gate, reviewer
-  and a `git revert` through the same channel bound it.
+  not carve one coherent outcome into slices merely because it spans many
+  modules or looks large: a chain of slices lands N+1 on top of N without
+  either having driven anything, and each slice is reviewed without the half
+  that gives it its reason. The #158 classifier requires at least two
+  independently landable outcomes that are each coarsely estimated as sizeable
+  (roughly 100+ changed lines or 3+ files). That estimate is a floor for
+  splitting named outcomes, not by itself a reason to split. The measured
+  `maxContextChars` enforcer remains the authority once implementation begins:
+  when the actual branch picture is over budget, the work must be repartitioned
+  into an ordered `## Blocked by` chain whose members each fit. Genuinely
+  separate issues that both touch `run.ts`/`inner-loop`/`merger` use the same
+  chain, not parallel execution. Since #146 a landing on main IS the driver
+  within five minutes, blast radius alone is still not a reason to split: the
+  gate, reviewer and a `git revert` through the same channel bound it.
 - **The suite must not depend on ambient git config** (the gate runner has no
   global identity) **nor on `process.cwd()` being a repository** (`/workspace/.git`
   is not a repository inside gate containers — name the directory in every git

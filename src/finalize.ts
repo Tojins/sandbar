@@ -442,7 +442,7 @@ export const CHUNK_LANDED_COMMENT_TEMPLATE = (chunkBranch: string): string =>
 
 type FinalizeKindInput =
   | { readonly kind: "merged"; readonly issue: IssueRef }
-  // #158 — qualitative fan-out, measured context budget, or provider refusal.
+  // #158 — coarse per-deliverable sizing, measured budget, or provider refusal.
   | {
       readonly kind: "needs-partition";
       readonly issue: IssueRef;

@@ -80,7 +80,7 @@ export default {
   // attempt 1. Disable this in hosts that cannot ship user-visible UI.
   // uiPrototypeCheck: true,
 
-  // Run one cold, qualitative fan-out classification at the branch seed.
+  // Split only when two landable pieces each estimate to 100+ lines or 3+ files.
   // Disable only when issues are partitioned before entering this queue.
   // partitionCheck: true,
 
