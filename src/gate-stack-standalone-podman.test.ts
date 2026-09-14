@@ -65,7 +65,7 @@ async function standaloneFixture(taskId: string, onTestFinished: FinishedHook) {
     await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)])
       .then((result) => result.stdout.trim())
       .catch(() => null);
-  const spec = () =>
+  const spec = (expectedMarker = "v1") =>
     resolveGateStack({
       containers: [
         {
@@ -80,7 +80,11 @@ async function standaloneFixture(taskId: string, onTestFinished: FinishedHook) {
         { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
       ],
       steps: [
-        { name: "read-marker", in: "runner", command: ["cat", "marker.txt"] },
+        {
+          name: "read-marker",
+          in: "runner",
+          command: ["grep", "-Fxq", expectedMarker, "marker.txt"],
+        },
       ],
     });
 
@@ -247,15 +251,14 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
         stackId: stackId,
         scope: SCOPE,
         worktreePath: repo,
-        spec: spec(),
+        spec: spec("uncommitted"),
         allowDirtyWorktree: true,
       });
       const green = await allowing.runGate();
+      // The step itself requires the UNCOMMITTED bytes. Its green verdict is
+      // the proof, without making this test depend on podman also returning a
+      // successful exec's stdout under concurrent load.
       expect(green.ok).toBe(true);
-      // Not merely "it did not refuse": the step read the UNCOMMITTED bytes,
-      // which is what an operator running `sandbar gate` on work in progress
-      // is asking about.
-      expect(green.stdout).toContain("uncommitted");
       await allowing.stop();
     },
     600_000,
