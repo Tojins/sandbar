@@ -195,9 +195,7 @@ describe("terminalFinalizeInputs", () => {
     ]);
   });
 
-  // The branch is only worth publishing when there is something on it — see
-  // the needs-ui-prototype/hard-error notes in finalize.ts.
-  it("derives hasCommits from the terminal's commit list", () => {
+  it("leaves publish decisions to finalization's structural git check", () => {
     const late = terminalFinalizeInputs([
       {
         issue: issue("2"),
@@ -216,10 +214,29 @@ describe("terminalFinalizeInputs", () => {
         },
       },
     ]);
-    expect(late.map((i) => "hasCommits" in i && i.hasCommits)).toEqual([
-      true,
-      false,
-    ]);
+    expect(late.every((i) => !("hasCommits" in i))).toBe(true);
+  });
+
+  it("maps NEEDS-PARTITION with its cause, slot, and measured size", () => {
+    expect(terminalFinalizeInputs([{
+      issue: issue("8"),
+      terminal: {
+        type: "NEEDS-PARTITION",
+        cause: "measured",
+        slot: "review-quality",
+        size: 700_000,
+        budget: 600_000,
+        detail: "too large",
+        commits: [{ sha: "a" }],
+      },
+    }])).toEqual([expect.objectContaining({
+      kind: "needs-partition",
+      cause: "measured",
+      slot: "review-quality",
+      size: 700_000,
+      budget: 600_000,
+      detail: "too large",
+    })]);
   });
 });
 

@@ -250,6 +250,12 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = `UI check ${event.invocation} · ${event.result ?? "finished"}`;
       tone = "dim";
       break;
+    case "partition-check":
+      text = `partition check ${event.invocation} · ${event.result}`;
+      tone = event.result === "PARTITION" || event.result === "input-too-large"
+        ? "bad"
+        : "dim";
+      break;
     case "gate":
       text = `${event.gate} ${event.ok ? "passed" : "failed"}`;
       tone = event.ok ? "good" : "bad";

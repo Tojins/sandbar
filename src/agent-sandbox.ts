@@ -68,6 +68,11 @@
 //         (#141). The cumulative OOM counter is snapshotted at both edges, and
 //         the invocation duration stops before the teardown read. Failed runs
 //         retain the same facts beside their partial speech/usage.
+//   F13 — a provider-declared prompt-size refusal has its own failure kind.
+//         Codex reports `turn.failed` + `input_too_large`; Claude reports an
+//         error `result` with `prompt_too_long` or `blocking_limit`. The inner
+//         loop parks these for partitioning instead of replaying them as infra
+//         failures in fresh sandboxes (#158).
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
@@ -575,6 +580,14 @@ export class AgentCredentialError extends Error {
   }
 }
 
+export class AgentInputTooLargeError extends Error {
+  readonly detail: string;
+  constructor(detail: string) {
+    super(`provider refused oversized input: ${detail}`);
+    this.detail = detail;
+  }
+}
+
 export class AgentIdleTimeoutError extends Error {
   readonly timeoutMs: number;
   constructor(message: string, timeoutMs: number) {
@@ -820,6 +833,17 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   if (obj.type === "result") {
     const measurement = normalizeClaudeResult(obj);
     return [
+      ...(obj.is_error === true &&
+        (obj.terminal_reason === "prompt_too_long" ||
+          obj.terminal_reason === "blocking_limit")
+        ? [{
+            type: "failure" as const,
+            kind: "input-too-large" as const,
+            message: typeof obj.result === "string" && obj.result.trim()
+              ? obj.result
+              : `Claude refused the prompt (${obj.terminal_reason}).`,
+          }]
+        : []),
       ...(typeof obj.result === "string"
         ? [{ type: "result" as const, result: obj.result }]
         : []),
@@ -966,11 +990,15 @@ export const parseCodexJsonLine = (line: string): ParsedStreamEvent[] => {
   // still trying.
   if (obj.type === "turn.failed") {
     const message = codexErrorMessage(obj.error);
+    const inputErrorCode = obj.error?.data?.input_error_code ??
+      obj.error?.input_error_code ?? obj.data?.input_error_code;
     return [{
       type: "failure",
-      kind: message.startsWith(CODEX_REFRESH_FAILURE_PREFIX)
-        ? "credential"
-        : "provider",
+      kind: inputErrorCode === "input_too_large"
+        ? "input-too-large"
+        : message.startsWith(CODEX_REFRESH_FAILURE_PREFIX)
+          ? "credential"
+          : "provider",
       message,
     }];
   }
@@ -2469,6 +2497,12 @@ const invokeAgent = async (
         if (classification.verdict === "credential") {
           settleReject(new AgentCredentialError(
             classification.detail ?? "credential refresh failed",
+          ));
+          return;
+        }
+        if (classification.verdict === "input-too-large") {
+          settleReject(new AgentInputTooLargeError(
+            classification.detail ?? "input exceeds the provider limit",
           ));
           return;
         }

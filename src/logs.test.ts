@@ -20,6 +20,7 @@ describe("agent invocation records (#135)", () => {
       "attempt-3-reviewer-correctness-2.log"],
     [{ role: "gate", attempt: 3 }, "attempt-3-gate.log"],
     [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
+    [{ role: "partition-check", invocation: 2 }, "partition-check-2.log"],
   ] as const)("names %j as %s", (identity, expected) => {
     expect(agentInvocationFilename(identity)).toBe(expected);
   });

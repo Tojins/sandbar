@@ -13,6 +13,7 @@ import {
   NEEDS_HUMAN_COMMENT_TEMPLATE,
   NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE,
   NEEDS_INFO_COMMENT_TEMPLATE,
+  NEEDS_PARTITION_COMMENT_TEMPLATE,
   NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE,
   NO_PROTOTYPE_NEEDED_PHRASE,
   READY_FOR_AGENT_LABEL as READY_FOR_AGENT,
@@ -73,6 +74,7 @@ type Script = {
   addLabelEditError?: string;
   issueState?: "OPEN" | "CLOSED";
   containedInOrigin?: boolean;
+  aheadOfSeed?: boolean;
   reclaim?: IssueCloneReclaim;
 };
 
@@ -120,6 +122,9 @@ function makeAdapter(
       // Default true: the common case is a branch still sitting at the origin
       // tip it was seeded from. Cases that model leftover commits set it false.
       return script.containedInOrigin ?? true;
+    },
+    async branchIsAheadOfSeed() {
+      return script.aheadOfSeed ?? false;
     },
     async postComment(n, body) {
       calls.comments.push({ n, body });
@@ -230,6 +235,24 @@ describe("comment templates", () => {
     expect(late).not.toContain("before writing any code");
     expect(late).toContain("sandbar/issue-45-t-45");
   });
+  it("NEEDS-PARTITION names the cause, slot, size, chain, and pushed branch", () => {
+    const body = NEEDS_PARTITION_COMMENT_TEMPLATE(
+      "measured",
+      "review-quality",
+      700_000,
+      600_000,
+      "The branch is too broad.",
+      NEEDS_INFO,
+      READY_FOR_AGENT,
+      "sandbar/issue-45-t-45",
+    );
+    expect(body).toContain("NEEDS-PARTITION (measured)");
+    expect(body).toContain("`review-quality`");
+    expect(body).toContain("700,000");
+    expect(body).toContain("600,000");
+    expect(body).toContain("## Blocked by");
+    expect(body).toContain("sandbar/issue-45-t-45");
+  });
   it("NEEDS-HUMAN body includes bot prefix, the branch, the failure trace, and the configured labels", () => {
     const body = NEEDS_HUMAN_COMMENT_TEMPLATE(
       "sandbar/issue-45-t-45",
@@ -281,7 +304,7 @@ describe("comment templates", () => {
 
 describe("finalizeOne", () => {
   it("posts one ordered spec-gap comment before a merged terminal's effects", async () => {
-    const { adapter, calls } = makeAdapter();
+    const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
     const gaps = [
       { round: 2, text: "Which source? Use the request record." },
       { round: 5, text: "What fallback? Emit no measurement." },
@@ -616,7 +639,6 @@ describe("finalizeOne", () => {
         kind: "needs-ui-prototype",
         issue: i,
         uiImpact: "New settings screen; tab order invented.",
-        hasCommits: false,
       },
       adapter,
       LABELS,
@@ -645,7 +667,7 @@ describe("finalizeOne", () => {
     });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: false },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
       adapter,
       LABELS,
     );
@@ -655,10 +677,9 @@ describe("finalizeOne", () => {
     expect(calls.forceDeletes).toEqual([i.branch]);
   });
 
-  // The regression this guard exists for: `hasCommits` is per-sandbox-cycle, so
-  // a HARD-ERROR retry (or a branch left by an interrupted earlier run) reports
-  // false while unpushed commits sit on the branch. Forcing would destroy work
-  // that was never pushed anywhere.
+  // The regression this guard exists for: a HARD-ERROR retry (or a branch left
+  // by an interrupted earlier run) can carry unpushed commits that the current
+  // cycle did not create. Forcing would destroy work that was never published.
   it("needs-ui-prototype without commits: keeps the branch when it carries commits not on origin", async () => {
     const { adapter, calls } = makeAdapter({
       deleteOk: false,
@@ -667,7 +688,7 @@ describe("finalizeOne", () => {
     });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: false },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
       adapter,
       LABELS,
     );
@@ -692,7 +713,6 @@ describe("finalizeOne", () => {
         kind: "needs-ui-prototype",
         issue: issue(45),
         uiImpact: "x",
-        hasCommits: false,
       },
       adapter,
       LABELS,
@@ -707,7 +727,7 @@ describe("finalizeOne", () => {
     const i = issue(45);
     await expect(
       finalizeOne(
-        { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: false },
+        { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
         adapter,
         LABELS,
       ),
@@ -722,7 +742,7 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: true },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
       adapter,
       LABELS,
     );
@@ -738,10 +758,10 @@ describe("finalizeOne", () => {
   // A late escalation: the agent committed before it realised it was inventing
   // UI, so the partial work is handed to the human and the branch is kept.
   it("needs-ui-prototype with commits: pushes and keeps the branch", async () => {
-    const { adapter, calls } = makeAdapter();
+    const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: true },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
       adapter,
       LABELS,
     );
@@ -755,11 +775,48 @@ describe("finalizeOne", () => {
     ]);
   });
 
+  it("needs-partition publishes an ahead branch and parks under needs-info", async () => {
+    const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
+    const i = issue(45);
+    const action = await finalizeOne({
+      kind: "needs-partition",
+      issue: i,
+      cause: "provider-refused",
+      slot: "implementer",
+      size: 1_064_340,
+      budget: 600_000,
+      detail: "input_too_large",
+    }, adapter, LABELS);
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.comments[0]?.body).toContain("input_too_large");
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
+    ]);
+  });
+
+  it("needs-partition does not publish a seed-only branch", async () => {
+    const { adapter, calls } = makeAdapter({ aheadOfSeed: false });
+    const action = await finalizeOne({
+      kind: "needs-partition",
+      issue: issue(45),
+      cause: "classifier",
+      slot: "partition-check",
+      size: 12_000,
+      budget: 600_000,
+      detail: "two deliverables",
+    }, adapter, LABELS);
+
+    expect(action).toEqual({ kind: "deleted-local" });
+    expect(calls.pushes).toEqual([]);
+  });
+
   it("needs-ui-prototype on an already-CLOSED issue: no comment, no label flip (#16)", async () => {
     const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", hasCommits: false },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
       adapter,
       LABELS,
     );
@@ -1006,9 +1063,9 @@ describe("finalizeOne", () => {
     ]);
   });
 
-  // #27, #98. Commits are counted on the issue branch, so an off-branch UI
-  // escalation has hasCommits=false. Its private clone remains the only store
-  // for the detached commit, and the cache branch is the sweep's liveness
+  // #27, #98. The structural branch check cannot see an off-branch UI
+  // escalation's detached commit. Its private clone remains the only store for
+  // that commit, and the cache branch is the sweep's liveness
   // record for that clone; both must survive the handoff.
   it("needs-ui-prototype: keeps the cache branch when the clone could not be reclaimed", async () => {
     const { adapter, calls } = makeAdapter({
@@ -1023,7 +1080,6 @@ describe("finalizeOne", () => {
         kind: "needs-ui-prototype",
         issue: i,
         uiImpact: "a new settings screen",
-        hasCommits: false,
         strandedHead: {
           branch: i.branch,
           headRef: null,
@@ -1266,10 +1322,10 @@ describe("finalizeOne", () => {
   });
 
   it("hard-error with commits: removes worktree, pushes only, no label flip, no comment", async () => {
-    const { adapter, calls } = makeAdapter();
+    const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "hard-error", issue: i, hasCommits: true },
+      { kind: "hard-error", issue: i },
       adapter,
       LABELS,
     );
@@ -1286,7 +1342,7 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "hard-error", issue: i, hasCommits: false },
+      { kind: "hard-error", issue: i },
       adapter,
       LABELS,
     );
@@ -1308,7 +1364,6 @@ describe("finalizeOne", () => {
       {
         kind: "hard-error",
         issue: issue(45),
-        hasCommits: false,
       },
       adapter,
       LABELS,
@@ -1330,7 +1385,7 @@ describe("finalizeOne", () => {
     });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "hard-error", issue: i, hasCommits: false },
+      { kind: "hard-error", issue: i },
       adapter,
       LABELS,
     );
@@ -1347,11 +1402,12 @@ describe("finalizeOne", () => {
 
   it("hard-error with commits: still pushes when the clone was preserved, and says the clone may hold more", async () => {
     const { adapter, calls } = makeAdapter({
+      aheadOfSeed: true,
       reclaim: { kind: "preserved", reason: "the worktree has uncommitted changes" },
     });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "hard-error", issue: i, hasCommits: true },
+      { kind: "hard-error", issue: i },
       adapter,
       LABELS,
     );
@@ -1386,7 +1442,7 @@ describe("finalizeOne", () => {
   });
 
   it("fresh-attempt: -d alone succeeding skips the -D fallback", async () => {
-    const { adapter, calls } = makeAdapter();
+    const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
     const action = await finalizeOne(
       { kind: "fresh-attempt", issue: issue(45) },
       adapter,
@@ -1609,7 +1665,7 @@ describe("finalizeOne", () => {
 
 describe("finalizeAll", () => {
   it("processes inputs in order and returns one result per input", async () => {
-    const { adapter, calls } = makeAdapter();
+    const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
     const inputs: FinalizeInput[] = [
       { kind: "merged", issue: issue(10), specGaps: [] },
       { kind: "needs-info", issue: issue(11), questions: "?", specGaps: [] },
@@ -1617,7 +1673,6 @@ describe("finalizeAll", () => {
       {
         kind: "hard-error",
         issue: issue(13),
-        hasCommits: true,
         specGaps: [],
       },
     ];

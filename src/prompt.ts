@@ -12,8 +12,10 @@
 // session — which is what lets the two sit on different vendors (#121).
 // After its first whole-branch quality listing, that history also anchors a
 // strict review of only the files no quality pass has seen yet (#107).
-// The UI checker (#126) is intentionally smaller: issue anchor plus its own
-// decision contract, with no project standards, diff or prior-round history.
+// The UI and partition checkers (#126/#158) are intentionally smaller: issue
+// anchor plus their own decision contracts, with no project standards, diff or
+// prior-round history. The partition check receives the context budget only as
+// a qualitative scale hint.
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure
@@ -63,6 +65,7 @@ const REVIEWER_PRIOR_ROUNDS_TPL = loadTemplate("reviewer-prior-rounds");
 const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
 const IMPLEMENTER_TPL = loadTemplate("implementer");
 const UI_CHECK_TPL = loadTemplate("ui-check");
+const PARTITION_CHECK_TPL = loadTemplate("partition-check");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
 const IMPLEMENTER_APPROVED_QUALITY_TPL = loadTemplate("implementer-approved-quality");
@@ -104,7 +107,7 @@ function truncationNote(limit: number): string {
 // A maxBuffer overflow is the exception, and it is not a fault at all: the
 // output is real, there is just more of it than the buffer holds. Node rejects
 // with the truncated prefix on `err.stdout`, so that prefix is returned with a
-// marker rather than thrown — a partial diff the agent can read beats both a
+// marker rather than thrown — a partial report the agent can read beats both a
 // halted issue and, once again, an empty string that reads as "no work yet".
 //
 // Exported, with the bound as a parameter, for one reason: the truncation path
@@ -288,6 +291,50 @@ export async function buildUiCheckPrompt(
   repo: RepoRef,
 ): Promise<string> {
   return [await buildIssueAnchor(issueId, repo), UI_CHECK_TPL].join("\n\n---\n\n");
+}
+
+// The independent fan-out classifier (#158). Like the UI check, it receives
+// only the issue anchor and its own decision contract. The budget is a scale
+// hint; the role never guesses a numeric diff size.
+export async function buildPartitionCheckPrompt(
+  issueId: string,
+  repo: RepoRef,
+  budgetChars: number,
+): Promise<string> {
+  return [
+    await buildIssueAnchor(issueId, repo),
+    render(PARTITION_CHECK_TPL, { budgetChars: String(budgetChars) }),
+  ].join("\n\n---\n\n");
+}
+
+// The context budget covers what the provider receives plus the branch patch
+// the role is explicitly told to read on demand (#158). This read is never
+// rendered into a prompt. The transport ceiling merely ensures a pathological
+// branch still returns an over-budget measurement instead of allocating
+// without bound.
+export async function measureNetDiffChars(
+  worktreePath: string,
+  baseRef: string,
+): Promise<number> {
+  return (await readGit(
+    ["diff", `${baseRef}...HEAD`],
+    worktreePath,
+    `the net diff size anchored at ${baseRef}`,
+  )).length;
+}
+
+export const contextChars = (prompt: string, netDiffChars: number): number =>
+  prompt.length + netDiffChars;
+
+export async function branchIsAheadOfSeed(
+  worktreePath: string,
+  baseRef: string,
+): Promise<boolean> {
+  return (await readGit(
+    ["rev-list", "--count", `${baseRef}..HEAD`],
+    worktreePath,
+    `the commit count anchored at ${baseRef}`,
+  )).trim() !== "0";
 }
 
 // Both passes review one immutable, gate-green branch snapshot. Build every

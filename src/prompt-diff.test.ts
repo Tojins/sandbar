@@ -22,7 +22,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { SandbarError } from "./errors.js";
 import { ensureIssueBranch, sourceBranchBase } from "./git-ops.js";
-import { buildPrompt, buildReviewerPrompts, readGit } from "./prompt.js";
+import {
+  branchIsAheadOfSeed,
+  buildPrompt,
+  buildReviewerPrompts,
+  contextChars,
+  measureNetDiffChars,
+  readGit,
+} from "./prompt.js";
 import { repoLayout, worktreePathFor } from "./repo-cache.js";
 import { ensureRepoCache } from "./repo-cache.js";
 
@@ -166,6 +173,16 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     expect(prompt).toContain("b.txt");
     expect(prompt).not.toContain(ADDED_LINE);
     expect(prompt).not.toContain("(empty — no changes against");
+  });
+
+  it("measures the on-demand net diff separately from the rendered prompt", async () => {
+    expect(await branchIsAheadOfSeed(worktree, "origin/main")).toBe(false);
+    await commitOnBranch();
+
+    const diff = (await git(worktree, "diff", "origin/main...HEAD")).stdout;
+    expect(await branchIsAheadOfSeed(worktree, "origin/main")).toBe(true);
+    expect(await measureNetDiffChars(worktree, "origin/main")).toBe(diff.length);
+    expect(contextChars("prompt", diff.length)).toBe(6 + diff.length);
   });
 
   it("anchors the verify stat at the newest quality-reviewed head", async () => {

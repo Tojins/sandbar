@@ -87,14 +87,15 @@ default is unlimited, so existing hosts keep their prior concurrency.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
-   stack. After setup, a default-on cold UI classifier runs once against the
-   issue anchor before attempt 1 (#126); hosts with no UI disable it with
-   `uiPrototypeCheck: false`. A missing prototype terminates immediately, while
-   CLEAR enters the ralph-style loop in the **same** sandbox so commits
-   accumulate on the issue branch. All transitions
-   live in the pure state machine; `inner-loop.ts` is I/O glue. The classifier
-   spends neither inner-loop budget and is rerun after a fresh
-   HARD-ERROR cycle. Three independent consecutive-failure budgets bound the
+   stack. After setup, a default-on cold partition classifier runs once per
+   admission at the branch seed (#158), followed by the default-on cold UI
+   classifier (#126). Hosts that partition before queueing or ship no UI
+   disable them with `partitionCheck: false` or `uiPrototypeCheck: false`.
+   Either terminal stops before attempt 1; CLEAR enters the ralph-style loop in
+   the **same** sandbox so commits accumulate on the issue branch. All transitions
+   live in the pure state machine; `inner-loop.ts` is I/O glue. Neither classifier
+   spends a convergence budget. Partition runs once per admission; the UI check
+   is rerun after a fresh HARD-ERROR cycle. Three independent consecutive-failure budgets bound the
    loop (#129, #143). `maxQualityRounds` (default 4) counts quality rejection
    and pre-gate re-prompts, then resets when quality approval leads to a
    completed reviewer verdict. `maxGateRounds` (default 4) counts red gate-1
@@ -102,11 +103,14 @@ default is unlimited, so existing hosts keep their prior concurrency.
    counts correctness rejections only. Reviewer harness failures spend none,
    leave the convergence streaks unchanged, and the second failure anywhere in
    one inner loop stops it under #41's guard. There is no total
-   implementer-attempt ceiling. `src/config.ts` owns all three defaults. The UI
-   classifier and reviewer are strictly advisory and read-only; each
+   implementer-attempt ceiling. `src/config.ts` owns all three defaults. The
+   partition classifier, UI classifier and reviewer are strictly advisory and read-only; each
    invocation snapshots branch tip, status and HEAD, and any mutation parks the
    issue with the managed clone preserved. After a clean, on-branch
-   COMPLETE, gate-1 and the quality reviewer run concurrently against the same
+   COMPLETE, the rendered review prompts plus seed-anchored net diff are
+   measured against `maxContextChars` (default 600,000); an oversized branch
+   parks before gate or review dispatch. A resumed branch is measured at
+   admission. Otherwise gate-1 and the quality reviewer run concurrently against the same
    commit (#123, #143). A reviewer write always parks; otherwise a red gate
    keeps the quality verdict and its history, re-prompts with the gate trace and
    the retained report labelled as approval or rejection, and prevents
@@ -124,7 +128,7 @@ default is unlimited, so existing hosts keep their prior concurrency.
    of those approvals inside the same round. `src/reviewer-run.ts` owns the
    order, the aggregation and what a failed reviewer invocation means (#41).
    Terminals: `DONE | NEEDS-INFO |
-   NEEDS-UI-PROTOTYPE (#21) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
+   NEEDS-UI-PROTOTYPE (#21) | NEEDS-PARTITION (#158) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
    CREDENTIAL | HARD-ERROR` (infra-only).
 
 3. **Landing** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
@@ -155,7 +159,10 @@ default is unlimited, so existing hosts keep their prior concurrency.
    `labels.needsInfo`/`labels.agentStuck`, plus `needs-review` for a
    chunk-landed member, are the only labels sandbar applies — `land` (#64) it only ever
    REMOVES, from a pull request a human labelled).
-   A terminal is finalised before its landing is attempted. Handoffs that decide
+   A terminal is finalised before its landing is attempted. Every non-DONE
+   terminal publishes an issue branch that is structurally ahead of its seed;
+   this cache-derived check replaces per-sandbox-cycle commit bookkeeping, so
+   work from an earlier HARD-ERROR cycle is not lost (#158). Handoffs that decide
    to remove `ready-for-agent` read that state back before the issue ceases to
    be ongoing; quota, credential, and infrastructure terminals deliberately
    remain queued.
@@ -462,7 +469,8 @@ outcomes.
   its header owns why the set is CLOSED at what the driver can build (a config
   is a program, so a name nothing implements is #66's silent failure).
   Preflight refuses per provider a run will actually invoke; the UI-check
-  provider is omitted when `uiPrototypeCheck` is off. The resolve
+  provider is omitted when `uiPrototypeCheck` is off, while the partition
+  check shares implementer routing. The resolve
   invocation uses the same provider boundary for argv, credential env and
   parsed output while keeping its raw streams verbatim in attempt logs. A
   provider's parser answers in SEVEN registers and the rule no new one may break
@@ -509,7 +517,9 @@ outcomes.
   and the only symptom is a bill. A warning, never a refusal — both configs run,
   and sandbar cannot know which account the operator meant to spend.
 - **Token contracts.** UI check: `<ui-check>CLEAR|PROTOTYPE-NEEDED</ui-check>`,
-  with the latter followed by `<ui-impact>`. Implementer:
+  with the latter followed by `<ui-impact>`. Partition check:
+  `<partition-check>CLEAR|PARTITION</partition-check>`, with PARTITION followed
+  by `<partition-reason>`. Implementer:
   `<promise>COMPLETE|NEEDS-INFO|NEEDS-UI-PROTOTYPE</promise>`; resolve loop:
   `COMMITTED|ABANDON`; anything
   else re-prompts. Reviewer: optional free-text `<spec-gap>` (correctness pass
@@ -530,7 +540,8 @@ outcomes.
   keeps only structure. No issue-loop prompt embeds a diff body (#158): the
   implementer and both reviewer passes receive the commit list, diff stat and
   exact seed-anchored command for reading hunks on demand; the first quality
-  pass must walk every file in the stat. Every git range a prompt renders
+  pass must walk every file in the stat. `maxContextChars` bounds each rendered
+  role prompt plus that on-demand net diff. Every git range a prompt renders
   anchors at the issue branch's SEED REF, never a bare branch name (#40, #61)
   — `src/prompt.ts`.
 - **One append-only event record is the run's source of truth (#70/#132).**
@@ -627,7 +638,11 @@ outcomes.
   `peakContext=<int>`: the maximum per-turn input footprint observed during an
   invocation. Cumulative cache reads measure cost, not depth; depth is likewise
   a report only, never a budget, threshold, adaptive bound or completion input,
-  and an unavailable measurement is absent rather than zero.
+  and an unavailable measurement is absent rather than zero. The distinct
+  `contextChars=<int>` report on implementer and review-pass events is the
+  rendered prompt plus the net diff the role is instructed to read; unlike
+  `peakContext`, it is also the declared `maxContextChars` decision input
+  (#158).
   `timing.ts`, `agent-usage.ts`, `gate.ts`, `gate-stack.ts`,
   `ensure-images.ts` and `events.ts` headers own the rest — `agent-usage.ts`
   specifically owns why the two providers' input conventions are opposite and

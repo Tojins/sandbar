@@ -323,6 +323,22 @@ describe("parseStreamJsonLine", () => {
     } }]);
   });
 
+  it("classifies Claude prompt-size refusals as terminal provider failures", () => {
+    for (const terminalReason of ["prompt_too_long", "blocking_limit"]) {
+      expect(parseStreamJsonLine(JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        terminal_reason: terminalReason,
+        result: "Prompt is too long",
+      }))).toContainEqual({
+        type: "failure",
+        kind: "input-too-large",
+        message: "Prompt is too long",
+      });
+    }
+  });
+
   // #85 reads usage independently of the speech guard; the guard itself is
   // unchanged, so a non-string `result` still contributes no speech.
   it("requires result to be a string", () => {
@@ -616,6 +632,20 @@ describe("parseCodexJsonLine", () => {
         '{"type":"turn.failed","error":{"message":"unexpected status 401"}}',
       ),
     ).toEqual([{ type: "failure", kind: "provider", message: "unexpected status 401" }]);
+  });
+
+  it("classifies Codex input_too_large structurally", () => {
+    expect(parseCodexJsonLine(JSON.stringify({
+      type: "turn.failed",
+      error: {
+        message: "Input exceeds the maximum length",
+        data: { input_error_code: "input_too_large", actual_chars: 1_064_340 },
+      },
+    }))).toEqual([{
+      type: "failure",
+      kind: "input-too-large",
+      message: "Input exceeds the maximum length",
+    }]);
   });
 
   // The give-up `error` event is shaped identically to the retries above it —

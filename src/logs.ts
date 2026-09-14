@@ -47,7 +47,8 @@ export type AgentInvocationIdentity =
       readonly invocation: number;
     }
   | { readonly role: "gate"; readonly attempt: number }
-  | { readonly role: "ui-check"; readonly invocation: number };
+  | { readonly role: "ui-check"; readonly invocation: number }
+  | { readonly role: "partition-check"; readonly invocation: number };
 
 export type AgentInvocationSequence = {
   filename(identity: AgentInvocationIdentity): string;
@@ -63,6 +64,8 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
       return `attempt-${identity.attempt}-gate.log`;
     case "ui-check":
       return `ui-check-${identity.invocation}.log`;
+    case "partition-check":
+      return `partition-check-${identity.invocation}.log`;
   }
 }
 
@@ -71,15 +74,22 @@ export function createAgentInvocationSequencer(): {
 } {
   let nextAttempt = 1;
   let nextUiCheck = 1;
+  let nextPartitionCheck = 1;
   return {
     startCycle() {
       const attemptOffset = nextAttempt - 1;
       const uiCheckOffset = nextUiCheck - 1;
+      const partitionCheckOffset = nextPartitionCheck - 1;
       return {
         filename(identity) {
           if (identity.role === "ui-check") {
             const invocation = uiCheckOffset + identity.invocation;
             nextUiCheck = Math.max(nextUiCheck, invocation + 1);
+            return agentInvocationFilename({ ...identity, invocation });
+          }
+          if (identity.role === "partition-check") {
+            const invocation = partitionCheckOffset + identity.invocation;
+            nextPartitionCheck = Math.max(nextPartitionCheck, invocation + 1);
             return agentInvocationFilename({ ...identity, invocation });
           }
           const attempt = attemptOffset + identity.attempt;

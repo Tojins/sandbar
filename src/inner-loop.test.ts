@@ -5,8 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 
 const innerLoopMocks = vi.hoisted(() => ({
   buildPrompt: vi.fn(async () => "implementer prompt"),
+  buildPartitionCheckPrompt: vi.fn(async () => "partition check prompt"),
   buildUiCheckPrompt: vi.fn(async () => "ui check prompt"),
   buildReviewerPrompts: vi.fn(),
+  measureNetDiffChars: vi.fn(async () => 0),
   branchTip: vi.fn(async () => "tip-a" as string | null),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
   fastForwardOffBranchHead: vi.fn(),
@@ -17,8 +19,10 @@ const innerLoopMocks = vi.hoisted(() => ({
 vi.mock("./prompt.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./prompt.js")>()),
   buildPrompt: innerLoopMocks.buildPrompt,
+  buildPartitionCheckPrompt: innerLoopMocks.buildPartitionCheckPrompt,
   buildUiCheckPrompt: innerLoopMocks.buildUiCheckPrompt,
   buildReviewerPrompts: innerLoopMocks.buildReviewerPrompts,
+  measureNetDiffChars: innerLoopMocks.measureNetDiffChars,
 }));
 
 vi.mock("./git-ops.js", async (importOriginal) => ({
@@ -31,6 +35,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 }));
 
 import {
+  AgentInputTooLargeError,
   withPartialContainerResources,
   withPartialDurationMs,
   withPartialOutput,
@@ -45,6 +50,7 @@ import {
   runGateAndReviewer,
   runImplementer,
   runInnerLoop,
+  runPartitionCheck,
   runReviewer,
   runUiCheck,
   runSandboxAndPublish,
@@ -332,6 +338,107 @@ describe("runUiCheck (#126)", () => {
       expect.stringContaining("ui checker changed the repository"),
     );
     expect(sandbox.syncBranchToCache).toHaveBeenCalledOnce();
+  });
+});
+
+describe("runPartitionCheck (#158)", () => {
+  const context = (stdout: string, budget = 600_000) => {
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
+      "refs/heads/sandbar/issue-158",
+    );
+    innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    const events: EventInput[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async () => ({
+        stdout,
+        commits: [],
+        durationMs: 7,
+        silent: false,
+        maxGapMs: 2,
+        toolCalls: 3,
+        peakContext: 11,
+      })),
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(),
+    } as unknown as Sandbox;
+    const ctx = {
+      issue: { id: "158", title: "fan out", branch: "sandbar/issue-158" },
+      sandbox,
+      base: { ref: "origin/main", sha: "base" },
+      opts: {
+        attemptLogger: { writeInvocation: vi.fn() },
+        onEvent: (event: EventInput) => events.push(event),
+      },
+      config: {
+        repo: { owner: "owner", name: "repo" },
+        implementerAgent: "codex",
+        implementerModelId: "gpt-5.6-sol",
+        implementerEffort: "medium",
+        maxContextChars: budget,
+      },
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+    } as unknown as Parameters<typeof runPartitionCheck>[1];
+    return { ctx, sandbox, events };
+  };
+
+  it("returns the cold classifier verdict and records the measured picture", async () => {
+    const { ctx, sandbox, events } = context(
+      "<partition-check>PARTITION</partition-check>" +
+        "<partition-reason>two independently landable deliverables</partition-reason>",
+    );
+    await expect(runPartitionCheck({ kind: "run-partition-check" }, ctx))
+      .resolves.toEqual({
+        kind: "partition-check-result",
+        result: {
+          kind: "PARTITION",
+          reason: "two independently landable deliverables",
+        },
+        size: 22,
+        budget: 600_000,
+      });
+    expect(sandbox.run).toHaveBeenCalledOnce();
+    expect(events).toEqual([expect.objectContaining({
+      kind: "partition-check",
+      result: "PARTITION",
+      usage: { toolCalls: 3, peakContext: 11, contextChars: 22 },
+    })]);
+  });
+
+  it("parks before provider dispatch when the issue anchor exceeds budget", async () => {
+    const { ctx, sandbox } = context("", 21);
+    await expect(runPartitionCheck({ kind: "run-partition-check" }, ctx))
+      .resolves.toEqual({
+        kind: "context-over-budget",
+        slot: "partition-check",
+        size: 22,
+        budget: 21,
+        detail: "The issue anchor alone exceeds the configured context budget.",
+      });
+    expect(sandbox.run).not.toHaveBeenCalled();
+  });
+
+  it("classifies a provider size refusal as a partition terminal without retrying", async () => {
+    const { ctx, sandbox, events } = context("");
+    vi.mocked(sandbox.run).mockRejectedValueOnce(
+      new AgentInputTooLargeError("actual_chars=1064340"),
+    );
+    await expect(runPartitionCheck({ kind: "run-partition-check" }, ctx))
+      .rejects.toMatchObject({
+        verdict: {
+          type: "NEEDS-PARTITION",
+          cause: "provider-refused",
+          slot: "partition-check",
+          detail: "actual_chars=1064340",
+        },
+      });
+    expect(sandbox.run).toHaveBeenCalledOnce();
+    expect(events).toEqual([expect.objectContaining({
+      kind: "partition-check",
+      result: "input-too-large",
+    })]);
   });
 });
 
@@ -942,6 +1049,7 @@ describe("runGateAndReviewer (#123)", () => {
     ({
       issue: { id: "123" },
       opts: { onEvent: (event: EventInput) => events.push(event) },
+      config: { maxContextChars: 100 },
       priorReviewRounds: [],
       specGaps: [],
       state: {
@@ -1057,6 +1165,27 @@ describe("runGateAndReviewer (#123)", () => {
     });
     expect(ctx.priorReviewRounds).toEqual([historyEntry]);
     expect(events).toEqual([]);
+  });
+
+  it("parks an oversized completed branch before starting gate or review", async () => {
+    const gate = vi.fn(async () => ({ ok: true, failureTrace: "" }));
+    const reviewer = vi.fn(async () => approved);
+    await expect(runGateAndReviewer(action, context(), {
+      gate,
+      reviewer,
+      prepareReview: vi.fn(async () => ({
+        prompts: { quality: "quality", correctness: "correctness-long" },
+        netDiffChars: 90,
+      })),
+    })).resolves.toEqual({
+      kind: "context-over-budget",
+      slot: "review-correctness",
+      size: 106,
+      budget: 100,
+      detail: "The completed branch exceeds the configured context budget before review.",
+    });
+    expect(gate).not.toHaveBeenCalled();
+    expect(reviewer).not.toHaveBeenCalled();
   });
 });
 
@@ -1184,6 +1313,48 @@ const harnessFailed: ReviewerOutcome = {
 };
 
 describe("runInnerLoop HARD-ERROR logging (#115)", () => {
+  it("runs the partition classifier once per admission across fresh-sandbox retries", async () => {
+    const enabled: boolean[] = [];
+    const runCycle = vi.fn(async (_issue, opts) => {
+      enabled.push(opts.config.partitionCheck);
+      if (enabled.length === 1) {
+        await opts.onEvent({
+          kind: "partition-check",
+          issue: 158,
+          title: "partition once",
+          invocation: 1,
+          provider: "codex",
+          model: "model",
+          effort: null,
+          durationMs: 1,
+          result: "CLEAR",
+        });
+        return {
+          verdict: { type: "HARD-ERROR" as const, reason: "socket refused" },
+          accumulatedCommits: [],
+          specGaps: [],
+        };
+      }
+      return {
+        verdict: { type: "DONE" as const, commits: [] },
+        accumulatedCommits: [],
+        specGaps: [],
+      };
+    });
+    await expect(runInnerLoop(
+      { id: "158", title: "partition once", branch: "sandbar/issue-158" },
+      {
+        config: { partitionCheck: true },
+        attemptLogger: {
+          startInvocationCycle: () => createAgentInvocationSequencer().startCycle(),
+        },
+        onEvent: () => undefined,
+      } as unknown as Parameters<typeof runInnerLoop>[1],
+      runCycle,
+    )).resolves.toMatchObject({ type: "DONE" });
+    expect(enabled).toEqual([true, false]);
+  });
+
   it("keeps every invocation record across retries and later admissions", async () => {
     const root = await mkdtemp(join(tmpdir(), "sandbar-invocation-cycles-"));
     try {

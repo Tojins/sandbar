@@ -1,7 +1,8 @@
 // Pure inner-loop state machine — no I/O. The runner calls step(state, event)
 // and executes the returned action; `terminate` ends the loop. Every decision
-// (one pre-attempt UI classification, promise routing, concurrent
-// gate/reviewer routing, per-pass budget exhaustion)
+// (the pre-attempt partition and UI classifications, promise routing,
+// concurrent gate/reviewer routing, per-pass convergence budget exhaustion,
+// and context-budget parking)
 // lives here and is table-driven tested in inner-loop-machine.test.ts.
 //
 // Three independent consecutive-failure budgets bound three kinds of
@@ -50,6 +51,14 @@
 import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
 import type { UiCheckResult } from "./ui-check-parser.js";
+import type { PartitionCheckResult } from "./partition-check-parser.js";
+
+export type ContextSlot =
+  | "partition-check"
+  | "ui-check"
+  | "implementer"
+  | "review-quality"
+  | "review-correctness";
 
 export const HARD_ERROR_MAX_RETRIES = 2;
 export const REVIEWER_HARNESS_FAILURE_LIMIT = 2;
@@ -62,6 +71,7 @@ export type ReviewerFeedback = {
 };
 
 export type LoopPhase =
+  | "needs-partition-check"
   | "needs-ui-check"
   | "needs-implementer"
   | "needs-gate-and-reviewer"
@@ -93,6 +103,7 @@ export type LoopState = {
   // #143). Never reset: infrastructure faults are bounded independently of
   // convergence streaks, including when ordinary verdicts occur between them.
   readonly reviewerHarnessFailures: number;
+  readonly uiPrototypeCheck: boolean;
   readonly phase: LoopPhase;
 };
 
@@ -124,6 +135,14 @@ export type Verdict =
       // and finalize pushes the branch when it has commits. Off the branch it
       // has none to push, so without this the partial work vanishes unrecorded.
       readonly strandedHead: HeadMismatch | null;
+    }
+  | {
+      readonly type: "NEEDS-PARTITION";
+      readonly cause: "classifier" | "measured" | "provider-refused";
+      readonly slot: ContextSlot;
+      readonly size: number;
+      readonly budget: number;
+      readonly detail: string;
     }
   | {
       // Quality- or gate-round budget exhausted, or a dedicated early-stop rule
@@ -182,7 +201,7 @@ export type Verdict =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause: "reviewer-wrote" | "ui-checker-wrote";
+      readonly cause: "reviewer-wrote" | "ui-checker-wrote" | "partition-checker-wrote";
     }
   | { readonly type: "HARD-ERROR"; readonly reason: string }
   | {
@@ -198,6 +217,7 @@ export type Verdict =
     };
 
 export type LoopAction =
+  | { readonly kind: "run-partition-check" }
   | { readonly kind: "run-ui-check" }
   | {
       readonly kind: "run-implementer";
@@ -218,8 +238,9 @@ export type LoopAction =
 // after COMPLETE (#123, #132).
 export function visiblePhases(
   action: LoopAction,
-): readonly ("ui-check" | "implementer" | "gate-1" | "review")[] {
+): readonly ("partition-check" | "ui-check" | "implementer" | "gate-1" | "review")[] {
   switch (action.kind) {
+    case "run-partition-check": return ["partition-check"];
     case "run-ui-check": return ["ui-check"];
     case "run-implementer": return ["implementer"];
     case "run-gate-and-reviewer": return ["gate-1", "review"];
@@ -228,8 +249,22 @@ export function visiblePhases(
 }
 
 export type LoopEvent =
+  | {
+      readonly kind: "partition-check-result";
+      readonly result: PartitionCheckResult;
+      readonly size: number;
+      readonly budget: number;
+    }
+  | { readonly kind: "partition-checker-wrote"; readonly detail: string }
   | { readonly kind: "ui-check-result"; readonly result: UiCheckResult }
   | { readonly kind: "ui-checker-wrote"; readonly detail: string }
+  | {
+      readonly kind: "context-over-budget";
+      readonly slot: ContextSlot;
+      readonly size: number;
+      readonly budget: number;
+      readonly detail: string;
+    }
   | {
       readonly kind: "implementer-result";
       readonly signal: ParseSignal;
@@ -305,6 +340,7 @@ export type InitialStateOptions = {
   readonly maxGateRounds: number;
   readonly maxReviewRounds: number;
   readonly uiPrototypeCheck: boolean;
+  readonly partitionCheck: boolean;
 };
 
 export function initialState(opts: InitialStateOptions): LoopState {
@@ -338,11 +374,17 @@ export function initialState(opts: InitialStateOptions): LoopState {
     lastDirtyPaths: null,
     lastOffBranch: false,
     reviewerHarnessFailures: 0,
-    phase: opts.uiPrototypeCheck ? "needs-ui-check" : "needs-implementer",
+    uiPrototypeCheck: opts.uiPrototypeCheck,
+    phase: opts.partitionCheck
+      ? "needs-partition-check"
+      : opts.uiPrototypeCheck
+        ? "needs-ui-check"
+        : "needs-implementer",
   };
 }
 
 export function initialAction(state: LoopState): LoopAction {
+  if (state.phase === "needs-partition-check") return { kind: "run-partition-check" };
   if (state.phase === "needs-ui-check") return { kind: "run-ui-check" };
   return {
     kind: "run-implementer",
@@ -358,7 +400,59 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
     throw new Error("inner-loop machine stepped after termination");
   }
 
+  if (event.kind === "context-over-budget") {
+    if (
+      state.phase !== "needs-partition-check" &&
+      state.phase !== "needs-implementer" &&
+      state.phase !== "needs-gate-and-reviewer"
+    ) {
+      throw new Error(`context-over-budget event in phase ${state.phase}`);
+    }
+    return terminate(state, {
+      type: "NEEDS-PARTITION",
+      cause: "measured",
+      slot: event.slot,
+      size: event.size,
+      budget: event.budget,
+      detail: event.detail,
+    });
+  }
+
   switch (event.kind) {
+    case "partition-checker-wrote":
+      if (state.phase !== "needs-partition-check") {
+        throw new Error(
+          `partition-checker-wrote event in phase ${state.phase}; expected needs-partition-check`,
+        );
+      }
+      return terminate(state, {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "partition-checker-wrote",
+        latestReviewerProse: event.detail,
+      });
+
+    case "partition-check-result":
+      if (state.phase !== "needs-partition-check") {
+        throw new Error(
+          `partition-check-result event in phase ${state.phase}; expected needs-partition-check`,
+        );
+      }
+      if (event.result.kind === "PARTITION") {
+        return terminate(state, {
+          type: "NEEDS-PARTITION",
+          cause: "classifier",
+          slot: "partition-check",
+          size: event.size,
+          budget: event.budget,
+          detail: event.result.reason,
+        });
+      }
+      const afterPartition: LoopState = {
+        ...state,
+        phase: state.uiPrototypeCheck ? "needs-ui-check" : "needs-implementer",
+      };
+      return { state: afterPartition, action: initialAction(afterPartition) };
+
     case "ui-checker-wrote":
       if (state.phase !== "needs-ui-check") {
         throw new Error(

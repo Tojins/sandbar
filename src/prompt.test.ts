@@ -468,7 +468,7 @@ describe("renderReviewerQualitySlot", () => {
       ...baseInputs,
       priorRounds: afterListing,
       commits: "a1 first",
-      stat: " whole | 1 +",
+        stat: " whole | 1 +",
       changedSinceStat: " x | 1 +",
     });
     expect(slot).toContain(

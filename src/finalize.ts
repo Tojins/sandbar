@@ -14,10 +14,11 @@
 // removing it is where commits can be destroyed; `reclaimIssueClone`
 // (agent-sandbox.ts) is the one rule for that, and it publishes into the cache
 // BEFORE it deletes, answering `preserved` with a reason when it could not.
-// Nothing here decides preservation by terminal kind: the arms that would go on
-// to delete the cache branch with `-d` (hard-error, needs-ui-prototype) read
-// that answer and keep the branch instead, because the cache branch is what
-// keeps `pruneStaleIssueClones` off a preserved clone. The reviewer-write
+// Nothing here decides preservation by terminal kind. Every non-DONE terminal
+// that may otherwise discard the cache branch asks structurally whether it is
+// ahead of its seed and publishes it first (#158); clone-preservation failures
+// still keep that branch because it is what keeps `pruneStaleIssueClones` off
+// a preserved clone. The reviewer-write
 // handoff is the one caller that asks for the clone to be kept when the rule
 // would reclaim it: the human is told to inspect it, and uncommitted evidence
 // cannot travel through a push. It reports push rejection in the handoff
@@ -31,8 +32,7 @@
 // branch on the source branch or on the chunk branch and PUSHED it (producing
 // different bytes, so the tip is no longer an ancestor of HEAD and `-d`
 // correctly refuses), or the silent-noop path is deliberately discarding it.
-// `needs-ui-prototype` has no such guarantee (its `hasCommits`
-// is per-sandbox-cycle, not per-branch), so it *verifies* containment via
+// `needs-ui-prototype` has no such guarantee, so it *verifies* containment via
 // branchIsContainedInOrigin before forcing, and keeps the branch otherwise.
 // `-d` refusing is never on its own a licence to force.
 //
@@ -80,6 +80,7 @@ import { SandbarError, isExitCode } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { IssueRef } from "./merger.js";
 import type { SpecGap } from "./inner-loop.js";
+import type { ContextSlot } from "./inner-loop-machine.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
@@ -197,6 +198,24 @@ export const NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE = (
   `decisions itself.\n\n` +
   `Then drop \`${needsInfoLabel}\` and re-apply \`${readyLabel}\`.\n\n` +
   `---\n\n${uiImpact}`;
+
+export const NEEDS_PARTITION_COMMENT_TEMPLATE = (
+  cause: "classifier" | "measured" | "provider-refused",
+  slot: ContextSlot,
+  size: number,
+  budget: number,
+  detail: string,
+  needsInfoLabel: string,
+  readyLabel: string,
+  branchPushed: string | null,
+): string =>
+  `${BOT_COMMENT_PREFIX} stopped with NEEDS-PARTITION (${cause}) in the ` +
+  `\`${slot}\` slot. Its working context was ${size.toLocaleString("en-US")} ` +
+  `characters against the configured ${budget.toLocaleString("en-US")}-character ` +
+  `budget.${branchPushed === null ? "" : ` Work was pushed to \`${branchPushed}\`.`}\n\n` +
+  `${detail}\n\nPartition this work into a \`## Blocked by\` chain on its chunk, ` +
+  `with each independently landable issue inside the context budget. Then drop ` +
+  `\`${needsInfoLabel}\` and re-apply \`${readyLabel}\` to the first issue that is ready.`;
 
 export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   branch: string,
@@ -423,6 +442,16 @@ export const CHUNK_LANDED_COMMENT_TEMPLATE = (chunkBranch: string): string =>
 
 type FinalizeKindInput =
   | { readonly kind: "merged"; readonly issue: IssueRef }
+  // #158 — qualitative fan-out, measured context budget, or provider refusal.
+  | {
+      readonly kind: "needs-partition";
+      readonly issue: IssueRef;
+      readonly cause: "classifier" | "measured" | "provider-refused";
+      readonly slot: ContextSlot;
+      readonly size: number;
+      readonly budget: number;
+      readonly detail: string;
+    }
   // #60 — a review-gated issue whose branch landed on its chunk's branch, which
   // is now on origin. NOT a close: nothing has reached the source branch and
   // the review that would justify closing has not happened. The issue stays
@@ -450,17 +479,16 @@ type FinalizeKindInput =
     }
   // #21 — implementer escalated on non-trivial UI impact with no prototype.
   // Same handoff shape as needs-info (comment + `ready-for-agent` → needsInfo),
-  // but the branch is pushed only when `hasCommits`: the escalation normally
-  // fires before any code exists, and pushing then would publish a remote
+  // but the branch is pushed only when structurally ahead of its seed: the
+  // escalation normally fires before code exists, and pushing then would publish a remote
   // branch identical to the source tip — one junk ref per escalation.
   | {
       readonly kind: "needs-ui-prototype";
       readonly issue: IssueRef;
       readonly uiImpact: string;
-      readonly hasCommits: boolean;
-      // #27 — the agent escalated from off the branch. `hasCommits` is false in
-      // that case (commits are counted on the branch), so this arm is about to
-      // delete a branch while the work sits on an unnamed dangling commit.
+      // #27 — the agent escalated from off the branch. The branch-ahead check
+      // cannot see that detached work, so this arm is about to delete a branch
+      // while the work sits on an unnamed dangling commit.
       readonly strandedHead: StrandedHead | null;
     }
   | {
@@ -503,12 +531,11 @@ type FinalizeKindInput =
       readonly kind: "read-only-agent-wrote";
       readonly issue: IssueRef;
       readonly latestReviewerProse: string;
-      readonly actor: "reviewer" | "UI checker";
+      readonly actor: "reviewer" | "UI checker" | "partition checker";
     }
   | {
       readonly kind: "hard-error";
       readonly issue: IssueRef;
-      readonly hasCommits: boolean;
     }
   | {
       readonly kind: "quota";
@@ -568,6 +595,10 @@ export type FinalizeAdapter = {
   // reason to preserve a clone the rule would reclaim. sandbox.close() in the
   // inner loop usually has already reclaimed it, in which case `absent`.
   reclaimIssueClone(branch: string, keep?: string): Promise<IssueCloneReclaim>;
+  // Structural replacement for per-cycle commit bookkeeping (#158). The cache
+  // answers whether the issue branch contains commits beyond the seed it would
+  // be cut from now (chunk tip when present, otherwise source).
+  branchIsAheadOfSeed(issue: IssueRef): Promise<boolean>;
   // True iff every commit on `branch` is already contained in
   // origin/<sourceBranch> — i.e. deleting it destroys nothing. This is the
   // *verified* form of the certainty forceDeleteBranch requires; `-d` refusing
@@ -624,6 +655,7 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "forge-unverified",
   "needs-info",
   "needs-ui-prototype",
+  "needs-partition",
   "needs-human",
   "review-budget-exhausted",
   "read-only-agent-wrote",
@@ -832,7 +864,8 @@ export async function finalizeOne(
     case "needs-ui-prototype": {
       const n = issueNumberOf(input.issue);
       const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
-      if (input.hasCommits) {
+      const aheadOfSeed = await adapter.branchIsAheadOfSeed(input.issue);
+      if (aheadOfSeed) {
         // Late escalation: the agent had already committed before it realised
         // it was inventing UI. Hand the partial work to the human.
         await adapter.pushBranch(input.issue.branch);
@@ -844,7 +877,7 @@ export async function finalizeOne(
           input.uiImpact,
           labels.needsInfo,
           READY_FOR_AGENT_LABEL,
-          input.hasCommits ? input.issue.branch : null,
+          aheadOfSeed ? input.issue.branch : null,
         ) +
           (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
       );
@@ -854,7 +887,7 @@ export async function finalizeOne(
         [labels.needsInfo],
       );
       requireFlip(r, n);
-      if (input.hasCommits) return { kind: "pushed" };
+      if (aheadOfSeed) return { kind: "pushed" };
       if (reclaim.kind === "preserved") return keptForPreservedClone(reclaim.reason);
       // Nothing was written this sandbox cycle, so drop the local branch:
       // ensureIssueBranch reuses an existing branch verbatim, and keeping an
@@ -865,10 +898,8 @@ export async function finalizeOne(
       // must outlive the handoff. For an ordinary empty attempt, `-d` refusing
       // is not permission to force: it also refuses when the
       // local source branch merely trails the origin tip we seeded from. And
-      // `hasCommits` is per-sandbox-cycle, not per-branch — a HARD-ERROR retry
-      // restarts the cycle with an empty commit list while the previous
-      // attempts' commits are still on the branch, as does a branch left by an
-      // interrupted earlier run. So escalate to `-D` only once the branch is
+      // The structural ahead check sees previous HARD-ERROR cycles and branches
+      // left by interrupted earlier runs. So escalate to `-D` only once the branch is
       // *verified* to contain nothing that isn't already on origin; otherwise
       // keep it and report the failure. The other force-deleting arms own that
       // certainty by construction (the merger just landed the work, or the
@@ -888,6 +919,34 @@ export async function finalizeOne(
       return f.ok
         ? { kind: "deleted-local" }
         : { kind: "delete-failed", error: f.error ?? d.error ?? "" };
+    }
+    case "needs-partition": {
+      const n = issueNumberOf(input.issue);
+      const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
+      const aheadOfSeed = await adapter.branchIsAheadOfSeed(input.issue);
+      if (aheadOfSeed) await adapter.pushBranch(input.issue.branch);
+      await adapter.postComment(
+        n,
+        NEEDS_PARTITION_COMMENT_TEMPLATE(
+          input.cause,
+          input.slot,
+          input.size,
+          input.budget,
+          input.detail,
+          labels.needsInfo,
+          READY_FOR_AGENT_LABEL,
+          aheadOfSeed ? input.issue.branch : null,
+        ),
+      );
+      const labelsResult = await adapter.editLabels(
+        n,
+        [READY_FOR_AGENT_LABEL],
+        [labels.needsInfo],
+      );
+      requireFlip(labelsResult, n);
+      if (aheadOfSeed) return { kind: "pushed" };
+      if (reclaim.kind === "preserved") return keptForPreservedClone(reclaim.reason);
+      return deleteBranchForcing(adapter, input.issue.branch);
     }
     case "needs-human": {
       const n = issueNumberOf(input.issue);
@@ -1051,7 +1110,7 @@ export async function finalizeOne(
     }
     case "hard-error": {
       const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
-      if (input.hasCommits) {
+      if (await adapter.branchIsAheadOfSeed(input.issue)) {
         await adapter.pushBranch(input.issue.branch);
         // A preserved clone may hold commits the push did not carry (the
         // reason says so when the publish is what failed); name it rather than
@@ -1188,6 +1247,26 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
         const msg = (e.stderr ?? "").trim() || e.message || String(err);
         return { ok: false, error: msg };
       }
+    },
+    async branchIsAheadOfSeed(issue) {
+      let seed = `origin/${deps.sourceBranch}`;
+      const chunkBranch = issue.chunk?.branch;
+      if (chunkBranch) {
+        try {
+          await exec("git", ["rev-parse", "--verify", "--quiet", `origin/${chunkBranch}`], {
+            cwd,
+          });
+          seed = `origin/${chunkBranch}`;
+        } catch (err) {
+          if (!isExitCode(err, 1)) throw err;
+        }
+      }
+      const { stdout } = await exec(
+        "git",
+        ["rev-list", "--count", `${seed}..${issue.branch}`],
+        { cwd },
+      );
+      return Number(stdout.trim()) > 0;
     },
     async branchIsContainedInOrigin(branch) {
       // Exit 0 iff the branch tip is an ancestor of (or equal to) the origin

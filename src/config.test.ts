@@ -19,8 +19,10 @@ import {
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_KEEP_AWAKE_WHILE_IDLE,
   DEFAULT_MAX_CONCURRENT_GATES,
+  DEFAULT_MAX_CONTEXT_CHARS,
   DEFAULT_IMPLEMENTER_MODEL_ID,
   DEFAULT_UI_PROTOTYPE_CHECK,
+  DEFAULT_PARTITION_CHECK,
   DEFAULT_UI_PORT,
   DEFAULT_REVIEWER_MODEL_ID,
   DEFAULT_REVIEWER_QUALITY_MODEL_ID,
@@ -268,6 +270,8 @@ describe("resolveConfig", () => {
     expect(r.sourceBranch).toBe(DEFAULT_SOURCE_BRANCH);
     expect(r.implementerModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
     expect(r.uiPrototypeCheck).toBe(DEFAULT_UI_PROTOTYPE_CHECK);
+    expect(r.partitionCheck).toBe(DEFAULT_PARTITION_CHECK);
+    expect(r.maxContextChars).toBe(DEFAULT_MAX_CONTEXT_CHARS);
     expect(r.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
     expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
     expect(r.reviewerQualityModelId).toBe(DEFAULT_REVIEWER_QUALITY_MODEL_ID);
@@ -541,6 +545,17 @@ describe("resolveConfig", () => {
         uiCheckAgent: "codex",
       }),
     ).not.toThrow();
+  });
+
+  it("validates the partition classifier and context budget (#158)", () => {
+    expect(resolveConfig({ ...minimal, partitionCheck: false }).partitionCheck)
+      .toBe(false);
+    expect(resolveConfig({ ...minimal, maxContextChars: 1234 }).maxContextChars)
+      .toBe(1234);
+    expect(() => resolveConfig({ ...minimal, partitionCheck: "yes" as never }))
+      .toThrow(/config\.partitionCheck must be a boolean/);
+    expect(() => resolveConfig({ ...minimal, maxContextChars: 0 }))
+      .toThrow(/maxContextChars must be a positive integer/);
   });
 
   it("inherits the implementer model only for a UI check on the same provider (#126)", () => {
