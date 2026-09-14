@@ -82,6 +82,13 @@ const ESCALATION_ATTEMPT = 6;
 // budget (#158); prompt slots contain only commit lists and stats.
 const GIT_READ_MAX_BUFFER = 50 * 1024 * 1024;
 
+// Git otherwise formats --stat to an 80-column terminal and replaces leading
+// path components with `...`. The stat is the issue-loop roles' complete file
+// index (#158), so every path must remain exact. Repository paths are bounded
+// far below this width by the filesystem; spelling both widths also keeps the
+// allocation between filename and graph columns independent of ambient config.
+const FULL_PATH_DIFF_STAT = "--stat=1000000,1000000";
+
 // What a truncated read renders instead of stopping mid-hunk. Deliberately not
 // diff-shaped, so no agent reads it as content.
 function truncationNote(limit: number): string {
@@ -467,7 +474,7 @@ async function buildAttemptSlot(
       `the commit list for ${inputs.issue.branch}, anchored at ${base.ref}`,
     ),
     readGit(
-      ["diff", "--stat", `${base.ref}...HEAD`],
+      ["diff", FULL_PATH_DIFF_STAT, `${base.ref}...HEAD`],
       worktreePath,
       `the branch diff stat for ${inputs.issue.branch}, anchored at ${base.ref}`,
     ),
@@ -654,7 +661,7 @@ async function buildReviewerSlotInputs(
 
   const stat = (
     await readGit(
-      ["diff", "--stat", `${base}...HEAD`],
+      ["diff", FULL_PATH_DIFF_STAT, `${base}...HEAD`],
       worktreePath,
       `the branch diff stat for ${inputs.issue.branch}, anchored at ${base}`,
     )
@@ -666,7 +673,7 @@ async function buildReviewerSlotInputs(
   const changedSinceStat = quality.mode === "verify"
     ? (
         await readGit(
-          ["diff", "--stat", `${quality.anchor}..HEAD`],
+          ["diff", FULL_PATH_DIFF_STAT, `${quality.anchor}..HEAD`],
           worktreePath,
           `the diff stat since the last quality review for ${inputs.issue.branch}, anchored at ${quality.anchor}`,
         )

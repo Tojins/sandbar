@@ -14,9 +14,9 @@
 // property under test is that a ref resolves in a repo git constructed, and a
 // fixture that adds a local `main` of its own passes with the bug restored.
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -45,6 +45,9 @@ const ISSUE = { id: "7", title: "widget", branch: BRANCH };
 // slots; its filename in the stat proves progressive disclosure is wired.
 const SUBJECT = "commit-on-the-issue-branch";
 const ADDED_LINE = "the-line-only-the-branch-has";
+const LONG_PATH =
+  "src/app/features/visit-editing/components/visit-version-diff/" +
+  "visit-version-diff.component.ts";
 
 let root: string;
 let origin: string;
@@ -101,6 +104,14 @@ async function commitOnBranch(): Promise<void> {
   await writeFile(join(worktree, "b.txt"), `${ADDED_LINE}\n`);
   await git(worktree, "add", "-A");
   await git(worktree, "commit", "-qm", SUBJECT);
+}
+
+async function commitLongPath(subject: string): Promise<void> {
+  const path = join(worktree, LONG_PATH);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${ADDED_LINE}\n`);
+  await git(worktree, "add", "-A");
+  await git(worktree, "commit", "-qm", subject);
 }
 
 const anchorOpts = (sourceBranch = "main") => ({
@@ -173,6 +184,43 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     expect(prompt).toContain("b.txt");
     expect(prompt).not.toContain(ADDED_LINE);
     expect(prompt).not.toContain("(empty — no changes against");
+  });
+
+  it("keeps long filenames exact in every progressive-disclosure stat", async () => {
+    await commitLongPath("long-path-on-the-issue-branch");
+    const listingHead = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
+
+    const implementer = await buildPrompt(implementerInputs(), anchorOpts());
+    const listing = await buildReviewerPrompts(reviewerInputs());
+    expect(implementer).toContain(LONG_PATH);
+    expect(listing.quality).toContain(LONG_PATH);
+    expect(listing.correctness).toContain(LONG_PATH);
+    expect(implementer).not.toContain(".../components/visit-version-diff");
+
+    const laterPath = `after-review/${LONG_PATH}`;
+    const path = join(worktree, laterPath);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, "later\n");
+    await git(worktree, "add", "-A");
+    await git(worktree, "commit", "-qm", "long-path-after-listing");
+
+    const verify = (await buildReviewerPrompts({
+      ...reviewerInputs(),
+      priorRounds: [{
+        round: 1,
+        head: listingHead,
+        quality: {
+          verdict: "APPROVED",
+          prose: "<verdict>APPROVED</verdict>",
+        },
+      }],
+    })).quality;
+    const changedSince = verify.slice(
+      verify.indexOf("## Changed since the last quality review"),
+      verify.indexOf("## Coding standards"),
+    );
+    expect(changedSince).toContain(laterPath);
+    expect(changedSince).not.toContain(".../visit-version-diff");
   });
 
   it("measures the on-demand net diff separately from the rendered prompt", async () => {
