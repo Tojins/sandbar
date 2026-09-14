@@ -14,8 +14,10 @@
 // strict review of only the lines no quality pass has seen yet (#107).
 // The UI and partition checkers (#126/#158) are intentionally smaller: issue
 // anchor plus their own decision contracts, with no project standards, diff or
-// prior-round history. The partition check receives the context budget only as
-// a qualitative scale hint.
+// prior-round history. The partition check keeps the context budget as a scale
+// hint while coarsely estimating each deliverable's files and changed lines;
+// only two independently landable deliverables each clearing its stated size
+// floor warrant a split.
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure

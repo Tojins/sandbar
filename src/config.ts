@@ -629,9 +629,10 @@ export type RunConfig = {
   // implementer unless explicitly split, while the check itself defaults on.
   readonly uiPrototypeCheck?: boolean;
   readonly uiCheckModelId?: string;
-  // Cold qualitative fan-out check before attempt 1 (#158). It uses the
-  // implementer routing, runs only while the branch is still at its seed, and
-  // may be disabled for hosts that partition work before queueing it.
+  // Cold fan-out and coarse per-deliverable size check before attempt 1 (#158):
+  // split only when two landable pieces each estimate to 100+ lines or 3+ files.
+  // It uses the implementer routing, runs only while the branch is still at its
+  // seed, and may be disabled for hosts that partition work before queueing it.
   readonly partitionCheck?: boolean;
   // The correctness pass — the one that ends an issue (#121). `reviewerAgent`
   // is its CLI.
