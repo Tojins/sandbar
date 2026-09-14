@@ -1250,6 +1250,19 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
       }
     },
     async branchIsAheadOfSeed(issue) {
+      try {
+        await exec(
+          "git",
+          ["show-ref", "--verify", "--quiet", `refs/heads/${issue.branch}`],
+          { cwd },
+        );
+      } catch (err) {
+        // A setup failure can terminate before ensureIssueBranch creates the
+        // ref. That terminal has no branch work to publish; other git failures
+        // do not establish absence and must still stop finalization.
+        if (isExitCode(err, 1)) return false;
+        throw err;
+      }
       let seed = `origin/${deps.sourceBranch}`;
       const chunkBranch = issue.chunk?.branch;
       if (chunkBranch) {

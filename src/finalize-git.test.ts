@@ -31,6 +31,7 @@ describe("finalize real adapter git classifications", () => {
   const chunkBranch = "sandbar/chunk-3-root";
   const chunkMember = "sandbar/issue-4-chunk-member";
   const chunkSeedOnly = "sandbar/issue-5-chunk-seed-only";
+  const absent = "sandbar/issue-6-never-created";
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "sandbar-finalize-git-"));
@@ -104,6 +105,22 @@ describe("finalize real adapter git classifications", () => {
       id: "5", title: "chunk seed", branch: chunkSeedOnly,
       chunk: { root: 3, branch: chunkBranch },
     })).toBe(false);
+    expect(await adapter().branchIsAheadOfSeed({
+      id: "6", title: "absent issue branch", branch: absent,
+    })).toBe(false);
+  });
+
+  it("propagates a broken seed lookup for an existing issue branch", async () => {
+    const brokenSeedAdapter = realAdapter({
+      layout: repoLayout(root, ".sandbar"),
+      repo: { owner: "o", name: "r" },
+      sourceBranch: "missing-source-branch",
+      beforeOriginWrite: async () => undefined,
+    });
+
+    await expect(brokenSeedAdapter.branchIsAheadOfSeed({
+      id: "1", title: "existing issue branch", branch: merged,
+    })).rejects.toThrow();
   });
 
   // #98 made the issue tree a marked clone and `reclaimIssueClone` the one
