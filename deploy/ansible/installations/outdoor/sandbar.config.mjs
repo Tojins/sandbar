@@ -1,8 +1,7 @@
-// The outdoor daemon's installation-owned config (#149). It mirrors the
-// RunConfig outdoor commits at its own root (Tojins/outdoor#235 has not yet
-// removed that copy) with the installation contract on top: an explicit
-// `cwd`, the gate stack read from the clone, and the Claude Code settings
-// file supplied from this directory instead of a host hook.
+// The outdoor daemon's installation-owned config (#149), the only sandbar
+// config outdoor has since Tojins/outdoor#259 removed the checkout-owned copy:
+// an explicit `cwd`, the gate stack read from the clone, and the Claude Code
+// settings file supplied from this directory instead of a host hook.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
