@@ -8,7 +8,7 @@ copies only `origin/*` for the source repository, so the bare local name
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diff}}{{priorRounds}}{{qualityMode}}{{changedSinceDiff}}{{codingStandards}}
+{{chunkBase}}{{commits}}{{diffStat}}{{priorRounds}}{{qualityMode}}{{changedSinceStat}}{{codingStandards}}
 
 {{projectStandards}}## Review process
 

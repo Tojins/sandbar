@@ -1,16 +1,17 @@
 // Prompt assembly for the inner-loop roles:
 // project anchor (shared verbatim by both agents), issue anchor
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
-// branch diff, sandbox-stack report #44, gate trace, typed reviewer feedback
+// commit list + diff stat (progressive disclosure, #158), sandbox-stack report
+// #44, gate trace, typed reviewer feedback
 // (including an approved quality pass whose correctness pass was skipped), and
 // the same coding standards the reviewer applies plus a live
-// pre-promise diff checklist (#78); reviewer: diff + commits, split into a
+// pre-promise diff checklist (#78); reviewer: diff stat + commits, split into a
 // self-sufficient quality pass (tests and standards) and the correctness pass
 // gated on it (#19, #121), plus every earlier successful review round (#88).
 // Both prompts are self-sufficient because neither pass resumes the other's
 // session — which is what lets the two sit on different vendors (#121).
 // After its first whole-branch quality listing, that history also anchors a
-// strict review of only the lines no quality pass has seen yet (#107).
+// strict review of only the files no quality pass has seen yet (#107).
 // The UI checker (#126) is intentionally smaller: issue anchor plus its own
 // decision contract, with no project standards, diff or prior-round history.
 //
@@ -74,8 +75,8 @@ const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
 const ESCALATION_ATTEMPT = 6;
 
 // Ceiling on a single git read below. Generous because the thing it bounds is a
-// whole branch's `log -p`; it is a limit, not an allocation, so the two-line
-// commit list is given the same one rather than a second knob.
+// potentially large git report. It is a transport limit, not the agent context
+// budget (#158); prompt slots contain only commit lists and stats.
 const GIT_READ_MAX_BUFFER = 50 * 1024 * 1024;
 
 // What a truncated read renders instead of stopping mid-hunk. Deliberately not
@@ -412,11 +413,18 @@ async function buildAttemptSlot(
   // Empty is a legitimate answer HERE and only here: attempt 1 has no commits.
   // Which is exactly why the read must not be able to fail quietly — the one
   // slot whose emptiness is unremarkable is the one that hid #40.
-  const diff = await readGit(
-    ["log", "-p", "--reverse", `${base.ref}..HEAD`],
-    worktreePath,
-    `the work done so far on ${inputs.issue.branch}, anchored at ${base.ref}`,
-  );
+  const [commits, stat] = await Promise.all([
+    readGit(
+      ["log", "--reverse", "--oneline", `${base.ref}..HEAD`],
+      worktreePath,
+      `the commit list for ${inputs.issue.branch}, anchored at ${base.ref}`,
+    ),
+    readGit(
+      ["diff", "--stat", `${base.ref}...HEAD`],
+      worktreePath,
+      `the branch diff stat for ${inputs.issue.branch}, anchored at ${base.ref}`,
+    ),
+  ]);
 
   const promptExtension = resolvePromptExtension(
     worktreePath,
@@ -428,7 +436,8 @@ async function buildAttemptSlot(
     promptExtension,
     claudeMdPath: anchor.claudeMdPath,
     ...(anchor.contextMdPath ? { contextMdPath: anchor.contextMdPath } : {}),
-    diff,
+    commits: commits.trim(),
+    stat: stat.trim(),
   });
 }
 
@@ -438,7 +447,8 @@ async function buildAttemptSlot(
 export type AttemptSlotRender = PromptInputs & {
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
-  readonly diff: string;
+  readonly commits: string;
+  readonly stat: string;
 };
 
 export function renderAttemptSlot(inputs: AttemptSlotRender): string {
@@ -449,11 +459,15 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     lastFailureTrace,
     extraReprompt,
     latestReviewerFeedback,
-    diff,
+    commits,
+    stat,
   } = inputs;
 
-  const workDone = diff.trim()
-    ? `## Work done so far\n\n\`\`\`diff\n${diff.trim()}\n\`\`\``
+  const workDone = commits
+    ? `## Work done so far\n\n### Commits\n\n\`\`\`\n${commits}\n\`\`\`\n\n` +
+      `### Diff stat\n\n\`\`\`\n${stat || "(empty)"}\n\`\`\`\n\n` +
+      `Inspect the changes in the worktree. Run \`git diff ${base.ref}...HEAD\` ` +
+      "to read the full patch, and open every relevant file on demand."
     : "No commits yet on this branch.";
 
   // Renders to "" for every issue seeded from the source branch, which is every
@@ -591,28 +605,28 @@ async function buildReviewerSlotInputs(
     );
   }
 
-  const diff = (
+  const stat = (
     await readGit(
-      ["diff", `${base}...HEAD`],
+      ["diff", "--stat", `${base}...HEAD`],
       worktreePath,
-      `the branch diff for ${inputs.issue.branch}, anchored at ${base}`,
+      `the branch diff stat for ${inputs.issue.branch}, anchored at ${base}`,
     )
   ).trim();
 
   // The quality pass's mode and anchor are one fact read off #88's history
   // (#107), derived again by the renderer; only the diff payload needs git.
   const quality = qualityReviewContext(inputs.priorRounds);
-  const changedSinceDiff = quality.mode === "verify"
+  const changedSinceStat = quality.mode === "verify"
     ? (
         await readGit(
-          ["diff", `${quality.anchor}..HEAD`],
+          ["diff", "--stat", `${quality.anchor}..HEAD`],
           worktreePath,
-          `changes since the last quality review for ${inputs.issue.branch}, anchored at ${quality.anchor}`,
+          `the diff stat since the last quality review for ${inputs.issue.branch}, anchored at ${quality.anchor}`,
         )
       ).trim()
     : undefined;
 
-  return { ...inputs, commits, diff, changedSinceDiff };
+  return { ...inputs, commits, stat, changedSinceStat };
 }
 
 // Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
@@ -625,12 +639,12 @@ export type ReviewerSlotRender = Omit<
 > & {
   readonly promptExtension?: PromptExtension;
   readonly commits: string;
-  readonly diff: string;
-  // `git diff <anchor>..HEAD`, required exactly when `priorRounds` puts the
+  readonly stat: string;
+  // `git diff --stat <anchor>..HEAD`, required exactly when `priorRounds` puts the
   // quality pass in verify mode (#107). Not a source of the mode: the renderer
   // reads that off `priorRounds`, and a verify render without this field is
   // refused rather than shown as "no changes" (#40).
-  readonly changedSinceDiff?: string;
+  readonly changedSinceStat?: string;
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
@@ -643,33 +657,34 @@ export function renderReviewerQualitySlot(inputs: ReviewerSlotRender): string {
 
 // The two #107 slots of the quality template. Listing mode until an entry
 // in #88's history carries a quality verdict; verify mode anchored at the
-// newest one that does, with the lines changed since it as a second diff. The
-// diff payload is the one thing the async builder alone can supply, so its
-// absence in verify mode is a caller error and throws — an empty diff means
+// newest one that does, with the files changed since it as a second stat. The
+// stat payload is the one thing the async builder alone can supply, so its
+// absence in verify mode is a caller error and throws — an empty stat means
 // git said nothing changed, never that nothing was read.
 function renderQualitySlots(
   inputs: ReviewerSlotRender,
-): { readonly qualityMode: string; readonly changedSinceDiff: string } {
+): { readonly qualityMode: string; readonly changedSinceStat: string } {
   const quality = qualityReviewContext(inputs.priorRounds);
   if (quality.mode === "list") {
     return {
       qualityMode: section(REVIEWER_QUALITY_LISTING_TPL),
-      changedSinceDiff: "",
+      changedSinceStat: "",
     };
   }
-  if (inputs.changedSinceDiff === undefined) {
+  if (inputs.changedSinceStat === undefined) {
     throw new Error(
       `reviewer quality prompt: verify mode anchored at ${quality.anchor} ` +
-        "was rendered without its changed-since diff",
+        "was rendered without its changed-since diff stat",
     );
   }
-  const body = inputs.changedSinceDiff
-    ? `\`\`\`diff\n${inputs.changedSinceDiff}\n\`\`\``
+  const body = inputs.changedSinceStat
+    ? `\`\`\`\n${inputs.changedSinceStat}\n\`\`\``
     : `(empty — no changes since \`${quality.anchor}\`)`;
   return {
     qualityMode: section(REVIEWER_QUALITY_VERIFY_TPL),
-    changedSinceDiff: section(
-      `## Changed since the last quality review\n\n${body}`,
+    changedSinceStat: section(
+      `## Changed since the last quality review\n\n${body}\n\n` +
+        `Inspect these changes with \`git diff ${quality.anchor}..HEAD\`.`,
     ),
   };
 }
@@ -678,7 +693,7 @@ function renderReviewerTemplate(
   template: string,
   inputs: ReviewerSlotRender,
 ): string {
-  const { issue, base, sourceBranch, promptExtension, claudeMdPath, contextMdPath, commits, diff } =
+  const { issue, base, sourceBranch, promptExtension, claudeMdPath, contextMdPath, commits, stat } =
     inputs;
 
   // Same slot as the implementer's, aimed at the other half of the mistake: an
@@ -698,9 +713,10 @@ function renderReviewerTemplate(
   // Named ref, not "the source branch" (#61): for a chunk member that is the
   // chunk tip, and calling it the source branch would tell the reviewer its
   // emptiness was measured against a tree the branch was never cut from.
-  const diffBlock = diff
-    ? `## Branch diff\n\n\`\`\`diff\n${diff}\n\`\`\``
-    : `## Branch diff\n\n(empty — no changes against \`${base.ref}\`)`;
+  const diffStatBlock = stat
+    ? `## Branch diff stat\n\n\`\`\`\n${stat}\n\`\`\`\n\n` +
+      `Read the full patch with \`git diff ${base.ref}...HEAD\` and inspect files in the worktree.`
+    : `## Branch diff stat\n\n(empty — no changes against \`${base.ref}\`)`;
 
   const priorRounds = inputs.priorRounds.length === 0
     ? ""
@@ -716,7 +732,7 @@ function renderReviewerTemplate(
     issueId: issue.id,
     issueTitle: issue.title,
     commits: section(commitsBlock),
-    diff: section(diffBlock),
+    diffStat: section(diffStatBlock),
     priorRounds: section(priorRounds),
     // Only the quality template has these two slots. Supplying them to the
     // correctness template too would let a future `{{qualityMode}}` in

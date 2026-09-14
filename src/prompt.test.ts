@@ -38,7 +38,8 @@ const implementerInputs = {
   lastFailureTrace: "",
   base: sourceBranchBase("main"),
   claudeMdPath: "CLAUDE.md",
-  diff: "",
+  commits: "",
+  stat: "",
 } as const;
 
 describe("renderAttemptSlot — unbounded attempt sequence (#129)", () => {
@@ -192,7 +193,7 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
       promptExtension: baseInputs.reviewerQualityPromptExtension,
       contextMdPath: "AGENTS.md",
       commits: "a1 first",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     const codingStandards = loadTemplate("coding-standards");
 
@@ -251,7 +252,7 @@ describe("renderReviewerSlot", () => {
       ...baseInputs,
       promptExtension: { text: "correctness-only instruction" },
       commits: "a1 first",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     expect(slot).toContain(
       "### Project prompt extension\n\ncorrectness-only instruction\n\n## Review process",
@@ -265,7 +266,7 @@ describe("renderReviewerSlot", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first\nb2 second",
-      diff: "diff --git a/x b/x\n+hi",
+      stat: " x | 1 +",
     });
     expect(slot).toMatch(/Correctness of logic/i);
     expect(slot).toMatch(/Spec conformance/i);
@@ -284,7 +285,7 @@ describe("renderReviewerSlot", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     expect(slot).not.toContain("### Project standards");
     expect(slot).not.toContain("@docs/CODING_STANDARDS.md");
@@ -295,7 +296,7 @@ describe("renderReviewerSlot", () => {
       ...baseInputs,
       contextMdPath: "CONTEXT.md",
       commits: "a1 first",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     expect(slot).toContain("@CONTEXT.md");
   });
@@ -304,7 +305,7 @@ describe("renderReviewerSlot", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     expect(slot).not.toContain("CONTEXT.md");
   });
@@ -313,7 +314,7 @@ describe("renderReviewerSlot", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     expect(slot).toMatch(/strictly advisory/i);
     expect(slot).toMatch(/do not run any command that writes under/i);
@@ -323,7 +324,7 @@ describe("renderReviewerSlot", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "",
-      diff: "",
+      stat: "",
     });
     expect(slot).toContain("<verdict>APPROVED</verdict>");
     expect(slot).toContain("<verdict>CHANGES-REQUESTED</verdict>");
@@ -334,7 +335,7 @@ describe("renderReviewerSlot", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first",
-      diff: "diff --git a/x b/x\n+hi",
+      stat: " x | 1 +",
     });
     expect(slot).not.toContain("## Prior review rounds");
   });
@@ -343,7 +344,7 @@ describe("renderReviewerSlot", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1 first\nb2 second",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     expect(slot).toContain("## Commits on this branch");
     expect(slot).toContain("a1 first");
@@ -354,38 +355,38 @@ describe("renderReviewerSlot", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     expect(slot).not.toContain("## Commits on this branch");
   });
 
-  it("renders a small diff inside the diff block", () => {
+  it("renders a small stat and the on-demand diff command", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1",
-      diff: "diff --git a/foo b/foo\n+hi\n",
+      stat: " foo | 1 +\n",
     });
-    expect(slot).toContain("## Branch diff");
-    expect(slot).toContain("```diff");
-    expect(slot).toContain("+hi");
+    expect(slot).toContain("## Branch diff stat");
+    expect(slot).toContain("foo | 1 +");
+    expect(slot).toContain("git diff origin/main...HEAD");
   });
 
-  it("renders a large diff verbatim (no truncation in the renderer)", () => {
+  it("does not turn a large stat into an embedded patch", () => {
     const big = Array.from({ length: 5000 }, (_, i) => `+ line ${i}`).join("\n");
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "a1",
-      diff: `diff --git a/big b/big\n${big}`,
+      stat: ` big | ${big.length} +`,
     });
-    expect(slot).toContain("+ line 0");
-    expect(slot).toContain("+ line 4999");
+    expect(slot).toContain(`big | ${big.length} +`);
+    expect(slot).not.toContain("+ line 0");
   });
 
   it("with no diff, shows the empty-diff placeholder", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "",
-      diff: "",
+      stat: "",
     });
     // The placeholder names the SEED REF (#61) — `origin/main` here, the chunk
     // tip for a member — because that is what the emptiness was measured
@@ -397,7 +398,7 @@ describe("renderReviewerSlot", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
       commits: "",
-      diff: "",
+      stat: "",
     });
     expect(slot).toContain("Issue #42: do the thing");
     expect(slot).toContain("`sandbar/issue-42-do-the-thing`");
@@ -412,7 +413,7 @@ describe("renderReviewerQualitySlot", () => {
       promptExtension: baseInputs.reviewerQualityPromptExtension,
       contextMdPath: "CONTEXT.md",
       commits: "a1 first",
-      diff: "diff --git a/x b/x\n+hi",
+      stat: " x | 1 +",
     });
 
   // Two dimensions since #121: spec moved to the correctness pass, which is
@@ -439,6 +440,7 @@ describe("renderReviewerQualitySlot", () => {
     const slot = renderQuality();
     expect(slot).toContain(
       "This is the only pass that reviews the whole branch for tests and standards. " +
+      "Walk every changed file named by the branch diff stat, reading its hunks with the full-diff command named above and opening the surrounding code. " +
       "Anything you do not raise now is not raised later. List every finding you would block on. " +
       "There is no limit on length.",
     );
@@ -461,23 +463,23 @@ describe("renderReviewerQualitySlot", () => {
     },
   }];
 
-  it("renders the exact verify contract and changed-since diff", () => {
+  it("renders the exact verify contract and changed-since stat", () => {
     const slot = renderReviewerQualitySlot({
       ...baseInputs,
       priorRounds: afterListing,
       commits: "a1 first",
-      diff: "whole branch",
-      changedSinceDiff: "diff --git a/x b/x\n+new line",
+      stat: " whole | 1 +",
+      changedSinceStat: " x | 1 +",
     });
     expect(slot).toContain(
       "An earlier pass listed this branch's tests and standards findings; the history above carries them. " +
-      "Review only the lines changed since that review, in the \"changed since\" diff below, " +
+      "Review only the files changed since that review, using the \"changed since\" stat and full-diff command below, " +
       "on both dimensions, exactly as at a listing. " +
       "Raise nothing else. If you request changes, you may add " +
       "findings outside them under `### Non-blocking`; they never affect a verdict, now or later.",
     );
-    expect(slot).toContain("## Changed since the last quality review\n\n```diff\n" +
-      "diff --git a/x b/x\n+new line\n```");
+    expect(slot).toContain("## Changed since the last quality review\n\n```\n x | 1 +\n```");
+    expect(slot).toContain("git diff abc1234..HEAD");
     expect(slot).toContain("An entry under `### Non-blocking` is checked but never blocks.");
   });
 
@@ -486,8 +488,8 @@ describe("renderReviewerQualitySlot", () => {
       ...baseInputs,
       priorRounds: afterListing,
       commits: "a1 first",
-      diff: "whole branch",
-      changedSinceDiff: "",
+      stat: " whole | 1 +",
+      changedSinceStat: "",
     });
     expect(slot).toContain("(empty — no changes since `abc1234`)");
   });
@@ -498,19 +500,19 @@ describe("renderReviewerQualitySlot", () => {
         ...baseInputs,
         priorRounds: afterListing,
         commits: "a1 first",
-        diff: "whole branch",
+        stat: " whole | 1 +",
       }),
     ).toThrow(/verify mode anchored at abc1234 was rendered without its changed-since diff/);
   });
 
   it("keeps both mode blocks and the changed-since diff out of the correctness prompt", () => {
-    for (const changedSinceDiff of ["diff --git a/x b/x\n+new line", undefined]) {
+    for (const changedSinceStat of [" x | 1 +", undefined]) {
       const slot = renderReviewerSlot({
         ...baseInputs,
         priorRounds: afterListing,
         commits: "a1 first",
-        diff: "whole branch",
-        changedSinceDiff,
+      stat: " whole | 1 +",
+        changedSinceStat,
       });
       expect(slot).not.toContain("## Changed since the last quality review");
       expect(slot).not.toContain("This is the only pass that reviews the whole branch");
@@ -532,7 +534,7 @@ describe("renderReviewerQualitySlot", () => {
         chunkBranch: "sandbar/chunk-1-root",
       },
       commits: "a1 first",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     expect(slot).toContain("## This branch is part of a chunk");
     expect(slot).toContain("sandbar/chunk-1-root");
@@ -555,7 +557,7 @@ describe("renderReviewerQualitySlot", () => {
     const slot = renderReviewerQualitySlot({
       ...noStandards,
       commits: "a1 first",
-      diff: "diff",
+      stat: " x.ts | 1 +",
     });
     expect(slot).toContain("## Coding standards");
     expect(slot).not.toContain("### Project standards");
@@ -648,8 +650,8 @@ describe("reviewer prior-round history (#88, #121)", () => {
       ...baseInputs,
       priorRounds,
       commits: "a1 first",
-      diff: "diff",
-      changedSinceDiff: "",
+      stat: " x.ts | 1 +",
+      changedSinceStat: "",
     };
     return [renderReviewerSlot(inputs), renderReviewerQualitySlot(inputs)] as const;
   };
@@ -889,7 +891,7 @@ describe("the chunk-base slots (#61)", () => {
       ...baseInputs,
       base,
       commits: "a1 first",
-      diff: "diff --git a/x b/x\n+hi",
+      stat: " x | 1 +",
     });
 
   it("tells the implementer its branch was cut from the chunk branch", () => {
@@ -940,7 +942,7 @@ describe("the chunk-base slots (#61)", () => {
     expect(impl.indexOf("## This branch is part of a chunk")).toBeLessThan(
       impl.indexOf("No commits yet on this branch."),
     );
-    expect(impl).toContain("The diff below is");
+    expect(impl).toContain("The summary below");
 
     const rev = reviewerSlot(chunkBase);
     expect(rev.indexOf("## This branch is part of a chunk")).toBeLessThan(
@@ -949,8 +951,8 @@ describe("the chunk-base slots (#61)", () => {
     expect(rev.indexOf("## This branch is part of a chunk")).toBeLessThan(
       rev.indexOf("## Branch diff"),
     );
-    expect(rev).toContain("the commits and diff below");
-    expect(rev).not.toContain("the commits and diff above");
+    expect(rev).toContain("the commits and diff stat below");
+    expect(rev).not.toContain("the commits and diff stat above");
   });
 
   // Every auto-lane issue and every chunk root. The section must leave no

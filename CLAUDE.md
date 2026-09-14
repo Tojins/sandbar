@@ -527,8 +527,12 @@ outcomes.
   rejection.
   The orchestrator gates between attempts; agents never decide "green".
 - **Prompt prose lives in `prompts/*.md`**, loaded by `src/prompts.ts`; TS
-  keeps only structure. Every git range a prompt renders anchors at the issue
-  branch's SEED REF, never a bare branch name (#40, #61) — `src/prompt.ts`.
+  keeps only structure. No issue-loop prompt embeds a diff body (#158): the
+  implementer and both reviewer passes receive the commit list, diff stat and
+  exact seed-anchored command for reading hunks on demand; the first quality
+  pass must walk every file in the stat. Every git range a prompt renders
+  anchors at the issue branch's SEED REF, never a bare branch name (#40, #61)
+  — `src/prompt.ts`.
 - **One append-only event record is the run's source of truth (#70/#132).**
   Immediately after both daemon locks are acquired, `src/events.ts` creates
   `run-<stamp>/events.jsonl`; every event has monotonic `seq`, wall-clock `ts`
