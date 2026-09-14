@@ -41,10 +41,10 @@ export default {
   maxConcurrentGates: 1,
 
   // One image, both roles: the agent sandbox and the gate's runner. It bakes
-  // the npm and bower trees under /deps (the checkout's toolchain pins
-  // node-sass, so the base is Node 14 — see the Containerfile), and its
-  // rebuildOn re-resolves it per sandbox so an issue that moves a lockfile
-  // gets an agent whose baked /deps match its branch.
+  // the npm and bower trees under /deps on the Node 22 the checkout pins
+  // (see its Containerfile), and its rebuildOn re-resolves it per sandbox so
+  // an issue that moves a lockfile gets an agent whose baked /deps match its
+  // branch.
   sandboxImage,
   images: [
     {
