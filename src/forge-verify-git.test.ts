@@ -134,8 +134,8 @@ describe("realVerifyAdapter git primitives (real repos)", () => {
     await git(other, "push", "origin", "HEAD:refs/heads/main");
 
     const out = await adapter.fastForwardSource(mine);
-    expect(out.kind).toBe("rejected");
-    expect(out.kind === "rejected" && out.reason).toMatch(/non-fast-forward|fetch first|rejected/i);
+    expect(out.kind).toBe("refused");
+    expect(out.kind === "refused" && out.reason).toMatch(/non-fast-forward|fetch first|rejected/i);
     // The other party's commit is still the tip: a verified-but-stale sha must
     // never overwrite work that arrived while CI was running.
     expect(await remoteSha("refs/heads/main")).toBe(theirs);
@@ -147,7 +147,7 @@ describe("realVerifyAdapter git primitives (real repos)", () => {
     await git(other, "push", "origin", "HEAD:refs/heads/main");
 
     expect((await adapter.fastForwardSource(await git(work, "rev-parse", "HEAD"))).kind).toBe(
-      "rejected",
+      "refused",
     );
 
     const sync = await adapter.syncWithSource();
@@ -223,7 +223,7 @@ describe("realVerifyAdapter git primitives (real repos)", () => {
     });
     await commit(work, "c.txt", "three\n");
     const out = await raced.pushIntegration("sandbar/integration");
-    expect(out.kind).toBe("rejected");
+    expect(out.kind).toBe("refused");
     // And it did NOT clobber the other write.
     expect(await remoteSha("refs/heads/sandbar/integration")).not.toBe(before);
     expect(await remoteSha("refs/heads/sandbar/integration")).toBe(

@@ -43,12 +43,18 @@ export type IssueOutcome = {
  */
 export function finalizeKindForSkip(
   reason: Exclude<SkipReason, "silent-noop">,
-): "merge-conflict" | "forge-unverified" | "merge-gate-red" {
+):
+  | "merge-conflict"
+  | "forge-unverified"
+  | "landing-push-refused"
+  | "merge-gate-red" {
   switch (reason) {
     case "conflict":
       return "merge-conflict";
     case "forge-unverified":
       return "forge-unverified";
+    case "push-refused":
+      return "landing-push-refused";
     case "gate-red":
     case "install-failed":
       return "merge-gate-red";

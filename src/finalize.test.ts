@@ -20,10 +20,12 @@ import {
   REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE,
   SPEC_GAPS_COMMENT,
   finalizeAll,
+  finalizationIntendsNotReady,
   finalizeOne as finalizeOneImpl,
   issueNumberOf,
 } from "./finalize.js";
 import type { IssueRef } from "./merger.js";
+import type { PushResult } from "./push-result.js";
 
 const LABELS: LabelConfig = DEFAULT_LABELS;
 const { needsInfo: NEEDS_INFO, agentStuck: AGENT_STUCK } = DEFAULT_LABELS;
@@ -63,6 +65,7 @@ type Calls = {
 
 type Script = {
   pushError?: string;
+  pushResult?: PushResult;
   postCommentError?: string;
   deleteOk?: boolean;
   deleteError?: string;
@@ -95,6 +98,14 @@ function makeAdapter(
     async pushBranch(branch) {
       calls.pushes.push(branch);
       if (script.pushError !== undefined) throw new SandbarError(script.pushError);
+      return script.pushResult ?? { kind: "ok" };
+    },
+    async localBranchRecovery(branch) {
+      return {
+        tipSha: "abc123",
+        ref: `refs/heads/${branch}`,
+        repoDir: "/host/.sandbar/repo.git",
+      };
     },
     async deleteBranch(branch) {
       calls.deletes.push(branch);
@@ -303,6 +314,17 @@ describe("comment templates", () => {
 });
 
 describe("finalizeOne", () => {
+  it("requires queue-label readback for a refusal park from a normally queued terminal", () => {
+    expect(finalizationIntendsNotReady({
+      input: {
+        kind: "hard-error",
+        issue: issue(64),
+        specGaps: [],
+      },
+      action: { kind: "parked-local" },
+    })).toBe(true);
+  });
+
   it("posts one ordered spec-gap comment before a merged terminal's effects", async () => {
     const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
     const gaps = [
@@ -1252,8 +1274,12 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("read-only UI checker");
   });
 
-  it("read-only-agent-wrote: parks and comments when a rewound branch cannot be pushed", async () => {
-    const { adapter, calls } = makeAdapter({ pushError: "non-fast-forward" });
+  it("read-only-agent-wrote: parks and comments when origin refuses the branch", async () => {
+    const refusal =
+      "! [remote rejected] topic -> topic (push protection declined)";
+    const { adapter, calls } = makeAdapter({
+      pushResult: { kind: "refused", reasons: [refusal] },
+    });
     const i = issue(45);
 
     const action = await finalizeOne(
@@ -1274,8 +1300,50 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
-    expect(calls.comments[0]!.body).toContain("non-fast-forward");
+    expect(calls.comments[0]!.body).toContain(refusal);
+    expect(calls.comments[0]!.body).toContain("abc123");
+    expect(calls.comments[0]!.body).toContain("refs/heads/");
+    expect(calls.comments[0]!.body).toContain("/host/.sandbar/repo.git");
+    expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
+  });
+
+  it.each([
+    {
+      result: { kind: "race" } as const,
+      failure: "non-fast-forward",
+    },
+    {
+      result: { kind: "fatal", reason: "ssh: handshake failed" } as const,
+      failure: "ssh: handshake failed",
+    },
+  ])("read-only-agent-wrote: parks and comments after a $result.kind push failure", async ({
+    result,
+    failure,
+  }) => {
+    const { adapter, calls } = makeAdapter({ pushResult: result });
+    const i = issue(45);
+
+    const action = await finalizeOne(
+      {
+        kind: "read-only-agent-wrote",
+        issue: i,
+        actor: "reviewer",
+        latestReviewerProse: "Reviewer rewound the branch.",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "parked-local" });
+    expect(calls.reclaims).toEqual([
+      { branch: i.branch, keep: expect.stringContaining("human inspection") },
+    ]);
+    expect(calls.comments[0]!.body).toContain(failure);
     expect(calls.comments[0]!.body).toContain("authoritative state");
+    expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
   });
 
   it("read-only-agent-wrote: does not park before the handoff comment succeeds", async () => {
@@ -1295,6 +1363,316 @@ describe("finalizeOne", () => {
     ).rejects.toThrow("comment failed");
 
     expect(calls.comments).toHaveLength(1);
+    expect(calls.labelEdits).toEqual([]);
+  });
+
+  it("needs-info turns a server refusal into an actionable local park", async () => {
+    const refusal =
+      "! [remote rejected] topic -> topic (secret scanning push protection)";
+    const { adapter, calls } = makeAdapter({
+      pushResult: { kind: "refused", reasons: [refusal] },
+    });
+    const i = issue(63);
+
+    const action = await finalizeOne(
+      {
+        kind: "needs-info",
+        issue: i,
+        questions: "Which deployment account should this use?",
+        strandedHead: null,
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "parked-local" });
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.body).toContain(refusal);
+    expect(calls.comments[0]!.body).toContain("Which deployment account");
+    expect(calls.comments[0]!.body).toContain("abc123");
+    expect(calls.comments[0]!.body).toContain(i.branch);
+    expect(calls.labelEdits).toEqual([{
+      n: 63,
+      remove: [READY_FOR_AGENT],
+      add: [AGENT_STUCK],
+    }]);
+  });
+
+  it("hard-error with unpublished work parks when origin refuses that branch", async () => {
+    const { adapter, calls } = makeAdapter({
+      aheadOfSeed: true,
+      pushResult: {
+        kind: "refused",
+        reasons: ["! [remote rejected] topic -> topic (hook declined)"],
+      },
+    });
+
+    const action = await finalizeOne(
+      { kind: "hard-error", issue: issue(64) },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "parked-local" });
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.labelEdits).toEqual([{
+      n: 64,
+      remove: [READY_FOR_AGENT],
+      add: [AGENT_STUCK],
+    }]);
+  });
+
+  it.each([
+    {
+      name: "quota",
+      input: {
+        kind: "quota",
+        issue: issue(70),
+        provider: "codex",
+        window: "seven_day",
+        resetsAt: 42,
+      } as const,
+      context: "subscription quota window",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "credential",
+      input: {
+        kind: "credential",
+        issue: issue(71),
+        provider: "codex",
+        detail: "token revoked",
+      } as const,
+      context: "CODEX_AUTH_JSON",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "UI prototype",
+      input: {
+        kind: "needs-ui-prototype",
+        issue: issue(72),
+        uiImpact: "invented navigation",
+        strandedHead: null,
+      } as const,
+      context: "invented navigation",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "partition",
+      input: {
+        kind: "needs-partition",
+        issue: issue(73),
+        cause: "measured",
+        slot: "review-quality",
+        size: 700_000,
+        budget: 600_000,
+        detail: "split the migrations",
+      } as const,
+      context: "split the migrations",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "needs-human",
+      input: {
+        kind: "needs-human",
+        issue: issue(74),
+        cause: "gate-red",
+        failureTrace: "gate exploded",
+        latestReviewerProse: null,
+        budgetExhausted: null,
+        strandedHead: null,
+      } as const,
+      context: "gate exploded",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "review budget",
+      input: {
+        kind: "review-budget-exhausted",
+        issue: issue(75),
+        budget: "correctness",
+        roundsUsed: 4,
+        latestReviewerProse: "still violates the contract",
+      } as const,
+      context: "still violates the contract",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "landing conflict",
+      input: { kind: "merge-conflict", issue: issue(76) } as const,
+      context: "origin refused to publish",
+      remove: [],
+    },
+    {
+      name: "landing gate",
+      input: { kind: "merge-gate-red", issue: issue(77) } as const,
+      context: "origin refused to publish",
+      remove: [],
+    },
+    {
+      name: "landing verification",
+      input: { kind: "forge-unverified", issue: issue(78) } as const,
+      context: "origin refused to publish",
+      remove: [],
+    },
+  ])("parks a refused $name publication with its terminal context", async ({
+    input,
+    context,
+    remove,
+  }) => {
+    const refusal =
+      `! [remote rejected] ${input.issue.branch} -> ${input.issue.branch} (policy declined)`;
+    const { adapter, calls } = makeAdapter({
+      aheadOfSeed: true,
+      pushResult: { kind: "refused", reasons: [refusal] },
+    });
+
+    const action = await finalizeOne(input, adapter, LABELS);
+
+    expect(action).toEqual({ kind: "parked-local" });
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]).toMatchObject({ n: Number(input.issue.id) });
+    expect(calls.comments[0]!.body).toContain(refusal);
+    expect(calls.comments[0]!.body).toContain(context);
+    expect(calls.labelEdits).toEqual([{
+      n: Number(input.issue.id),
+      remove,
+      add: [AGENT_STUCK],
+    }]);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
+  });
+
+  it("keeps stranded-commit recovery beside a refused UI handoff", async () => {
+    const i = issue(79);
+    const { adapter, calls } = makeAdapter({
+      aheadOfSeed: true,
+      pushResult: {
+        kind: "refused",
+        reasons: ["! [remote rejected] topic -> topic (policy declined)"],
+      },
+    });
+
+    await finalizeOne({
+      kind: "needs-ui-prototype",
+      issue: i,
+      uiImpact: "new settings hierarchy",
+      strandedHead: {
+        branch: i.branch,
+        headRef: null,
+        headSha: "stranded999",
+        branchSha: "base000",
+        branchIsAncestor: false,
+      },
+    }, adapter, LABELS);
+
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.body).toContain("new settings hierarchy");
+    expect(calls.comments[0]!.body).toContain("stranded999");
+    expect(calls.comments[0]!.body).toContain("git branch <rescue-name> stranded999");
+  });
+
+  it("does not label a refused publishing handoff when its comment fails", async () => {
+    const { adapter, calls } = makeAdapter({
+      pushResult: {
+        kind: "refused",
+        reasons: ["! [remote rejected] topic -> topic (policy declined)"],
+      },
+      postCommentError: "comment failed",
+    });
+
+    await expect(finalizeOne({
+      kind: "needs-info",
+      issue: issue(80),
+      questions: "which account?",
+      strandedHead: null,
+    }, adapter, LABELS)).rejects.toThrow("comment failed");
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.labelEdits).toEqual([]);
+  });
+
+  it("fails loud when refused publishing cannot apply its handoff label", async () => {
+    const { adapter, calls } = makeAdapter({
+      pushResult: {
+        kind: "refused",
+        reasons: ["! [remote rejected] topic -> topic (policy declined)"],
+      },
+      labelEditOk: false,
+    });
+
+    await expect(finalizeOne({
+      kind: "needs-info",
+      issue: issue(81),
+      questions: "which account?",
+      strandedHead: null,
+    }, adapter, LABELS)).rejects.toBeInstanceOf(SandbarError);
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.labelEdits).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: "quota",
+      input: {
+        kind: "quota",
+        issue: issue(82),
+        provider: "codex",
+        window: "seven_day",
+      } as const,
+    },
+    {
+      name: "credential",
+      input: {
+        kind: "credential",
+        issue: issue(83),
+        provider: "codex",
+        detail: "token revoked",
+      } as const,
+    },
+    {
+      name: "hard error",
+      input: { kind: "hard-error", issue: issue(84) } as const,
+    },
+  ])("skips refused $name tracker writes when the issue has closed", async ({ input }) => {
+    const { adapter, calls } = makeAdapter({
+      aheadOfSeed: true,
+      issueState: "CLOSED",
+      pushResult: {
+        kind: "refused",
+        reasons: ["! [remote rejected] topic -> topic (policy declined)"],
+      },
+    });
+
+    await expect(finalizeOne(input, adapter, LABELS))
+      .resolves.toEqual({ kind: "skipped-closed" });
+    expect(calls.reclaims).toEqual([{ branch: input.issue.branch }]);
+    expect(calls.pushes).toEqual([input.issue.branch]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([]);
+    expect(calls.deletes).toEqual([]);
+    expect(calls.forceDeletes).toEqual([]);
+  });
+
+  it.each([
+    { result: { kind: "race" } as const, message: "remote branch moved" },
+    {
+      result: { kind: "fatal", reason: "ssh: handshake failed" } as const,
+      message: "handshake failed",
+    },
+  ])("keeps $result.kind push failures loud", async ({ result, message }) => {
+    const { adapter, calls } = makeAdapter({ pushResult: result });
+
+    await expect(finalizeOne(
+      {
+        kind: "needs-info",
+        issue: issue(65),
+        questions: "q",
+        strandedHead: null,
+      },
+      adapter,
+      LABELS,
+    )).rejects.toThrow(message);
+    expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([]);
   });
 
@@ -1543,6 +1921,41 @@ describe("finalizeOne", () => {
     await expect(
       finalizeOne({ kind: "merge-conflict", issue: issue(45) }, adapter, LABELS),
     ).rejects.toThrow(SandbarError);
+  });
+
+  it("landing-push-refused parks from the cache without retrying the refused push", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+
+    const action = await finalizeOne(
+      { kind: "landing-push-refused", issue: i },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "parked-local" });
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
+    expect(calls.pushes).toEqual([]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [], add: [AGENT_STUCK] },
+    ]);
+  });
+
+  it("landing-push-refused fails loud when its handoff label cannot be applied", async () => {
+    const { adapter, calls } = makeAdapter({ labelEditOk: false });
+
+    await expect(finalizeOne(
+      { kind: "landing-push-refused", issue: issue(45) },
+      adapter,
+      LABELS,
+    )).rejects.toBeInstanceOf(SandbarError);
+    expect(calls.pushes).toEqual([]);
+    expect(calls.labelEdits).toEqual([{
+      n: 45,
+      remove: [],
+      add: [AGENT_STUCK],
+    }]);
   });
 
   it("silent-noop-exhausted with a failed handoff label flip: throws SandbarError", async () => {

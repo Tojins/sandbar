@@ -69,6 +69,13 @@
 //                     the difference with a second question rather than
 //                     guessing (`ChunkRefLookup`), because guessing wrong
 //                     spends a label a human applied.
+//   * refused       — origin was reached and its server refused the content or
+//                     one of the refs in a Phase-A atomic chunk push. Every
+//                     member composed into that push is parked with the exact
+//                     refusal and its host-cache recovery point; later chunk
+//                     groups and Phase B continue. This does not spend a
+//                     reviewed chunk's `land` request: the refusal happened
+//                     while growing the review branch, before that landing.
 //   * deferred      — the same cycle put ANOTHER member's work on the chunk
 //                     branch (#61 plans a whole layer at a time, so a chunk
 //                     grows while a request is outstanding). Landing then

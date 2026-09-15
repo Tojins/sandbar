@@ -264,8 +264,9 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
 });
 
 describe("a failed read is never rendered as an empty slot (#40)", () => {
-  // The base ref not resolving is exactly #40's shape. Whatever else it is, it
-  // must not come back as "there is no work here".
+  // The base ref not resolving is exactly #40's shape. Both independent prompt
+  // reads use it concurrently, so either named read may be the first rejection;
+  // whatever else it is, it must not come back as "there is no work here".
   it("throws out of the implementer slot instead of claiming no commits", async () => {
     await commitOnBranch();
 
@@ -275,7 +276,9 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
     );
 
     await expect(built).rejects.toBeInstanceOf(SandbarError);
-    await expect(built).rejects.toThrow(/commit list/);
+    await expect(built).rejects.toThrow(
+      /could not read the (commit list|branch diff stat)/,
+    );
   });
 
   // Asserted on the message, not just the class: swallow the read and the

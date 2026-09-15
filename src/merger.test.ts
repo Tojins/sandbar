@@ -392,6 +392,13 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.order.push("chunk-push");
       return r;
     },
+    async localBranchRecovery(branch) {
+      return {
+        tipSha: `tip-${branch}`,
+        ref: `refs/heads/${branch}`,
+        repoDir: "/host/.sandbar/repo.git",
+      };
+    },
     async ensureChunkPullRequest({ chunkBranch, title, body }) {
       calls.chunkPrs.push({ chunkBranch, title, body });
       calls.order.push("chunk-pr");
@@ -1186,6 +1193,23 @@ describe("runMergerWithAdapter — push lifecycle", () => {
     );
     expect(calls.closes).toEqual([]);
   });
+
+  it("source push refusal halts without retry and names the refusal", async () => {
+    const refusal =
+      "! [remote rejected] HEAD -> main (protected branch hook declined)";
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      pushes: [{ kind: "refused", reasons: [refusal] }],
+    });
+
+    await expect(runMergerWithAdapter([issue(42)], adapter)).rejects.toThrow(
+      new RegExp(`refused: ${refusal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+    );
+    expect(calls.pushes).toBe(1);
+    expect(calls.pulls).toBe(0);
+    expect(calls.closes).toEqual([]);
+  });
 });
 
 describe("runMergerWithAdapter — post-push close retries (#14)", () => {
@@ -1706,7 +1730,7 @@ describe("runMergerWithAdapter — verified merge mode", () => {
       heads: ["base", "p1", "landed"],
     });
     const { verify } = makeVerifyFake({
-      integrationPush: { kind: "rejected", reason: "stale info" },
+      integrationPush: { kind: "refused", reason: "stale info" },
     });
 
     await expect(
@@ -1789,7 +1813,7 @@ describe("runMergerWithAdapter — verified merge mode", () => {
       heads: ["base", "p1", "p2", "landed"],
     });
     const { verify } = makeVerifyFake({
-      integrationPush: { kind: "rejected", reason: "stale info" },
+      integrationPush: { kind: "refused", reason: "stale info" },
     });
 
     const err = await runMergerWithAdapter(
@@ -1865,7 +1889,7 @@ describe("runMergerWithAdapter — verified merge mode", () => {
       heads: ["base", "p1", "landed"],
     });
     const { verify } = makeVerifyFake({
-      integrationPush: { kind: "rejected", reason: "stale info" },
+      integrationPush: { kind: "refused", reason: "stale info" },
     });
 
     const err = await runMergerWithAdapter([issue(7)], adapter, undefined, undefined, {
@@ -1887,7 +1911,7 @@ describe("runMergerWithAdapter — verified merge mode", () => {
     });
     const { verify } = makeVerifyFake();
     verify.fastForwardSource = async () => ({
-      kind: "rejected",
+      kind: "refused",
       reason: "non-fast-forward",
     });
 
@@ -2127,6 +2151,47 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
     expect((err as MergerError).message).toContain("#44");
     // The failed group's members keep their branches and their queue label.
     expect(calls.removedLabels).toEqual([]);
+  });
+
+  it("parks every member of a refused chunk push and continues with later chunks", async () => {
+    const refusal =
+      "! [remote rejected] HEAD -> sandbar/chunk-42-c (workflow scope required)";
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok", "ok"],
+      gates: [{ ok: true }, { ok: true }, { ok: true }],
+      chunkPushes: [
+        { kind: "refused", reasons: [refusal] },
+        { kind: "ok" },
+      ],
+    });
+
+    const summary = await runMergerWithAdapter(
+      [chunkIssue(42), chunkIssue(43, 42), chunkIssue(44)],
+      adapter,
+    );
+
+    expect(summary.skipped.map(({ issue, reason }) => [issue.id, reason]))
+      .toEqual([["42", "push-refused"], ["43", "push-refused"]]);
+    expect(summary.chunkLanded.map((landing) => landing.issue.id)).toEqual(["44"]);
+    expect(calls.chunkPushes.map(({ branch }) => branch)).toEqual([
+      "sandbar/chunk-42-c",
+      "sandbar/chunk-44-c",
+    ]);
+    expect(calls.removedLabels).toEqual([
+      { n: 42, label: READY_FOR_AGENT_LABEL },
+      { n: 43, label: READY_FOR_AGENT_LABEL },
+    ]);
+    expect(calls.comments).toHaveLength(2);
+    expect(calls.comments.map(({ n }) => n)).toEqual([42, 43]);
+    for (const n of [42, 43]) {
+      const member = chunkIssue(n, n === 43 ? 42 : undefined);
+      const comment = calls.comments.find((call) => call.n === n)!;
+      expect(comment.msg).toContain(refusal);
+      expect(comment.msg).toContain(`tip-${member.branch}`);
+      expect(comment.msg).toContain(`refs/heads/${member.branch}`);
+      expect(comment.msg).toContain("/host/.sandbar/repo.git");
+      expect(comment.msg).toContain("ready-for-agent");
+    }
   });
 
   it("reads no head sha and checks out nothing when no issue carries a chunk", async () => {

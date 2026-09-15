@@ -246,6 +246,7 @@ describe("finalizeKindForSkip", () => {
     expect(finalizeKindForSkip("gate-red")).toBe("merge-gate-red");
     expect(finalizeKindForSkip("install-failed")).toBe("merge-gate-red");
     expect(finalizeKindForSkip("forge-unverified")).toBe("forge-unverified");
+    expect(finalizeKindForSkip("push-refused")).toBe("landing-push-refused");
   });
 
   it("throws rather than guessing on an unknown reason", () => {

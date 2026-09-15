@@ -26,6 +26,7 @@ describe("finalize real adapter git classifications", () => {
   let root: string;
   let seed: string;
   let cache: string;
+  let origin: string;
   const merged = "sandbar/issue-1-merged";
   const unmerged = "sandbar/issue-2-unmerged";
   const chunkBranch = "sandbar/chunk-3-root";
@@ -36,7 +37,7 @@ describe("finalize real adapter git classifications", () => {
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "sandbar-finalize-git-"));
     seed = join(root, "seed");
-    const origin = join(root, "origin.git");
+    origin = join(root, "origin.git");
     const layout = repoLayout(root, ".sandbar");
     cache = layout.repoDir;
 
@@ -88,6 +89,37 @@ describe("finalize real adapter git classifications", () => {
   it("classifies branches by containment in origin/main", async () => {
     expect(await adapter().branchIsContainedInOrigin(merged)).toBe(true);
     expect(await adapter().branchIsContainedInOrigin(unmerged)).toBe(false);
+  });
+
+  it("names the exact durable cache recovery point", async () => {
+    const recovery = await adapter().localBranchRecovery(unmerged);
+    const { stdout } = await exec("git", ["rev-parse", unmerged], {
+      cwd: cache,
+      env: GIT_ENV,
+    });
+
+    expect(recovery).toEqual({
+      tipSha: stdout.trim(),
+      ref: `refs/heads/${unmerged}`,
+      repoDir: cache,
+    });
+  });
+
+  it("reports a real server-refused issue ref with git's per-ref line", async () => {
+    await writeFile(
+      join(origin, "hooks", "pre-receive"),
+      "#!/bin/sh\nexit 1\n",
+      { mode: 0o755 },
+    );
+
+    const result = await adapter().pushBranch(unmerged);
+
+    expect(result.kind).toBe("refused");
+    if (result.kind !== "refused") return;
+    expect(result.reasons).toHaveLength(1);
+    expect(result.reasons[0]).toMatch(
+      /!\s+\[remote rejected\]\s+sandbar\/issue-2-unmerged -> sandbar\/issue-2-unmerged \(pre-receive hook declined\)$/,
+    );
   });
 
   it("measures unpublished work from the source or chunk seed", async () => {

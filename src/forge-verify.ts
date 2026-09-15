@@ -616,7 +616,7 @@ export async function waitForChecks(
 
 export type PushOutcome =
   | { readonly kind: "ok" }
-  | { readonly kind: "rejected"; readonly reason: string };
+  | { readonly kind: "refused"; readonly reason: string };
 
 // One shape for both kinds of pull request sandbar opens, declared beside the
 // create-or-update primitive that returns it (#62) and re-exported here: this
@@ -857,7 +857,7 @@ export async function runVerifiedLanding(
     const pushed = await deps.verify.pushIntegration(opts.integrationBranch);
     if (pushed.kind !== "ok") {
       return fatal(
-        `push to integration branch '${opts.integrationBranch}' was rejected: ${pushed.reason}`,
+        `push to integration branch '${opts.integrationBranch}' was refused: ${pushed.reason}`,
       );
     }
 
@@ -1220,7 +1220,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
         );
         return { kind: "ok" };
       } catch (err) {
-        return { kind: "rejected", reason: pushErrorReason(err) };
+        return { kind: "refused", reason: pushErrorReason(err) };
       }
     },
 
@@ -1380,7 +1380,7 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
         );
         return { kind: "ok" };
       } catch (err) {
-        return { kind: "rejected", reason: pushErrorReason(err) };
+        return { kind: "refused", reason: pushErrorReason(err) };
       }
     },
 
