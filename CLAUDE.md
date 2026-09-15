@@ -766,10 +766,10 @@ npm run build && node dist/cli.js --config <path>
   not carve one coherent outcome into slices merely because it spans many
   modules or looks large: a chain of slices lands N+1 on top of N without
   either having driven anything, and each slice is reviewed without the half
-  that gives it its reason. The #158 classifier requires at least two
-  independently landable outcomes that are each coarsely estimated as sizeable
-  (roughly 100+ changed lines or 3+ files). That estimate is a floor for
-  splitting named outcomes, not by itself a reason to split. The measured
+  that gives it its reason. The #158 classifier asks for a split only
+  when the whole issue plausibly exceeds `maxContextChars` AND it names
+  outcomes that each land alone; the per-piece estimates in its reason are for
+  the human reading the comment, never the reason to split. The measured
   `maxContextChars` enforcer remains the authority once implementation begins:
   when the actual branch picture is over budget, the work must be repartitioned
   into an ordered `## Blocked by` chain whose members each fit. Genuinely

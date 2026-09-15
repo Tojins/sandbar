@@ -314,10 +314,9 @@ asked to and has finished draining.
 ### Context and convergence budgets
 
 Before attempt 1, `partitionCheck` (default `true`) makes one cold,
-read-only classification that asks for a split only when the issue names at
-least two independently landable deliverables each estimated at roughly 100 or
-more changed lines or 3 or more files. Disable it only when work is partitioned
-before it reaches Sandbar.
+read-only classification that asks for a split only when the whole issue
+plausibly exceeds `maxContextChars` and it names deliverables that each land
+alone. Disable it only when work is partitioned before it reaches Sandbar.
 
 `maxContextChars` (default 600,000) bounds the complete working picture for an
 issue-loop role: its rendered prompt plus the seed-anchored net diff it is told

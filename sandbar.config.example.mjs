@@ -80,7 +80,7 @@ export default {
   // attempt 1. Disable this in hosts that cannot ship user-visible UI.
   // uiPrototypeCheck: true,
 
-  // Split only when two landable pieces each estimate to 100+ lines or 3+ files.
+  // Asks for a split only when the whole issue plausibly exceeds maxContextChars.
   // Disable only when issues are partitioned before entering this queue.
   // partitionCheck: true,
 

@@ -1,8 +1,8 @@
 // Pre-attempt issue partition classifier token parser (#158).
 //
-// Before implementation, the classifier decides whether this is one coherent
-// deliverable or at least two independently landable deliverables that are each
-// coarsely estimated as sizeable; the floor itself lives in the prompt template.
+// Before implementation, the classifier decides whether the whole issue
+// plausibly exceeds the context budget and names deliverables that each land
+// alone; the gate itself lives in the prompt template.
 // Its token is deliberately distinct from both the UI classifier and the
 // implementer's promise. PARTITION requires the explanation finalise will hand
 // to the human.

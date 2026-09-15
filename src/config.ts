@@ -629,8 +629,9 @@ export type RunConfig = {
   // implementer unless explicitly split, while the check itself defaults on.
   readonly uiPrototypeCheck?: boolean;
   readonly uiCheckModelId?: string;
-  // Cold fan-out and coarse per-deliverable size check before attempt 1 (#158).
-  // Its size floor lives in the prompt template. It uses the implementer
+  // Cold fan-out check before attempt 1 (#158): a split is asked for only
+  // when the whole issue plausibly exceeds `maxContextChars` and it names
+  // outcomes that land alone. It uses the implementer
   // routing, runs only while the branch is still at its seed, and may be
   // disabled for hosts that partition work before queueing it.
   readonly partitionCheck?: boolean;
