@@ -2693,6 +2693,30 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
+  it("keeps gate-derived env literal instead of applying config.env fallback", async () => {
+    await git(["branch", "sandbar/issue-166-env"], dir);
+    process.env.GATE_EMPTY = "host-value-must-not-win";
+    try {
+      const provider = makeLocalProvider();
+      const sandbox = await createSandbox({
+        env: { DECLARED: "configured" },
+        literalEnv: { GATE_EMPTY: "", CONTAINER_HOST: "unix:///run/podman.sock" },
+        branch: "sandbar/issue-166-env",
+        sandbox: provider,
+        layout: layoutFor(dir),
+      });
+      await sandbox.close();
+
+      expect(provider.capturedEnv).toMatchObject({
+        DECLARED: "configured",
+        GATE_EMPTY: "",
+        CONTAINER_HOST: "unix:///run/podman.sock",
+      });
+    } finally {
+      delete process.env.GATE_EMPTY;
+    }
+  });
+
   // #5 became structural in #38: there is no path to get wrong and no fixed
   // `.sandbar/.env` to fall through to, so a stale file at the old location is
   // just a file. What is still worth pinning is that the record the caller

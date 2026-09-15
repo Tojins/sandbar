@@ -12,6 +12,9 @@
 // else. `agent-providers.ts` owns which NAME resolves to which of them. Codex's
 // file-shaped ChatGPT credential is now a run-owned shared mount (#134), kept
 // outside this provider command; `codex-auth.ts` owns its lifecycle.
+// Gate-step attachments (#166) enter through the same existing env/mount
+// provider boundary: config.env retains its allowlist fallback semantics while
+// the gate's own env stays literal, and the provider sees one final record.
 //
 // A provider's parser answers in seven registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
@@ -503,6 +506,10 @@ export type CreateSandboxOptions = {
   // when empty — see env.ts. A VALUE since #38: sandbar names no env file, and
   // there is no hidden `<cwd>/.sandbar/.env` second source to fall through to.
   env: Record<string, string>;
+  // Container-literal variables derived from the gate step containers (#166).
+  // Unlike config.env, an empty value stays empty rather than inheriting from
+  // the host. Config resolution proves these keys do not overlap `env`.
+  literalEnv?: Readonly<Record<string, string>>;
   // Worktree already created by prepareWorktree(). When set, createSandbox
   // skips prune/create/copyToWorktree/onWorktreeReady (all done by
   // prepareWorktree) and only brings up the container. Lets the caller learn
@@ -2636,7 +2643,10 @@ export const createSandbox = async (
   let providerHandle: SandboxHandle;
   let sandboxRepoDir: string;
   try {
-    const resolvedEnv = resolveSandboxEnv(options.env);
+    const resolvedEnv = {
+      ...resolveSandboxEnv(options.env),
+      ...(options.literalEnv ?? {}),
+    };
     // mergeProviderEnv: agent env is {} on sandbar's path; provider env layers
     // over resolved (overlap between agent⨯sandbox would throw, but agent={}).
     const env = { ...resolvedEnv, ...options.sandbox.env };

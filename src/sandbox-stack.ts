@@ -9,8 +9,10 @@
 // unattractive: `--pod` and `--userns=keep-id` are refused together, a pod
 // member's uid maps to a subuid (EACCES on the worktree, the gate's D3 rule
 // from the other side), and `claude --dangerously-skip-permissions` refuses to
-// run as root. The isolation is structural: this is a DIFFERENT namespace from
-// the gate's pod, so the agent cannot reach the stack its verdict is formed in.
+// run as root. The network isolation is structural: this is a DIFFERENT
+// namespace from the gate's pod, so the app beside the agent is never the app
+// whose behavior forms the verdict. A gate-derived runtime socket may provide
+// control-plane access (#166); it does not merge the namespaces or verdicts.
 //
 // Ordering. Up: worktree → `onWorktreeReady` → anchor → siblings →
 // `onSandboxReady` — siblings BEFORE the sandbox-ready hooks, because those

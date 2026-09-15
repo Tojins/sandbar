@@ -1353,6 +1353,7 @@ export async function run(
     ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
     scope,
     gateStack: config.gateStack,
+    sandboxGateAttachments: config.sandboxGateAttachments,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
     adrDir: config.adrDir,

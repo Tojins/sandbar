@@ -783,6 +783,16 @@ describe("renderSandboxStackSlot (#44)", () => {
     expect(slot).toMatch(/restarts a sibling/i);
   });
 
+  it("says no runtime is provided only when the gate contributes no attachments", () => {
+    expect(renderSandboxStackSlot([up])).toMatch(/not given a container runtime/i);
+
+    const attached = renderSandboxStackSlot([up], true);
+    expect(attached).not.toMatch(/not given a container runtime/i);
+    expect(attached).toMatch(/mounts and environment.*also attached/is);
+    expect(attached).toMatch(/runtime-backed tests/i);
+    expect(attached).not.toMatch(/stack is a separate namespace you cannot reach/i);
+  });
+
   // #152: the slot used to offer `gateStack` as "ordinary code you can edit",
   // and an implementer that believes it spends its rounds making the branch fit
   // a stack it cannot move. Both halves are load-bearing — the stack is fixed

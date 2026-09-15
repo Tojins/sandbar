@@ -240,9 +240,13 @@ outcomes.
 - **Every shell-out names its repo; nothing inherits `process.cwd()` (#34),**
   and every `gh` call passes `--repo` (`src/repo-ref.ts`). Preflight verifies
   the configured tracker and the git remote agree on host and `owner/name`.
-- **Per-issue git and podman isolation (#98, #28).** Issue and merger trees are
+- **Per-issue git and podman isolation (#98, #28, #166).** Issue and merger trees are
   hardlink clones of the host-only bare cache; no container mounts the cache,
-  and each sandbox can write only its own repository. Gate containers get an
+  and each sandbox's own repository mount names only its issue clone. It also
+  inherits the mounts and env of gate step runners: this adds no authority the
+  implementer's code did not already exercise when the gate ran it, but can
+  include a same-user runtime socket and the host paths that runtime can mount.
+  Gate containers get an
   empty tmpfs over `.git`, while UI-check and reviewer writes are detected and
   parked for human inspection. The corollary: an attempt's commits live in the
   clone until a host-side fetch publishes them, so removing a clone is where work can be
@@ -266,11 +270,15 @@ outcomes.
 - **The gate stack is config-driven (#24)** and `resolveGateStack` validates it
   before the lock. `src/gate-stack.ts`'s header is authoritative for the rest:
   lifecycles, readiness, wedge detection, bounded podman calls, timeouts, one
-  pod per stack.
+  pod per stack. The agent sandbox derives the mounts and env of each container
+  named by a step (#166); conflicting runner values/destinations and collisions
+  with `config.env` are config errors, not precedence rules.
 - **The sandbox stack (#44).** `inSandbox: true` gate containers get a second
   copy beside the agent, in a netns chain off the sandbox container (a pod
   cannot host keep-id). Logs are followed to read-only files at
-  `/sandbar/logs/<name>.log`; there is no restart. `src/sandbox-stack.ts`.
+  `/sandbar/logs/<name>.log`; there is no restart. A derived runtime socket may
+  expose the gate's control plane, but the sibling and gate network namespaces
+  and verdicts remain separate. `src/sandbox-stack.ts`.
 - **An image that bakes dependencies is a function of the branch (#37, #46).**
   `images[].rebuildOn` + fingerprint labels; an unbuildable image is a gate
   red, not a HARD-ERROR. Appending the driver-owned tools is infrastructure and
@@ -762,10 +770,12 @@ npm run build && node dist/cli.js --config <path>
   changes. glibc, pinned to the host's node major,
   because `node_modules` is installed on the host by the `onWorktreeReady` hook
   and shared through the bind mount.
-- **The gate runs the podman-layer tests over the host's socket (#48)** —
+- **The gate and implementer run the podman-layer tests over the host's socket
+  (#48, #166)** —
   `CONTAINER_HOST` plus a read-only socket mount; test containers are scoped
-  siblings of the run's own (#47). What a human still runs by hand is exactly
-  three host-only files: `gate-stack-hostpodman.test.ts` (local-client and
+  siblings of the run's own (#47). The sandbox derives both declarations from
+  the gate runner, with no installation config field. What remains host-only is
+  exactly three files: `gate-stack-hostpodman.test.ts` (local-client and
   systemd-session facts) and `sandbox-stack-podman.test.ts` (keep-id anchor
   chain, #44), plus `container-resources-podman.test.ts` (the host-side cgroup
   path returned by a local rootless Podman, #141).
