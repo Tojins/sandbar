@@ -22,7 +22,7 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "cleanup.ts": 1,
   "cli.ts": 2,
   "containers.ts": 1,
-  "agent-tools.ts": 7,
+  "agent-tools.ts": 5,
   "ensure-images.ts": 3,
   "finalize.ts": 4,
   "forge-verify.ts": 6,

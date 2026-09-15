@@ -1744,10 +1744,10 @@ export function resolveImages(
 // be a function of does not exist yet" — a true statement about the wrong
 // moment, since the issue worktree is prepared before the sandbox is created
 // and the branch's files are on disk in time. It is resolved once per sandbox
-// rather than once per attempt, and a failed build falls back to the declared
-// tag rather than wedging the container the fix would be written in;
-// `resolveSandboxImage` in agent-tools.ts carries both halves of that
-// argument.
+// rather than once per attempt. A failed branch-recipe build falls back to the
+// declared tag rather than wedging the container the fix would be written in;
+// a failed driver-owned tools layer propagates as infrastructure.
+// `resolveSandboxImage` in agent-tools.ts carries that authority boundary.
 export function checkRebuildOnIsUsed(
   images: readonly BuiltImage[],
   gateStack: ResolvedGateStack,

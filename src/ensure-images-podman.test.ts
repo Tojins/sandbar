@@ -145,6 +145,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       `executes the generated git, user, and ${selectedVariant} selection contract over ${packageManager}`,
       async ({ expect, task, onTestFinished }) => {
         const tag = testImageTag(`agent-recipe-${selectedVariant}-${task.id}`);
+        const toolsTag = testImageTag(`agent-tools-${selectedVariant}-${task.id}`);
         const context = await mkdtemp(join(tmpdir(), "sandbar-agent-recipe-"));
         onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
         const artifact = AGENT_PROVIDER_PACKAGES.codex.artifacts.x64[0]!;
@@ -162,18 +163,25 @@ describe.runIf(available)("ensureImages against real podman", () => {
           },
         };
         await writeFile(
-          join(context, "Containerfile"),
-          agentToolsContainerfile(base, ["codex"], {
-            arch: "x64", packages, libc: selectedVariant,
-          }),
-        );
-        await writeFile(
           join(context, "codex-glibc"),
           "#!/bin/sh\necho 'codex glibc fixture'\n",
         );
         await writeFile(
           join(context, "codex-musl"),
           "#!/bin/sh\necho 'codex musl fixture'\n",
+        );
+        await writeFile(
+          join(context, "Containerfile"),
+          `FROM scratch\nCOPY --chmod=0755 codex-${selectedVariant} /usr/local/bin/codex\n`,
+        );
+        await buildImage({ tag: toolsTag, containerfile: "<generated>" }, {
+          root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+        });
+        await writeFile(
+          join(context, "Containerfile"),
+          agentToolsContainerfile(base, toolsTag, ["codex"], {
+            arch: "x64", packages, libc: selectedVariant,
+          }),
         );
         await buildImage({ tag, containerfile: "<generated>" }, {
           root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
@@ -204,6 +212,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
     async ({ expect, task, onTestFinished }) => {
       const uidBaseTag = testImageTag(`uid-base-${task.id}`);
       const tag = testImageTag(`uid-recipe-${task.id}`);
+      const toolsTag = testImageTag(`uid-tools-${task.id}`);
       const codexHome = "/var/lib/sandbar-codex";
       const baseContext = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-base-"));
       onTestFinished(() => rm(baseContext, { recursive: true, force: true }), 60_000);
@@ -219,16 +228,27 @@ describe.runIf(available)("ensureImages against real podman", () => {
       onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
       const hostAuth = join(context, "codex-auth.json");
       await writeFile(hostAuth, "before", { mode: 0o600 });
-      await writeFile(
-        join(context, "Containerfile"),
-        agentToolsContainerfile(uidBaseTag, ["codex"], { libc: "musl", codexHome }),
-      );
       await writeFile(join(context, "codex-static"), "#!/bin/sh\necho fixture\n");
       // The recipe installs every binary the provider declares (#120), so the
       // context has to carry the code-mode host beside the CLI.
       await writeFile(
         join(context, "codex-code-mode-host-static"),
         "#!/bin/sh\necho fixture-host\n",
+      );
+      await writeFile(
+        join(context, "Containerfile"),
+        "FROM scratch\n" +
+          "COPY --chmod=0755 codex-static /usr/local/bin/codex\n" +
+          "COPY --chmod=0755 codex-code-mode-host-static /usr/local/bin/codex-code-mode-host\n",
+      );
+      await buildImage({ tag: toolsTag, containerfile: "<generated>" }, {
+        root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+      });
+      await writeFile(
+        join(context, "Containerfile"),
+        agentToolsContainerfile(uidBaseTag, toolsTag, ["codex"], {
+          libc: "musl", codexHome,
+        }),
       );
       await buildImage({ tag, containerfile: "<generated>" }, {
         root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
