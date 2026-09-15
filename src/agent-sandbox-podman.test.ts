@@ -54,7 +54,7 @@ import { scopedResourcePrefix } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
-  removeFixtureContainer,
+  removeFixtureContainerOnTestFinished,
 } from "./podman-test-scope.test-util.js";
 import { sandboxRunArgs } from "./agent-sandbox.js";
 import { withRuntimeEnv } from "./runtime.js";
@@ -210,10 +210,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     "leaks a zombie per orphan when pid 1 is the sleep entrypoint",
     async ({ expect, onTestFinished }) => {
       const name = await start("without-init");
-      onTestFinished(
-        () => removeFixtureContainer(name).catch(() => {}),
-        60_000,
-      );
+      removeFixtureContainerOnTestFinished(onTestFinished, name);
       // The control's own premise: without --init, `sleep infinity` is pid 1.
       expect(await pid1Comm(name)).toBe("sleep");
 
@@ -227,10 +224,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     "reaps the same orphan under --init",
     async ({ expect, onTestFinished }) => {
       const name = await start("with-init");
-      onTestFinished(
-        () => removeFixtureContainer(name).catch(() => {}),
-        60_000,
-      );
+      removeFixtureContainerOnTestFinished(onTestFinished, name);
       // podman's init takes pid 1 and the entrypoint becomes its child; the
       // binary's comm has been both `catatonit` and `podman-init` across
       // versions, so what is asserted is that `sleep` is no longer pid 1.
