@@ -487,6 +487,7 @@ export function toolsImageTag(
 export function isToolsImageTagIn(scope: RunScope, ref: string): boolean {
   const colon = ref.lastIndexOf(":");
   if (colon <= ref.lastIndexOf("/")) return false;
+  if (ref.slice(0, colon) !== AGENT_TOOLS_IMAGE_REPOSITORY) return false;
   return new RegExp(
     `^sb-tools-${scope}-(glibc|musl)-[0-9a-f]{${IMAGE_FINGERPRINT_CHARS}}$`,
   ).test(ref.slice(colon + 1));

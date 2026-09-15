@@ -307,6 +307,10 @@ describe("variantImageTag", () => {
     expect(isToolsImageTagIn(scope, tag)).toBe(true);
     expect(isVariantImageTagIn(scope, tag)).toBe(false);
     expect(isToolsImageTagIn(runScope("/elsewhere"), tag)).toBe(false);
+    expect(isToolsImageTagIn(
+      scope,
+      tag.replace("localhost/sandbar-agent-tools", "localhost/unrelated"),
+    )).toBe(false);
   });
 });
 
