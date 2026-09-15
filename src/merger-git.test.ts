@@ -387,6 +387,35 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(await originHas("refs/heads/sandbar/chunk-2-c")).toBeNull();
   });
 
+  it("reports real server-refused chunk and member lines as a refusal", async () => {
+    await writeFile(
+      join(origin, "hooks", "pre-receive"),
+      "#!/bin/sh\nexit 1\n",
+      { mode: 0o755 },
+    );
+    await commit(wt, "refused.txt", "content the server refuses\n");
+    await git(wt, "branch", "sandbar/issue-163-member", "HEAD");
+
+    const result = await adapter().pushChunkBranch("sandbar/chunk-163-c", [{
+      source: "sandbar/issue-163-member",
+      destination: "sandbar/member-163",
+    }]);
+
+    expect(result.kind).toBe("refused");
+    if (result.kind !== "refused") return;
+    expect(result.reasons).toHaveLength(2);
+    expect(result.reasons).toEqual(expect.arrayContaining([
+      expect.stringMatching(
+        /!\s+\[remote rejected\]\s+HEAD -> sandbar\/chunk-163-c \(pre-receive hook declined\)$/,
+      ),
+      expect.stringMatching(
+        /!\s+\[remote rejected\]\s+sandbar\/issue-163-member -> sandbar\/member-163 \(pre-receive hook declined\)$/,
+      ),
+    ]));
+    expect(await originHas("refs/heads/sandbar/chunk-163-c")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-163")).toBeNull();
+  });
+
   it("refuses to publish a member source not contained by the chunk", async () => {
     await commit(seed, "member-source.txt", "member source\n");
     await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/issue-5-member");
