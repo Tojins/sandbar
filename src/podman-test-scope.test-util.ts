@@ -177,6 +177,9 @@
 // renders the evidence in the test's final FAIL block, where the next agent's
 // gate-tail prompt cannot lose it. Passing tests stay silent, and a fixture the
 // test already removed contributes neither a diagnostic nor a cleanup error.
+// An evidence-read failure remains the primary failure, and if removal fails
+// too an aggregate carries both; cleanup must never replace the reason the
+// failed hook was already going to report.
 // The bare helper keeps its throwing contract for removals made during a test.
 //
 // Already-leaked volumes are the operator's to clear, and no sweep may do it —
@@ -292,25 +295,46 @@ export function removeFixtureContainerOnTestFinished(
     ).filter(({ exists }) => exists);
     if (present.length === 0) return;
 
-    let diagnostic: string | undefined;
-    try {
-      if (task.result?.state === "fail") {
-        diagnostic = (
-          await Promise.all(
+    const evidence = task.result?.state === "fail"
+      ? await Promise.allSettled([
+          Promise.all(
             present.map(({ name }) => fixtureFailureDiagnostic(name)),
-          )
-        ).join("\n");
-      }
-    } finally {
-      const presentNames = new Set(present.map(({ name }) => name));
-      await removeFixtureContainer(
+          ),
+        ])
+      : [];
+    const evidenceResult = evidence[0];
+    const primaryFailure = evidenceResult?.status === "rejected"
+      ? evidenceResult.reason
+      : evidenceResult?.status === "fulfilled"
+        ? new Error(evidenceResult.value.join("\n"))
+        : undefined;
+
+    const presentNames = new Set(present.map(({ name }) => name));
+    const [removal] = await Promise.allSettled([
+      removeFixtureContainer(
         ...args.filter(
           (arg) => arg.startsWith("-") || presentNames.has(arg),
         ),
+      ),
+    ]);
+    const removalFailure = removal?.status === "rejected"
+      ? removal.reason
+      : undefined;
+
+    if (primaryFailure !== undefined && removalFailure !== undefined) {
+      const primaryDetail = primaryFailure instanceof Error
+        ? primaryFailure.message
+        : String(primaryFailure);
+      const removalDetail = removalFailure instanceof Error
+        ? removalFailure.message
+        : String(removalFailure);
+      throw new AggregateError(
+        [primaryFailure, removalFailure],
+        `${primaryDetail}\n--- fixture container removal also failed ---\n${removalDetail}`,
       );
     }
-
-    if (diagnostic !== undefined) throw new Error(diagnostic);
+    if (primaryFailure !== undefined) throw primaryFailure;
+    if (removalFailure !== undefined) throw removalFailure;
   }, 60_000);
 }
 
