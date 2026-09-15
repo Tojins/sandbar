@@ -170,6 +170,15 @@
 // `cleanup` needs nothing of this: it removes containers through
 // `cleanupOrphanContainers`, which carries `-v` itself.
 //
+// A FINISHED-HOOK REMOVAL MUST PRESERVE A FAILED FIXTURE'S EVIDENCE (#165).
+// `removeFixtureContainerOnTestFinished` inspects every target that still
+// exists when a failed test finishes, records its exit code and last 40 log
+// lines, removes it, and only then throws the diagnostic. Vitest consequently
+// renders the evidence in the test's final FAIL block, where the next agent's
+// gate-tail prompt cannot lose it. Passing tests stay silent, and a fixture the
+// test already removed contributes neither a diagnostic nor a cleanup error.
+// The bare helper keeps its throwing contract for removals made during a test.
+//
 // Already-leaked volumes are the operator's to clear, and no sweep may do it —
 // an anonymous volume carries no label, so sandbar's are indistinguishable
 // from another project's. With no sandbar and no test run in flight:
@@ -227,6 +236,82 @@ export async function removeFixtureContainer(
   ...args: readonly string[]
 ): Promise<void> {
   await exec(RUNTIME, ["rm", "-f", "-v", "-t", "0", ...args]);
+}
+
+function fixtureNames(args: readonly string[]): readonly string[] {
+  // The removal helper's contract permits leading podman flags (currently
+  // `--depend`) followed by one or more names. Fixture names never begin with
+  // a dash.
+  return args.filter((arg) => !arg.startsWith("-"));
+}
+
+async function fixtureContainerExists(name: string): Promise<boolean> {
+  try {
+    await exec(RUNTIME, ["container", "exists", name]);
+    return true;
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? error.code
+        : undefined;
+    if (code === 1) return false;
+    throw error;
+  }
+}
+
+async function fixtureFailureDiagnostic(name: string): Promise<string> {
+  const [inspection, logs] = await Promise.all([
+    exec(RUNTIME, ["inspect", "--format", "{{.State.ExitCode}}", name]),
+    exec(RUNTIME, ["logs", "--tail", "40", name]),
+  ]);
+  const output = [logs.stdout.trimEnd(), logs.stderr.trimEnd()]
+    .filter(Boolean)
+    .join("\n");
+  return (
+    `fixture container ${name} exit code: ${inspection.stdout.trim()}\n` +
+    `--- fixture container ${name} (last 40 log lines) ---\n` +
+    (output || "(empty)")
+  );
+}
+
+// Register removal at the point a fixture becomes the current test's
+// responsibility. `args` has exactly `removeFixtureContainer`'s shape.
+export function removeFixtureContainerOnTestFinished(
+  onTestFinished: FinishedHook,
+  ...args: readonly string[]
+): void {
+  onTestFinished(async ({ task }) => {
+    const names = fixtureNames(args);
+    const present = (
+      await Promise.all(
+        names.map(async (name) => ({
+          name,
+          exists: await fixtureContainerExists(name),
+        })),
+      )
+    ).filter(({ exists }) => exists);
+    if (present.length === 0) return;
+
+    let diagnostic: string | undefined;
+    try {
+      if (task.result?.state === "fail") {
+        diagnostic = (
+          await Promise.all(
+            present.map(({ name }) => fixtureFailureDiagnostic(name)),
+          )
+        ).join("\n");
+      }
+    } finally {
+      const presentNames = new Set(present.map(({ name }) => name));
+      await removeFixtureContainer(
+        ...args.filter(
+          (arg) => arg.startsWith("-") || presentNames.has(arg),
+        ),
+      );
+    }
+
+    if (diagnostic !== undefined) throw new Error(diagnostic);
+  }, 60_000);
 }
 
 export type PodmanTestScope = {

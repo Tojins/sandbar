@@ -48,8 +48,10 @@ import { resolveGateStack } from "./config.js";
 import { sandboxContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
+  type FinishedHook,
   podmanTestScope,
   removeFixtureContainer,
+  removeFixtureContainerOnTestFinished,
 } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 import { type SandboxStack, startSandboxStack } from "./sandbox-stack.js";
@@ -111,7 +113,7 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
   // `podman run`. That is the point of the file: `sandboxRunArgs` is what an
   // agent sandbox actually runs, so a flag that turns out to be incompatible
   // with hosting joiners has to fail here rather than in a cycle.
-  const startAnchor = async (): Promise<string> => {
+  const startAnchor = async (onTestFinished: FinishedHook): Promise<string> => {
     const name = `sandbar-${SCOPE}-anchor`;
     await removeFixtureContainer("--depend", name).catch(() => {});
     const anchor = sandboxRunArgs({
@@ -136,6 +138,7 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
     // podman as a file (#154) — this file's whole point is that the production
     // path is what runs.
     await withRuntimeEnv(anchor, (argv) => exec(RUNTIME, argv));
+    removeFixtureContainerOnTestFinished(onTestFinished, "--depend", name);
     return name;
   };
 
@@ -154,9 +157,6 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
   afterEach(async () => {
     if (stack) await stack.stop().catch(() => {});
     stack = null;
-    if (anchor) {
-      await removeFixtureContainer("--depend", anchor).catch(() => {});
-    }
     await rm(repo, { recursive: true, force: true });
     await rm(logDir, { recursive: true, force: true });
   }, 120_000);
@@ -211,8 +211,8 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
   // rather than about bringup having returned.
   it(
     "a keep-id anchor hosts a root joiner the agent reaches on 127.0.0.1",
-    async () => {
-      anchor = await startAnchor();
+    async ({ onTestFinished }) => {
+      anchor = await startAnchor(onTestFinished);
       stack = await startSandboxStack({
         issueId: ISSUE_ID,
         scope: SCOPE,
@@ -293,8 +293,8 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
   // publish, and the capability question is about the namespace, not the host.)
   it.runIf(lowPortAvailable)(
     "a root joiner binds a privileged port inside the anchor's namespace",
-    async () => {
-      anchor = await startAnchor();
+    async ({ onTestFinished }) => {
+      anchor = await startAnchor(onTestFinished);
       stack = await startSandboxStack({
         issueId: ISSUE_ID,
         scope: SCOPE,
@@ -335,8 +335,8 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
   // a subuid and fail, which is why `containerRunArgs` passes neither flag.
   it(
     "a joiner writes the shared worktree as the invoking user",
-    async () => {
-      anchor = await startAnchor();
+    async ({ onTestFinished }) => {
+      anchor = await startAnchor(onTestFinished);
       stack = await startSandboxStack({
         issueId: ISSUE_ID,
         scope: SCOPE,
@@ -373,8 +373,8 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
   // the order backwards and the leak is the WHOLE chain, not half of it.
   it(
     "podman refuses to remove the anchor while a joiner is attached",
-    async () => {
-      anchor = await startAnchor();
+    async ({ onTestFinished }) => {
+      anchor = await startAnchor(onTestFinished);
       stack = await startSandboxStack({
         issueId: ISSUE_ID,
         scope: SCOPE,
@@ -421,8 +421,8 @@ describe.runIf(available)("the sandbox stack's anchor chain", () => {
   // declare no sandbox container.
   it(
     "--depend removes the anchor and its joiners together",
-    async () => {
-      anchor = await startAnchor();
+    async ({ onTestFinished }) => {
+      anchor = await startAnchor(onTestFinished);
       stack = await startSandboxStack({
         issueId: ISSUE_ID,
         scope: SCOPE,

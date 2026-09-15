@@ -32,6 +32,7 @@ import {
   podmanTestScope,
   podmanTestStackId,
   removeFixtureContainer,
+  removeFixtureContainerOnTestFinished,
   runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
@@ -810,6 +811,11 @@ describe.runIf(available)("gate stack against real podman", () => {
         IMAGE,
         "infinity",
       ]);
+      removeFixtureContainerOnTestFinished(
+        onTestFinished,
+        "--depend",
+        anchor,
+      );
       const spec = resolveGateStack({
         containers: [
           { name: "runner", image: IMAGE, mountWorktree: "/work", hold: true },
@@ -822,20 +828,14 @@ describe.runIf(available)("gate stack against real podman", () => {
         steps: [{ name: "ok", in: "runner", command: ["true"] }],
       });
       const dead = spec.containers.filter((c) => c.name === "dead");
-      try {
-        await expect(
-          bringUpContainers(dead, {
-            attach: { kind: "netns", anchorContainerName: anchor },
-            label: "sandbox stack",
-            worktreePath: repo,
-            nameOf: (c) => cName(c.name),
-          }),
-        ).rejects.toThrow(/^sandbox stack: .*exited during startup/);
-      } finally {
-        // `--depend` takes the joiner with it, which is the removal order
-        // this topology forces everywhere else too.
-        await removeFixtureContainer("--depend", anchor).catch(() => {});
-      }
+      await expect(
+        bringUpContainers(dead, {
+          attach: { kind: "netns", anchorContainerName: anchor },
+          label: "sandbox stack",
+          worktreePath: repo,
+          nameOf: (c) => cName(c.name),
+        }),
+      ).rejects.toThrow(/^sandbox stack: .*exited during startup/);
     },
     180_000,
   );
@@ -1069,9 +1069,7 @@ describe.runIf(available)("removing a pre-upgrade container's volume", () => {
       const cName = (name: string): string =>
         stackContainerNameFor(SCOPE, stackId, name);
       const NAME = cName("volprobe");
-      onTestFinished(async () => {
-        await removeFixtureContainer(NAME).catch(() => {});
-      }, 60_000);
+      removeFixtureContainerOnTestFinished(onTestFinished, NAME);
 
       await exec(RUNTIME, [
         "run",

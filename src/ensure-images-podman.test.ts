@@ -38,7 +38,7 @@ import {
   type FinishedHook,
   podmanTestScope,
   podmanTestStackId,
-  removeFixtureContainer,
+  removeFixtureContainerOnTestFinished,
   runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
@@ -112,9 +112,7 @@ async function serveArtifacts(
   await runFixtureContainer([
     "--name", container, "-p", "127.0.0.1::8080", tag,
   ]);
-  const close = (): Promise<void> =>
-    removeFixtureContainer(container);
-  onTestFinished(close, 60_000);
+  removeFixtureContainerOnTestFinished(onTestFinished, container);
   const probePath = Object.keys(paths)[0];
   if (probePath === undefined) {
     throw new Error("artifact server requires at least one fixture path");
@@ -313,10 +311,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         tag,
         "/usr/local/bin/claude",
       ]);
-      onTestFinished(
-        () => removeFixtureContainer(container),
-        60_000,
-      );
+      removeFixtureContainerOnTestFinished(onTestFinished, container);
       const copied = await mkdtemp(join(root, "copied-"));
       await exec(RUNTIME, ["cp", `${container}:/usr/local/bin/.`, copied]);
       for (const [binary, content] of [

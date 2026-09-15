@@ -60,13 +60,14 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { stackContainerNameFor } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
   removeFixtureContainer,
+  removeFixtureContainerOnTestFinished,
   runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
@@ -109,13 +110,10 @@ afterAll(async () => {
 describe.runIf(available)("podman exec under a killed local client", () => {
   const NAME = cName("killprobe");
 
-  beforeEach(async () => {
+  beforeEach(async ({ onTestFinished }) => {
     await removeFixtureContainer(NAME).catch(() => {});
     await runFixtureContainer(["--name", NAME, IMAGE, "sleep", "infinity"]);
-  }, 60_000);
-
-  afterEach(async () => {
-    await removeFixtureContainer(NAME).catch(() => {});
+    removeFixtureContainerOnTestFinished(onTestFinished, NAME);
   }, 60_000);
 
   // The green-on-red this whole mechanism exists to avoid. Node's `timeout:`
@@ -187,18 +185,17 @@ describe.runIf(hasUserSystemd)("healthcheck scheduling", () => {
     (await exec("systemctl", ["--user", "list-timers", "--all", "--no-pager"]))
       .stdout;
 
-  beforeEach(async () => {
+  beforeEach(async ({ onTestFinished }) => {
     for (const n of [SCHEDULED, UNSCHEDULED]) {
       await removeFixtureContainer(n).catch(() => {});
     }
-  }, 60_000);
-
-  afterEach(async () => {
     // `rm` is also what removes the transient unit podman created, so this is
     // cleanup of two things rather than one.
-    for (const n of [SCHEDULED, UNSCHEDULED]) {
-      await removeFixtureContainer(n).catch(() => {});
-    }
+    removeFixtureContainerOnTestFinished(
+      onTestFinished,
+      SCHEDULED,
+      UNSCHEDULED,
+    );
   }, 60_000);
 
   it(
