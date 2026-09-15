@@ -559,6 +559,7 @@ describe("silent implementer attempt policy (#116)", () => {
         implementerModelId: "model",
         maxQualityRounds: 4,
         promptExtensions,
+        sandboxGateAttachments: { env: {}, mounts: [] },
       },
       anchorOpts: {},
       base: { ref: "origin/main" },
@@ -1430,6 +1431,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         agentImages: {},
         scope: "w12345678",
         gateStack: { containers: [], steps: [] },
+        sandboxGateAttachments: { env: {}, mounts: [] },
         claudeMdPath: "CLAUDE.md",
         ...overrides,
       },
@@ -1551,6 +1553,49 @@ describe("runInnerLoop context terminals (#158)", () => {
     });
     expect(sandbox.run).toHaveBeenCalledTimes(1);
     expect(innerLoopMocks.buildPartitionCheckPrompt).not.toHaveBeenCalled();
+  });
+
+  it("attaches gate-runner env and mounts to the implementer sandbox", async () => {
+    const { opts } = harness(async () => ({
+      ...completeRun,
+      stdout: "<promise>NEEDS-INFO</promise><questions>done</questions>",
+      commits: [],
+    }), {
+      sandboxGateAttachments: {
+        env: {
+          CONTAINER_HOST: "unix:///run/podman.sock",
+          SANDBAR_REQUIRE_PODMAN_TESTS: "1",
+        },
+        mounts: [
+          { hostPath: "fixtures", containerPath: "/fixtures", mode: "ro" },
+          { hostPath: "/tmp", containerPath: "/tmp", mode: "rw" },
+        ],
+      },
+    });
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+      type: "NEEDS-INFO",
+    });
+    expect(innerLoopMocks.createSandbox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        literalEnv: {
+          CONTAINER_HOST: "unix:///run/podman.sock",
+          SANDBAR_REQUIRE_PODMAN_TESTS: "1",
+        },
+        extraMounts: [
+          {
+            hostPath: "/worktree/fixtures",
+            sandboxPath: "/fixtures",
+            readonly: true,
+          },
+          { hostPath: "/tmp", sandboxPath: "/tmp", readonly: false },
+        ],
+      }),
+    );
+    expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ sandboxHasGateAttachments: true }),
+      expect.anything(),
+    );
   });
 
   it.each(["completed", "failed"] as const)(

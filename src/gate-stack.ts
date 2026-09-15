@@ -551,10 +551,20 @@ export function mountSpec(
   worktreePath: string,
   mount: ResolvedStackMount,
 ): string {
-  const hostPath = isAbsolute(mount.hostPath)
+  const hostPath = resolveStackMountHostPath(worktreePath, mount);
+  return `${hostPath}:${mount.containerPath}:${mount.mode},z`;
+}
+
+// Gate containers and the implementer sandbox must see a relative declared
+// mount from the same issue tree (#166). Keeping the rooting here prevents the
+// sandbox copy from quietly resolving against the driver's cwd instead.
+export function resolveStackMountHostPath(
+  worktreePath: string,
+  mount: Pick<ResolvedStackMount, "hostPath">,
+): string {
+  return isAbsolute(mount.hostPath)
     ? mount.hostPath
     : resolvePath(worktreePath, mount.hostPath);
-  return `${hostPath}:${mount.containerPath}:${mount.mode},z`;
 }
 
 // No `-p` at all, and since #43 that is unconditional: `tcp` readiness was the

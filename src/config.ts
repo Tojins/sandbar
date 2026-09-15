@@ -140,6 +140,12 @@ export const DEFAULT_LABELS: LabelConfig = {
 // naming, bringup order, teardown) and the fact that the steps' exit codes are
 // the verdict.
 //
+// The implementer sandbox also derives the mounts and env of every container a
+// step runs in (#166). This remains one description rather than a sandbox
+// config surface. Because several runner environments flatten into one
+// sandbox, resolution refuses conflicting destinations/keys and collisions
+// with config.env; `sandboxGateAttachmentsOf` owns that contract.
+//
 // This replaces the single `dbSidecar` + two fixed `gateCommands` of #20/#15.
 // The sidecar dissolved into `containers[]` the moment the pod removed the need
 // for a pinned IP: with every container sharing one namespace, the address the
@@ -457,6 +463,16 @@ export type ResolvedGateStep = {
 export type ResolvedGateStack = {
   readonly containers: readonly ResolvedStackContainer[];
   readonly steps: readonly ResolvedGateStep[];
+};
+
+// The gate-runner declarations an implementer sandbox inherits (#166). Only
+// containers a step actually enters contribute: a sidecar's env and mounts
+// describe that sidecar, while a runner's describe the environment in which
+// the consumer expects its suite to execute. The host paths stay worktree-
+// relative here and are rooted against the issue worktree at sandbox creation.
+export type SandboxGateAttachments = {
+  readonly env: Readonly<Record<string, string>>;
+  readonly mounts: readonly ResolvedStackMount[];
 };
 
 // How a cycle's merge result reaches the source branch (#22).
@@ -887,6 +903,8 @@ export type ResolvedConfig = Required<
   readonly copyToWorktree: readonly ResolvedCopyToWorktreeEntry[];
   readonly labels: LabelConfig;
   readonly gateStack: ResolvedGateStack;
+  // Derived from gateStack; never a consumer-facing config field (#166).
+  readonly sandboxGateAttachments: SandboxGateAttachments;
   readonly mergeMode: ResolvedMergeMode;
 };
 
@@ -1284,6 +1302,84 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
   }
 
   return { containers, steps };
+}
+
+// Flatten the environment in which gate STEPS run into the one sandbox
+// container the implementer uses (#166). A repeated runner is included once;
+// two different runners may share an attachment only when they agree exactly.
+// Anything else has no honest single-container rendering and is refused at
+// config validation instead of being decided by declaration or step order.
+export function sandboxGateAttachmentsOf(
+  stack: ResolvedGateStack,
+  configEnv: Readonly<Record<string, string>>,
+): SandboxGateAttachments {
+  const steppedInto = new Set(stack.steps.map((step) => step.in));
+  const envByKey = new Map<
+    string,
+    { readonly value: string; readonly container: string }
+  >();
+  const mounts: ResolvedStackMount[] = [];
+  const mountByDestination = new Map<
+    string,
+    { readonly mount: ResolvedStackMount; readonly container: string }
+  >();
+
+  for (const container of stack.containers) {
+    if (!steppedInto.has(container.name)) continue;
+
+    for (const [key, value] of Object.entries(container.env)) {
+      if (Object.hasOwn(configEnv, key)) {
+        throw new SandbarError(
+          `config.gateStack: step container '${container.name}' sets env key ` +
+            `'${key}', which collides with config.env. Both would enter the ` +
+            "implementer sandbox and neither source may silently override the other.",
+        );
+      }
+      const previous = envByKey.get(key);
+      if (previous !== undefined && previous.value !== value) {
+        throw new SandbarError(
+          `config.gateStack: step containers '${previous.container}' and ` +
+            `'${container.name}' disagree on env key '${key}'. Their gate env ` +
+            "is flattened into one implementer sandbox, so the values must match.",
+        );
+      }
+      if (previous === undefined) {
+        envByKey.set(key, { value, container: container.name });
+      }
+    }
+
+    for (const mount of container.mounts) {
+      const previous = mountByDestination.get(mount.containerPath);
+      if (
+        previous !== undefined &&
+        (previous.mount.hostPath !== mount.hostPath ||
+          previous.mount.mode !== mount.mode)
+      ) {
+        throw new SandbarError(
+          `config.gateStack: step containers '${previous.container}' and ` +
+            `'${container.name}' disagree on mount destination ` +
+            `'${mount.containerPath}' (${previous.mount.hostPath}:` +
+            `${previous.mount.mode} versus ${mount.hostPath}:${mount.mode}). ` +
+            "Their gate mounts are flattened into one implementer sandbox, " +
+            "so each destination must name one identical source and mode.",
+        );
+      }
+      if (previous === undefined) {
+        mounts.push(mount);
+        mountByDestination.set(mount.containerPath, {
+          mount,
+          container: container.name,
+        });
+      }
+    }
+  }
+
+  return {
+    env: Object.fromEntries(
+      [...envByKey].map(([key, entry]) => [key, entry.value]),
+    ),
+    mounts,
+  };
 }
 
 // The three readiness kinds #43 retired, and what each becomes. Rejected BY
@@ -1958,6 +2054,8 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const ghRepo = requireRepoPart("ghRepo", config.ghRepo);
   const developers = requireDevelopers(config.developers);
   const gateStack = resolveGateStack(config.gateStack);
+  const env = resolveEnv(config.env);
+  const sandboxGateAttachments = sandboxGateAttachmentsOf(gateStack, env);
   const images = resolveImages(config.images, config.sandboxImage);
   checkRebuildOnIsUsed(images, gateStack, config.sandboxImage);
   // Resolved to absolute HERE, not left as the host wrote it (#34). Since every
@@ -2114,7 +2212,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     // default is a real configuration — a host that supplies every credential
     // through the process environment still has to DECLARE the keys, because
     // the fallback is per declared key and never a wholesale leak.
-    env: resolveEnv(config.env),
+    env,
     maxQualityRounds: requirePositiveInteger(
       "maxQualityRounds",
       config.maxQualityRounds ?? DEFAULT_MAX_QUALITY_ROUNDS,
@@ -2147,6 +2245,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     copyToWorktree: resolveCopyToWorktree(config.copyToWorktree, cwd),
     labels: { ...DEFAULT_LABELS, ...config.labels },
     gateStack,
+    sandboxGateAttachments,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
     defaultLane: requireLane(config.defaultLane),
   };

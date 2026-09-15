@@ -13,6 +13,10 @@
 // sandbox entry via `beforeSandboxReady`: they attach to the agent
 // container's netns, so it must exist first, and they must be up before a
 // consumer's `onSandboxReady` hook runs.
+// The step-running gate containers' declared mounts and env are attached to
+// the agent sandbox too (#166). Config resolution has already flattened and
+// validated them; this layer only roots relative sources in the issue worktree
+// and preserves gate env as literal container values.
 //
 // The partition and UI-prototype decisions (#158/#126) are cold agent calls in
 // the existing issue sandbox and spend no convergence budget. Partition runs
@@ -115,6 +119,7 @@ import type {
   PromptExtensions,
   ResolvedCopyToWorktreeEntry,
   ResolvedGateStack,
+  SandboxGateAttachments,
 } from "./config.js";
 import {
   AgentToolsImageError,
@@ -127,7 +132,12 @@ import type { EventInput, UsageFields } from "./events.js";
 import { parsePartitionCheck } from "./partition-check-parser.js";
 import { summarizeGateFailure } from "./gate.js";
 import type { GateSemaphore } from "./gate-semaphore.js";
-import { ContainerBringupError, type Stack, startStack } from "./gate-stack.js";
+import {
+  ContainerBringupError,
+  resolveStackMountHostPath,
+  type Stack,
+  startStack,
+} from "./gate-stack.js";
 import {
   type HeadMismatch,
   type IssueBranchBase,
@@ -574,6 +584,7 @@ export type InnerLoopConfig = {
   // sandbox container and the gate stack are named under it.
   readonly scope: RunScope;
   readonly gateStack: ResolvedGateStack;
+  readonly sandboxGateAttachments: SandboxGateAttachments;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -604,6 +615,11 @@ export type InnerLoopOptions = {
   // The one run-wide admission seam shared with the merger (#142).
   readonly gateSemaphore: GateSemaphore;
 };
+
+const hasSandboxGateAttachments = (
+  attachments: SandboxGateAttachments,
+): boolean =>
+  attachments.mounts.length > 0 || Object.keys(attachments.env).length > 0;
 
 type SandboxCycleOutcome = {
   readonly verdict: Verdict;
@@ -957,6 +973,11 @@ async function runSandboxCycle(
             sandboxPath: SANDBOX_LOG_MOUNT,
             readonly: true,
           }]),
+          ...config.sandboxGateAttachments.mounts.map((mount) => ({
+            hostPath: resolveStackMountHostPath(worktreePath, mount),
+            sandboxPath: mount.containerPath,
+            readonly: mount.mode === "ro",
+          })),
         ];
         return agentSandbox.createSandbox({
           branch: issue.branch,
@@ -971,6 +992,7 @@ async function runSandboxCycle(
           }),
           hooks: opts.hooks,
           env: config.env,
+          literalEnv: config.sandboxGateAttachments.env,
           preparedWorktreePath: worktreePath,
           ...(extraMounts.length === 0 ? {} : { extraMounts }),
           onNotice: (severity, message) => opts.onEvent({
@@ -1102,6 +1124,9 @@ async function runSandboxCycle(
         base,
         promptExtension: config.promptExtensions?.implementer,
         sandboxStack: sandboxStatuses,
+        sandboxHasGateAttachments: hasSandboxGateAttachments(
+          config.sandboxGateAttachments,
+        ),
       }, anchorOpts);
       const size = contextChars(
         admissionPrompt,
@@ -1759,6 +1784,9 @@ export async function runImplementer(
         ? { latestReviewerFeedback: action.latestReviewerFeedback }
         : {}),
       sandboxStack: ctx.sandboxStatuses,
+      sandboxHasGateAttachments: hasSandboxGateAttachments(
+        config.sandboxGateAttachments,
+      ),
     },
     anchorOpts,
   );

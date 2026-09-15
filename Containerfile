@@ -56,8 +56,10 @@ RUN groupmod -n agent node \
 # `apt upgrade` triggers a rebuild mid-backlog, against a failure that needs a
 # major-version bump to appear.
 #
-# In the agent-sandbox role no socket is mounted and `CONTAINER_HOST` is unset,
-# so this binary reaches nothing. Inert, and cheaper than a second image.
+# In the agent-sandbox role the gate step runner's declared mounts and env are
+# inherited (#166). This repo's installation therefore gives the implementer
+# the same socket and `CONTAINER_HOST`, making this client usable for iterating
+# on podman-layer tests instead of leaving them to gate-only verification.
 RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/podman-remote-static-linux_amd64.tar.gz \
       | tar xz -C /tmp \
     && install -m0755 /tmp/bin/podman-remote-static-linux_amd64 /usr/bin/podman \

@@ -72,6 +72,12 @@ const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-fee
 const IMPLEMENTER_APPROVED_QUALITY_TPL = loadTemplate("implementer-approved-quality");
 const IMPLEMENTER_ESCALATION_TPL = loadTemplate("implementer-escalation");
 const IMPLEMENTER_SANDBOX_STACK_TPL = loadTemplate("implementer-sandbox-stack");
+const IMPLEMENTER_SANDBOX_GATE_ACCESS_ISOLATED_TPL = loadTemplate(
+  "implementer-sandbox-gate-access-isolated",
+);
+const IMPLEMENTER_SANDBOX_GATE_ACCESS_ATTACHED_TPL = loadTemplate(
+  "implementer-sandbox-gate-access-attached",
+);
 const IMPLEMENTER_CHUNK_BASE_TPL = loadTemplate("implementer-chunk-base");
 const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
 
@@ -207,6 +213,9 @@ export type PromptInputs = {
   // credentials, which database, what the fixtures are — stay in the anchor
   // docs, where they already are.
   readonly sandboxStack?: readonly SandboxContainerStatus[];
+  // Whether the gate step containers contributed any env or mounts to this
+  // sandbox (#166). Relevant only when sandboxStack makes the section visible.
+  readonly sandboxHasGateAttachments?: boolean;
 };
 
 export type ReviewerPromptInputs = {
@@ -548,7 +557,10 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
       )
     : "";
 
-  const sandboxStack = renderSandboxStackSlot(inputs.sandboxStack ?? []);
+  const sandboxStack = renderSandboxStackSlot(
+    inputs.sandboxStack ?? [],
+    inputs.sandboxHasGateAttachments ?? false,
+  );
 
   const orchestratorNote = extraReprompt
     ? `## Orchestrator note\n\n${extraReprompt}`
@@ -608,6 +620,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
 // reach is worse than no address at all.
 export function renderSandboxStackSlot(
   statuses: readonly SandboxContainerStatus[],
+  hasGateAttachments = false,
 ): string {
   if (statuses.length === 0) return "";
   const lines: string[] = [];
@@ -624,6 +637,9 @@ export function renderSandboxStackSlot(
   }
   return render(IMPLEMENTER_SANDBOX_STACK_TPL, {
     containers: lines.join("\n").trim(),
+    gateAccess: hasGateAttachments
+      ? IMPLEMENTER_SANDBOX_GATE_ACCESS_ATTACHED_TPL
+      : IMPLEMENTER_SANDBOX_GATE_ACCESS_ISOLATED_TPL,
   });
 }
 

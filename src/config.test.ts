@@ -76,6 +76,117 @@ const minimal: RunConfig = {
   },
 };
 
+describe("sandbox gate attachments (#166)", () => {
+  const twoRunners = (overrides?: {
+    readonly firstEnv?: Readonly<Record<string, string>>;
+    readonly secondEnv?: Readonly<Record<string, string>>;
+    readonly firstMount?: {
+      readonly hostPath: string;
+      readonly containerPath: string;
+      readonly mode?: "ro" | "rw";
+    };
+    readonly secondMount?: {
+      readonly hostPath: string;
+      readonly containerPath: string;
+      readonly mode?: "ro" | "rw";
+    };
+  }): RunConfig["gateStack"] => ({
+    containers: [
+      {
+        name: "first",
+        image: "runner",
+        mountWorktree: "/workspace",
+        hold: true,
+        env: overrides?.firstEnv,
+        mounts: overrides?.firstMount ? [overrides.firstMount] : [],
+      },
+      {
+        name: "second",
+        image: "runner",
+        hold: true,
+        env: overrides?.secondEnv,
+        mounts: overrides?.secondMount ? [overrides.secondMount] : [],
+      },
+      {
+        name: "sidecar",
+        image: "database",
+        env: { SIDECAR_ONLY: "no" },
+        mounts: [{ hostPath: "sidecar.sql", containerPath: "/seed.sql" }],
+      },
+    ],
+    steps: [
+      { name: "check", in: "first", command: ["npm", "run", "check"] },
+      { name: "test", in: "second", command: ["npm", "test"] },
+      { name: "test-again", in: "first", command: ["npm", "test"] },
+    ],
+  });
+
+  it("derives a deduplicated union from step containers only", () => {
+    const sharedMount = {
+      hostPath: "/run/user/1000/podman.sock",
+      containerPath: "/run/podman.sock",
+    } as const;
+    const resolved = resolveConfig({
+      ...minimal,
+      gateStack: twoRunners({
+        firstEnv: { CONTAINER_HOST: "unix:///run/podman.sock", FIRST: "yes" },
+        secondEnv: { CONTAINER_HOST: "unix:///run/podman.sock", SECOND: "yes" },
+        firstMount: sharedMount,
+        secondMount: sharedMount,
+      }),
+    });
+
+    expect(resolved.sandboxGateAttachments).toEqual({
+      env: {
+        CONTAINER_HOST: "unix:///run/podman.sock",
+        FIRST: "yes",
+        SECOND: "yes",
+      },
+      mounts: [{ ...sharedMount, mode: "ro" }],
+    });
+  });
+
+  it("refuses a step-container env key that collides with config.env", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      env: { CONTAINER_HOST: "host-value" },
+      gateStack: twoRunners({
+        firstEnv: { CONTAINER_HOST: "unix:///run/podman.sock" },
+      }),
+    })).toThrow(/CONTAINER_HOST.*collides with config\.env/);
+  });
+
+  it("refuses two step containers that disagree on an env key", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      gateStack: twoRunners({
+        firstEnv: { SERVICE_URL: "http://one" },
+        secondEnv: { SERVICE_URL: "http://two" },
+      }),
+    })).toThrow(/'first'.*'second'.*disagree on env key 'SERVICE_URL'/);
+  });
+
+  it("refuses two step containers that map different sources to one mount destination", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      gateStack: twoRunners({
+        firstMount: { hostPath: "/tmp", containerPath: "/shared", mode: "ro" },
+        secondMount: { hostPath: "fixtures", containerPath: "/shared", mode: "ro" },
+      }),
+    })).toThrow(/'first'.*'second'.*disagree on mount destination '\/shared'/);
+  });
+
+  it("refuses two step containers that give one mount destination different modes", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      gateStack: twoRunners({
+        firstMount: { hostPath: "/tmp", containerPath: "/shared", mode: "ro" },
+        secondMount: { hostPath: "/tmp", containerPath: "/shared", mode: "rw" },
+      }),
+    })).toThrow(/'first'.*'second'.*disagree on mount destination '\/shared'/);
+  });
+});
+
 describe("resolveCopyToWorktree (#147)", () => {
   const cwd = "/consumer/checkout";
 

@@ -646,9 +646,14 @@ port is which in your own anchor docs, beside the credentials.
 - **Opt-in per container.** Declare it nowhere and nothing changes: no extra
   container, no prompt section, no cost.
 - **It is a different namespace from the gate's**, deliberately. The agent must
-  not be able to reach the stack its verdict is formed in, and that comes from
-  the topology rather than from the absence of a container runtime inside the
-  sandbox. There is no podman in there, and there is not meant to be.
+  not mistake the stack beside it for the stack its verdict is formed in. The
+  gate remains a separate network namespace and its result remains
+  authoritative. The sandbox also receives the mounts and environment of every
+  container a gate step runs in; if those expose a runtime socket, the agent can
+  use the image's client to run the same runtime-backed tests while iterating.
+  Two step runners must agree on shared env keys and mount destinations, and a
+  gate env key must not collide with `config.env`; inconsistent configurations
+  are refused before the run.
 - **The gate is authoritative.** Sandbox siblings run the image your config
   names, resolved once when the sandbox is created; the gate re-resolves
   `rebuildOn` images per gate run. (The agent's own container is in between:

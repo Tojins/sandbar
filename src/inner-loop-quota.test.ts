@@ -161,6 +161,7 @@ const config = (
   },
   scope: { id: "12345678", prefix: "sandbar-w12345678" },
   gateStack: { containers: [], steps: [] },
+  sandboxGateAttachments: { env: {}, mounts: [] },
   claudeMdPath: "CLAUDE.md",
 });
 
