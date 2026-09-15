@@ -849,23 +849,34 @@ describe("renderSandboxStackSlot (#44)", () => {
 // prompts/implementer.md would otherwise drop it silently — the same class of
 // failure as an unemittable escalation token above.
 describe("renderAttemptSlot — the sandbox slot reaches the prompt", () => {
-  const slotWith = (sandboxStack: Parameters<typeof renderSandboxStackSlot>[0]) =>
+  const slotWith = (
+    sandboxStack: Parameters<typeof renderSandboxStackSlot>[0],
+    sandboxHasGateAttachments = false,
+  ) =>
     renderAttemptSlot({
       ...implementerInputs,
       sandboxStack,
+      sandboxHasGateAttachments,
     });
 
+  const sibling = {
+    name: "db",
+    image: "mariadb",
+    lifecycle: "issue" as const,
+    logPath: "/sandbar/logs/db.log",
+    up: true,
+    failure: null,
+  };
+
   it("splices the rendered section in", () => {
-    expect(slotWith([
-      {
-        name: "db",
-        image: "mariadb",
-        lifecycle: "issue",
-        logPath: "/sandbar/logs/db.log",
-        up: true,
-        failure: null,
-      },
-    ])).toContain("## Your sandbox stack");
+    expect(slotWith([sibling])).toContain("## Your sandbox stack");
+  });
+
+  it("splices attached gate-access guidance into the assembled attempt", () => {
+    const slot = slotWith([sibling], true);
+    expect(slot).toMatch(/mounts and environment.*also attached/is);
+    expect(slot).toMatch(/runtime-backed tests/i);
+    expect(slot).not.toMatch(/not given a container runtime/i);
   });
 
   it("leaves no trace of the placeholder when there is no sandbox stack", () => {

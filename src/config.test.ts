@@ -166,12 +166,22 @@ describe("sandbox gate attachments (#166)", () => {
     })).toThrow(/'first'.*'second'.*disagree on env key 'SERVICE_URL'/);
   });
 
-  it("refuses two step containers that disagree on a mount destination", () => {
+  it("refuses two step containers that map different sources to one mount destination", () => {
     expect(() => resolveConfig({
       ...minimal,
       gateStack: twoRunners({
-        firstMount: { hostPath: "/tmp", containerPath: "/shared", mode: "rw" },
-        secondMount: { hostPath: "fixtures", containerPath: "/shared" },
+        firstMount: { hostPath: "/tmp", containerPath: "/shared", mode: "ro" },
+        secondMount: { hostPath: "fixtures", containerPath: "/shared", mode: "ro" },
+      }),
+    })).toThrow(/'first'.*'second'.*disagree on mount destination '\/shared'/);
+  });
+
+  it("refuses two step containers that give one mount destination different modes", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      gateStack: twoRunners({
+        firstMount: { hostPath: "/tmp", containerPath: "/shared", mode: "ro" },
+        secondMount: { hostPath: "/tmp", containerPath: "/shared", mode: "rw" },
       }),
     })).toThrow(/'first'.*'second'.*disagree on mount destination '\/shared'/);
   });

@@ -33,8 +33,8 @@ Some things to know before you spend time on them:
 - **The gate's `issue`-lifecycle containers outlive your attempts.** They are
   created once for the issue and reused by every gate run on this branch, so
   state an earlier attempt's code left inside one — an applied migration, a
-  stamped fixture, a warm cache — is still there for the next attempt, and from
-  here you can neither see it nor reset it. If a gate step reds because that
-  state is stale, report it: the fix is the project resetting it in a step that
-  runs every gate run, never the branch's own code edited until the stale state
-  accepts it.
+  stamped fixture, a warm cache — is still there for the next attempt. If your
+  derived gate access makes that state visible, inspect it only: do not reset or
+  change it manually. If a gate step reds because that state is stale, report
+  it: the repeatable fix is the project resetting it in a step that runs every
+  gate run, never the branch's own code edited until the stale state accepts it.

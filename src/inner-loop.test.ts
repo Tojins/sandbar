@@ -1592,6 +1592,10 @@ describe("runInnerLoop context terminals (#158)", () => {
         ],
       }),
     );
+    expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ sandboxHasGateAttachments: true }),
+      expect.anything(),
+    );
   });
 
   it.each(["completed", "failed"] as const)(
