@@ -90,6 +90,20 @@ describe("finalize real adapter git classifications", () => {
     expect(await adapter().branchIsContainedInOrigin(unmerged)).toBe(false);
   });
 
+  it("names the exact durable cache recovery point", async () => {
+    const recovery = await adapter().localBranchRecovery(unmerged);
+    const { stdout } = await exec("git", ["rev-parse", unmerged], {
+      cwd: cache,
+      env: GIT_ENV,
+    });
+
+    expect(recovery).toEqual({
+      tipSha: stdout.trim(),
+      ref: `refs/heads/${unmerged}`,
+      repoDir: cache,
+    });
+  });
+
   it("measures unpublished work from the source or chunk seed", async () => {
     expect(await adapter().branchIsAheadOfSeed({
       id: "1", title: "source seed", branch: merged,

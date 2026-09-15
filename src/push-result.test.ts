@@ -19,14 +19,14 @@ describe("classifyPushError", () => {
       "! [remote rejected] sandbar/issue-11-c -> sandbar/member-11 (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/deploy.yml` without `workflow` scope)";
 
     expect(classifyPushError({
-      stderr: `remote: refusing update\n ${chunk}\n ${member}\nerror: failed to push some refs`,
+      stderr: `remote: refusing update\n${chunk}\n${member}\nerror: failed to push some refs`,
     })).toEqual({ kind: "refused", reasons: [chunk, member] });
   });
 
   it("classifies a remote hook refusal as refused", () => {
     expect(classifyPushError({
       stderr:
-        " ! [remote rejected] HEAD -> topic (pre-receive hook declined)\nerror: failed to push some refs",
+        "! [remote rejected] HEAD -> topic (pre-receive hook declined)\nerror: failed to push some refs",
     })).toEqual({
       kind: "refused",
       reasons: [

@@ -18,13 +18,21 @@
 // that may otherwise discard the cache branch asks structurally whether it is
 // ahead of its seed and publishes it first (#158); clone-preservation failures
 // still keep that branch because it is what keeps `pruneStaleIssueClones` off
-// a preserved clone. The reviewer-write
-// handoff is the one caller that asks for the clone to be kept when the rule
-// would reclaim it: the human is told to inspect it, and uncommitted evidence
-// cannot travel through a push. It reports push rejection in the handoff
-// comment instead of aborting the rest of the finalise pass. As with every
-// human handoff, the explanatory comment precedes the label flip so a comment
-// failure cannot park an issue without its recovery instructions.
+// a preserved clone. The reviewer-write handoff is the one caller that asks for
+// the clone to be kept when the rule would reclaim it: the human is told to
+// inspect it, and uncommitted evidence cannot travel through a push.
+//
+// A SERVER-REFUSED PUSH is the other deliberate local park (#163), for every
+// terminal that publishes an issue branch. The shared classifier reads Git's
+// `[remote rejected]` ref line as a fact about this branch's content or ref,
+// distinct from a non-fast-forward race and from transport. Finalise comments
+// with the exact refusal, tip sha, cache ref/path and recovery command, then
+// swaps `ready-for-agent` for `agentStuck`; the rest of the queue continues.
+// Races and transport failures still halt loudly. The landing path's
+// `landing-push-refused` input is already commented and de-queued by merger, so
+// this module only applies its handoff label and does not retry the same refused
+// content. As with every human handoff, the explanatory comment precedes the
+// label flip so a comment failure cannot park an issue without instructions.
 //
 // `git branch -d` is escalated to `-D` only where the caller owns the certainty
 // that the work is preserved elsewhere. For `merged`/`chunk-landed`/
@@ -61,10 +69,10 @@
 // Required side-effects fail loud, they don't swallow (#8). The original bug was
 // `editLabels` catching a "label doesn't exist" error, logging it, and returning
 // as if the issue had been parked — so the run continued and the issue, never
-// removed from the queue, was re-picked forever. Now the required git/gh
-// operations (pushBranch, postComment, and the required label flips via
-// requireFlip) throw SandbarError on failure; run() surfaces it as the final
-// output and stops. editLabels still removes then adds as separate `gh` calls so
+// removed from the queue, was re-picked forever. Now required comments and
+// label flips fail loud, and pushBranch returns the named git outcome above so
+// only a server refusal can become a local park; run() surfaces every other
+// failure and stops. editLabels still removes then adds as separate `gh` calls so
 // a missing add-label can't abort the queue-removing --remove-label, and it
 // returns its outcome structured so the benign `merged` cleanup can ignore a
 // failure while the handoff arms turn it into a loud stop.
@@ -84,6 +92,11 @@ import type { ContextSlot } from "./inner-loop-machine.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
+import {
+  classifyPushError,
+  type LocalBranchRecovery,
+  type PushResult,
+} from "./push-result.js";
 
 // Where an implementer's commits ended up when it worked off the issue branch
 // (#27). Structural alias of git-ops' HeadMismatch — finalize only ever reads
@@ -98,6 +111,27 @@ const exec = promisify(execFile);
 export const READY_FOR_AGENT_LABEL = "ready-for-agent";
 
 export const BOT_COMMENT_PREFIX = "**Sandbar:**";
+
+export const PUSH_REFUSED_COMMENT_TEMPLATE = (args: {
+  readonly branch: string;
+  readonly reasons: readonly string[];
+  readonly recovery: LocalBranchRecovery;
+  readonly stuckLabel: string;
+  readonly readyLabel: string;
+  readonly context?: string;
+}): string =>
+  `${BOT_COMMENT_PREFIX} origin refused to publish \`${args.branch}\`. Git's ` +
+  `server-side refusal is a fact about this branch's content or ref, not a ` +
+  `transient push race, so Sandbar parked the issue instead of halting the ` +
+  `rest of the queue. Git reported:\n\n\`\`\`text\n${args.reasons.join("\n")}\n\`\`\`\n\n` +
+  `The commits remain on this box at tip \`${args.recovery.tipSha}\`, cache ` +
+  `ref \`${args.recovery.ref}\`, in \`${args.recovery.repoDir}\`. Publish that ` +
+  `ref with an identity allowed to write this content (for example, an ` +
+  `authorised SSH remote):\n\n\`\`\`sh\ngit -C '${args.recovery.repoDir}' push ` +
+  `<authorised-remote> '${args.recovery.ref}:${args.recovery.ref}'\n\`\`\`\n\n` +
+  `After resolving any additional handoff below, drop \`${args.stuckLabel}\` ` +
+  `and re-apply \`${args.readyLabel}\`.` +
+  (args.context ? `\n\n---\n\n${args.context}` : "");
 
 // A note that applies to every template below, and to the ones in
 // `chunk-land.ts` and `chunk-pr.ts`: these bodies are posted into the HOST
@@ -583,7 +617,10 @@ export const SPEC_GAPS_COMMENT = (gaps: readonly SpecGap[]): string =>
   gaps.map((gap) => `\n\n### Review round ${gap.round}\n\n${gap.text}`).join("");
 
 export type FinalizeAdapter = {
-  pushBranch(branch: string): Promise<void>;
+  pushBranch(branch: string): Promise<PushResult>;
+  // Exact durable cache location used in a refused-push handoff. Asked only
+  // after pushBranch returns `refused`.
+  localBranchRecovery(branch: string): Promise<LocalBranchRecovery>;
   // git branch -d — refuses if the branch isn't merged, which is desirable.
   // Returns ok=false with the error message instead of throwing so the
   // orchestrator can keep finalising the rest.
@@ -674,7 +711,8 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
 // Quota and infrastructure terminals deliberately leave the issue queued, and
 // a closed-issue handoff performs no tracker write at all (#16).
 export function finalizationIntendsNotReady(result: FinalizeResult): boolean {
-  return result.action.kind !== "skipped-closed" && HANDOFF_KINDS.has(result.input.kind);
+  return result.action.kind === "parked-local" ||
+    (result.action.kind !== "skipped-closed" && HANDOFF_KINDS.has(result.input.kind));
 }
 
 // The one caller that keeps a clone the reclaim rule would remove — see the
@@ -726,6 +764,54 @@ function requireFlip(r: LabelEditResult, issueNum: number): void {
       `error — the label does not exist in the repo (sandbar never creates ` +
       `labels). Create it or set config.labels, then re-run.`,
   );
+}
+
+// One policy for every issue-branch publish. A server refusal is attributable
+// to this branch and becomes the same recoverable local park whichever terminal
+// happened to reach finalise. Races and transport failures say nothing about
+// the branch's content and retain the existing fail-loud behavior.
+async function pushBranchOrPark(
+  input: FinalizeInput,
+  adapter: FinalizeAdapter,
+  labels: LabelConfig,
+  options: {
+    readonly context?: string;
+    readonly queueAlreadyRemoved?: boolean;
+  } = {},
+): Promise<Extract<FinalizeAction, { kind: "parked-local" }> | null> {
+  const push = await adapter.pushBranch(input.issue.branch);
+  if (push.kind === "ok") return null;
+  if (push.kind === "race") {
+    throw new SandbarError(
+      `Failed to push branch '${input.issue.branch}' to origin: the remote branch moved (non-fast-forward).`,
+    );
+  }
+  if (push.kind === "fatal") {
+    throw new SandbarError(
+      `Failed to push branch '${input.issue.branch}' to origin: ${push.reason}`,
+    );
+  }
+
+  const n = issueNumberOf(input.issue);
+  const recovery = await adapter.localBranchRecovery(input.issue.branch);
+  await adapter.postComment(
+    n,
+    PUSH_REFUSED_COMMENT_TEMPLATE({
+      branch: input.issue.branch,
+      reasons: push.reasons,
+      recovery,
+      stuckLabel: labels.agentStuck,
+      readyLabel: READY_FOR_AGENT_LABEL,
+      ...(options.context === undefined ? {} : { context: options.context }),
+    }),
+  );
+  const flip = await adapter.editLabels(
+    n,
+    options.queueAlreadyRemoved ? [] : [READY_FOR_AGENT_LABEL],
+    [labels.agentStuck],
+  );
+  requireFlip(flip, n);
+  return { kind: "parked-local" };
 }
 
 // `-d`, escalating to `-D` when it refuses. ONLY for callers that own the
@@ -831,7 +917,10 @@ export async function finalizeOne(
     case "merge-conflict": {
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
-      await adapter.pushBranch(input.issue.branch);
+      const refused = await pushBranchOrPark(input, adapter, labels, {
+        queueAlreadyRemoved: true,
+      });
+      if (refused) return refused;
       // The merger already dropped `ready-for-agent`; finalize only parks it
       // under the handoff label.
       const r = await adapter.editLabels(n, [], [labels.agentStuck]);
@@ -842,7 +931,10 @@ export async function finalizeOne(
     case "forge-unverified": {
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
-      await adapter.pushBranch(input.issue.branch);
+      const refused = await pushBranchOrPark(input, adapter, labels, {
+        queueAlreadyRemoved: true,
+      });
+      if (refused) return refused;
       const r = await adapter.editLabels(n, [], [labels.agentStuck]);
       requireFlip(r, n);
       return { kind: "pushed" };
@@ -857,16 +949,23 @@ export async function finalizeOne(
     case "needs-info": {
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
-      await adapter.pushBranch(input.issue.branch);
+      const body = NEEDS_INFO_COMMENT_TEMPLATE(
+        input.issue.branch,
+        input.questions,
+        labels.needsInfo,
+        READY_FOR_AGENT_LABEL,
+      ) + (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : "");
+      const refused = await pushBranchOrPark(input, adapter, labels, {
+        context:
+          `${BOT_COMMENT_PREFIX} the agent also paused with NEEDS-INFO. ` +
+          `Answer the questions below before re-applying ` +
+          `\`${READY_FOR_AGENT_LABEL}\`.\n\n---\n\n${input.questions}` +
+          (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
+      });
+      if (refused) return refused;
       await adapter.postComment(
         n,
-        NEEDS_INFO_COMMENT_TEMPLATE(
-          input.issue.branch,
-          input.questions,
-          labels.needsInfo,
-          READY_FOR_AGENT_LABEL,
-        ) +
-          (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
+        body,
       );
       const r = await adapter.editLabels(
         n,
@@ -883,7 +982,16 @@ export async function finalizeOne(
       if (aheadOfSeed) {
         // Late escalation: the agent had already committed before it realised
         // it was inventing UI. Hand the partial work to the human.
-        await adapter.pushBranch(input.issue.branch);
+        const refused = await pushBranchOrPark(input, adapter, labels, {
+          context:
+            `${BOT_COMMENT_PREFIX} the agent also stopped because this issue ` +
+            "implies user-visible UI that has no human-approved prototype. " +
+            `Its assessment follows. Supply a readable prototype as described ` +
+            `on the issue, or reply \"${NO_PROTOTYPE_NEEDED_PHRASE}\" if the ` +
+            `agent should make the design decisions, before re-applying the ` +
+            `queue label.\n\n${input.uiImpact}`,
+        });
+        if (refused) return refused;
       }
       await adapter.postComment(
         n,
@@ -939,7 +1047,19 @@ export async function finalizeOne(
       const n = issueNumberOf(input.issue);
       const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
       const aheadOfSeed = await adapter.branchIsAheadOfSeed(input.issue);
-      if (aheadOfSeed) await adapter.pushBranch(input.issue.branch);
+      if (aheadOfSeed) {
+        const refused = await pushBranchOrPark(input, adapter, labels, {
+          context:
+            `${BOT_COMMENT_PREFIX} the agent also stopped with NEEDS-PARTITION ` +
+            `(${input.cause}) in the \`${input.slot}\` slot. Its working context ` +
+            `was ${input.size.toLocaleString("en-US")} characters against the ` +
+            `configured ${input.budget.toLocaleString("en-US")}-character budget.\n\n` +
+            `${input.detail}\n\nPartition this work into a \`## Blocked by\` ` +
+            `chain on its chunk before re-applying \`${READY_FOR_AGENT_LABEL}\` ` +
+            `to the first issue that is ready.`,
+        });
+        if (refused) return refused;
+      }
       await adapter.postComment(
         n,
         NEEDS_PARTITION_COMMENT_TEMPLATE(
@@ -966,7 +1086,6 @@ export async function finalizeOne(
     case "needs-human": {
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
-      await adapter.pushBranch(input.issue.branch);
       // #17: name the real blocker. uncommittable-worktree → the dirty paths, and
       // say that no gate ran; off-branch-head → where HEAD went and how to
       // rescue the commits (#27); gate-red → the gate failure trace.
@@ -1021,15 +1140,18 @@ export async function finalizeOne(
             );
         }
       })();
-      await adapter.postComment(
-        n,
+      const fullBody =
         body +
-          (input.budgetExhausted === null
-            ? ""
-            : `\n\nThe \`${input.budgetExhausted.budget === "quality" ? "maxQualityRounds" : "maxGateRounds"}\` ` +
-              `budget ran out after ${input.budgetExhausted.roundsUsed} consecutive ` +
-              `${input.budgetExhausted.budget === "quality" ? "quality failures" : "red gates"}.`),
-      );
+        (input.budgetExhausted === null
+          ? ""
+          : `\n\nThe \`${input.budgetExhausted.budget === "quality" ? "maxQualityRounds" : "maxGateRounds"}\` ` +
+            `budget ran out after ${input.budgetExhausted.roundsUsed} consecutive ` +
+            `${input.budgetExhausted.budget === "quality" ? "quality failures" : "red gates"}.`);
+      const refused = await pushBranchOrPark(input, adapter, labels, {
+        context: fullBody,
+      });
+      if (refused) return refused;
+      await adapter.postComment(n, fullBody);
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
@@ -1041,10 +1163,15 @@ export async function finalizeOne(
     case "quota": {
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
-      await adapter.pushBranch(input.issue.branch);
       const reset = input.resetsAt === undefined
         ? "an unknown time"
         : new Date(input.resetsAt * 1000).toISOString();
+      const refused = await pushBranchOrPark(input, adapter, labels, {
+        context:
+          `${BOT_COMMENT_PREFIX} The \`${input.provider}\` subscription quota ` +
+          `window \`${input.window}\` also closed; it resets at ${reset}.`,
+      });
+      if (refused) return refused;
       await adapter.postComment(
         n,
         `**Sandbar:** The \`${input.provider}\` subscription quota window ` +
@@ -1058,7 +1185,12 @@ export async function finalizeOne(
       const n = issueNumberOf(input.issue);
       const detail = input.detail.trim();
       await adapter.reclaimIssueClone(input.issue.branch);
-      await adapter.pushBranch(input.issue.branch);
+      const refused = await pushBranchOrPark(input, adapter, labels, {
+        context:
+          `${BOT_COMMENT_PREFIX} The \`${input.provider}\` provider also refused ` +
+          `its credential: ${detail}${/[.!?]$/.test(detail) ? "" : "."}`,
+      });
+      if (refused) return refused;
       await adapter.postComment(
         n,
         `**Sandbar:** The \`${input.provider}\` provider refused its credential: ` +
@@ -1073,17 +1205,21 @@ export async function finalizeOne(
     case "review-budget-exhausted": {
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
-      await adapter.pushBranch(input.issue.branch);
+      const body = REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
+        input.issue.branch,
+        input.budget,
+        input.roundsUsed,
+        input.latestReviewerProse,
+        labels.agentStuck,
+        READY_FOR_AGENT_LABEL,
+      );
+      const refused = await pushBranchOrPark(input, adapter, labels, {
+        context: body,
+      });
+      if (refused) return refused;
       await adapter.postComment(
         n,
-        REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
-          input.issue.branch,
-          input.budget,
-          input.roundsUsed,
-          input.latestReviewerProse,
-          labels.agentStuck,
-          READY_FOR_AGENT_LABEL,
-        ),
+        body,
       );
       const r = await adapter.editLabels(
         n,
@@ -1100,20 +1236,17 @@ export async function finalizeOne(
       // to hand to a human. Reclaiming still publishes the branch first, which
       // is what the push below reads.
       await reclaimClone(input, adapter);
-      let pushFailure: string | null = null;
-      try {
-        await adapter.pushBranch(input.issue.branch);
-      } catch (err) {
-        pushFailure = err instanceof Error ? err.message : String(err);
-      }
+      const body =
+        `${BOT_COMMENT_PREFIX} stopped because the read-only ${input.actor} changed the issue repository. ` +
+        `The write is contained to this issue and its managed clone has been preserved for human inspection.\n\n` +
+        input.latestReviewerProse;
+      const refused = await pushBranchOrPark(input, adapter, labels, {
+        context: body,
+      });
+      if (refused) return refused;
       await adapter.postComment(
         n,
-        `${BOT_COMMENT_PREFIX} stopped because the read-only ${input.actor} changed the issue repository. ` +
-          `The write is contained to this issue and its managed clone has been preserved for human inspection.` +
-          (pushFailure === null
-            ? ""
-            : ` The changed branch could not be pushed (${pushFailure}); inspect the preserved clone for the authoritative state.`) +
-          `\n\n${input.latestReviewerProse}`,
+        body,
       );
       const r = await adapter.editLabels(
         n,
@@ -1121,12 +1254,13 @@ export async function finalizeOne(
         [labels.agentStuck],
       );
       requireFlip(r, n);
-      return { kind: pushFailure === null ? "pushed" : "parked-local" };
+      return { kind: "pushed" };
     }
     case "hard-error": {
       const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
       if (await adapter.branchIsAheadOfSeed(input.issue)) {
-        await adapter.pushBranch(input.issue.branch);
+        const refused = await pushBranchOrPark(input, adapter, labels);
+        if (refused) return refused;
         // A preserved clone may hold commits the push did not carry (the
         // reason says so when the publish is what failed); name it rather than
         // report a plain push.
@@ -1228,20 +1362,22 @@ export function realAdapter(deps: RealFinalizeAdapterDeps): FinalizeAdapter {
   const cwd = deps.layout.repoDir;
   return {
     async pushBranch(branch) {
-      // Required: the whole point of the non-merged terminals is to hand the
-      // branch to a human. If the push fails we must NOT report success and
-      // move on (the #8 class of bug) — fail loud.
+      // The pure layer decides whether a classified failure is a per-branch
+      // refusal to park or a race/transport failure to surface loudly.
       await deps.beforeOriginWrite();
       try {
         await exec("git", ["push", "origin", `${branch}:${branch}`], { cwd });
+        return { kind: "ok" };
       } catch (err) {
-        throw new SandbarError(
-          `Failed to push branch '${branch}' to origin: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-          { cause: err },
-        );
+        return classifyPushError(err);
       }
+    },
+    async localBranchRecovery(branch) {
+      const ref = `refs/heads/${branch}`;
+      const { stdout } = await exec("git", ["rev-parse", "--verify", ref], {
+        cwd,
+      });
+      return { tipSha: stdout.trim(), ref, repoDir: cwd };
     },
     async deleteBranch(branch) {
       try {

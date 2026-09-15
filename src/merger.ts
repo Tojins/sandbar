@@ -1705,9 +1705,9 @@ export async function runMergerWithAdapter(
           });
           await emit(`skip #${n} reason=push-refused`);
         } catch (err) {
-          asHalt(`Could not park issue #${issue.id} after ${branch} was refused`)(
-            err,
-          );
+          throw asHalt(
+            `Could not park issue #${issue.id} after ${branch} was refused`,
+          )(err);
         }
       }
       await emit(

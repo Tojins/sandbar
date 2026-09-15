@@ -42,8 +42,7 @@ export function classifyPushError(err: unknown): PushResult {
   const stderr = typeof e?.stderr === "string" ? e.stderr : "";
   const statusLines = stderr
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+    .filter((line) => line.trim().length > 0);
   const refused = statusLines.filter((line) =>
     /!\s+\[remote rejected\]/i.test(line),
   );
