@@ -113,14 +113,21 @@ async function serveArtifacts(
   const close = (): Promise<void> =>
     removeFixtureContainer(container);
   onTestFinished(close, 60_000);
-  const published = (await exec(RUNTIME, ["port", container, "8080/tcp"]))
-    .stdout.match(/:(\d+)(?:\r?\n|$)/);
-  if (published === null) {
+  const published = (
+    await exec(RUNTIME, [
+      "container",
+      "inspect",
+      "--format",
+      '{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}',
+      container,
+    ])
+  ).stdout.trim();
+  if (!/^\d+$/.test(published)) {
     throw new Error(
       `podman did not publish the artifact server port for ${container}`,
     );
   }
-  return `http://127.0.0.1:${published[1]}`;
+  return `http://127.0.0.1:${published}`;
 }
 
 describe.runIf(available)("ensureImages against real podman", () => {
