@@ -1,14 +1,26 @@
-import { mkdtemp, readFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { agentInvocationFilename, createTranscriptTree } from "./logs.js";
 
+const temporaryDirectories = new Set<string>();
+
 const makeRun = async () => {
   const base = await mkdtemp(join(tmpdir(), "sandbar-transcripts-"));
+  temporaryDirectories.add(base);
   return createTranscriptTree(join(base, "run-test"));
 };
+
+afterEach(async () => {
+  await Promise.all(
+    [...temporaryDirectories].map((path) =>
+      rm(path, { recursive: true, force: true })
+    ),
+  );
+  temporaryDirectories.clear();
+});
 
 describe("agent invocation records (#135)", () => {
   it.each([

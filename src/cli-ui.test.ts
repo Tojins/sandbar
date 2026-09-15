@@ -1,7 +1,7 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const seams = vi.hoisted(() => ({
   start: vi.fn(async () => ({
@@ -33,9 +33,25 @@ vi.mock("./cleanup.js", () => ({
 
 import { main } from "./cli.js";
 
+const temporaryDirectories = new Set<string>();
+const makeTemporaryDirectory = async (): Promise<string> => {
+  const path = await mkdtemp(join(tmpdir(), "sandbar-cli-ui-"));
+  temporaryDirectories.add(path);
+  return path;
+};
+
+afterEach(async () => {
+  await Promise.all(
+    [...temporaryDirectories].map((path) =>
+      rm(path, { recursive: true, force: true })
+    ),
+  );
+  temporaryDirectories.clear();
+});
+
 describe("sandbar ui entrypoint", () => {
   it("loads config relative to the invocation cwd, serves, prints, and registers close", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "sandbar-cli-ui-"));
+    const cwd = await makeTemporaryDirectory();
     await writeFile(join(cwd, "other.mjs"), "export default { marker: 'loaded' };\n");
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     await expect(main(["ui", "--config", "other.mjs"], cwd)).resolves.toBe(0);
@@ -53,7 +69,7 @@ describe("sandbar ui entrypoint", () => {
   });
 
   it("uses the invocation port instead of config.uiPort when supplied", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "sandbar-cli-ui-"));
+    const cwd = await makeTemporaryDirectory();
     await writeFile(join(cwd, "sandbar.config.mjs"), "export default {};\n");
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     await expect(main(["ui", "--port", "7555"], cwd)).resolves.toBe(0);

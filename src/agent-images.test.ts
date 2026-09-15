@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   AGENT_PROVIDER_NAMES,
@@ -32,11 +32,23 @@ import {
 } from "./ensure-images.js";
 import { runScope, variantImageTag } from "./naming.js";
 
+const fakeArtifactRoots = new Set<string>();
+
+afterEach(async () => {
+  await Promise.all(
+    [...fakeArtifactRoots].map((path) =>
+      rm(path, { recursive: true, force: true })
+    ),
+  );
+  fakeArtifactRoots.clear();
+});
+
 async function fakeAgentArtifacts(
   providers: readonly (typeof AGENT_PROVIDER_NAMES)[number][],
   libc: "glibc" | "musl",
 ): Promise<PreparedAgentArtifacts> {
   const root = await mkdtemp(join(tmpdir(), "sandbar-agent-tools-test-"));
+  fakeArtifactRoots.add(root);
   const sha256: Record<string, string> = {};
   const arch = process.arch as "x64" | "arm64";
   // EVERY binary the provider installs, named by the module's own rule (#120).
