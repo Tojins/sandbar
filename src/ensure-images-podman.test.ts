@@ -113,6 +113,20 @@ async function serveArtifacts(
   const close = (): Promise<void> =>
     removeFixtureContainer(container);
   onTestFinished(close, 60_000);
+  const probePath = Object.keys(paths)[0];
+  if (probePath === undefined) {
+    throw new Error("artifact server requires at least one fixture path");
+  }
+  // `podman run -d` returns once the container process exists, before httpd
+  // necessarily reaches listen(2). Wait inside the server container so the
+  // subsequent host-side Buildah ADD cannot race its startup.
+  await exec(RUNTIME, [
+    "exec",
+    container,
+    "sh",
+    "-c",
+    `for delay in $(seq 1 100); do wget -q -O /dev/null http://127.0.0.1:8080${probePath} && exit 0; sleep 0.1; done; exit 1`,
+  ]);
   const published = (
     await exec(RUNTIME, [
       "container",
