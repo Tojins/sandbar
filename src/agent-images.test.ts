@@ -185,6 +185,51 @@ describe("run-owned agent images", () => {
     ]);
   });
 
+  it("rebuilds a matching augmented image when the base is unlabelled", async () => {
+    const scope = runScope("/unlabelled-base-image");
+    const arch = hostAgentArchitecture();
+    const toolsFingerprint = agentToolsFingerprint(
+      ["codex"], "glibc", { arch },
+    );
+    const toolsTag = toolsImageTag(scope, "glibc", toolsFingerprint);
+    const recipe = agentToolsContainerfile(
+      "base", toolsTag, ["codex"], { arch, libc: "glibc" },
+    );
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(["unknown", recipe]))
+      .digest("hex");
+    const augmentedTag = variantImageTag("base", scope, fingerprint);
+    const records: Array<{ tag: string; built: boolean; reason: string }> = [];
+    const builds: string[] = [];
+
+    const images = await createAgentImages({
+      declaredBaseTag: "base",
+      providers: ["codex"],
+      scope,
+      inputsLabel: async (tag) => {
+        if (tag === toolsTag) return toolsFingerprint;
+        if (tag === augmentedTag) return fingerprint;
+        return null;
+      },
+      build: async (image) => { builds.push(image.containerfile); },
+      log: () => {},
+      onImage: (record) => {
+        records.push({
+          tag: record.tag,
+          built: record.built,
+          reason: record.reason,
+        });
+      },
+    });
+
+    expect(images.declaredTag).toBe(augmentedTag);
+    expect(builds).toEqual(["<generated-agent-tools-augmentation>"]);
+    expect(records).toEqual([
+      { tag: toolsTag, built: false, reason: "tools-current" },
+      { tag: augmentedTag, built: true, reason: "base-unlabelled" },
+    ]);
+  });
+
   it("memoizes one tools image per libc while augmenting different bases", async () => {
     const builds: CapturedBuild[] = [];
     const scope = runScope("/agent-libc-memo");

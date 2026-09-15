@@ -300,14 +300,21 @@ describe.runIf(available)("ensureImages against real podman", () => {
         timeoutMs: 600_000,
       });
 
-      const { stdout: created } = await exec(RUNTIME, [
+      const container = stackContainerNameFor(
+        SCOPE,
+        podmanTestStackId("artifact-inspect", task.id),
+        "tools",
+      );
+      await exec(RUNTIME, [
         "create",
+        "--name",
+        container,
+        "--image-volume=ignore",
         tag,
         "/usr/local/bin/claude",
       ]);
-      const container = created.trim();
       onTestFinished(
-        () => exec(RUNTIME, ["rm", "-f", container]).then(() => undefined),
+        () => removeFixtureContainer(container),
         60_000,
       );
       const copied = await mkdtemp(join(root, "copied-"));
