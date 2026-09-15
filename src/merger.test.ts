@@ -2181,9 +2181,14 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
       { n: 42, label: READY_FOR_AGENT_LABEL },
       { n: 43, label: READY_FOR_AGENT_LABEL },
     ]);
-    for (const comment of calls.comments.slice(0, 2)) {
+    expect(calls.comments).toHaveLength(2);
+    expect(calls.comments.map(({ n }) => n)).toEqual([42, 43]);
+    for (const n of [42, 43]) {
+      const member = chunkIssue(n, n === 43 ? 42 : undefined);
+      const comment = calls.comments.find((call) => call.n === n)!;
       expect(comment.msg).toContain(refusal);
-      expect(comment.msg).toContain("refs/heads/sandbar/issue-");
+      expect(comment.msg).toContain(`tip-${member.branch}`);
+      expect(comment.msg).toContain(`refs/heads/${member.branch}`);
       expect(comment.msg).toContain("/host/.sandbar/repo.git");
       expect(comment.msg).toContain("ready-for-agent");
     }

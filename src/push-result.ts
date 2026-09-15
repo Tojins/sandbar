@@ -30,6 +30,24 @@ export type LocalBranchRecovery = {
   readonly repoDir: string;
 };
 
+// The substantive recovery recipe is shared by merger and finalise. Their
+// introductions differ (one refused an atomic chunk push, the other an issue
+// branch push), but the durable location and the command a human runs must not
+// drift between those two paths.
+export function pushRefusedRecoveryNote(args: {
+  readonly reasons: readonly string[];
+  readonly recovery: LocalBranchRecovery;
+}): string {
+  return (
+    `Git reported:\n\n\`\`\`text\n${args.reasons.join("\n")}\n\`\`\`\n\n` +
+    `The commits remain on this box at tip \`${args.recovery.tipSha}\`, cache ` +
+    `ref \`${args.recovery.ref}\`, in \`${args.recovery.repoDir}\`. Publish that ` +
+    `ref with an identity allowed to write this content (for example, an ` +
+    `authorised SSH remote):\n\n\`\`\`sh\ngit -C '${args.recovery.repoDir}' push ` +
+    `<authorised-remote> '${args.recovery.ref}:${args.recovery.ref}'\n\`\`\``
+  );
+}
+
 export function pushErrorDetail(err: unknown): string {
   const e = err as { stderr?: unknown; message?: unknown } | null;
   const stderr = typeof e?.stderr === "string" ? e.stderr.trim() : "";

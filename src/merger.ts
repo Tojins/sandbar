@@ -376,6 +376,7 @@ import {
   classifyPushError,
   type LocalBranchRecovery,
   type PushResult,
+  pushRefusedRecoveryNote,
 } from "./push-result.js";
 import {
   RESOLVE_AGENT_TIMEOUT_MS,
@@ -479,16 +480,8 @@ export function buildChunkPushRefusedComment(args: {
     "and the gate passed, but origin refused the atomic landing push. This is " +
     "a refusal of the pushed content or ref, not a transient push race, so " +
     "`ready-for-agent` was removed and the same push will not be retried " +
-    "automatically. Git reported:\n\n```text\n" +
-    `${args.reasons.join("\n")}\n` +
-    "```\n\n" +
-    `The issue commits remain on this box at tip \`${args.recovery.tipSha}\`, ` +
-    `cache ref \`${args.recovery.ref}\`, in \`${args.recovery.repoDir}\`. ` +
-    "Publish that ref with an identity allowed to write this content (for " +
-    "example, an authorised SSH remote):\n\n```sh\n" +
-    `git -C '${args.recovery.repoDir}' push <authorised-remote> ` +
-    `'${args.recovery.ref}:${args.recovery.ref}'\n` +
-    "```\n\nThen drop the human-handoff label and re-apply `ready-for-agent`. " +
+    `automatically. ${pushRefusedRecoveryNote(args)}\n\n` +
+    "Then drop the human-handoff label and re-apply `ready-for-agent`. " +
     "Sandbar will re-run the gate and reviews on the unchanged tip and retry " +
     "the chunk landing once origin already carries the branch."
   );
