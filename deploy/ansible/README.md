@@ -34,8 +34,10 @@ exist, naming a missing path before it installs either unit.
 
 ## What the role provides
 
-The target is Ubuntu 24.04 or 26.04. Host-global work runs once: packages,
-Node 24, git, gh, AppArmor's podman/pasta interoperability rule, cgroup-v2
+The target is Ubuntu 24.04 or 26.04, with Podman 5.7 / Buildah 1.42 or newer
+(agent tools use `ADD --checksum` and `COPY --from=<local image>`). Host-global
+work runs once: packages, Node 24, git, gh, AppArmor's podman/pasta
+interoperability rule, cgroup-v2
 delegation, swap, key-only SSH, unattended security upgrades without automatic
 reboots, the operator VPN, Caddy, the driver build, and the convergence
 timer.

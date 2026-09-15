@@ -256,9 +256,10 @@ outcomes.
   place without manufacturing a human-inspection complaint. All resource
   names carry `w`+8-hex of the *realpath'd* locked workdir; the orphan sweep
   only ever touches its own scope, and unattributable debris is reported, never
-  removed. `src/containers.ts` and `src/naming.ts` headers. Image **tags** are
-  the one class the scope does not partition — on a shared host, give each
-  workdir its own tags.
+  removed. `src/containers.ts` and `src/naming.ts` headers. Configured image
+  **tags** are the one class the scope does not partition — on a shared host,
+  give each workdir its own tags. Driver-owned tools images are scoped and
+  persistent; startup keeps only the running driver's pin fingerprints.
 - **Runtime is podman**, hard-coded (`src/runtime.ts`). The agent sandbox runs
   under `--init` (#42), and every container gets `--image-volume=ignore` (#50)
   — see `src/agent-sandbox.ts` and `src/containers.ts` headers.
@@ -272,7 +273,8 @@ outcomes.
   `/sandbar/logs/<name>.log`; there is no restart. `src/sandbox-stack.ts`.
 - **An image that bakes dependencies is a function of the branch (#37, #46).**
   `images[].rebuildOn` + fingerprint labels; an unbuildable image is a gate
-  red, not a HARD-ERROR. `src/image-inputs.ts`, `src/ensure-images.ts` and
+  red, not a HARD-ERROR. Appending the driver-owned tools is infrastructure and
+  does produce HARD-ERROR. `src/image-inputs.ts`, `src/ensure-images.ts` and
   `src/agent-tools.ts` headers.
 - **`sandbar gate` (#45)** is the one standalone runner for the same stack; it
   deliberately suspends D1, the lock, preflight and `sandboxHooks`.
@@ -510,8 +512,10 @@ outcomes.
   per session) and an image missing the helper has no command runner at all.
   Installed unconditionally and never paired with a `features.code_mode` pin;
   `agent-providers.ts`'s header owns the probe runs behind that. The
-  augmentation (`src/agent-tools.ts`) enforces a base contract
-  of `/bin/sh`, CA roots, and git or apt/apk/dnf — no Node/npm runtime. The
+  augmentation (`src/agent-tools.ts`) builds persistent, workdir-scoped tools
+  images with checksum-verified remote `ADD`s in podman's storage, then copies
+  their binaries into each base. It enforces a base contract of `/bin/sh`, CA
+  roots, and git or apt/apk/dnf — no Node/npm runtime. The
   merger uses the same augmented declared image, while gate containers keep the
   unaugmented base because they run no agent. Both pins move with the driver,
   and codex's is specifically co-versioned with its load-bearing JSONL parser.

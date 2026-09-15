@@ -778,21 +778,47 @@ async function checkVariantUid(
 export async function removeBranchImages(
   tags: readonly string[],
 ): Promise<readonly string[]> {
+  return (await removeImageTags(tags)).failures;
+}
+
+const runImageQuery: RuntimeExec = (args) => exec(RUNTIME, [...args], {
+  timeout: IMAGE_QUERY_TIMEOUT_MS,
+});
+
+// Listing and removing podman image tags are shared lifecycle operations. The
+// callers retain the authority-specific selection and ordering rules: branch
+// variants are transient and child-first, while current tools pins persist.
+export async function listImageTags(
+  run: RuntimeExec = runImageQuery,
+): Promise<readonly string[]> {
+  const { stdout } = await run([
+    "images",
+    "--format",
+    "{{.Repository}}:{{.Tag}}",
+  ]);
+  return stdout.split("\n").map((tag) => tag.trim()).filter(Boolean);
+}
+
+export async function removeImageTags(
+  tags: readonly string[],
+  run: RuntimeExec = runImageQuery,
+): Promise<SweepResult> {
+  const removed: string[] = [];
   const failures: string[] = [];
   for (const tag of tags) {
+    const args = ["rmi", "-f", tag];
     try {
-      await exec(RUNTIME, ["rmi", "-f", tag], {
-        timeout: IMAGE_QUERY_TIMEOUT_MS,
-      });
+      await run(args);
+      removed.push(tag);
     } catch (err) {
       failures.push(
-        `  ${RUNTIME} rmi -f ${tag}: ${
+        `  ${RUNTIME} ${args.join(" ")}\n    ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
     }
   }
-  return failures;
+  return { removed, failures };
 }
 
 // Per-branch images left behind in THIS scope, swept at startup — the image
@@ -814,38 +840,14 @@ export async function removeBranchImages(
 // image block every future run).
 export async function sweepBranchImages(
   scope: RunScope,
-  run: RuntimeExec = (args) => exec(RUNTIME, [...args], {
-    timeout: IMAGE_QUERY_TIMEOUT_MS,
-  }),
+  run: RuntimeExec = runImageQuery,
 ): Promise<SweepResult> {
-  const { stdout } = await run([
-    "images",
-    "--format",
-    "{{.Repository}}:{{.Tag}}",
-  ]);
-  const tags = stdout
-    .split("\n")
-    .map((s) => s.trim())
+  const tags = (await listImageTags(run))
     .filter((t) => isVariantImageTagIn(scope, t))
-    // Agent-tool images built in agent-tools.ts are children of branch variants
-    // and carry one more suffix. Remove the more-derived (longer) tags first.
+    // Augmented sandbox images are children of branch variants and carry one
+    // more suffix. Remove the more-derived (longer) tags first.
     .sort((a, b) => b.length - a.length);
-  const removed: string[] = [];
-  const failures: string[] = [];
-  for (const tag of tags) {
-    const args = ["rmi", "-f", tag];
-    try {
-      await run(args);
-      removed.push(tag);
-    } catch (err) {
-      failures.push(
-        `  ${RUNTIME} ${args.join(" ")}\n    ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-  return { removed, failures };
+  return removeImageTags(tags, run);
 }
 
 // `--entrypoint id` rather than `run <image> id -u`: with a plain command the

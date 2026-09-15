@@ -117,6 +117,7 @@ import type {
   ResolvedGateStack,
 } from "./config.js";
 import {
+  AgentToolsImageError,
   type AgentImages,
   resolveSandboxImage,
 } from "./agent-tools.js";
@@ -921,9 +922,10 @@ async function runSandboxCycle(
         // the worktree above is what makes that answerable here: it is on disk
         // before this line, which is all the fingerprint needs. Resolved once
         // per sandbox — the attempts accumulate in this container, so there is
-        // no later point that could re-resolve without discarding them — and
-        // falling back to the declared tag if the build fails, because this is
-        // the container the fix would be written in. See resolveSandboxImage.
+        // no later point that could re-resolve without discarding them. A
+        // branch-recipe failure falls back because this is the container the
+        // fix would be written in; a driver-owned tools-layer failure
+        // propagates as infrastructure. See resolveSandboxImage.
         const imageName = await resolveSandboxImage({
           declaredTag: config.sandboxImage,
           agentImages: config.agentImages,
@@ -1236,7 +1238,11 @@ async function runSandboxCycle(
     // SandbarError but reports infrastructure — a container that would not
     // start, or an issue-lifecycle container found dead before a gate run —
     // which is precisely what HARD-ERROR's fresh-stack retry exists for.
-    if (err instanceof SandbarError && !(err instanceof ContainerBringupError)) {
+    if (
+      err instanceof SandbarError &&
+      !(err instanceof ContainerBringupError) &&
+      !(err instanceof AgentToolsImageError)
+    ) {
       throw err;
     }
     // Setup failure or any other unhandled exception inside the cycle.

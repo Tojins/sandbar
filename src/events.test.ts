@@ -1,7 +1,7 @@
-import { appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { readEventsFile, runStampFromDate, startEventRecord } from "./events.js";
 
@@ -10,9 +10,25 @@ const start = {
   workdir: "/repo/.sandbar", maxParallelIssues: 3, pid: 42,
 } as const;
 
+const temporaryDirectories = new Set<string>();
+const makeTemporaryDirectory = async (): Promise<string> => {
+  const path = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+  temporaryDirectories.add(path);
+  return path;
+};
+
+afterEach(async () => {
+  await Promise.all(
+    [...temporaryDirectories].map((path) =>
+      rm(path, { recursive: true, force: true })
+    ),
+  );
+  temporaryDirectories.clear();
+});
+
 describe("event record", () => {
   it("serializes concurrent emissions in monotonic sequence", async () => {
-    const baseDir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+    const baseDir = await makeTemporaryDirectory();
     const record = await startEventRecord({
       baseDir, now: new Date("2026-05-05T21:15:32.101Z"), start,
     });
@@ -32,7 +48,7 @@ describe("event record", () => {
   });
 
   it("recovers the serialization latch after one append fails", async () => {
-    const baseDir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+    const baseDir = await makeTemporaryDirectory();
     let calls = 0;
     const record = await startEventRecord({
       baseDir,
@@ -59,7 +75,7 @@ describe("event record", () => {
   });
 
   it("retries finalization when the run-end append fails", async () => {
-    const baseDir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+    const baseDir = await makeTemporaryDirectory();
     let runEndAttempts = 0;
     const record = await startEventRecord({
       baseDir,
@@ -85,7 +101,7 @@ describe("event record", () => {
   });
 
   it("refuses an unknown schema", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+    const dir = await makeTemporaryDirectory();
     const path = join(dir, "events.jsonl");
     await writeFile(path, JSON.stringify({ seq: 1, ts: "x", kind: "run-start", schemaVersion: 99 }) + "\n");
     await expect(readEventsFile(path)).rejects.toThrow(/Unsupported sandbar event schema 99/);
@@ -96,7 +112,7 @@ describe("event record", () => {
     ["skipped", [1, 3]],
     ["out-of-order", [1, 3, 2]],
   ])("refuses a %s sequence", async (_name, sequences) => {
-    const dir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+    const dir = await makeTemporaryDirectory();
     const path = join(dir, "events.jsonl");
     const rows = sequences.map((seq, index) => index === 0 ? {
       ...start, kind: "run-start", schemaVersion: 2, seq, ts: "2026-09-07T10:00:00Z",
@@ -107,7 +123,7 @@ describe("event record", () => {
   });
 
   it("ignores an unterminated append tail", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "sandbar-events-"));
+    const dir = await makeTemporaryDirectory();
     const path = join(dir, "events.jsonl");
     await writeFile(path, `${JSON.stringify({
       ...start,

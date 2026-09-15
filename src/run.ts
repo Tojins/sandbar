@@ -147,6 +147,7 @@ import {
 import {
   type AgentImages,
   createAgentImages,
+  sweepAgentToolsImages,
 } from "./agent-tools.js";
 import { type CodexAuthMount, prepareCodexAuth } from "./codex-auth.js";
 import {
@@ -1063,6 +1064,16 @@ export async function run(
       await runRecord.emit({ kind: "sweep", scope: "startup", removed: staleImages.removed, failures: [] });
     }
     await reportSweepFailures(staleImages, (event) => runRecord.emit(event), "startup");
+
+    // Unlike per-branch variants, the current tools images survive clean run
+    // teardown so restarts reuse their large, checksum-addressed downloads.
+    // A predecessor's other pin fingerprints are no longer reusable and are
+    // swept only inside this workdir's scope.
+    const staleTools = await sweepAgentToolsImages(scope, agentProviders);
+    if (staleTools.removed.length > 0) {
+      await runRecord.emit({ kind: "sweep", scope: "startup", removed: staleTools.removed, failures: [] });
+    }
+    await reportSweepFailures(staleTools, (event) => runRecord.emit(event), "startup");
 
     // Debris no run's scope claims: from a build predating #28, or the
     // sandcastle era. Reported rather than removed, because a bare-prefix match

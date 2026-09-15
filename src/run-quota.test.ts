@@ -190,6 +190,7 @@ vi.mock("./ensure-images.js", async (importOriginal) => ({
 }));
 vi.mock("./agent-tools.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./agent-tools.js")>(),
+  sweepAgentToolsImages: vi.fn(async () => ({ removed: [], failures: [] })),
   createAgentImages: vi.fn(async () => ({
     declaredTag: "image", augment: vi.fn(async () => "image"), builtTags: () => [],
   })),
@@ -253,7 +254,7 @@ import type { InnerLoopOptions } from "./inner-loop.js";
 import { MergerError, realAdapter, type RunMergerOptions } from "./merger.js";
 import { realAdapter as realFinalizeAdapter } from "./finalize.js";
 import { createBranchImages, ensureImages } from "./ensure-images.js";
-import { createAgentImages } from "./agent-tools.js";
+import { createAgentImages, sweepAgentToolsImages } from "./agent-tools.js";
 import { cleanupOrphanContainers } from "./containers.js";
 import { UiPortInUseError, startUiServer } from "./ui-server.js";
 import {
@@ -1172,6 +1173,7 @@ describe("run quota orchestration (#109)", () => {
       .rejects.toThrow("EXIT:4");
     expect(ensureImages).toHaveBeenCalledTimes(2);
     expect(createAgentImages).toHaveBeenCalledTimes(2);
+    expect(sweepAgentToolsImages).toHaveBeenCalledOnce();
     for (const [options] of vi.mocked(createAgentImages).mock.calls) {
       expect(options).toEqual(expect.objectContaining({ codexHome }));
     }

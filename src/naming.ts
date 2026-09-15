@@ -457,3 +457,38 @@ export function isVariantImageTagIn(scope: RunScope, ref: string): boolean {
     `(^|-)sb-${scope}-[0-9a-f]{${IMAGE_FINGERPRINT_CHARS}}$`,
   ).test(ref.slice(colon + 1));
 }
+
+// ---------------------------------------------------------------------------
+// Persistent agent-tools image tags (#162)
+//
+// Tools images are the deliberate persistent counterpart to the short-lived
+// per-branch variants above. They carry the same workdir scope, plus libc and
+// the running driver's pin fingerprint:
+//
+//   localhost/sandbar-agent-tools:sb-tools-w1a2b3c4d-glibc-9f2e1d70
+//
+// The distinct `sb-tools-` infix keeps `sweepBranchImages` from treating the
+// current persistent image as a crashed run's branch debris. Its own startup
+// sweep uses the parser below and preserves only the current fingerprints.
+// ---------------------------------------------------------------------------
+
+const AGENT_TOOLS_IMAGE_REPOSITORY = "localhost/sandbar-agent-tools";
+
+export function toolsImageTag(
+  scope: RunScope,
+  libc: "glibc" | "musl",
+  fingerprint: string,
+): string {
+  return `${AGENT_TOOLS_IMAGE_REPOSITORY}:sb-tools-${scope}-${libc}-${
+    fingerprint.slice(0, IMAGE_FINGERPRINT_CHARS)
+  }`;
+}
+
+export function isToolsImageTagIn(scope: RunScope, ref: string): boolean {
+  const colon = ref.lastIndexOf(":");
+  if (colon <= ref.lastIndexOf("/")) return false;
+  if (ref.slice(0, colon) !== AGENT_TOOLS_IMAGE_REPOSITORY) return false;
+  return new RegExp(
+    `^sb-tools-${scope}-(glibc|musl)-[0-9a-f]{${IMAGE_FINGERPRINT_CHARS}}$`,
+  ).test(ref.slice(colon + 1));
+}

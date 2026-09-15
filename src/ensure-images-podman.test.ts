@@ -11,7 +11,8 @@
 // an image the operator's own checkout no longer matches.
 
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -21,6 +22,7 @@ import type { BuiltImage } from "./config.js";
 import { AGENT_PROVIDER_PACKAGES } from "./agent-providers.js";
 import {
   agentToolsContainerfile,
+  agentToolsImageContainerfile,
   detectImageLibc,
 } from "./agent-tools.js";
 import {
@@ -30,11 +32,14 @@ import {
   readInputsLabel,
   sweepBranchImages,
 } from "./ensure-images.js";
-import { variantImageTag } from "./naming.js";
+import { stackContainerNameFor, variantImageTag } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   type FinishedHook,
   podmanTestScope,
+  podmanTestStackId,
+  removeFixtureContainer,
+  runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -63,6 +68,83 @@ const available = podmanTestsEnabled({
   what: "ensure-images podman tests",
   image: BASE,
 });
+
+const sha256 = async (path: string): Promise<string> =>
+  createHash("sha256").update(await readFile(path)).digest("hex");
+
+async function serveArtifacts(
+  root: string,
+  taskId: string,
+  paths: Readonly<Record<string, string>>,
+  onTestFinished: FinishedHook,
+): Promise<string> {
+  // The gate runner may be a container driving a remote podman socket. Keep
+  // the fixture beside Buildah and publish it on that host's loopback, where
+  // ADD's host-side downloader can reach it in either local or remote mode.
+  const context = await mkdtemp(join(root, "server-context-"));
+  const artifacts = join(context, "artifacts");
+  await mkdir(artifacts);
+  for (const [path, file] of Object.entries(paths)) {
+    if (!/^\/[a-zA-Z0-9._-]+$/.test(path)) {
+      throw new Error(
+        `artifact fixture path must be a root-level filename: ${path}`,
+      );
+    }
+    await writeFile(join(artifacts, path.slice(1)), await readFile(file));
+  }
+  await writeFile(
+    join(context, "Containerfile"),
+    // Alpine's busybox build omits the `httpd` applet ("applet not found",
+    // exit 127 before listen); the upstream busybox image ships it.
+    "FROM docker.io/library/busybox:1.37\n" +
+      "COPY artifacts/ /srv/\n" +
+      "CMD [\"busybox\", \"httpd\", \"-f\", \"-p\", \"8080\", \"-h\", \"/srv\"]\n",
+  );
+  const tag = testImageTag(`artifact-server-${taskId}`);
+  await buildImage({ tag, containerfile: "<generated-artifact-server>" }, {
+    root: "", contextRoot: context, capture: true,
+  });
+  const container = stackContainerNameFor(
+    SCOPE,
+    podmanTestStackId("artifact-server", taskId),
+    "http",
+  );
+  await runFixtureContainer([
+    "--name", container, "-p", "127.0.0.1::8080", tag,
+  ]);
+  const close = (): Promise<void> =>
+    removeFixtureContainer(container);
+  onTestFinished(close, 60_000);
+  const probePath = Object.keys(paths)[0];
+  if (probePath === undefined) {
+    throw new Error("artifact server requires at least one fixture path");
+  }
+  // `podman run -d` returns once the container process exists, before httpd
+  // necessarily reaches listen(2). Wait inside the server container so the
+  // subsequent host-side Buildah ADD cannot race its startup.
+  await exec(RUNTIME, [
+    "exec",
+    container,
+    "sh",
+    "-c",
+    `for delay in $(seq 1 100); do wget -q -O /dev/null http://127.0.0.1:8080${probePath} && exit 0; sleep 0.1; done; exit 1`,
+  ]);
+  const published = (
+    await exec(RUNTIME, [
+      "container",
+      "inspect",
+      "--format",
+      '{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}',
+      container,
+    ])
+  ).stdout.trim();
+  if (!/^\d+$/.test(published)) {
+    throw new Error(
+      `podman did not publish the artifact server port for ${container}`,
+    );
+  }
+  return `http://127.0.0.1:${published}`;
+}
 
 describe.runIf(available)("ensureImages against real podman", () => {
   // `cleanup` is the two production sweepers plus the tags they cannot see —
@@ -122,6 +204,192 @@ describe.runIf(available)("ensureImages against real podman", () => {
     600_000,
   );
 
+  it(
+    "executes generated direct and archive downloads with checksum and member validation",
+    async ({ expect, task, onTestFinished }) => {
+      const root = await mkdtemp(join(tmpdir(), "sandbar-tools-downloads-"));
+      onTestFinished(() => rm(root, { recursive: true, force: true }), 60_000);
+
+      const direct = join(root, "claude");
+      await writeFile(direct, "direct fixture\n", { mode: 0o600 });
+      const exactRoot = join(root, "exact");
+      const prefixedRoot = join(root, "prefixed");
+      const ambiguousRoot = join(root, "ambiguous");
+      await Promise.all([
+        mkdir(exactRoot),
+        mkdir(prefixedRoot),
+        mkdir(ambiguousRoot),
+      ]);
+      await Promise.all([
+        writeFile(join(exactRoot, "codex"), "exact archive fixture\n", {
+          mode: 0o600,
+        }),
+        writeFile(
+          join(prefixedRoot, "codex-code-mode-host-x86_64-unknown-linux-musl"),
+          "prefixed archive fixture\n",
+          { mode: 0o600 },
+        ),
+        writeFile(join(ambiguousRoot, "codex-one"), "one\n"),
+        writeFile(join(ambiguousRoot, "codex-two"), "two\n"),
+      ]);
+      const exact = join(root, "codex.tar.gz");
+      const prefixed = join(root, "codex-host.tar.gz");
+      const ambiguous = join(root, "ambiguous.tar.gz");
+      await Promise.all([
+        exec("tar", ["-czf", exact, "-C", exactRoot, "."]),
+        exec("tar", ["-czf", prefixed, "-C", prefixedRoot, "."]),
+        exec("tar", ["-czf", ambiguous, "-C", ambiguousRoot, "."]),
+      ]);
+
+      const artifactOrigin = await serveArtifacts(
+        root,
+        task.id,
+        {
+          "/claude": direct,
+          "/codex.tar.gz": exact,
+          "/codex-host.tar.gz": prefixed,
+          "/ambiguous.tar.gz": ambiguous,
+        },
+        onTestFinished,
+      );
+      const directArtifact = {
+        variant: "static" as const,
+        url: `${artifactOrigin}/claude`,
+        sha256: await sha256(direct),
+      };
+      const exactArtifact = {
+        variant: "static" as const,
+        url: `${artifactOrigin}/codex.tar.gz`,
+        sha256: await sha256(exact),
+        archive: true,
+      };
+      const prefixedArtifact = {
+        variant: "static" as const,
+        binary: "codex-code-mode-host",
+        url: `${artifactOrigin}/codex-host.tar.gz`,
+        sha256: await sha256(prefixed),
+        archive: true,
+      } as const;
+      const packages: typeof AGENT_PROVIDER_PACKAGES = {
+        claude: {
+          version: "fixture",
+          artifacts: { x64: [directArtifact], arm64: [directArtifact] },
+        },
+        codex: {
+          version: "fixture",
+          artifacts: {
+            x64: [exactArtifact, prefixedArtifact],
+            arm64: [exactArtifact, prefixedArtifact],
+          },
+        },
+      };
+      const tag = testImageTag(`tools-download-${task.id}`);
+      const context = await mkdtemp(join(root, "context-"));
+      await writeFile(
+        join(context, "Containerfile"),
+        agentToolsImageContainerfile(
+          "docker.io/library/alpine:3.22",
+          ["claude", "codex"],
+          { arch: "x64", libc: "musl", packages },
+        ),
+      );
+      await buildImage({ tag, containerfile: "<generated-agent-tools-download>" }, {
+        root: "",
+        contextRoot: context,
+        capture: true,
+        timeoutMs: 600_000,
+      });
+
+      const container = stackContainerNameFor(
+        SCOPE,
+        podmanTestStackId("artifact-inspect", task.id),
+        "tools",
+      );
+      await exec(RUNTIME, [
+        "create",
+        "--name",
+        container,
+        "--image-volume=ignore",
+        tag,
+        "/usr/local/bin/claude",
+      ]);
+      onTestFinished(
+        () => removeFixtureContainer(container),
+        60_000,
+      );
+      const copied = await mkdtemp(join(root, "copied-"));
+      await exec(RUNTIME, ["cp", `${container}:/usr/local/bin/.`, copied]);
+      for (const [binary, content] of [
+        ["claude", "direct fixture\n"],
+        ["codex", "exact archive fixture\n"],
+        ["codex-code-mode-host", "prefixed archive fixture\n"],
+      ] as const) {
+        const path = join(copied, binary);
+        expect(await readFile(path, "utf8")).toBe(content);
+        expect((await stat(path)).mode & 0o111).toBe(0o111);
+      }
+
+      const ambiguousPackages: typeof AGENT_PROVIDER_PACKAGES = {
+        ...packages,
+        codex: {
+          version: "fixture",
+          artifacts: {
+            x64: [{
+              ...exactArtifact,
+              url: `${artifactOrigin}/ambiguous.tar.gz`,
+              sha256: await sha256(ambiguous),
+            }],
+            arm64: [exactArtifact],
+          },
+        },
+      };
+      const ambiguousTag = testImageTag(`tools-ambiguous-${task.id}`);
+      await writeFile(
+        join(context, "Containerfile"),
+        agentToolsImageContainerfile(
+          "docker.io/library/alpine:3.22",
+          ["codex"],
+          { arch: "x64", libc: "musl", packages: ambiguousPackages },
+        ),
+      );
+      await expect(buildImage(
+        { tag: ambiguousTag, containerfile: "<generated-agent-tools-download>" },
+        { root: "", contextRoot: context, capture: true, timeoutMs: 600_000 },
+      )).rejects.toMatchObject({
+        output: expect.stringContaining("archive contains no unique codex binary"),
+      });
+
+      const checksumPackages: typeof AGENT_PROVIDER_PACKAGES = {
+        ...packages,
+        claude: {
+          version: "fixture",
+          artifacts: {
+            x64: [{ ...directArtifact, sha256: "0".repeat(64) }],
+            arm64: [directArtifact],
+          },
+        },
+      };
+      const checksumTag = testImageTag(`tools-checksum-${task.id}`);
+      await writeFile(
+        join(context, "Containerfile"),
+        agentToolsImageContainerfile(
+          "docker.io/library/alpine:3.22",
+          ["claude"],
+          { arch: "x64", libc: "musl", packages: checksumPackages },
+        ),
+      );
+      const checksumError = await buildImage(
+        { tag: checksumTag, containerfile: "<generated-agent-tools-download>" },
+        { root: "", contextRoot: context, capture: true, timeoutMs: 600_000 },
+      ).catch((error: unknown) => error);
+      expect(checksumError).toBeInstanceOf(ImageBuildError);
+      expect((checksumError as ImageBuildError).output).toMatch(
+        /checksum|digest|sha256/i,
+      );
+    },
+    600_000,
+  );
+
   it.concurrent(
     "reports a missing generated context as an image build failure",
     async ({ expect, task, onTestFinished }) => {
@@ -145,6 +413,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       `executes the generated git, user, and ${selectedVariant} selection contract over ${packageManager}`,
       async ({ expect, task, onTestFinished }) => {
         const tag = testImageTag(`agent-recipe-${selectedVariant}-${task.id}`);
+        const toolsTag = testImageTag(`agent-tools-${selectedVariant}-${task.id}`);
         const context = await mkdtemp(join(tmpdir(), "sandbar-agent-recipe-"));
         onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
         const artifact = AGENT_PROVIDER_PACKAGES.codex.artifacts.x64[0]!;
@@ -162,18 +431,25 @@ describe.runIf(available)("ensureImages against real podman", () => {
           },
         };
         await writeFile(
-          join(context, "Containerfile"),
-          agentToolsContainerfile(base, ["codex"], {
-            arch: "x64", packages, libc: selectedVariant,
-          }),
-        );
-        await writeFile(
           join(context, "codex-glibc"),
           "#!/bin/sh\necho 'codex glibc fixture'\n",
         );
         await writeFile(
           join(context, "codex-musl"),
           "#!/bin/sh\necho 'codex musl fixture'\n",
+        );
+        await writeFile(
+          join(context, "Containerfile"),
+          `FROM scratch\nCOPY --chmod=0755 codex-${selectedVariant} /usr/local/bin/codex\n`,
+        );
+        await buildImage({ tag: toolsTag, containerfile: "<generated>" }, {
+          root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+        });
+        await writeFile(
+          join(context, "Containerfile"),
+          agentToolsContainerfile(base, toolsTag, ["codex"], {
+            arch: "x64", packages, libc: selectedVariant,
+          }),
         );
         await buildImage({ tag, containerfile: "<generated>" }, {
           root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
@@ -204,6 +480,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
     async ({ expect, task, onTestFinished }) => {
       const uidBaseTag = testImageTag(`uid-base-${task.id}`);
       const tag = testImageTag(`uid-recipe-${task.id}`);
+      const toolsTag = testImageTag(`uid-tools-${task.id}`);
       const codexHome = "/var/lib/sandbar-codex";
       const baseContext = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-base-"));
       onTestFinished(() => rm(baseContext, { recursive: true, force: true }), 60_000);
@@ -219,16 +496,27 @@ describe.runIf(available)("ensureImages against real podman", () => {
       onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
       const hostAuth = join(context, "codex-auth.json");
       await writeFile(hostAuth, "before", { mode: 0o600 });
-      await writeFile(
-        join(context, "Containerfile"),
-        agentToolsContainerfile(uidBaseTag, ["codex"], { libc: "musl", codexHome }),
-      );
       await writeFile(join(context, "codex-static"), "#!/bin/sh\necho fixture\n");
       // The recipe installs every binary the provider declares (#120), so the
       // context has to carry the code-mode host beside the CLI.
       await writeFile(
         join(context, "codex-code-mode-host-static"),
         "#!/bin/sh\necho fixture-host\n",
+      );
+      await writeFile(
+        join(context, "Containerfile"),
+        "FROM scratch\n" +
+          "COPY --chmod=0755 codex-static /usr/local/bin/codex\n" +
+          "COPY --chmod=0755 codex-code-mode-host-static /usr/local/bin/codex-code-mode-host\n",
+      );
+      await buildImage({ tag: toolsTag, containerfile: "<generated>" }, {
+        root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+      });
+      await writeFile(
+        join(context, "Containerfile"),
+        agentToolsContainerfile(uidBaseTag, toolsTag, ["codex"], {
+          libc: "musl", codexHome,
+        }),
       );
       await buildImage({ tag, containerfile: "<generated>" }, {
         root: "", contextRoot: context, capture: true, timeoutMs: 600_000,

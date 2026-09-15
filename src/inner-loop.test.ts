@@ -68,6 +68,7 @@ import {
   withPartialOutput,
   type Sandbox,
 } from "./agent-sandbox.js";
+import { AgentToolsImageError } from "./agent-tools.js";
 import {
   enforceReviewerSnapshot,
   priorReviewRound,
@@ -1579,6 +1580,20 @@ describe("runInnerLoop context terminals (#158)", () => {
       expect(innerLoopMocks.buildPrompt).not.toHaveBeenCalled();
     },
   );
+
+  it("classifies a driver-owned tools image failure as HARD-ERROR", async () => {
+    const { opts, events } = harness(vi.fn());
+    innerLoopMocks.resolveSandboxImage.mockRejectedValue(
+      new AgentToolsImageError("tools image storage is full"),
+    );
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+      type: "HARD-ERROR",
+      reason: "tools image storage is full",
+    });
+    expect(innerLoopMocks.resolveSandboxImage).toHaveBeenCalledTimes(3);
+    expect(events.filter((event) => event.kind === "hard-error")).toHaveLength(2);
+  });
 });
 
 describe("runInnerLoop HARD-ERROR logging (#115)", () => {

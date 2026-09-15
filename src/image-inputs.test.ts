@@ -28,8 +28,10 @@ import { SandbarError } from "./errors.js";
 import { fingerprintImageInputs } from "./image-inputs.js";
 import {
   type RunScope,
+  isToolsImageTagIn,
   isVariantImageTagIn,
   runScope,
+  toolsImageTag,
   variantImageTag,
 } from "./naming.js";
 
@@ -295,6 +297,20 @@ describe("variantImageTag", () => {
   it("stays inside podman's 128-char tag limit for a realistic base tag", () => {
     const tag = variantImageTag("sandbar-outdoor:latest", scope, "9f2e1d70ab");
     expect(tag.slice(tag.lastIndexOf(":") + 1).length).toBeLessThan(128);
+  });
+
+  it("gives persistent tools images a distinct scoped namespace", () => {
+    const tag = toolsImageTag(scope, "glibc", "9f2e1d70abcdef");
+    expect(tag).toBe(
+      `localhost/sandbar-agent-tools:sb-tools-${scope}-glibc-9f2e1d70`,
+    );
+    expect(isToolsImageTagIn(scope, tag)).toBe(true);
+    expect(isVariantImageTagIn(scope, tag)).toBe(false);
+    expect(isToolsImageTagIn(runScope("/elsewhere"), tag)).toBe(false);
+    expect(isToolsImageTagIn(
+      scope,
+      tag.replace("localhost/sandbar-agent-tools", "localhost/unrelated"),
+    )).toBe(false);
   });
 });
 
@@ -688,7 +704,7 @@ describe("resolveSandboxImage", () => {
     expect(reported[0]).toContain("ETARGET");
   });
 
-  it("falls back to the augmented declared image when variant augmentation fails", async () => {
+  it("propagates a driver-owned tool-layer failure instead of laundering it into a branch fallback", async () => {
     const source = await tree({
       Containerfile: "FROM x",
       "package-lock.json": "{}",
@@ -700,7 +716,7 @@ describe("resolveSandboxImage", () => {
     const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
     const attempted: string[] = [];
     const reported: string[] = [];
-    const image = await resolveSandboxImage({
+    await expect(resolveSandboxImage({
       declaredTag: "sandbox",
       agentImages: agentImages(async (tag) => {
         attempted.push(tag);
@@ -712,44 +728,11 @@ describe("resolveSandboxImage", () => {
       onFallback: (line) => {
         reported.push(line);
       },
-    });
+    })).rejects.toThrow("registry unavailable");
     expect(attempted).toEqual([
       variantImageTag("sandbox", scope, (await fp(branch, SANDBOX))!),
     ]);
-    expect(image).toBe("agent:sandbox");
-    expect(reported).toHaveLength(1);
-    expect(reported[0]).toContain("could not append the run-owned agent tools");
-    expect(reported[0]).toContain("environment is a commit behind its own branch");
-    expect(reported[0]).toContain("The gate runs the successfully resolved branch image");
-    expect(reported[0]).toContain("this line is the only report it gets");
-  });
-
-  it("does not claim a gate runs the sandbox image when no gate container does", async () => {
-    const source = await tree({
-      Containerfile: "FROM x",
-      "package-lock.json": "{}",
-    });
-    const branch = await tree({
-      Containerfile: "FROM x",
-      "package-lock.json": "changed",
-    });
-    const base = new Map([["sandbox", (await fp(source, SANDBOX))!]]);
-    const reported: string[] = [];
-    await resolveSandboxImage({
-      declaredTag: "sandbox",
-      agentImages: agentImages(async () => {
-        throw new SandbarError("registry unavailable");
-      }),
-      worktreePath: branch,
-      branchImages: harness(base, async () => {}),
-      gateRunsSameImage: false,
-      onFallback: (line) => {
-        reported.push(line);
-      },
-    });
-    expect(reported).toHaveLength(1);
-    expect(reported[0]).toContain("No `gateStack` container runs the sandbox image");
-    expect(reported[0]).not.toContain("The gate runs the successfully resolved branch image");
+    expect(reported).toEqual([]);
   });
 
   it("promises a second report only when a gate container runs the same image", async () => {
