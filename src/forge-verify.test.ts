@@ -902,7 +902,7 @@ describe("runVerifiedLanding", () => {
 
   it("is fatal (not a parked cycle) when the integration push is rejected", async () => {
     const { result, calls } = await land({
-      pushes: [{ kind: "rejected", reason: "stale info" }],
+      pushes: [{ kind: "refused", reason: "stale info" }],
       heads: ["sha-A"],
     });
     expect(result.kind).toBe("fatal");
@@ -917,7 +917,7 @@ describe("runVerifiedLanding", () => {
         { kind: "green", names: ["tests"] },
         { kind: "green", names: ["tests"] },
       ],
-      fastForward: [{ kind: "rejected", reason: "non-fast-forward" }, { kind: "ok" }],
+      fastForward: [{ kind: "refused", reason: "non-fast-forward" }, { kind: "ok" }],
       // Three reads: round 1's HEAD, the post-sync check that the re-merge
       // actually produced a commit, then round 2's HEAD.
       heads: ["sha-A", "sha-B", "sha-B"],
@@ -932,7 +932,7 @@ describe("runVerifiedLanding", () => {
   it("parks rather than force-landing when the re-merge itself fails", async () => {
     const { result, calls } = await land({
       checks: [{ kind: "green", names: ["tests"] }],
-      fastForward: [{ kind: "rejected", reason: "non-fast-forward" }],
+      fastForward: [{ kind: "refused", reason: "non-fast-forward" }],
       sync: [{ ok: false, reason: "CONFLICT in src/a.ts" }],
       heads: ["sha-A"],
     });
@@ -949,8 +949,8 @@ describe("runVerifiedLanding", () => {
           { kind: "green", names: ["tests"] },
         ],
         fastForward: [
-          { kind: "rejected", reason: "non-fast-forward" },
-          { kind: "rejected", reason: "non-fast-forward" },
+          { kind: "refused", reason: "non-fast-forward" },
+          { kind: "refused", reason: "non-fast-forward" },
         ],
         heads: ["sha-A", "sha-B"],
       },
@@ -1195,7 +1195,7 @@ describe("realVerifyAdapter push primitives", () => {
     });
     const { exec } = fakeExec((c) => (c.args[0] === "ls-remote" ? { stdout: "" } : err));
     const out = await adapterWith(exec).pushIntegration("b");
-    expect(out).toEqual({ kind: "rejected", reason: "! [rejected] (stale info)" });
+    expect(out).toEqual({ kind: "refused", reason: "! [rejected] (stale info)" });
   });
 
   it("fast-forwards by sha, unforced, so a moved origin is a rejection not a clobber", async () => {
@@ -1677,7 +1677,7 @@ describe("runVerifiedLanding — repo-level faults halt instead of parking", () 
     // identical sha and then blame a branch that never moved.
     const { result, calls } = await land({
       checks: [{ kind: "green", names: ["tests"] }],
-      fastForward: [{ kind: "rejected", reason: "protected branch hook declined" }],
+      fastForward: [{ kind: "refused", reason: "protected branch hook declined" }],
       // Same sha before and after the sync: the re-merge produced nothing.
       heads: ["sha-A", "sha-A"],
     });
@@ -1694,7 +1694,7 @@ describe("runVerifiedLanding — repo-level faults halt instead of parking", () 
         { kind: "green", names: ["tests"] },
         { kind: "green", names: ["tests"] },
       ],
-      fastForward: [{ kind: "rejected", reason: "non-fast-forward" }, { kind: "ok" }],
+      fastForward: [{ kind: "refused", reason: "non-fast-forward" }, { kind: "ok" }],
       heads: ["sha-A", "sha-B", "sha-B"],
     });
     expect(result).toMatchObject({ kind: "landed", sha: "sha-B" });

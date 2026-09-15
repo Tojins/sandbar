@@ -367,11 +367,10 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(barriers).toBe(1);
   });
 
-  it("reports a rejected member ref as a membership failure, not a chunk race", async () => {
-    // Git gives the genuinely non-fast-forward member ref its own rejection
-    // reason while marking the chunk ref only as `(atomic push failed)`. The
-    // adapter reads that distinction so a member-ref conflict is not retried
-    // as though only the chunk branch had raced.
+  it("reports a non-fast-forward member ref as a race", async () => {
+    // Git's client-side `[rejected] (non-fast-forward)` status means the
+    // destination moved, whichever atomic ref names it. Server-side content
+    // refusals use `[remote rejected]` and are classified separately.
     await commit(wt, "member.txt", "first landing\n");
     await git(wt, "branch", "sandbar/issue-2-member", "HEAD");
     await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-2");
@@ -384,8 +383,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
       destination: "sandbar/member-2",
     }]);
 
-    expect(result.kind).toBe("fatal");
-    if (result.kind === "fatal") expect(result.reason).toContain("membership ref rejected");
+    expect(result).toEqual({ kind: "race" });
     expect(await originHas("refs/heads/sandbar/chunk-2-c")).toBeNull();
   });
 

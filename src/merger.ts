@@ -115,8 +115,14 @@
 // label left on would retry that same failing merge every cycle forever). A
 // push race, a forge verdict that never arrived, a `gh` that could not be
 // reached, an ORIGIN that could not be reached — none of those is a fact about
-// the chunk, so the label stays and the next run tries again. Nothing lands and
-// nothing is closed in either case.
+// the chunk, so the label stays and the next run tries again. A SERVER REFUSAL
+// is different: Git reports it as `[remote rejected]`, proving origin was
+// reached and refused this content or ref. On a Phase-A chunk push that fact is
+// attributable to the group just composed, so every member in the atomic push
+// is commented with the exact refusal and its host-cache recovery point,
+// removed from `ready-for-agent`, and the batch continues. The Phase-B source
+// push remains cycle-wide and cannot be attributed, so its refusal still halts.
+// Nothing lands or closes in any of these cases.
 //
 // That last one is why `fetchChunkRef` answers in three states instead of two
 // (`ChunkRefLookup`). "Origin has no such branch" is a fact about the chunk and
@@ -367,6 +373,11 @@ import {
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 import {
+  classifyPushError,
+  type LocalBranchRecovery,
+  type PushResult,
+} from "./push-result.js";
+import {
   RESOLVE_AGENT_TIMEOUT_MS,
   type ResolveAdapter,
   type ResolveAgentRun,
@@ -455,6 +466,31 @@ export function buildInstallFailedComment(target: MergeTarget): string {
     "the merged tree failed — the post-merge gate could not run. The merge has been " +
     "reverted and `ready-for-agent` removed; please investigate the dependency change " +
     "before re-labelling."
+  );
+}
+
+export function buildChunkPushRefusedComment(args: {
+  readonly chunkBranch: string;
+  readonly reasons: readonly string[];
+  readonly recovery: LocalBranchRecovery;
+}): string {
+  return (
+    `Sandbar merged this branch onto its chunk branch \`${args.chunkBranch}\` ` +
+    "and the gate passed, but origin refused the atomic landing push. This is " +
+    "a refusal of the pushed content or ref, not a transient push race, so " +
+    "`ready-for-agent` was removed and the same push will not be retried " +
+    "automatically. Git reported:\n\n```text\n" +
+    `${args.reasons.join("\n")}\n` +
+    "```\n\n" +
+    `The issue commits remain on this box at tip \`${args.recovery.tipSha}\`, ` +
+    `cache ref \`${args.recovery.ref}\`, in \`${args.recovery.repoDir}\`. ` +
+    "Publish that ref with an identity allowed to write this content (for " +
+    "example, an authorised SSH remote):\n\n```sh\n" +
+    `git -C '${args.recovery.repoDir}' push <authorised-remote> ` +
+    `'${args.recovery.ref}:${args.recovery.ref}'\n` +
+    "```\n\nThen drop the human-handoff label and re-apply `ready-for-agent`. " +
+    "Sandbar will re-run the gate and reviews on the unchanged tip and retry " +
+    "the chunk landing once origin already carries the branch."
   );
 }
 
@@ -635,10 +671,7 @@ type MergeAttempt = (
     }
 ) & { readonly durationMs: number };
 
-export type PushResult =
-  | { readonly kind: "ok" }
-  | { readonly kind: "race" }
-  | { readonly kind: "fatal"; readonly reason: string };
+export type { PushResult } from "./push-result.js";
 
 // What origin has for a chunk branch — THREE answers, because two of them are
 // one `git fetch` failure from the outside and are not the same fact (#64).
@@ -707,12 +740,17 @@ export type MergerAdapter = ResolveAdapter & {
   // already been reset, and a landed one is committed).
   checkoutDetached(ref: string): Promise<void>;
   // Push HEAD to `refs/heads/<chunkBranch>` on origin. Never forcing: a
-  // rejected push means the chunk branch moved under us, so this composition
-  // is not built on what is there and overwriting it would drop a member.
+  // client-side rejection means the chunk branch moved under us, so this
+  // composition is not built on what is there and overwriting it would drop a
+  // member. A server-side refusal parks the composed members instead (#163).
   pushChunkBranch(
     chunkBranch: string,
     members: readonly { readonly source: string; readonly destination: string }[],
   ): Promise<PushResult>;
+  // The issue branch's durable host-cache location after its managed clone was
+  // reclaimed. Asked only when origin refuses a Phase-A push, so the handoff
+  // can name the exact commits a human must publish.
+  localBranchRecovery(branch: string): Promise<LocalBranchRecovery>;
   // Create-or-update the chunk's DRAFT pull request against the source branch
   // (#62) — the review surface the whole review lane exists to produce. Called
   // once per chunk per cycle, AFTER the push, because a PR is a handle on
@@ -755,6 +793,11 @@ export type SkipReason =
   // verification, so nothing was landed. Cycle-level, so every issue that had
   // merged carries it — the red is not attributable to one of them.
   | "forge-unverified"
+  // The Phase-A atomic chunk push reached origin, which refused its content or
+  // ref. The merger has already posted the cache recovery instructions and
+  // removed the queue label; finalise must only apply the handoff label and
+  // must not retry the same refused issue-branch push.
+  | "push-refused"
   // Resolve-loop's HEAD-advance invariant tripped: the agent gave up via a
   // silent `git merge --abort` rather than completing the merge. The branch
   // is intact, but no commit landed on the source branch. Orchestrator
@@ -1633,12 +1676,51 @@ export async function runMergerWithAdapter(
         })),
       )
       .catch(asHalt(`Chunk push failed for ${branch}`));
+    if (push.kind === "refused") {
+      // A server refusal is a fact about this group's content or refs. Park
+      // every member merged into the rejected atomic push: there is no pool
+      // state for "DONE locally but land without rerunning", and attributing
+      // only a named ref would leave its siblings in precisely that state.
+      // Their issue refs still live in the host cache; unlike the ephemeral
+      // composition, those are actionable recovery points.
+      for (const { issue, durationMs } of landedMembers) {
+        try {
+          const n = issueNumberOf(issue);
+          const recovery = await adapter.localBranchRecovery(issue.branch);
+          await adapter.commentOnIssue(
+            n,
+            buildChunkPushRefusedComment({
+              chunkBranch: branch,
+              reasons: push.reasons,
+              recovery,
+            }),
+          );
+          await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+          skipped.push({ issue, reason: "push-refused" });
+          await opts.observations.onOutcome({
+            kind: "skipped",
+            issue,
+            reason: "push-refused",
+            durationMs,
+          });
+          await emit(`skip #${n} reason=push-refused`);
+        } catch (err) {
+          asHalt(`Could not park issue #${issue.id} after ${branch} was refused`)(
+            err,
+          );
+        }
+      }
+      await emit(
+        `chunk ${branch}: push refused; parked ${landedMembers.map(({ issue }) => `#${issueNumberOf(issue)}`).join(", ")}`,
+      );
+      return;
+    }
     if (push.kind !== "ok") {
-      // Not force-pushed and not retried. A rejected push means the chunk
-      // branch moved under this cycle, so the composition here was built on a
-      // base that is no longer the branch — landing it would silently drop
-      // whatever moved it. The members keep `ready-for-agent` and their issue
-      // branches, so the next run re-merges them onto the branch as it now is.
+      // Not force-pushed and not retried. A race means the chunk branch moved
+      // under this cycle, so the composition here was built on a base that is
+      // no longer the branch — landing it would silently drop whatever moved
+      // it. Transport failures likewise say nothing about these members. Both
+      // remain run-wide halts and leave their queue labels untouched.
       throw new MergerError(
         `Could not push chunk branch ${branch} (${push.kind === "race" ? "rejected — the branch moved under this cycle" : push.reason}). ` +
           `${landedMembers.length} issue(s) merged onto it locally and were NOT landed: ` +
@@ -2184,6 +2266,13 @@ export async function runMergerWithAdapter(
       nothingLanded(),
     );
   }
+  if (push.kind === "refused") {
+    await emit(`push refused: ${push.reasons.join(" | ")}`);
+    throw new MergerError(
+      `Push to origin source branch was refused: ${push.reasons.join("\n")}`,
+      nothingLanded(),
+    );
+  }
 
   // Origin has moved — see `landed`.
   landed = true;
@@ -2606,27 +2695,10 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const agentProvider = buildAgentProvider(deps.mergerAgent, deps.mergerModelId, {
     effort: deps.mergerEffort,
   });
-  // The merger worktree is always detached, so every push it makes is HEAD to a
-  // named ref on origin, and every one of them classifies its failure the same
-  // way. ONE copy of that classification (#60): the race regex is the whole
-  // basis for "the target moved under this cycle, so never force and never
-  // retry", which both landing targets rest on — a second copy is a git version
-  // or a server phrasing a rejection differently, patched in one place and
-  // silently reclassified as `fatal` in the other.
-  const pushErrorDetail = (err: unknown): string => {
-    const e = err as { stderr?: string; message?: string };
-    return e.stderr?.trim() || e.message || "unknown push error";
-  };
-  const classifyPushError = (err: unknown): PushResult => {
-    const stderr = (err as { stderr?: string }).stderr ?? "";
-    if (/rejected|non-fast-forward|fetch first|stale info/i.test(stderr)) {
-      return { kind: "race" };
-    }
-    return {
-      kind: "fatal",
-      reason: pushErrorDetail(err),
-    };
-  };
+  // The merger worktree is always detached, so every push it makes is HEAD to
+  // a named ref on origin. `classifyPushError` is shared with finalise: Git's
+  // bracketed status, rather than the unqualified word "rejected", decides
+  // whether the destination moved or the server refused the content/ref.
   const pushHeadTo = async (dest: string): Promise<PushResult> => {
     await deps.beforeOriginWrite();
     try {
@@ -3167,22 +3239,15 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         ], { cwd });
         return { kind: "ok" };
       } catch (err) {
-        const stderr = (err as { stderr?: string }).stderr ?? "";
-        const memberRejected = members.some(({ destination }) =>
-          stderr.split("\n").some(
-            (line) =>
-              line.includes(destination) &&
-              !/\(atomic push failed\)/i.test(line),
-          ),
-        );
-        if (memberRejected) {
-          return {
-            kind: "fatal",
-            reason: `membership ref rejected: ${pushErrorDetail(err)}`,
-          };
-        }
         return classifyPushError(err);
       }
+    },
+    async localBranchRecovery(branch) {
+      const ref = `refs/heads/${branch}`;
+      const { stdout } = await exec("git", ["rev-parse", "--verify", ref], {
+        cwd: deps.cacheDir,
+      });
+      return { tipSha: stdout.trim(), ref, repoDir: deps.cacheDir };
     },
     async ensureChunkPullRequest({ chunkBranch, title, body }) {
       // DRAFT, which is the whole mechanism (#54 Q14): it disables GitHub's

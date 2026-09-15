@@ -1545,6 +1545,25 @@ describe("finalizeOne", () => {
     ).rejects.toThrow(SandbarError);
   });
 
+  it("landing-push-refused parks from the cache without retrying the refused push", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+
+    const action = await finalizeOne(
+      { kind: "landing-push-refused", issue: i },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "parked-local" });
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
+    expect(calls.pushes).toEqual([]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [], add: [AGENT_STUCK] },
+    ]);
+  });
+
   it("silent-noop-exhausted with a failed handoff label flip: throws SandbarError", async () => {
     const { adapter } = makeAdapter({ labelEditOk: false });
     await expect(

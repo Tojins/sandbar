@@ -469,6 +469,12 @@ type FinalizeKindInput =
   // explanatory comment and dropped the queue label; finalize pushes the branch
   // (the human needs it on the forge to inspect) and parks it.
   | { readonly kind: "forge-unverified"; readonly issue: IssueRef }
+  // #163 — origin refused the Phase-A atomic chunk push. The merger already
+  // posted exact cache recovery instructions and removed the queue label.
+  // Finalise applies the human-handoff label but MUST NOT push the issue branch:
+  // it contains the same refused content and would turn a per-branch park back
+  // into a run-wide halt.
+  | { readonly kind: "landing-push-refused"; readonly issue: IssueRef }
   | {
       readonly kind: "needs-info";
       readonly issue: IssueRef;
@@ -654,6 +660,7 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "merge-conflict",
   "merge-gate-red",
   "forge-unverified",
+  "landing-push-refused",
   "needs-info",
   "needs-ui-prototype",
   "needs-partition",
@@ -839,6 +846,13 @@ export async function finalizeOne(
       const r = await adapter.editLabels(n, [], [labels.agentStuck]);
       requireFlip(r, n);
       return { kind: "pushed" };
+    }
+    case "landing-push-refused": {
+      const n = issueNumberOf(input.issue);
+      await adapter.reclaimIssueClone(input.issue.branch);
+      const r = await adapter.editLabels(n, [], [labels.agentStuck]);
+      requireFlip(r, n);
+      return { kind: "parked-local" };
     }
     case "needs-info": {
       const n = issueNumberOf(input.issue);
