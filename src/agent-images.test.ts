@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -19,7 +19,11 @@ import {
   selectedAgentArtifacts,
   sweepAgentToolsImages,
 } from "./agent-tools.js";
-import { type BuildOptions, formatImageRecord } from "./ensure-images.js";
+import {
+  type BuildOptions,
+  formatImageRecord,
+  sweepBranchImages,
+} from "./ensure-images.js";
 import {
   isToolsImageTagIn,
   runScope,
@@ -93,6 +97,7 @@ describe("run-owned agent images", () => {
       scope: runScope("/agent-images"),
       inputsLabel: async (tag) => tag === "localhost/app:base" ? "base-fp" : null,
       build: async (image, options) => {
+        expect(await readdir(options.contextRoot!)).toEqual(["Containerfile"]);
         builds.push({
           tag: image.tag,
           identity: image.containerfile,
@@ -111,6 +116,33 @@ describe("run-owned agent images", () => {
     expect(builds[1]!.recipe).not.toContain("ADD --checksum");
     expect(images.builtTags()).toEqual([images.declaredTag]);
     expect(images.builtTags()).not.toContain(builds[0]!.tag);
+    for (const build of builds) {
+      await expect(access(build.options.contextRoot!)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+  });
+
+  it("disposes generated contexts immediately when augmentation fails", async () => {
+    const contextRoots: string[] = [];
+    await expect(createAgentImages({
+      declaredBaseTag: "broken-base",
+      providers: ["codex"],
+      scope: runScope("/failed-agent-context"),
+      inputsLabel: async () => null,
+      build: async (image, options) => {
+        contextRoots.push(options.contextRoot!);
+        expect(await readdir(options.contextRoot!)).toEqual(["Containerfile"]);
+        if (image.containerfile === "<generated-agent-tools-augmentation>") {
+          throw new Error("augmentation failed");
+        }
+      },
+      log: () => {},
+    })).rejects.toThrow("augmentation failed");
+    expect(contextRoots).toHaveLength(2);
+    for (const contextRoot of contextRoots) {
+      await expect(access(contextRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    }
   });
 
   it("reuses persistent tools and an augmented image with matching full labels", async () => {
@@ -302,6 +334,44 @@ describe("run-owned agent images", () => {
     expect(result.failures).toEqual([]);
     expect(result.removed).toEqual([obsolete]);
     expect(removed).toEqual([obsolete]);
+  });
+
+  it("changes the tools fingerprint for each independently pinned digest", () => {
+    const baseline = agentToolsFingerprint(["codex"], "glibc");
+    const artifacts = AGENT_PROVIDER_PACKAGES.codex.artifacts.x64;
+    for (const binary of [undefined, "codex-code-mode-host"] as const) {
+      const changedPackages = {
+        ...AGENT_PROVIDER_PACKAGES,
+        codex: {
+          ...AGENT_PROVIDER_PACKAGES.codex,
+          artifacts: {
+            ...AGENT_PROVIDER_PACKAGES.codex.artifacts,
+            x64: artifacts.map((artifact) =>
+              artifact.binary === binary
+                ? { ...artifact, sha256: "f".repeat(64) }
+                : artifact
+            ),
+          },
+        },
+      };
+      expect(agentToolsFingerprint(["codex"], "glibc", {
+        packages: changedPackages,
+      })).not.toBe(baseline);
+    }
+  });
+
+  it("sweeps augmented children before their branch-variant parents", async () => {
+    const scope = runScope("/nested-agent-images");
+    const parent = variantImageTag("base", scope, "a".repeat(64));
+    const child = variantImageTag(parent, scope, "b".repeat(64));
+    const removed: string[] = [];
+    const result = await sweepBranchImages(scope, async (args) => {
+      if (args[0] === "images") return { stdout: `${parent}\n${child}\n` };
+      removed.push(args.at(-1) ?? "");
+      return { stdout: "" };
+    });
+    expect(result.failures).toEqual([]);
+    expect(removed).toEqual([child, parent]);
   });
 
   it("selects every provider binary and static artifacts before libc-specific ones", () => {

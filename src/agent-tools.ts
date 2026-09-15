@@ -55,7 +55,9 @@ import {
   type BuildOptions,
   type ImageRecorder,
   buildImage,
+  listImageTags,
   readInputsLabel,
+  removeImageTags,
 } from "./ensure-images.js";
 import {
   type RunScope,
@@ -418,34 +420,12 @@ export async function sweepAgentToolsImages(
       ))
     ),
   );
-  const { stdout } = await run([
-    "images",
-    "--format",
-    "{{.Repository}}:{{.Tag}}",
-  ]);
-  const tags = stdout
-    .split("\n")
-    .map((line) => line.trim())
+  const tags = (await listImageTags(run))
     .filter((tag) =>
       isToolsImageTagIn(scope, tag) &&
       !current.has(imageTagComponent(tag))
     );
-  const removed: string[] = [];
-  const failures: string[] = [];
-  for (const tag of tags) {
-    const args = ["rmi", "-f", tag];
-    try {
-      await run(args);
-      removed.push(tag);
-    } catch (err) {
-      failures.push(
-        `  ${RUNTIME} ${args.join(" ")}\n    ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-  return { removed, failures };
+  return removeImageTags(tags, run);
 }
 
 export type AgentImages = {

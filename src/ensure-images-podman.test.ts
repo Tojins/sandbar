@@ -11,7 +11,10 @@
 // an image the operator's own checkout no longer matches.
 
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -21,6 +24,7 @@ import type { BuiltImage } from "./config.js";
 import { AGENT_PROVIDER_PACKAGES } from "./agent-providers.js";
 import {
   agentToolsContainerfile,
+  agentToolsImageContainerfile,
   detectImageLibc,
 } from "./agent-tools.js";
 import {
@@ -63,6 +67,42 @@ const available = podmanTestsEnabled({
   what: "ensure-images podman tests",
   image: BASE,
 });
+
+const sha256 = async (path: string): Promise<string> =>
+  createHash("sha256").update(await readFile(path)).digest("hex");
+
+async function serveArtifacts(
+  paths: Readonly<Record<string, string>>,
+): Promise<{ readonly origin: string; readonly close: () => Promise<void> }> {
+  const bodies = new Map<string, Buffer>();
+  for (const [path, file] of Object.entries(paths)) {
+    bodies.set(path, await readFile(file));
+  }
+  const server = createHttpServer((request, response) => {
+    const body = bodies.get(request.url ?? "");
+    if (body === undefined) {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { "Content-Length": body.length });
+    response.end(body);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => reject(error);
+    server.once("error", onError);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => error === undefined ? resolve() : reject(error));
+    }),
+  };
+}
 
 describe.runIf(available)("ensureImages against real podman", () => {
   // `cleanup` is the two production sweepers plus the tags they cannot see —
@@ -118,6 +158,181 @@ describe.runIf(available)("ensureImages against real podman", () => {
         "test -x /usr/local/bin/payload && cat /usr/local/bin/payload",
       ]);
       expect(result.stdout).toContain("generated-context");
+    },
+    600_000,
+  );
+
+  it(
+    "executes generated direct and archive downloads with checksum and member validation",
+    async ({ expect, task, onTestFinished }) => {
+      const root = await mkdtemp(join(tmpdir(), "sandbar-tools-downloads-"));
+      onTestFinished(() => rm(root, { recursive: true, force: true }), 60_000);
+
+      const direct = join(root, "claude");
+      await writeFile(direct, "direct fixture\n", { mode: 0o600 });
+      const exactRoot = join(root, "exact");
+      const prefixedRoot = join(root, "prefixed");
+      const ambiguousRoot = join(root, "ambiguous");
+      await Promise.all([
+        mkdir(exactRoot),
+        mkdir(prefixedRoot),
+        mkdir(ambiguousRoot),
+      ]);
+      await Promise.all([
+        writeFile(join(exactRoot, "codex"), "exact archive fixture\n", {
+          mode: 0o600,
+        }),
+        writeFile(
+          join(prefixedRoot, "codex-code-mode-host-x86_64-unknown-linux-musl"),
+          "prefixed archive fixture\n",
+          { mode: 0o600 },
+        ),
+        writeFile(join(ambiguousRoot, "codex-one"), "one\n"),
+        writeFile(join(ambiguousRoot, "codex-two"), "two\n"),
+      ]);
+      const exact = join(root, "codex.tar.gz");
+      const prefixed = join(root, "codex-host.tar.gz");
+      const ambiguous = join(root, "ambiguous.tar.gz");
+      await Promise.all([
+        exec("tar", ["-czf", exact, "-C", exactRoot, "."]),
+        exec("tar", ["-czf", prefixed, "-C", prefixedRoot, "."]),
+        exec("tar", ["-czf", ambiguous, "-C", ambiguousRoot, "."]),
+      ]);
+
+      const server = await serveArtifacts({
+        "/claude": direct,
+        "/codex.tar.gz": exact,
+        "/codex-host.tar.gz": prefixed,
+        "/ambiguous.tar.gz": ambiguous,
+      });
+      onTestFinished(server.close, 60_000);
+      const directArtifact = {
+        variant: "static" as const,
+        url: `${server.origin}/claude`,
+        sha256: await sha256(direct),
+      };
+      const exactArtifact = {
+        variant: "static" as const,
+        url: `${server.origin}/codex.tar.gz`,
+        sha256: await sha256(exact),
+        archive: true,
+      };
+      const prefixedArtifact = {
+        variant: "static" as const,
+        binary: "codex-code-mode-host",
+        url: `${server.origin}/codex-host.tar.gz`,
+        sha256: await sha256(prefixed),
+        archive: true,
+      } as const;
+      const packages: typeof AGENT_PROVIDER_PACKAGES = {
+        claude: {
+          version: "fixture",
+          artifacts: { x64: [directArtifact], arm64: [directArtifact] },
+        },
+        codex: {
+          version: "fixture",
+          artifacts: {
+            x64: [exactArtifact, prefixedArtifact],
+            arm64: [exactArtifact, prefixedArtifact],
+          },
+        },
+      };
+      const tag = testImageTag(`tools-download-${task.id}`);
+      const context = await mkdtemp(join(root, "context-"));
+      await writeFile(
+        join(context, "Containerfile"),
+        agentToolsImageContainerfile(
+          "docker.io/library/alpine:3.22",
+          ["claude", "codex"],
+          { arch: "x64", libc: "musl", packages },
+        ),
+      );
+      await buildImage({ tag, containerfile: "<generated-agent-tools-download>" }, {
+        root: "",
+        contextRoot: context,
+        capture: true,
+        timeoutMs: 600_000,
+      });
+
+      const { stdout: created } = await exec(RUNTIME, [
+        "create",
+        tag,
+        "/usr/local/bin/claude",
+      ]);
+      const container = created.trim();
+      onTestFinished(
+        () => exec(RUNTIME, ["rm", "-f", container]).then(() => undefined),
+        60_000,
+      );
+      const copied = await mkdtemp(join(root, "copied-"));
+      await exec(RUNTIME, ["cp", `${container}:/usr/local/bin/.`, copied]);
+      for (const [binary, content] of [
+        ["claude", "direct fixture\n"],
+        ["codex", "exact archive fixture\n"],
+        ["codex-code-mode-host", "prefixed archive fixture\n"],
+      ] as const) {
+        const path = join(copied, binary);
+        expect(await readFile(path, "utf8")).toBe(content);
+        expect((await stat(path)).mode & 0o111).toBe(0o111);
+      }
+
+      const ambiguousPackages: typeof AGENT_PROVIDER_PACKAGES = {
+        ...packages,
+        codex: {
+          version: "fixture",
+          artifacts: {
+            x64: [{
+              ...exactArtifact,
+              url: `${server.origin}/ambiguous.tar.gz`,
+              sha256: await sha256(ambiguous),
+            }],
+            arm64: [exactArtifact],
+          },
+        },
+      };
+      const ambiguousTag = testImageTag(`tools-ambiguous-${task.id}`);
+      await writeFile(
+        join(context, "Containerfile"),
+        agentToolsImageContainerfile(
+          "docker.io/library/alpine:3.22",
+          ["codex"],
+          { arch: "x64", libc: "musl", packages: ambiguousPackages },
+        ),
+      );
+      await expect(buildImage(
+        { tag: ambiguousTag, containerfile: "<generated-agent-tools-download>" },
+        { root: "", contextRoot: context, capture: true, timeoutMs: 600_000 },
+      )).rejects.toMatchObject({
+        output: expect.stringContaining("archive contains no unique codex binary"),
+      });
+
+      const checksumPackages: typeof AGENT_PROVIDER_PACKAGES = {
+        ...packages,
+        claude: {
+          version: "fixture",
+          artifacts: {
+            x64: [{ ...directArtifact, sha256: "0".repeat(64) }],
+            arm64: [directArtifact],
+          },
+        },
+      };
+      const checksumTag = testImageTag(`tools-checksum-${task.id}`);
+      await writeFile(
+        join(context, "Containerfile"),
+        agentToolsImageContainerfile(
+          "docker.io/library/alpine:3.22",
+          ["claude"],
+          { arch: "x64", libc: "musl", packages: checksumPackages },
+        ),
+      );
+      const checksumError = await buildImage(
+        { tag: checksumTag, containerfile: "<generated-agent-tools-download>" },
+        { root: "", contextRoot: context, capture: true, timeoutMs: 600_000 },
+      ).catch((error: unknown) => error);
+      expect(checksumError).toBeInstanceOf(ImageBuildError);
+      expect((checksumError as ImageBuildError).output).toMatch(
+        /checksum|digest|sha256/i,
+      );
     },
     600_000,
   );
