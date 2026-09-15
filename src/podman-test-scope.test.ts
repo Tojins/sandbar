@@ -137,6 +137,18 @@ describe("removeFixtureContainerOnTestFinished", () => {
     ]);
   });
 
+  it("propagates a passing test's fixture removal failure", async () => {
+    const hook = registeredHook("rm-fail");
+
+    await expect(hook(context("pass"))).rejects.toThrow(
+      /fixture removal failed/,
+    );
+    expect(await calls()).toEqual([
+      "container exists rm-fail",
+      "rm -f -v -t 0 rm-fail",
+    ]);
+  });
+
   it("does nothing when the fixture is already gone", async () => {
     const hook = registeredHook("gone");
 

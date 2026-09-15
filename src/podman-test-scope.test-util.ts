@@ -295,19 +295,24 @@ export function removeFixtureContainerOnTestFinished(
     ).filter(({ exists }) => exists);
     if (present.length === 0) return;
 
-    const evidence = task.result?.state === "fail"
-      ? await Promise.allSettled([
-          Promise.all(
-            present.map(({ name }) => fixtureFailureDiagnostic(name)),
-          ),
-        ])
-      : [];
-    const evidenceResult = evidence[0];
-    const primaryFailure = evidenceResult?.status === "rejected"
-      ? evidenceResult.reason
-      : evidenceResult?.status === "fulfilled"
-        ? new Error(evidenceResult.value.join("\n"))
-        : undefined;
+    let primaryFailure: unknown;
+    if (task.result?.state === "fail") {
+      const evidence = await Promise.allSettled(
+        present.map(({ name }) => fixtureFailureDiagnostic(name)),
+      );
+      const evidenceFailure = evidence.find(
+        (result) => result.status === "rejected",
+      );
+      primaryFailure = evidenceFailure === undefined
+        ? new Error(
+            evidence
+              .flatMap((result) =>
+                result.status === "fulfilled" ? [result.value] : [],
+              )
+              .join("\n"),
+          )
+        : evidenceFailure.reason;
+    }
 
     const presentNames = new Set(present.map(({ name }) => name));
     const [removal] = await Promise.allSettled([
