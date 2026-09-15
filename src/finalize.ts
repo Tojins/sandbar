@@ -28,11 +28,14 @@
 // distinct from a non-fast-forward race and from transport. Finalise comments
 // with the exact refusal, tip sha, cache ref/path and recovery command, then
 // swaps `ready-for-agent` for `agentStuck`; the rest of the queue continues.
-// Races and transport failures still halt loudly. The landing path's
-// `landing-push-refused` input is already commented and de-queued by merger, so
-// this module only applies its handoff label and does not retry the same refused
-// content. As with every human handoff, the explanatory comment precedes the
-// label flip so a comment failure cannot park an issue without instructions.
+// Races and transport failures still halt loudly except at the reviewer-write
+// handoff: that pre-existing evidence-preservation path parks after any failed
+// publish because its authoritative state is the deliberately retained clone.
+// The landing path's `landing-push-refused` input is already commented and
+// de-queued by merger, so this module only applies its handoff label and does
+// not retry the same refused content. As with every human handoff, the
+// explanatory comment precedes the label flip so a comment failure cannot park
+// an issue without instructions.
 //
 // `git branch -d` is escalated to `-D` only where the caller owns the certainty
 // that the work is preserved elsewhere. For `merged`/`chunk-landed`/
@@ -915,39 +918,28 @@ function needsHumanComments(
 
 const readOnlyAgentWroteExplanation = (
   input: Extract<FinalizeInput, { readonly kind: "read-only-agent-wrote" }>,
+  pushFailure?: string,
 ): string =>
   `Stopped because the read-only ${input.actor} changed the issue repository. ` +
   `The write is contained to this issue and its managed clone has been ` +
-  `preserved for human inspection.\n\n${input.latestReviewerProse}`;
+  `preserved for human inspection.` +
+  (pushFailure === undefined
+    ? ""
+    : ` The changed branch could not be pushed (${pushFailure}); inspect the preserved clone for the authoritative state.`) +
+  `\n\n${input.latestReviewerProse}`;
 
-// One policy for every issue-branch publish. A server refusal is attributable
-// to this branch and becomes the same recoverable local park whichever terminal
-// happened to reach finalise. Races and transport failures say nothing about
-// the branch's content and retain the existing fail-loud behavior.
-async function pushBranchOrPark(
+type PushRefusal = Extract<PushResult, { readonly kind: "refused" }>;
+
+async function parkRefusedPush(
   input: FinalizeInput,
   adapter: FinalizeAdapter,
   labels: LabelConfig,
+  push: PushRefusal,
   options: {
     readonly context?: string;
     readonly queueAlreadyRemoved?: boolean;
   } = {},
-): Promise<
-  Extract<FinalizeAction, { kind: "parked-local" | "skipped-closed" }> | null
-> {
-  const push = await adapter.pushBranch(input.issue.branch);
-  if (push.kind === "ok") return null;
-  if (push.kind === "race") {
-    throw new SandbarError(
-      `Failed to push branch '${input.issue.branch}' to origin: the remote branch moved (non-fast-forward).`,
-    );
-  }
-  if (push.kind === "fatal") {
-    throw new SandbarError(
-      `Failed to push branch '${input.issue.branch}' to origin: ${push.reason}`,
-    );
-  }
-
+): Promise<Extract<FinalizeAction, { kind: "parked-local" | "skipped-closed" }>> {
   const n = issueNumberOf(input.issue);
   // Quota, credential, and hard-error are not normally human handoffs, so the
   // top-level guard intentionally does not read issue state for them. A refusal
@@ -976,6 +968,36 @@ async function pushBranchOrPark(
   );
   requireFlip(flip, n);
   return { kind: "parked-local" };
+}
+
+// One policy for every issue-branch publish. A server refusal is attributable
+// to this branch and becomes the same recoverable local park whichever terminal
+// happened to reach finalise. Races and transport failures say nothing about
+// the branch's content and retain the existing fail-loud behavior.
+async function pushBranchOrPark(
+  input: FinalizeInput,
+  adapter: FinalizeAdapter,
+  labels: LabelConfig,
+  options: {
+    readonly context?: string;
+    readonly queueAlreadyRemoved?: boolean;
+  } = {},
+): Promise<
+  Extract<FinalizeAction, { kind: "parked-local" | "skipped-closed" }> | null
+> {
+  const push = await adapter.pushBranch(input.issue.branch);
+  if (push.kind === "ok") return null;
+  if (push.kind === "race") {
+    throw new SandbarError(
+      `Failed to push branch '${input.issue.branch}' to origin: the remote branch moved (non-fast-forward).`,
+    );
+  }
+  if (push.kind === "fatal") {
+    throw new SandbarError(
+      `Failed to push branch '${input.issue.branch}' to origin: ${push.reason}`,
+    );
+  }
+  return parkRefusedPush(input, adapter, labels, push, options);
 }
 
 // `-d`, escalating to `-D` when it refuses. ONLY for callers that own the
@@ -1336,14 +1358,20 @@ export async function finalizeOne(
       // is what the push below reads.
       await reclaimClone(input, adapter);
       const explanation = readOnlyAgentWroteExplanation(input);
-      const body = `${BOT_COMMENT_PREFIX} ${explanation}`;
-      const refused = await pushBranchOrPark(input, adapter, labels, {
-        context: explanation,
-      });
-      if (refused) return refused;
+      const push = await adapter.pushBranch(input.issue.branch);
+      if (push.kind === "refused") {
+        return parkRefusedPush(input, adapter, labels, push, {
+          context: explanation,
+        });
+      }
+      const pushFailure = push.kind === "race"
+        ? "the remote branch moved (non-fast-forward)"
+        : push.kind === "fatal"
+        ? push.reason
+        : undefined;
       await adapter.postComment(
         n,
-        body,
+        `${BOT_COMMENT_PREFIX} ${readOnlyAgentWroteExplanation(input, pushFailure)}`,
       );
       const r = await adapter.editLabels(
         n,
@@ -1351,7 +1379,7 @@ export async function finalizeOne(
         [labels.agentStuck],
       );
       requireFlip(r, n);
-      return { kind: "pushed" };
+      return { kind: pushFailure === undefined ? "pushed" : "parked-local" };
     }
     case "hard-error": {
       const reclaim = await adapter.reclaimIssueClone(input.issue.branch);

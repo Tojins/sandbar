@@ -1307,6 +1307,45 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
   });
 
+  it.each([
+    {
+      result: { kind: "race" } as const,
+      failure: "non-fast-forward",
+    },
+    {
+      result: { kind: "fatal", reason: "ssh: handshake failed" } as const,
+      failure: "ssh: handshake failed",
+    },
+  ])("read-only-agent-wrote: parks and comments after a $result.kind push failure", async ({
+    result,
+    failure,
+  }) => {
+    const { adapter, calls } = makeAdapter({ pushResult: result });
+    const i = issue(45);
+
+    const action = await finalizeOne(
+      {
+        kind: "read-only-agent-wrote",
+        issue: i,
+        actor: "reviewer",
+        latestReviewerProse: "Reviewer rewound the branch.",
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "parked-local" });
+    expect(calls.reclaims).toEqual([
+      { branch: i.branch, keep: expect.stringContaining("human inspection") },
+    ]);
+    expect(calls.comments[0]!.body).toContain(failure);
+    expect(calls.comments[0]!.body).toContain("authoritative state");
+    expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+  });
+
   it("read-only-agent-wrote: does not park before the handoff comment succeeds", async () => {
     const { adapter, calls } = makeAdapter({ postCommentError: "comment failed" });
 

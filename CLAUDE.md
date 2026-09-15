@@ -164,10 +164,13 @@ default is unlimited, so existing hosts keep their prior concurrency.
    its seed; this cache-derived check replaces per-sandbox-cycle commit
    bookkeeping, so work from an earlier HARD-ERROR cycle is not lost (#158).
    A server-refused branch push parks only that issue and names its surviving
-   host-cache ref (#163); races and transport failures still halt. Handoffs that
-   decide to remove `ready-for-agent` read that state back before the issue
-   ceases to be ongoing; quota, credential, and infrastructure terminals
-   deliberately remain queued unless their own branch publish is refused.
+   host-cache ref (#163); races and transport failures still halt, except that
+   the reviewer-write evidence handoff retains its historical rule of parking
+   after any failed publish because its preserved clone is authoritative.
+   Handoffs that decide to remove `ready-for-agent` read that state back before
+   the issue ceases to be ongoing; quota, credential, and infrastructure
+   terminals deliberately remain queued unless their own branch publish is
+   refused.
 
 ### Daemon polling and exits (`src/scheduler.ts`, `src/exit-conditions.ts`)
 
