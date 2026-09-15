@@ -94,7 +94,9 @@ async function serveArtifacts(
   }
   await writeFile(
     join(context, "Containerfile"),
-    "FROM docker.io/library/alpine:3.22\n" +
+    // Alpine's busybox build omits the `httpd` applet ("applet not found",
+    // exit 127 before listen); the upstream busybox image ships it.
+    "FROM docker.io/library/busybox:1.37\n" +
       "COPY artifacts/ /srv/\n" +
       "CMD [\"busybox\", \"httpd\", \"-f\", \"-p\", \"8080\", \"-h\", \"/srv\"]\n",
   );
