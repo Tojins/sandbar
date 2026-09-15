@@ -337,7 +337,9 @@ describe("run-owned agent images", () => {
   });
 
   it("changes the tools fingerprint for each independently pinned digest", () => {
-    const baseline = agentToolsFingerprint(["codex"], "glibc");
+    const baseline = agentToolsFingerprint(
+      ["codex"], "glibc", { arch: "x64" },
+    );
     const artifacts = AGENT_PROVIDER_PACKAGES.codex.artifacts.x64;
     for (const binary of [undefined, "codex-code-mode-host"] as const) {
       const changedPackages = {
@@ -355,6 +357,7 @@ describe("run-owned agent images", () => {
         },
       };
       expect(agentToolsFingerprint(["codex"], "glibc", {
+        arch: "x64",
         packages: changedPackages,
       })).not.toBe(baseline);
     }

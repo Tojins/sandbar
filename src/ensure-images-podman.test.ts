@@ -13,8 +13,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { createServer as createHttpServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -34,11 +32,14 @@ import {
   readInputsLabel,
   sweepBranchImages,
 } from "./ensure-images.js";
-import { variantImageTag } from "./naming.js";
+import { stackContainerNameFor, variantImageTag } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   type FinishedHook,
   podmanTestScope,
+  podmanTestStackId,
+  removeFixtureContainer,
+  runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -72,36 +73,54 @@ const sha256 = async (path: string): Promise<string> =>
   createHash("sha256").update(await readFile(path)).digest("hex");
 
 async function serveArtifacts(
+  root: string,
+  taskId: string,
   paths: Readonly<Record<string, string>>,
-): Promise<{ readonly origin: string; readonly close: () => Promise<void> }> {
-  const bodies = new Map<string, Buffer>();
+  onTestFinished: FinishedHook,
+): Promise<string> {
+  // The gate runner may be a container driving a remote podman socket. Keep
+  // the fixture beside Buildah and publish it on that host's loopback, where
+  // ADD's host-side downloader can reach it in either local or remote mode.
+  const context = await mkdtemp(join(root, "server-context-"));
+  const artifacts = join(context, "artifacts");
+  await mkdir(artifacts);
   for (const [path, file] of Object.entries(paths)) {
-    bodies.set(path, await readFile(file));
-  }
-  const server = createHttpServer((request, response) => {
-    const body = bodies.get(request.url ?? "");
-    if (body === undefined) {
-      response.writeHead(404).end();
-      return;
+    if (!/^\/[a-zA-Z0-9._-]+$/.test(path)) {
+      throw new Error(
+        `artifact fixture path must be a root-level filename: ${path}`,
+      );
     }
-    response.writeHead(200, { "Content-Length": body.length });
-    response.end(body);
+    await writeFile(join(artifacts, path.slice(1)), await readFile(file));
+  }
+  await writeFile(
+    join(context, "Containerfile"),
+    "FROM docker.io/library/alpine:3.22\n" +
+      "COPY artifacts/ /srv/\n" +
+      "CMD [\"busybox\", \"httpd\", \"-f\", \"-p\", \"8080\", \"-h\", \"/srv\"]\n",
+  );
+  const tag = testImageTag(`artifact-server-${taskId}`);
+  await buildImage({ tag, containerfile: "<generated-artifact-server>" }, {
+    root: "", contextRoot: context, capture: true,
   });
-  await new Promise<void>((resolve, reject) => {
-    const onError = (error: Error): void => reject(error);
-    server.once("error", onError);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", onError);
-      resolve();
-    });
-  });
-  const address = server.address() as AddressInfo;
-  return {
-    origin: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close((error) => error === undefined ? resolve() : reject(error));
-    }),
-  };
+  const container = stackContainerNameFor(
+    SCOPE,
+    podmanTestStackId("artifact-server", taskId),
+    "http",
+  );
+  await runFixtureContainer([
+    "--name", container, "-p", "127.0.0.1::8080", tag,
+  ]);
+  const close = (): Promise<void> =>
+    removeFixtureContainer(container);
+  onTestFinished(close, 60_000);
+  const published = (await exec(RUNTIME, ["port", container, "8080/tcp"]))
+    .stdout.match(/:(\d+)(?:\r?\n|$)/);
+  if (published === null) {
+    throw new Error(
+      `podman did not publish the artifact server port for ${container}`,
+    );
+  }
+  return `http://127.0.0.1:${published[1]}`;
 }
 
 describe.runIf(available)("ensureImages against real podman", () => {
@@ -199,28 +218,32 @@ describe.runIf(available)("ensureImages against real podman", () => {
         exec("tar", ["-czf", ambiguous, "-C", ambiguousRoot, "."]),
       ]);
 
-      const server = await serveArtifacts({
-        "/claude": direct,
-        "/codex.tar.gz": exact,
-        "/codex-host.tar.gz": prefixed,
-        "/ambiguous.tar.gz": ambiguous,
-      });
-      onTestFinished(server.close, 60_000);
+      const artifactOrigin = await serveArtifacts(
+        root,
+        task.id,
+        {
+          "/claude": direct,
+          "/codex.tar.gz": exact,
+          "/codex-host.tar.gz": prefixed,
+          "/ambiguous.tar.gz": ambiguous,
+        },
+        onTestFinished,
+      );
       const directArtifact = {
         variant: "static" as const,
-        url: `${server.origin}/claude`,
+        url: `${artifactOrigin}/claude`,
         sha256: await sha256(direct),
       };
       const exactArtifact = {
         variant: "static" as const,
-        url: `${server.origin}/codex.tar.gz`,
+        url: `${artifactOrigin}/codex.tar.gz`,
         sha256: await sha256(exact),
         archive: true,
       };
       const prefixedArtifact = {
         variant: "static" as const,
         binary: "codex-code-mode-host",
-        url: `${server.origin}/codex-host.tar.gz`,
+        url: `${artifactOrigin}/codex-host.tar.gz`,
         sha256: await sha256(prefixed),
         archive: true,
       } as const;
@@ -283,7 +306,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
           artifacts: {
             x64: [{
               ...exactArtifact,
-              url: `${server.origin}/ambiguous.tar.gz`,
+              url: `${artifactOrigin}/ambiguous.tar.gz`,
               sha256: await sha256(ambiguous),
             }],
             arm64: [exactArtifact],
