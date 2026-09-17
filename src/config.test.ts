@@ -884,6 +884,20 @@ describe("resolveConfig", () => {
       ...minimal,
       adjudicatorAgent: "codex",
     })).toThrow(/config\.adjudicatorModelId/);
+    expect(() => resolveConfig({
+      ...minimal,
+      reviewerModelId: "opus",
+      adjudicatorAgent: "codex",
+    })).toThrow(/config\.adjudicatorAgent is "codex"[\s\S]*config\.adjudicatorModelId/);
+
+    const sameProvider = resolveConfig({
+      ...minimal,
+      reviewerAgent: "codex",
+      reviewerModelId: "gpt-5.6-sol",
+      reviewerQualityModelId: "gpt-5.6-sol",
+      adjudicatorAgent: "codex",
+    });
+    expect(sameProvider.adjudicatorModelId).toBe("gpt-5.6-sol");
   });
 
   // A renamed field is #66's silent failure by construction: the config is

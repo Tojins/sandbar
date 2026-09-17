@@ -596,9 +596,15 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
           `adjudicator-harness-failed event in phase ${state.phase}; expected needs-adjudicator`,
         );
       }
+      if (state.pendingRejection === null) {
+        throw new Error("adjudicator harness failed without a pending rejection");
+      }
       return onReviewerHarnessFailed(
         state,
-        { ok: true, failureTrace: "" },
+        {
+          ok: state.pendingRejection.gateOk,
+          failureTrace: state.lastFailureTrace,
+        },
         `adjudicator: ${event.detail}`,
       );
   }

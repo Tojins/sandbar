@@ -2136,6 +2136,13 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "adjudicatorAgent",
     config.adjudicatorAgent ?? reviewerAgent,
   );
+  // The adjudicator inherits the correctness model only while it also uses
+  // the correctness provider. Once its provider is split, the correctness
+  // model says nothing about that provider's model-id namespace (#167).
+  const inheritedAdjudicatorModelId =
+    config.adjudicatorAgent === undefined || adjudicatorAgent === reviewerAgent
+      ? config.reviewerModelId
+      : undefined;
   const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
   assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
   if (uiPrototypeCheck) {
@@ -2170,7 +2177,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   assertRoleModelIdNamed(
     "adjudicator",
     adjudicatorAgent,
-    config.adjudicatorModelId ?? config.reviewerModelId,
+    config.adjudicatorModelId ?? inheritedAdjudicatorModelId,
     {
       agentField:
         config.adjudicatorAgent === undefined ? "reviewerAgent" : "adjudicatorAgent",
@@ -2217,7 +2224,9 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     reviewerQualityModelId:
       config.reviewerQualityModelId ?? DEFAULT_REVIEWER_QUALITY_MODEL_ID,
     adjudicatorModelId:
-      config.adjudicatorModelId ?? config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
+      config.adjudicatorModelId ??
+      inheritedAdjudicatorModelId ??
+      DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     implementerAgent,
     uiCheckAgent,

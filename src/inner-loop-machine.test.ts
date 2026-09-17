@@ -272,6 +272,43 @@ describe("unchanged rejection adjudication (#167)", () => {
     });
     expect(failedTwice.state.qualityFailures).toBe(1);
   });
+
+  it("preserves a rejected head's red gate trace through adjudicator harness failures", () => {
+    let state = initialState(defaultOpts);
+    state = step(state, impl(complete, [], null, null, 1, "abc")).state;
+    const rejected = step(state, {
+      ...rejectedAt("quality", "abc"),
+      gate: gate1Red("GATE-TRACE-T"),
+    });
+    const disputed = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const failedOnce = step(disputed.state, {
+      kind: "adjudicator-harness-failed",
+      detail: "no ruling",
+    });
+    expect(asImpl(failedOnce.action).failureTrace).toBe("GATE-TRACE-T");
+
+    const disputedAgain = step(
+      failedOnce.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const failedTwice = step(disputedAgain.state, {
+      kind: "adjudicator-harness-failed",
+      detail: "no ruling again",
+    });
+    expect(failedTwice.action).toMatchObject({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-HUMAN",
+        cause: "reviewer-harness-failed",
+        failureTrace:
+          "Gate-1 failure:\nGATE-TRACE-T\n\n" +
+          "Reviewer harness failure:\nadjudicator: no ruling again",
+      },
+    });
+  });
 });
 const needsInfo = (questions: string): ParseSignal => ({
   kind: "NEEDS-INFO",
