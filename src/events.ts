@@ -7,8 +7,10 @@
 // Finalization follows the same durability boundary: concurrent callers share
 // one run-end append, and a failed append leaves finalization retryable.
 // `ts` is wall-clock display data only; no decision reads it. Raw subprocess
-// transcripts remain separate files through `logs.ts`. A `landed` duration is
-// one merge unit; `landing-batch` carries the distinct whole-phase duration.
+// transcripts remain separate files through `logs.ts`. Landing requests carry
+// their UI status and reason explicitly: the reducer does not reconstruct a
+// queue or guess a merger step from neighbouring events (#168). A `landed`
+// duration is one merge unit; `landing-batch` carries the distinct whole-phase duration.
 // Container-backed duration boundaries may also carry `peakMemoryBytes`
 // (cgroup-v2 `memory.peak`, or Podman's sampled usage only as a fallback) and
 // `oomKilled` (an increase in cgroup-v2 `memory.events` `oom_kill` over a
@@ -33,7 +35,7 @@ import {
   type TranscriptTree,
 } from "./logs.js";
 
-export const EVENT_SCHEMA_VERSION = 2;
+export const EVENT_SCHEMA_VERSION = 3;
 
 export class EventRecordReadError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -120,6 +122,28 @@ export type GateStepEvent = ContainerResources & {
   readonly durationMs: number;
 };
 
+export type LandRequestStatus =
+  | {
+      readonly kind: "landing";
+      readonly step: "merge" | "gate-2" | "push";
+      readonly reason: string;
+    }
+  | { readonly kind: "queued" | "deferred"; readonly reason: string };
+
+export type LandRequestEvent = {
+  readonly pullRequest: number;
+  readonly branch: string;
+  readonly title: string;
+  readonly members: readonly number[];
+  readonly status: LandRequestStatus;
+};
+
+export type ChunkLandingEvent = {
+  readonly pullRequest: number;
+  readonly title: string;
+  readonly members: readonly number[];
+};
+
 export type EventInput =
   | {
       readonly kind: "run-start";
@@ -137,6 +161,7 @@ export type EventInput =
   | { readonly kind: "sweep"; readonly scope: "startup" | "quiescent"; readonly removed: readonly string[]; readonly failures: readonly string[] }
   | { readonly kind: "image"; readonly action: "built" | "reused"; readonly image: string; readonly durationMs: number; readonly detail: string }
   | { readonly kind: "landing-batch"; readonly n: number; readonly durationMs: number }
+  | ({ readonly kind: "land-request" } & LandRequestEvent)
   | {
       readonly kind: "recompute";
       readonly n: number;
@@ -171,7 +196,8 @@ export type EventInput =
   | (EventIssue & { readonly kind: "hard-error"; readonly retry: number; readonly max: number; readonly reason: string })
   | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-PARTITION" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "HARD-ERROR" | "QUOTA" | "CREDENTIAL" | "REJECTED"; readonly reason: string | null; readonly durationMs: number })
   | (EventIssue & { readonly kind: "landed"; readonly outcome: "merged" | "chunk-landed" | "skipped"; readonly branch: string; readonly target: string | null; readonly reason: string | null; readonly durationMs: number })
-  | { readonly kind: "landed"; readonly outcome: "chunk-on-source" | "chunk-parked" | "chunk-deferred"; readonly branch: string; readonly target: string | null; readonly reason: string | null; readonly durationMs: number }
+  | ({ readonly kind: "landed"; readonly outcome: "chunk-on-source"; readonly branch: string; readonly target: string; readonly reason: null; readonly durationMs: number } & ChunkLandingEvent)
+  | ({ readonly kind: "landed"; readonly outcome: "chunk-parked" | "chunk-deferred"; readonly branch: string; readonly target: null; readonly reason: string; readonly durationMs: number } & ChunkLandingEvent)
   | (EventIssue & { readonly kind: "finalise"; readonly finaliseKind: FinalizeInput["kind"]; readonly outcome: FinalizeAction["kind"]; readonly detail?: string });
 
 export type RunEvent = EventInput & {

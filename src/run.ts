@@ -62,7 +62,9 @@
 //                              updated per landing (#62); nothing of it reaches
 //                              the source branch until a human has reviewed
 //                              the chunk and put `land` on that pull request
-//                              (#64) — at which point the chunk branch is
+//                              (#64) — at which point the next recompute starts
+//                              the landing even while unrelated issues run
+//                              (#168), the chunk branch is
 //                              merged in the SAME source pass, its members are
 //                              closed, and the branch is deleted.
 //   Finalise:                  Per-issue branch lifecycle — push/delete the
@@ -78,7 +80,9 @@
 // One event record at <cwd>/<workDir>/logs/run-<UTC-ISO>/events.jsonl captures
 // every fact after both the workdir and origin locks are won (#132, #139). Raw
 // agent, gate, merger and resolve transcripts stay beside it as files. `run()`
-// hosts the file-fed UI; stdout contains its URL only. After the record exists,
+// hosts the file-fed UI; stdout contains its URL only. Land requests record
+// their queued/deferred reason and each merge/gate-2/push transition so that
+// UI status is event evidence rather than reducer inference (#168). After the record exists,
 // operator complaints are events; stderr is reserved for the internal-failure
 // banner.
 // Container-backed events retain cgroup peak-memory and OOMKilled evidence;
@@ -234,6 +238,9 @@ import {
   CHUNK_RESIDUE_KEPT_BANNER,
   CHUNK_RESIDUE_RETIRED_BANNER,
   LAND_LABEL,
+  type ChunkLandTarget,
+  type ChunkLandDeferral,
+  chunkLandDeferral,
   chunkResidue,
   selectLandRequests,
 } from "./chunk-land.js";
@@ -1373,7 +1380,57 @@ export async function run(
   let landingNumber = 0;
   let iteration = 0;
   let lastPlanDiagnostics: string | null = null;
-  const deferredLandBranches = new Set<string>();
+  const deferredLandReason = (
+    members: readonly { readonly number: number }[],
+  ): string => {
+    const named = members.map((member) => `#${member.number}`);
+    if (named.length === 1) {
+      return `${named[0]} targets this chunk · lands once ${named[0]} lands or parks`;
+    }
+    return `${named.join(", ")} target this chunk · lands once they land or park`;
+  };
+
+  const landRequestEvent = (
+    request: ChunkLandTarget,
+    status: Extract<EventInput, { kind: "land-request" }>["status"],
+  ): Extract<EventInput, { kind: "land-request" }> => ({
+    kind: "land-request",
+    pullRequest: request.pullRequest,
+    branch: request.branch,
+    title: request.title,
+    members: request.members.map((member) => member.number),
+    status,
+  });
+
+  const emitObservedLandRequests = async (
+    observed: readonly ChunkLandTarget[],
+    runnable: readonly ChunkLandTarget[],
+    deferrals: ReadonlyMap<string, ChunkLandDeferral>,
+  ): Promise<void> => {
+    const runnableIndex = new Map(
+      runnable.map((request, index) => [request.branch, index] as const),
+    );
+    for (const request of observed) {
+      const deferral = deferrals.get(request.branch);
+      if (deferral !== undefined) {
+        await runRecord.emit(landRequestEvent(request, {
+          kind: "deferred",
+          reason: deferredLandReason(deferral.members),
+        }));
+        continue;
+      }
+      const index = runnableIndex.get(request.branch);
+      const previous = index === undefined || index === 0
+        ? undefined
+        : runnable[index - 1];
+      await runRecord.emit(landRequestEvent(request, {
+        kind: "queued",
+        reason: previous
+          ? `lands after PR #${previous.pullRequest}`
+          : "lands next",
+      }));
+    }
+  };
 
   const waitForSchedulerWake = async (): Promise<RecomputeTrigger> => {
     const wake = await pool.waitForWake(config.pollIntervalMs);
@@ -1585,6 +1642,9 @@ export async function run(
           outcome: "chunk-on-source",
           branch: outcome.target.branch,
           target: config.sourceBranch,
+          pullRequest: outcome.target.pullRequest,
+          title: outcome.target.title,
+          members: outcome.target.members.map((member) => member.number),
           reason: null,
           durationMs: outcome.durationMs,
         });
@@ -1595,21 +1655,33 @@ export async function run(
           outcome: "chunk-parked",
           branch: outcome.skipped.target.branch,
           target: null,
+          pullRequest: outcome.skipped.target.pullRequest,
+          title: outcome.skipped.target.title,
+          members: outcome.skipped.target.members.map((member) => member.number),
           reason: outcome.skipped.reason,
           durationMs: outcome.durationMs,
         });
         return;
       case "chunk-deferred":
-        await runRecord.emit({
-          kind: "landed",
-          outcome: "chunk-deferred",
-          branch: outcome.deferred.target.branch,
-          target: null,
-          reason: `member work in flight (${outcome.deferred.landedNow
-            .map((member) => `#${member.number}`).join(", ")})`,
-          durationMs: outcome.durationMs,
-        });
-        return;
+        {
+          const reason = deferredLandReason(outcome.deferred.landedNow);
+          await runRecord.emit(landRequestEvent(outcome.deferred.target, {
+            kind: "deferred",
+            reason,
+          }));
+          await runRecord.emit({
+            kind: "landed",
+            outcome: "chunk-deferred",
+            branch: outcome.deferred.target.branch,
+            target: null,
+            pullRequest: outcome.deferred.target.pullRequest,
+            title: outcome.deferred.target.title,
+            members: outcome.deferred.target.members.map((member) => member.number),
+            reason,
+            durationMs: outcome.durationMs,
+          });
+          return;
+        }
     }
   };
 
@@ -1897,9 +1969,19 @@ export async function run(
         await fetchLandRequestPullRequests(repo, LAND_LABEL),
         resolution.landedChunks,
       );
-      const landRequests: ReturnType<typeof selectLandRequests> = planTrigger === "landing-finished"
-        ? selectedLandRequests.filter((request) => !deferredLandBranches.has(request.branch))
-        : selectedLandRequests;
+      const ongoingForChunkLanding = pool.ongoingIssues().map((issue) => ({
+        number: Number(issue.id),
+        title: issue.title,
+        chunkBranch: issue.chunk?.branch ?? null,
+      }));
+      const landDeferrals = new Map(
+        selectedLandRequests.flatMap((request) => {
+          const deferral = chunkLandDeferral(request, ongoingForChunkLanding);
+          return deferral === null ? [] : [[request.branch, deferral] as const];
+        }),
+      );
+      const landRequests: ReturnType<typeof selectLandRequests> =
+        selectedLandRequests.filter((request) => !landDeferrals.has(request.branch));
       if (landRequests.length > 0) {
         const named = landRequests
           .map((r) => `${r.branch} (PR #${r.pullRequest})`)
@@ -1964,7 +2046,8 @@ export async function run(
         activity.enterBusy();
       }
       if (schedulerAction.kind === "exit") {
-        await emitRecompute(iteration, planTrigger, resolution, [], landRequests);
+        await emitRecompute(iteration, planTrigger, resolution, [], selectedLandRequests);
+        await emitObservedLandRequests(selectedLandRequests, landRequests, landDeferrals);
         terminalExit = await announceExit(
           schedulerExit(schedulerAction.reason, {
             pool,
@@ -1985,7 +2068,8 @@ export async function run(
         activity.enterBusy();
       }
       if (planTrigger !== "poll" || pollIsReportable) {
-        await emitRecompute(iteration, planTrigger, resolution, issues, landRequests);
+        await emitRecompute(iteration, planTrigger, resolution, issues, selectedLandRequests);
+        await emitObservedLandRequests(selectedLandRequests, landRequests, landDeferrals);
         for (const line of chunkDriftLines) {
           await runRecord.emit({ kind: "complaint", severity: "warning", message: line });
         }
@@ -2102,6 +2186,25 @@ export async function run(
       const completedIssues = outcomes
         .filter((o) => o.terminal.type === "DONE")
         .map((o) => o.issue);
+
+      const landingTogetherReason = (request: ChunkLandTarget): string => {
+        const companions = [
+          ...completedIssues.map((issue) =>
+            `#${issue.id} → ${issue.chunk ? "its chunk" : config.sourceBranch}`),
+          ...landRequests
+            .filter((other) => other.branch !== request.branch)
+            .map((other) => `PR #${other.pullRequest}`),
+        ];
+        return companions.length > 0
+          ? `landing together with ${companions.join(", ")}`
+          : "";
+      };
+      for (const [index, request] of landRequests.entries()) {
+        const previous = landRequests[index - 1];
+        await runRecord.emit(landRequestEvent(request, index === 0
+          ? { kind: "landing", step: "merge", reason: landingTogetherReason(request) }
+          : { kind: "queued", reason: `lands after PR #${previous!.pullRequest}` }));
+      }
 
 
       // ---------------------------------------------------------------------
@@ -2259,6 +2362,17 @@ export async function run(
                 return path;
               },
               observations: {
+                onProgress: async (key, step) => {
+                  const request = landRequests.find(
+                    (candidate) => key === `chunk-${candidate.root}`,
+                  );
+                  if (!request) return;
+                  await runRecord.emit(landRequestEvent(request, {
+                    kind: "landing",
+                    step,
+                    reason: landingTogetherReason(request),
+                  }));
+                },
                 onGate: (key, gate) => {
                   const issueId = key.startsWith("chunk-") ? key.slice("chunk-".length) : key;
                   const planned = completedIssues.find((issue) => issue.id === issueId);
@@ -2397,10 +2511,6 @@ export async function run(
       // this only ever produces handoff inputs.
       const mergerOutcome = halt ? haltPartial : mergerSummary;
       if (mergerOutcome) {
-        deferredLandBranches.clear();
-        for (const deferred of mergerOutcome.deferredChunks) {
-          deferredLandBranches.add(deferred.target.branch);
-        }
         const { inputs, bumpedSilentNoop } = mergeFinalizeInputs(
           mergerOutcome,
           silentNoopAttemptsByIssue,

@@ -2584,6 +2584,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
   });
 
   it("merges origin's chunk branch, lands it with the cycle, then wraps it up", async () => {
+    const progress: Array<{ key: string; step: string }> = [];
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
       gates: [{ ok: true }],
@@ -2594,7 +2595,13 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       adapter,
       undefined,
       undefined,
-      landing(request(42, [42, 43])),
+      {
+        ...landing(request(42, [42, 43])),
+        observations: {
+          ...DISCARD_MERGER_OBSERVATIONS,
+          onProgress: (key, step) => { progress.push({ key, step }); },
+        },
+      },
     );
 
     // The merge source is ORIGIN's copy: the chunk branch outlives the run and
@@ -2604,6 +2611,11 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     // One gate over the composition, one push — the source pass's own.
     expect(calls.gates).toBe(1);
     expect(calls.pushes).toBe(1);
+    expect(progress).toEqual([
+      { key: "chunk-42", step: "merge" },
+      { key: "chunk-42", step: "gate-2" },
+      { key: "chunk-42", step: "push" },
+    ]);
     expect(summary.pushed).toBe(true);
     // …and only then the wrap-up: every member closed — deepest first, the
     // root last — `needs-review` dropped, the pull request closed, the branch

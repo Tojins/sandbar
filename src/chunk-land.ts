@@ -264,6 +264,36 @@ export type ChunkLandTarget = {
   readonly pullRequest: number;
 };
 
+export type ChunkLandOngoingIssue = {
+  readonly number: number;
+  readonly title: string;
+  readonly chunkBranch: string | null;
+};
+
+export type ChunkLandDeferral = {
+  readonly members: readonly ChunkMember[];
+  readonly reason: "ongoing" | "rework";
+};
+
+// The one chunk-specific answer both scheduler discovery and the merger use.
+// Keeping it ahead of the scheduler is what lets unrelated work stop blocking
+// safe requests without turning a genuinely deferred request into one merger
+// pass (and one PR comment) per poll (#168).
+export function chunkLandDeferral(
+  request: ChunkLandTarget,
+  ongoing: readonly ChunkLandOngoingIssue[],
+): ChunkLandDeferral | null {
+  if (request.rework.length > 0) {
+    return { members: request.rework, reason: "rework" };
+  }
+  const targeting = ongoing
+    .filter((issue) => issue.chunkBranch === request.branch)
+    .map((issue) => ({ number: issue.number, title: issue.title }));
+  return targeting.length > 0
+    ? { members: targeting, reason: "ongoing" }
+    : null;
+}
+
 // The fields of an open pull request this module reads. `headRefName` is the
 // branch it is FOR, which is the only thing tying a PR to a chunk.
 export type PullRequestSummary = {

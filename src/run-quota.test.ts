@@ -2068,7 +2068,7 @@ describe("run quota orchestration (#109)", () => {
     expect(ensureImages).toHaveBeenCalledTimes(1);
   });
 
-  it("waits for a poll before retrying an unchanged deferred landing request", async () => {
+  it("keeps an unchanged deferred request out of the landing path", async () => {
     const target = {
       root: 42,
       branch: "sandbar/chunk-42-test",
@@ -2102,8 +2102,17 @@ describe("run quota orchestration (#109)", () => {
       .rejects.toThrow("EXIT:1");
     expect(exit).toHaveBeenCalledWith(1);
     expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
-    expect(seams.merger).toHaveBeenCalledTimes(2);
+    expect(seams.merger).not.toHaveBeenCalled();
     expect(seams.innerLoop).not.toHaveBeenCalled();
+    expect(eventsOf("land-request")).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        pullRequest: 9,
+        status: {
+          kind: "deferred",
+          reason: "#42 targets this chunk · lands once #42 lands or parks",
+        },
+      }),
+    ]));
     expect(eventsOf("exit").some((event) => event.tag === "stuck")).toBe(false);
     expect(eventsOf("idle").length).toBeGreaterThan(0);
   });

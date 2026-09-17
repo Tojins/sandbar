@@ -75,9 +75,15 @@ describe("run UI server", () => {
           { kind: "impl", from: "2026-09-07T10:21:00Z", to: null, label: "a2" },
         ] }],
       waiting: [{ issue: 3, title: "Waiting title", why: PARKED_WHY, parked: true }],
+      landing: [{ pullRequest: 305, branch: "sandbar/chunk-177", title: "Migrations",
+        members: [177], requestedAt: "2026-09-07T09:25:00Z",
+        statusSince: "2026-09-07T10:27:00Z", status: "landing", step: "gate-2",
+        reason: "landing together with #156 → its chunk, PR #306" }],
       finished: [{ issue: 1, title: "Finished title", outcome: "HARD-ERROR",
         reason: "provider cause\n(codex exited with code 1)", attempts: 1,
         rounds: 1, ms: 60_000, landed: "main", at: "2026-09-07T09:40:00Z" }],
+      landedChunks: [{ pullRequest: 304, title: "Landed chunk", members: [299],
+        target: "main", ms: 60_000, at: "2026-09-07T09:45:00Z" }],
       eventCount: 1,
       events: [{ at: "2026-09-07T09:50:00Z", issue: 2, text: "attempt started", tone: "" }],
     };
@@ -98,6 +104,19 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("<details id=\"events\"><summary>Events");
     expect(app.innerHTML).toContain("Pool title");
     expect(app.innerHTML).toContain("Waiting title");
+    expect(app.innerHTML).toContain("Landing · 1 requested");
+    expect(app.innerHTML).toContain(">gate-2 2m</b> · landing together with #156 → its chunk, PR #306 · requested 1h04 ago");
+    expect(app.innerHTML).toContain("PR #304");
+    expect(app.innerHTML).toContain("LANDED → main · #299");
+    expect(app.innerHTML.indexOf("Waiting</h2>")).toBeLessThan(
+      app.innerHTML.indexOf("Landing · 1 requested"),
+    );
+    expect(app.innerHTML.indexOf("Landing · 1 requested")).toBeLessThan(
+      app.innerHTML.indexOf("Finished recently"),
+    );
+    expect(app.innerHTML.indexOf("PR #304")).toBeLessThan(
+      app.innerHTML.indexOf("#1</span>"),
+    );
     // This run has been live for 60h54, but the timeline begins at the first
     // pool span. Ten-minute ticks stay readable and the eight-minute current
     // span occupies useful width instead of being crushed against `now`.

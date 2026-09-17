@@ -590,7 +590,13 @@ outcomes.
   The internal-failure banner is the sole post-record stderr rendering.
 - **The UI is a projection, never scheduler state (#132).** `src/run-state.ts`
   purely reduces events into the pool timeline, waiting and parked rows, recent
-  events, and finished issues across recent run directories. `src/ui-server.ts`
+  events, landing requests, and finished issues and chunk landings across recent
+  run directories. The Landing section (#168) sits between Waiting and Finished,
+  lists only pull requests carrying `land`, and uses the waiting-row shape. Its
+  queued/deferred reason and merge/gate-2/push step are explicit event fields;
+  the reducer does not infer them from adjacent merger events. A chunk that
+  reaches the source branch joins Finished by timestamp with issue outcomes.
+  `src/ui-server.ts`
   serves the shipped vanilla page and `/state.json`, rereading the record on
   every request. Terminal causes stay full in the event feed and lead the
   compact HARD-ERROR retry, parked and recently-finished projections. A pending

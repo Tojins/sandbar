@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readEventsFile, runStampFromDate, startEventRecord } from "./events.js";
+import {
+  EVENT_SCHEMA_VERSION,
+  readEventsFile,
+  runStampFromDate,
+  startEventRecord,
+} from "./events.js";
 
 const start = {
   driver: "sandbar test", configPath: "/repo/sandbar.config.mjs",
@@ -115,7 +120,8 @@ describe("event record", () => {
     const dir = await makeTemporaryDirectory();
     const path = join(dir, "events.jsonl");
     const rows = sequences.map((seq, index) => index === 0 ? {
-      ...start, kind: "run-start", schemaVersion: 2, seq, ts: "2026-09-07T10:00:00Z",
+      ...start, kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, seq,
+      ts: "2026-09-07T10:00:00Z",
     } : { kind: "complaint", severity: "warning", message: String(index), seq,
       ts: "2026-09-07T10:00:01Z" });
     await writeFile(path, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
@@ -128,7 +134,7 @@ describe("event record", () => {
     await writeFile(path, `${JSON.stringify({
       ...start,
       kind: "run-start",
-      schemaVersion: 2,
+      schemaVersion: EVENT_SCHEMA_VERSION,
       seq: 1,
       ts: "2026-09-07T10:00:00Z",
     })}\n{\"kind\":\"compl`);

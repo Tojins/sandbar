@@ -2,7 +2,9 @@
 //
 // The event record is complete; this module decides what is visible. It owns
 // the pool timeline, waiting/parked join and compact event prose, while the
-// HTTP server owns only file discovery and delivery. Wall-clock `now` and PID
+// HTTP server owns only file discovery and delivery. Landing rows consume the
+// explicit request status/reason transitions in the record; they never infer a
+// queue position or merger step from event adjacency (#168). Wall-clock `now` and PID
 // liveness are explicit inputs so tests do not depend on either ambient fact.
 // Container resource fields stay attached to feed rows verbatim (#141), and a
 // gate's per-step map is passed by reference; the reducer neither reinterprets
@@ -54,6 +56,33 @@ export type FinishedIssueState = {
   readonly at: string;
 };
 
+type LandingRequestStateBase = {
+  readonly pullRequest: number;
+  readonly branch: string;
+  readonly title: string;
+  readonly members: readonly number[];
+  readonly requestedAt: string;
+  readonly statusSince: string;
+  readonly reason: string;
+};
+
+export type LandingRequestState = LandingRequestStateBase & (
+  | {
+      readonly status: "landing";
+      readonly step: "merge" | "gate-2" | "push";
+    }
+  | { readonly status: "queued" | "deferred"; readonly step: null }
+);
+
+export type FinishedChunkState = {
+  readonly pullRequest: number;
+  readonly title: string;
+  readonly members: readonly number[];
+  readonly target: string;
+  readonly ms: number;
+  readonly at: string;
+};
+
 export type FeedEvent = ContainerResources & {
   readonly at: string;
   readonly issue: number | null;
@@ -83,7 +112,9 @@ export type UiState = {
   };
   readonly pool: readonly PoolIssueState[];
   readonly waiting: readonly WaitingIssueState[];
+  readonly landing: readonly LandingRequestState[];
   readonly finished: readonly FinishedIssueState[];
+  readonly landedChunks: readonly FinishedChunkState[];
   readonly eventCount: number;
   readonly events: readonly FeedEvent[];
 };
@@ -172,8 +203,14 @@ function feedText(event: RunEvent): FeedEvent | null {
       tone = "dim";
       break;
     case "landing-batch":
-      text = `landing batch ${event.n} complete · ${event.durationMs}ms`;
+      text = `landing complete · ${event.durationMs}ms`;
       tone = "dim";
+      break;
+    case "land-request":
+      text = `PR #${event.pullRequest} · ${
+        event.status.kind === "landing" ? event.status.step : event.status.kind
+      } · ${event.status.reason}`;
+      tone = event.status.kind === "landing" ? "" : "dim";
       break;
     case "admitted":
       text = `admitted #${event.issue}`;
@@ -391,10 +428,25 @@ function finishedFrom(events: readonly RunEvent[]): readonly FinishedIssueState[
   });
 }
 
+function finishedChunksFrom(events: readonly RunEvent[]): readonly FinishedChunkState[] {
+  return events.flatMap((event) => event.kind === "landed" &&
+    event.outcome === "chunk-on-source"
+    ? [{
+        pullRequest: event.pullRequest,
+        title: event.title,
+        members: event.members,
+        target: event.target,
+        ms: event.durationMs,
+        at: event.ts,
+      }]
+    : []);
+}
+
 export type ReduceRunOptions = {
   readonly now: Date;
   readonly pidAlive: boolean;
   readonly recentFinished?: readonly FinishedIssueState[];
+  readonly recentLandedChunks?: readonly FinishedChunkState[];
 };
 
 export function reduceRunEvents(
@@ -418,6 +470,7 @@ export function reduceRunEvents(
     number,
     Extract<RunEvent, { kind: "terminal" }>
   >();
+  const landingRequests = new Map<number, LandingRequestState>();
 
   for (const event of events) {
     const feedEvent = feedText(event);
@@ -498,6 +551,9 @@ export function reduceRunEvents(
         break;
       }
       case "landed":
+        if (event.outcome === "chunk-on-source" || event.outcome === "chunk-parked") {
+          landingRequests.delete(event.pullRequest);
+        }
         if ("issue" in event && typeof event.issue === "number") {
           executing.delete(event.issue);
           if (event.outcome === "skipped") {
@@ -512,6 +568,28 @@ export function reduceRunEvents(
           }
         }
         break;
+      case "land-request": {
+        const previous = landingRequests.get(event.pullRequest);
+        const previousStep = previous?.step ?? null;
+        const nextStep = event.status.kind === "landing" ? event.status.step : null;
+        const unchanged = previous !== undefined &&
+          previous.status === event.status.kind &&
+          previousStep === nextStep &&
+          previous.reason === event.status.reason;
+        const common: LandingRequestStateBase = {
+          pullRequest: event.pullRequest,
+          branch: event.branch,
+          title: event.title,
+          members: event.members,
+          requestedAt: previous?.requestedAt ?? event.ts,
+          statusSince: unchanged ? previous.statusSince : event.ts,
+          reason: event.status.reason,
+        };
+        landingRequests.set(event.pullRequest, event.status.kind === "landing"
+          ? { ...common, status: "landing", step: event.status.step }
+          : { ...common, status: event.status.kind, step: null });
+        break;
+      }
       case "finalise": {
         const issue = issues.get(event.issue);
         if (!issue) break;
@@ -529,6 +607,12 @@ export function reduceRunEvents(
       case "recompute":
         lastRecompute = event;
         waiting = event.waiting;
+        {
+          const observed = new Set(event.landRequests);
+          for (const [pullRequest, request] of landingRequests) {
+            if (!observed.has(request.branch)) landingRequests.delete(pullRequest);
+          }
+        }
         for (const admitted of event.admitted) {
           executing.add(admitted.issue);
           if (!issues.has(admitted.issue)) {
@@ -623,6 +707,17 @@ export function reduceRunEvents(
     seenFinished.add(item.issue);
     dedupedFinished.push(item);
   }
+  const allLandedChunks = [
+    ...finishedChunksFrom(events),
+    ...(options.recentLandedChunks ?? []),
+  ].sort((a, b) => b.at.localeCompare(a.at));
+  const dedupedLandedChunks: FinishedChunkState[] = [];
+  const seenPullRequests = new Set<number>();
+  for (const item of allLandedChunks) {
+    if (seenPullRequests.has(item.pullRequest)) continue;
+    seenPullRequests.add(item.pullRequest);
+    dedupedLandedChunks.push(item);
+  }
   return {
     now: options.now.toISOString(),
     run: {
@@ -643,7 +738,11 @@ export function reduceRunEvents(
     },
     pool: [...issues.values()].sort((a, b) => a.issue - b.issue),
     waiting: waitingRows.sort((a, b) => a.issue - b.issue),
+    landing: [...landingRequests.values()].sort(
+      (a, b) => a.pullRequest - b.pullRequest,
+    ),
     finished: dedupedFinished,
+    landedChunks: dedupedLandedChunks,
     eventCount: feed.length,
     events: feed.reverse().slice(0, RECENT_EVENT_LIMIT),
   };
@@ -651,4 +750,8 @@ export function reduceRunEvents(
 
 export function finishedIssues(events: readonly RunEvent[]): readonly FinishedIssueState[] {
   return finishedFrom(events);
+}
+
+export function finishedChunks(events: readonly RunEvent[]): readonly FinishedChunkState[] {
+  return finishedChunksFrom(events);
 }
