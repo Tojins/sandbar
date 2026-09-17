@@ -638,7 +638,7 @@ type FinalizeKindInput =
       readonly kind: "read-only-agent-wrote";
       readonly issue: IssueRef;
       readonly latestReviewerProse: string;
-      readonly actor: "reviewer" | "UI checker" | "partition checker";
+      readonly actor: "reviewer" | "adjudicator" | "UI checker" | "partition checker";
     }
   | {
       readonly kind: "hard-error";

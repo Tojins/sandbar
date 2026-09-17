@@ -8,6 +8,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   buildPartitionCheckPrompt: vi.fn(async () => "partition check prompt"),
   buildUiCheckPrompt: vi.fn(async () => "ui check prompt"),
   buildReviewerPrompts: vi.fn(),
+  buildAdjudicatorPrompt: vi.fn(async () => "adjudicator prompt"),
   measureNetDiffChars: vi.fn(async () => 0),
   branchIsAheadOfSeed: vi.fn(async () => false),
   ensureIssueBranch: vi.fn(async () => ({
@@ -31,6 +32,7 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   buildPartitionCheckPrompt: innerLoopMocks.buildPartitionCheckPrompt,
   buildUiCheckPrompt: innerLoopMocks.buildUiCheckPrompt,
   buildReviewerPrompts: innerLoopMocks.buildReviewerPrompts,
+  buildAdjudicatorPrompt: innerLoopMocks.buildAdjudicatorPrompt,
   measureNetDiffChars: innerLoopMocks.measureNetDiffChars,
   branchIsAheadOfSeed: innerLoopMocks.branchIsAheadOfSeed,
 }));
@@ -62,7 +64,10 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 }));
 
 import {
+  AgentCredentialError,
+  AgentError,
   AgentInputTooLargeError,
+  AgentQuotaError,
   withPartialContainerResources,
   withPartialDurationMs,
   withPartialOutput,
@@ -80,6 +85,7 @@ import {
   runInnerLoop,
   runPartitionCheck,
   runReviewer,
+  runAdjudicator,
   runUiCheck,
   runSandboxAndPublish,
   type ReadOnlyAgentSnapshot,
@@ -1046,6 +1052,437 @@ describe("role prompt-extension wiring (#91)", () => {
   });
 });
 
+describe("runAdjudicator (#167)", () => {
+  const action = {
+    kind: "run-adjudicator" as const,
+    attempt: 2,
+    reviewRound: 1,
+    rejection: {
+      round: 1,
+      pass: "quality" as const,
+      head: "head123",
+      report: "false report",
+      gateOk: true,
+    },
+  };
+
+  const context = (
+    sandbox: Sandbox,
+    events: EventInput[] = [],
+  ): Parameters<typeof runAdjudicator>[1] => ({
+    issue: { id: "167", title: "adjudicate", branch: "sandbar/issue-167" },
+    sandbox,
+    opts: {
+      attemptLogger: { writeInvocation: vi.fn() },
+      onEvent: async (event: EventInput) => { events.push(event); },
+    },
+    config: {
+      repo: { owner: "owner", name: "repo" },
+      layout: { repoDir: "/repo" },
+      sourceBranch: "main",
+      claudeMdPath: "CLAUDE.md",
+      maxContextChars: 1000,
+      adjudicatorAgent: "codex",
+      adjudicatorModelId: "judge-model",
+    },
+    base: { ref: "origin/main" },
+    priorReviewRounds: [{
+      round: 1,
+      head: "head123",
+      quality: {
+        verdict: "CHANGES-REQUESTED",
+        prose: "false report",
+        specGap: null,
+      },
+    }],
+    specGaps: [],
+    invocationSequence: createAgentInvocationSequencer().startCycle(),
+  } as unknown as Parameters<typeof runAdjudicator>[1]);
+
+  const unchangedAdjudicatorSnapshot = () => {
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("head123");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
+      "refs/heads/sandbar/issue-167",
+    );
+  };
+
+  it("records an overrule, drops the rejected report from history, and stays read-only", async () => {
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("head123");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
+      "refs/heads/sandbar/issue-167",
+    );
+    const filenames: string[] = [];
+    const events: EventInput[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async (options: Parameters<Sandbox["run"]>[0]) => {
+        await options.onInvocationEnd?.({
+          agent: options.name ?? options.agent.name,
+          provider: options.agent.name,
+          model: options.model ?? null,
+          end: "exit",
+          detail: null,
+          exitCode: 0,
+          durationMs: 17,
+          speech: "five arguments\n<ruling>OVERRULED</ruling>",
+          stdout: "five arguments\n<ruling>OVERRULED</ruling>",
+          stderr: "",
+        });
+        return {
+          stdout: "five arguments\n<ruling>OVERRULED</ruling>",
+          commits: [],
+          durationMs: 17,
+          silent: false,
+          maxGapMs: 2,
+          toolCalls: 3,
+        };
+      }),
+    } as unknown as Sandbox;
+    const history = [{
+      round: 1,
+      head: "head123",
+      quality: { verdict: "APPROVED" as const, prose: "ok", specGap: null },
+      correctness: {
+        verdict: "CHANGES-REQUESTED" as const,
+        prose: "false report",
+        specGap: null,
+      },
+    }];
+    const ctx = {
+      issue: { id: "167", title: "adjudicate", branch: "sandbar/issue-167" },
+      sandbox,
+      opts: {
+        attemptLogger: {
+          writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
+        },
+        onEvent: async (event: EventInput) => { events.push(event); },
+      },
+      config: {
+        repo: { owner: "owner", name: "repo" },
+        layout: { repoDir: "/repo" },
+        sourceBranch: "main",
+        claudeMdPath: "CLAUDE.md",
+        maxContextChars: 1000,
+        adjudicatorAgent: "codex",
+        adjudicatorModelId: "judge-model",
+      },
+      base: { ref: "origin/main" },
+      priorReviewRounds: history,
+      specGaps: [],
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+    } as unknown as Parameters<typeof runAdjudicator>[1];
+
+    await expect(runAdjudicator({
+      kind: "run-adjudicator",
+      attempt: 2,
+      reviewRound: 1,
+      rejection: {
+        round: 1,
+        pass: "correctness",
+        head: "head123",
+        report: "false report",
+        gateOk: true,
+      },
+    }, ctx)).resolves.toMatchObject({
+      kind: "adjudicator-result",
+      ruling: "OVERRULED",
+      reasoning: "five arguments",
+      correctness: null,
+    });
+    expect(history[0]!.correctness).toEqual({
+      verdict: "OVERRULED",
+      prose: "",
+      specGap: null,
+    });
+    expect(filenames).toEqual([
+      "attempt-2-adjudicator-correctness-1.log",
+    ]);
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: "adjudication",
+      pass: "correctness",
+      head: "head123",
+      ruling: "OVERRULED",
+      durationMs: expect.any(Number),
+      usage: expect.objectContaining({ toolCalls: 3 }),
+    }));
+  });
+
+  it("continues an overruled quality report directly into correctness", async () => {
+    innerLoopMocks.buildReviewerPrompts.mockResolvedValueOnce({
+      quality: "unused quality prompt",
+      correctness: "correctness prompt",
+    });
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("head123");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
+      "refs/heads/sandbar/issue-167",
+    );
+    const names: string[] = [];
+    const outputs = [
+      "the quality report is false\n<ruling>OVERRULED</ruling>",
+      "<verdict>APPROVED</verdict>",
+    ];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async (options: Parameters<Sandbox["run"]>[0]) => {
+        names.push(options.name ?? "");
+        return {
+          stdout: outputs.shift()!,
+          commits: [],
+          durationMs: 5,
+          silent: false,
+          maxGapMs: 1,
+          toolCalls: 0,
+        };
+      }),
+    } as unknown as Sandbox;
+    const history = [{
+      round: 1,
+      head: "head123",
+      quality: {
+        verdict: "CHANGES-REQUESTED" as const,
+        prose: "false quality report",
+        specGap: null,
+      },
+    }];
+    const events: EventInput[] = [];
+    const ctx = {
+      issue: { id: "167", title: "adjudicate", branch: "sandbar/issue-167" },
+      sandbox,
+      opts: {
+        attemptLogger: { writeInvocation: vi.fn() },
+        onEvent: async (event: EventInput) => { events.push(event); },
+      },
+      config: {
+        repo: { owner: "owner", name: "repo" },
+        layout: { repoDir: "/repo" },
+        sourceBranch: "main",
+        claudeMdPath: "CLAUDE.md",
+        maxContextChars: 1000,
+        adjudicatorAgent: "codex",
+        adjudicatorModelId: "judge-model",
+        reviewerQualityAgent: "codex",
+        reviewerQualityModelId: "quality-model",
+        reviewerAgent: "codex",
+        reviewerModelId: "correctness-model",
+      },
+      base: { ref: "origin/main" },
+      accumulated: [{ sha: "head123" }],
+      priorReviewRounds: history,
+      specGaps: [],
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+    } as unknown as Parameters<typeof runAdjudicator>[1];
+
+    await expect(runAdjudicator({
+      kind: "run-adjudicator",
+      attempt: 2,
+      reviewRound: 1,
+      rejection: {
+        round: 1,
+        pass: "quality",
+        head: "head123",
+        report: "false quality report",
+        gateOk: true,
+      },
+    }, ctx)).resolves.toMatchObject({
+      kind: "adjudicator-result",
+      ruling: "OVERRULED",
+      correctness: { kind: "reviewer-result", verdict: "APPROVED" },
+      reviewRound: {
+        head: "head123",
+        quality: "APPROVED",
+        correctness: "APPROVED",
+        rejectingPass: null,
+      },
+    });
+    expect(names).toEqual([
+      "adjudicator-167-round-1-quality",
+      "reviewer-167-round-1-correctness",
+    ]);
+    expect(history[0]).toMatchObject({
+      quality: { verdict: "OVERRULED", prose: "" },
+      correctness: { verdict: "APPROVED" },
+    });
+    expect(events.map((event) => event.kind)).toContain("phase");
+  });
+
+  it.each([
+    ["completed", "tip"],
+    ["completed", "status"],
+    ["completed", "HEAD"],
+    ["failed", "tip"],
+    ["failed", "status"],
+    ["failed", "HEAD"],
+  ] as const)(
+    "parks when a %s adjudicator invocation changes %s before any correctness review",
+    async (outcome, changed) => {
+      unchangedAdjudicatorSnapshot();
+      if (changed === "tip") {
+        innerLoopMocks.branchTip
+          .mockReset()
+          .mockResolvedValueOnce("head123")
+          .mockResolvedValueOnce("moved-head");
+      } else if (changed === "status") {
+        innerLoopMocks.dirtyWorktreePaths
+          .mockReset()
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([" M changed.ts"]);
+      } else {
+        innerLoopMocks.symbolicHeadRef
+          .mockReset()
+          .mockResolvedValueOnce("refs/heads/sandbar/issue-167")
+          .mockResolvedValueOnce(null);
+      }
+      const preserveWorktree = vi.fn();
+      const syncBranchToCache = vi.fn(async () => undefined);
+      const ruling = "evidence\n<ruling>OVERRULED</ruling>";
+      const sandbox = {
+        worktreePath: "/worktree",
+        preserveWorktree,
+        syncBranchToCache,
+        run: vi.fn(async () => {
+          if (outcome === "failed") {
+            throw withPartialOutput(
+              new AgentError("teardown failed"),
+              ruling,
+              undefined,
+              0,
+              undefined,
+              undefined,
+            );
+          }
+          return {
+            stdout: ruling,
+            commits: [],
+            durationMs: 5,
+            silent: false,
+            maxGapMs: 1,
+            toolCalls: 0,
+          };
+        }),
+      } as unknown as Sandbox;
+      const events: EventInput[] = [];
+
+      await expect(runAdjudicator(action, context(sandbox, events))).resolves.toMatchObject({
+        kind: "adjudicator-wrote",
+      });
+      expect(sandbox.run).toHaveBeenCalledOnce();
+      expect(preserveWorktree).toHaveBeenCalledOnce();
+      expect(syncBranchToCache).toHaveBeenCalledOnce();
+      expect(events.some((event) => event.kind === "phase")).toBe(false);
+      expect(events.some((event) => event.kind === "adjudication")).toBe(false);
+    },
+  );
+
+  it.each([
+    ["quota", new AgentQuotaError("codex", { status: "rejected", window: "five_hour" })],
+    ["credential", new AgentCredentialError("refresh refused")],
+  ] as const)("propagates an adjudicator %s refusal after enforcing read-only state", async (_kind, refusal) => {
+    unchangedAdjudicatorSnapshot();
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async () => { throw refusal; }),
+    } as unknown as Sandbox;
+
+    await expect(runAdjudicator(action, context(sandbox))).rejects.toBe(refusal);
+    expect(sandbox.run).toHaveBeenCalledOnce();
+    expect(innerLoopMocks.branchTip).toHaveBeenCalledTimes(2);
+  });
+
+  it("classifies an adjudicator input refusal as a partition terminal", async () => {
+    unchangedAdjudicatorSnapshot();
+    const refusal = new AgentInputTooLargeError("actual_chars=1001");
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async () => { throw refusal; }),
+    } as unknown as Sandbox;
+
+    await expect(runAdjudicator(action, context(sandbox))).rejects.toMatchObject({
+      verdict: {
+        type: "NEEDS-PARTITION",
+        cause: "provider-refused",
+        slot: "adjudication",
+        detail: "actual_chars=1001",
+      },
+    });
+    expect(sandbox.run).toHaveBeenCalledOnce();
+  });
+
+  it("classifies an adjudication measured over budget before dispatch", async () => {
+    innerLoopMocks.buildAdjudicatorPrompt.mockResolvedValueOnce("0123456789");
+    innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(991);
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(),
+    } as unknown as Sandbox;
+
+    await expect(runAdjudicator(action, context(sandbox))).rejects.toMatchObject({
+      verdict: {
+        type: "NEEDS-PARTITION",
+        cause: "measured",
+        slot: "adjudication",
+        size: 1001,
+        budget: 1000,
+      },
+    });
+    expect(sandbox.run).not.toHaveBeenCalled();
+  });
+
+  it("retries a missing ruling once, then returns a harness failure", async () => {
+    unchangedAdjudicatorSnapshot();
+    const events: EventInput[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async () => ({
+        stdout: "reasoning without the required token",
+        commits: [],
+        durationMs: 5,
+        silent: false,
+        maxGapMs: 1,
+        toolCalls: 0,
+      })),
+    } as unknown as Sandbox;
+
+    await expect(runAdjudicator(action, context(sandbox, events))).resolves.toMatchObject({
+      kind: "adjudicator-harness-failed",
+      detail: expect.stringMatching(/invocation 1\/2[\s\S]*invocation 2\/2/),
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event.kind === "complaint")).toHaveLength(1);
+  });
+
+  it("accepts a ruling emitted by a failed adjudicator invocation", async () => {
+    unchangedAdjudicatorSnapshot();
+    const events: EventInput[] = [];
+    const failure = withPartialOutput(
+      new AgentError("teardown failed"),
+      "the report is true\n<ruling>UPHELD</ruling>",
+      { inputTokens: 12 },
+      2,
+      34,
+      undefined,
+    );
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async () => { throw failure; }),
+    } as unknown as Sandbox;
+
+    await expect(runAdjudicator(action, context(sandbox, events))).resolves.toMatchObject({
+      kind: "adjudicator-result",
+      ruling: "UPHELD",
+      reasoning: "the report is true",
+    });
+    expect(sandbox.run).toHaveBeenCalledOnce();
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: "adjudication",
+      ruling: "UPHELD",
+      usage: expect.objectContaining({ inputTokens: 12, toolCalls: 2, peakContext: 34 }),
+    }));
+  });
+});
+
 describe("runGateAndReviewer (#123)", () => {
   const action = {
     kind: "run-gate-and-reviewer" as const,
@@ -1421,6 +1858,8 @@ describe("runInnerLoop context terminals (#158)", () => {
         reviewerAgent: "codex",
         reviewerQualityAgent: "codex",
         uiCheckAgent: "codex",
+        adjudicatorAgent: "codex",
+        adjudicatorModelId: "correctness-model",
         uiPrototypeCheck: false,
         partitionCheck: false,
         maxContextChars: 600_000,
@@ -1532,6 +1971,66 @@ describe("runInnerLoop context terminals (#158)", () => {
     });
     expect(sandbox.run).not.toHaveBeenCalled();
     expect(innerLoopMocks.buildPartitionCheckPrompt).not.toHaveBeenCalled();
+  });
+
+  it("emits the correctness round continued after a quality overrule", async () => {
+    const { sandbox, opts, events } = harness(async (options) => {
+      const name = options.name ?? "";
+      if (name === "implementer-158-attempt-1") return completeRun;
+      if (name === "implementer-158-attempt-2") {
+        return { ...completeRun, commits: [] };
+      }
+      if (name === "implementer-158-attempt-3") {
+        return {
+          ...completeRun,
+          stdout: "<promise>NEEDS-INFO</promise><questions>stop</questions>",
+          commits: [],
+        };
+      }
+      if (name.endsWith("-quality")) {
+        return {
+          ...approvedReview,
+          stdout: "quality finding\n<verdict>CHANGES-REQUESTED</verdict>",
+        };
+      }
+      if (name.startsWith("adjudicator-")) {
+        return {
+          ...approvedReview,
+          stdout: "false finding\n<ruling>OVERRULED</ruling>",
+        };
+      }
+      if (name.endsWith("-correctness")) {
+        return {
+          ...approvedReview,
+          stdout: "correctness finding\n<verdict>CHANGES-REQUESTED</verdict>",
+        };
+      }
+      throw new Error(`unexpected agent invocation ${name}`);
+    });
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+      type: "NEEDS-INFO",
+      questions: "stop",
+    });
+    const rounds = events.filter(
+      (event): event is Extract<EventInput, { kind: "review-round" }> =>
+        event.kind === "review-round",
+    );
+    expect(rounds).toHaveLength(2);
+    expect(rounds[1]).toMatchObject({
+      attempt: 2,
+      round: 1,
+      head: "head123",
+      gateOk: true,
+      quality: "APPROVED",
+      correctness: "CHANGES-REQUESTED",
+      rejectingPass: "correctness",
+      qualityFailures: 0,
+      correctnessFailures: 1,
+    });
+    expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toContain(
+      "reviewer-158-round-1-correctness",
+    );
   });
 
   it("admits a resumed branch at budget and skips the partition classifier", async () => {

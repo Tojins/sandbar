@@ -69,7 +69,13 @@ export type TitledEventIssue = {
   readonly title: string;
 };
 
-export type IssuePhase = "partition-check" | "ui-check" | "implementer" | "gate-1" | "review";
+export type IssuePhase =
+  | "partition-check"
+  | "ui-check"
+  | "implementer"
+  | "gate-1"
+  | "review"
+  | "adjudication";
 
 export type WaitingReason =
   | { readonly kind: "blocked"; readonly by: readonly number[] }
@@ -164,6 +170,7 @@ export type EventInput =
   | (EventIssue & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventIssue & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventIssue & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly pass: "quality" | "correctness"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "adjudication"; readonly attempt: number; readonly round: number; readonly pass: "quality" | "correctness"; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number })
   | (ContainerResources & { readonly kind: "container"; readonly stack: "gate" | "sandbox"; readonly name: string; readonly container: string; readonly lifecycle: "issue" | "attempt"; readonly durationMs: number; readonly issue?: number; readonly title?: string })
   | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly qualityMode: "list" | "verify"; readonly gateOk: boolean; readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED"; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "quality" | "correctness" | null; readonly qualityFailures: number; readonly gateFailures: number; readonly correctnessFailures: number; readonly durationMs: number })

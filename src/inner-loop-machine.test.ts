@@ -67,6 +67,249 @@ const noSignal = (reprompt?: string): ParseSignal => ({
   reprompt: reprompt ?? "Still working. Emit <promise>...",
   missingTag: reprompt === undefined,
 });
+
+describe("unchanged rejection adjudication (#167)", () => {
+  const reachRejection = (pass: "quality" | "correctness", head = "abc") => {
+    let state = initialState(defaultOpts);
+    state = step(state, impl(complete, [], null, null, 1, head)).state;
+    return step(state, rejectedAt(pass, head));
+  };
+
+  it("routes a zero-commit COMPLETE at the rejected head to the adjudicator", () => {
+    const rejected = reachRejection("quality");
+    const disputed = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    expect(disputed.action).toMatchObject({
+      kind: "run-adjudicator",
+      reviewRound: 1,
+      rejection: { pass: "quality", head: "abc", report: "finding" },
+    });
+  });
+
+  it("does not adjudicate after the implementer changes the head", () => {
+    const rejected = reachRejection("quality");
+    const changed = step(
+      rejected.state,
+      impl(complete, [], null, null, 1, "def"),
+    );
+    expect(changed.action.kind).toBe("run-gate-and-reviewer");
+  });
+
+  it("voids an overruled quality rejection and accepts correctness approval", () => {
+    const rejected = reachRejection("quality");
+    const disputed = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const ruled = step(disputed.state, {
+      kind: "adjudicator-result",
+      pass: "quality",
+      head: "abc",
+      ruling: "OVERRULED",
+      reasoning: "the cited call has five arguments",
+      correctness: approved(),
+      reviewRound: null,
+    });
+    expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
+    expect(ruled.state.qualityFailures).toBe(0);
+  });
+
+  it("continues an overruled quality round into a chargeable correctness rejection", () => {
+    const rejected = reachRejection("quality");
+    const disputed = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const ruled = step(disputed.state, {
+      kind: "adjudicator-result",
+      pass: "quality",
+      head: "abc",
+      ruling: "OVERRULED",
+      reasoning: "false quality report",
+      correctness: changes("real correctness finding"),
+      reviewRound: null,
+    });
+    expect(ruled.action.kind).toBe("run-implementer");
+    expect(ruled.state.qualityFailures).toBe(0);
+    expect(ruled.state.correctnessFailures).toBe(1);
+    expect(ruled.state.pendingRejection).toMatchObject({
+      round: 1,
+      pass: "correctness",
+      head: "abc",
+    });
+  });
+
+  it("keeps the original round through consecutive quality and correctness overrulings", () => {
+    const rejected = reachRejection("quality");
+    const qualityDispute = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const correctnessRejected = step(qualityDispute.state, {
+      kind: "adjudicator-result",
+      pass: "quality",
+      head: "abc",
+      ruling: "OVERRULED",
+      reasoning: "false quality report",
+      correctness: changes("false correctness report"),
+      reviewRound: null,
+    });
+    expect(correctnessRejected.state.pendingRejection).toMatchObject({
+      round: 1,
+      pass: "correctness",
+      head: "abc",
+    });
+
+    const correctnessDispute = step(
+      correctnessRejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    expect(correctnessDispute.action).toMatchObject({
+      kind: "run-adjudicator",
+      reviewRound: 1,
+      rejection: { round: 1, pass: "correctness", head: "abc" },
+    });
+    const ruled = step(correctnessDispute.state, {
+      kind: "adjudicator-result",
+      pass: "correctness",
+      head: "abc",
+      ruling: "OVERRULED",
+      reasoning: "false correctness report",
+      correctness: null,
+      reviewRound: null,
+    });
+    expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
+  });
+
+  it("makes an overruled correctness rejection final approval", () => {
+    const rejected = reachRejection("correctness");
+    const disputed = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const ruled = step(disputed.state, {
+      kind: "adjudicator-result",
+      pass: "correctness",
+      head: "abc",
+      ruling: "OVERRULED",
+      reasoning: "false correctness report",
+      correctness: null,
+      reviewRound: null,
+    });
+    expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
+    expect(ruled.state.correctnessFailures).toBe(0);
+  });
+
+  it("offers one adjudication per head/pass after an upheld ruling", () => {
+    const rejected = reachRejection("quality");
+    const disputed = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const upheld = step(disputed.state, {
+      kind: "adjudicator-result",
+      pass: "quality",
+      head: "abc",
+      ruling: "UPHELD",
+      reasoning: "the test is genuinely missing",
+      correctness: null,
+      reviewRound: null,
+    });
+    const repeated = step(
+      upheld.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    expect(repeated.action.kind).toBe("run-gate-and-reviewer");
+    if (upheld.action.kind !== "run-implementer") throw new Error("expected implementer");
+    expect(upheld.action.latestReviewerFeedback?.prose).toContain("UPHELD");
+    expect(upheld.action.latestReviewerFeedback?.prose).toContain(
+      "the test is genuinely missing",
+    );
+    expect(upheld.action.latestReviewerFeedback?.prose).toContain("finding");
+  });
+
+  it("parks immediately if the read-only adjudicator writes", () => {
+    const rejected = reachRejection("quality");
+    const disputed = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const wrote = step(disputed.state, {
+      kind: "adjudicator-wrote",
+      detail: "Adjudicator changed git state",
+    });
+    expect(wrote.action).toMatchObject({
+      kind: "terminate",
+      verdict: { type: "NEEDS-HUMAN-REVIEW", cause: "adjudicator-wrote" },
+    });
+  });
+
+  it("charges no pass budget for missing rulings and stops on the second harness failure", () => {
+    const rejected = reachRejection("quality");
+    const disputed = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const failedOnce = step(disputed.state, {
+      kind: "adjudicator-harness-failed",
+      detail: "no ruling",
+    });
+    expect(failedOnce.action.kind).toBe("run-implementer");
+    expect(failedOnce.state.qualityFailures).toBe(1);
+    const disputedAgain = step(
+      failedOnce.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const failedTwice = step(disputedAgain.state, {
+      kind: "adjudicator-harness-failed",
+      detail: "no ruling again",
+    });
+    expect(failedTwice.action).toMatchObject({
+      kind: "terminate",
+      verdict: { type: "NEEDS-HUMAN", cause: "reviewer-harness-failed" },
+    });
+    expect(failedTwice.state.qualityFailures).toBe(1);
+  });
+
+  it("preserves a rejected head's red gate trace through adjudicator harness failures", () => {
+    let state = initialState(defaultOpts);
+    state = step(state, impl(complete, [], null, null, 1, "abc")).state;
+    const rejected = step(state, {
+      ...rejectedAt("quality", "abc"),
+      gate: gate1Red("GATE-TRACE-T"),
+    });
+    const disputed = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const failedOnce = step(disputed.state, {
+      kind: "adjudicator-harness-failed",
+      detail: "no ruling",
+    });
+    expect(asImpl(failedOnce.action).failureTrace).toBe("GATE-TRACE-T");
+
+    const disputedAgain = step(
+      failedOnce.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const failedTwice = step(disputedAgain.state, {
+      kind: "adjudicator-harness-failed",
+      detail: "no ruling again",
+    });
+    expect(failedTwice.action).toMatchObject({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-HUMAN",
+        cause: "reviewer-harness-failed",
+        failureTrace:
+          "Gate-1 failure:\nGATE-TRACE-T\n\n" +
+          "Reviewer harness failure:\nadjudicator: no ruling again",
+      },
+    });
+  });
+});
 const needsInfo = (questions: string): ParseSignal => ({
   kind: "NEEDS-INFO",
   questions,
@@ -123,12 +366,34 @@ const impl = (
     readonly fromSha: string;
     readonly toSha: string;
   } | null = null,
+  commits = 1,
+  head = "head",
 ): LoopEvent => ({
   kind: "implementer-result",
   signal,
   dirtyPaths,
   offBranch,
   fastForwarded,
+  commits,
+  head,
+});
+
+const rejectedAt = (
+  pass: "quality" | "correctness",
+  head: string,
+  prose = "finding",
+): LoopEvent => ({
+  kind: "gate-and-reviewer-result",
+  gate: gate1Ok,
+  reviewer: pass === "quality" ? qualityChanges(prose) : changes(prose),
+  reviewRound: {
+    head,
+    qualityMode: "list",
+    quality: pass === "quality" ? "CHANGES-REQUESTED" : "APPROVED",
+    correctness: pass === "correctness" ? "CHANGES-REQUESTED" : "SKIPPED",
+    rejectingPass: pass,
+    durationMs: 1,
+  },
 });
 
 // A HEAD that is detached, i.e. the #27 shape that leaves a CLEAN tree.

@@ -4,7 +4,7 @@
 // `config.env` remains a record the host supplies however it likes, and sandbar
 // names no file (#38): `readEnvFile` is the opt-in one-liner for hosts that want
 // a gitignored file beside the config. `splitRoleRouting` (#137) partitions
-// fifteen reserved `SANDBAR_*` keys out of that record before the remainder is
+// eighteen reserved `SANDBAR_*` keys out of that record before the remainder is
 // used as the sandbox allowlist. The config remains a program: it decides
 // whether to call the helper and spreads the returned routing over its own
 // defaults. Keeping the split beside the parser gives one spelling of those
@@ -35,6 +35,9 @@ const ROLE_ROUTING_FIELDS = [
   "reviewerQualityAgent",
   "reviewerQualityModelId",
   "reviewerQualityEffort",
+  "adjudicatorAgent",
+  "adjudicatorModelId",
+  "adjudicatorEffort",
   "mergerAgent",
   "mergerModelId",
   "mergerEffort",

@@ -196,6 +196,7 @@ describe("requiredAgentProviders", () => {
         uiCheckAgent: "claude",
         reviewerAgent: "claude",
         reviewerQualityAgent: "claude",
+        adjudicatorAgent: "claude",
         mergerAgent: "claude",
       }),
     ).toEqual(["claude"]);
@@ -209,6 +210,7 @@ describe("requiredAgentProviders", () => {
         uiCheckAgent: "codex",
         reviewerAgent: "claude",
         reviewerQualityAgent: "claude",
+        adjudicatorAgent: "claude",
         mergerAgent: "claude",
       }),
     ).toEqual(["claude", "codex"]);
@@ -225,6 +227,7 @@ describe("requiredAgentProviders", () => {
         uiCheckAgent: "codex",
         reviewerAgent: "codex",
         reviewerQualityAgent: "codex",
+        adjudicatorAgent: "codex",
         mergerAgent: "codex",
       }),
     ).toEqual(["codex"]);
@@ -242,9 +245,22 @@ describe("requiredAgentProviders", () => {
         uiCheckAgent: "claude",
         reviewerAgent: "claude",
         reviewerQualityAgent: "codex",
+        adjudicatorAgent: "claude",
         mergerAgent: "claude",
       }),
     ).toEqual(["claude", "codex"]);
+  });
+
+  it("adds the provider only the adjudicator names (#167)", () => {
+    expect(requiredAgentProviders({
+      uiPrototypeCheck: true,
+      implementerAgent: "claude",
+      uiCheckAgent: "claude",
+      reviewerAgent: "claude",
+      reviewerQualityAgent: "claude",
+      adjudicatorAgent: "codex",
+      mergerAgent: "claude",
+    })).toEqual(["claude", "codex"]);
   });
 
   // The list feeds a refusal message; an order that moved with the config
@@ -256,6 +272,7 @@ describe("requiredAgentProviders", () => {
       uiCheckAgent: "codex",
       reviewerAgent: "claude",
       reviewerQualityAgent: "claude",
+      adjudicatorAgent: "claude",
       mergerAgent: "claude",
     });
     const b = requiredAgentProviders({
@@ -264,6 +281,7 @@ describe("requiredAgentProviders", () => {
       uiCheckAgent: "claude",
       reviewerAgent: "codex",
       reviewerQualityAgent: "claude",
+      adjudicatorAgent: "claude",
       mergerAgent: "claude",
     });
     expect(a).toEqual(b);
@@ -275,6 +293,7 @@ describe("requiredAgentProviders", () => {
       uiCheckAgent: "codex" as const,
       reviewerAgent: "claude" as const,
       reviewerQualityAgent: "claude" as const,
+      adjudicatorAgent: "claude" as const,
       mergerAgent: "claude" as const,
     };
     expect(requiredAgentProviders({ ...roles, uiPrototypeCheck: true })).toEqual([

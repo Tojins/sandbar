@@ -12,6 +12,9 @@
 // session — which is what lets the two sit on different vendors (#121).
 // After its first whole-branch quality listing, that history also anchors a
 // strict review of only the lines no quality pass has seen yet (#107).
+// The adjudicator (#167) gets the shared anchors plus one rejected report and
+// its immutable head, deliberately without prior-round history or implementer
+// speech so it must re-establish every blocking claim from the code.
 // The UI and partition checkers (#126/#158) are intentionally smaller: issue
 // anchor plus their own decision contracts, with no project standards, diff or
 // prior-round history. The partition check is gated on the context budget: a split is
@@ -80,6 +83,7 @@ const IMPLEMENTER_SANDBOX_GATE_ACCESS_ATTACHED_TPL = loadTemplate(
 );
 const IMPLEMENTER_CHUNK_BASE_TPL = loadTemplate("implementer-chunk-base");
 const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
+const ADJUDICATOR_TPL = loadTemplate("adjudicator");
 
 // Attempt at which the implementer prompt starts surfacing the escalation block.
 const ESCALATION_ATTEMPT = 6;
@@ -258,9 +262,13 @@ export type PriorReviewRound = {
   readonly head: string;
   // In execution order (#121): quality gates the round, so every recorded round
   // carries its verdict and only a round quality approved carries correctness.
-  readonly quality: ParsedVerdict;
-  readonly correctness?: ParsedVerdict;
+  readonly quality: PriorReviewPass;
+  readonly correctness?: PriorReviewPass;
 };
+
+export type PriorReviewPass =
+  | ParsedVerdict
+  | { readonly verdict: "OVERRULED"; readonly prose: ""; readonly specGap: null };
 
 export type QualityReviewContext =
   | { readonly mode: "list"; readonly anchor: null }
@@ -394,6 +402,47 @@ export async function buildReviewerPrompts(
       ),
     })),
   };
+}
+
+export type AdjudicatorPromptInputs = Omit<
+  ReviewerPromptInputs,
+  "reviewerPromptExtension" | "reviewerQualityPromptExtension" | "priorRounds"
+> & {
+  readonly pass: "quality" | "correctness";
+  readonly head: string;
+  readonly report: string;
+};
+
+// A cold adjudicator gets the project and issue anchors plus exactly one
+// rejected report. Prior-round history and implementer speech are absent by
+// construction (#167), so neither can prime the independent reread.
+export async function buildAdjudicatorPrompt(
+  inputs: AdjudicatorPromptInputs,
+): Promise<string> {
+  const [projectAnchor, issueAnchor] = await Promise.all([
+    buildProjectAnchor(
+      {
+        repo: inputs.repo,
+        repoDir: inputs.repoDir,
+        claudeMdPath: inputs.claudeMdPath,
+        contextMdPath: inputs.contextMdPath,
+        sourceBranch: inputs.sourceBranch,
+      },
+      inputs.worktreePath,
+    ),
+    buildIssueAnchor(inputs.issue.id, inputs.repo),
+  ]);
+  return [
+    projectAnchor,
+    issueAnchor,
+    render(ADJUDICATOR_TPL, {
+      pass: inputs.pass,
+      head: inputs.head,
+      branch: inputs.issue.branch,
+      baseRef: inputs.base.ref,
+      report: stripVerdictTokens(inputs.report).trim() || "(no report prose)",
+    }),
+  ].join("\n\n---\n\n");
 }
 
 // `probeWorktree` is the tree the emitted `@refs` will be resolved in — the
@@ -818,11 +867,11 @@ function renderReviewerTemplate(
   });
 }
 
-function reviewFindings(pass: ParsedVerdict): string {
+function reviewFindings(pass: PriorReviewPass): string {
   return stripVerdictTokens(pass.prose).trim();
 }
 
-function renderPriorReviewPass(name: "quality" | "correctness", pass: ParsedVerdict): string {
+function renderPriorReviewPass(name: "quality" | "correctness", pass: PriorReviewPass): string {
   const findings = reviewFindings(pass);
   return `${name}: ${pass.verdict}${findings ? `\n${findings}` : ""}`;
 }

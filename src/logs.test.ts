@@ -30,6 +30,8 @@ describe("agent invocation records (#135)", () => {
       "attempt-3-reviewer-quality-1.log"],
     [{ role: "reviewer", attempt: 3, pass: "correctness", invocation: 2 },
       "attempt-3-reviewer-correctness-2.log"],
+    [{ role: "adjudicator", attempt: 3, pass: "quality", invocation: 1 },
+      "attempt-3-adjudicator-quality-1.log"],
     [{ role: "gate", attempt: 3 }, "attempt-3-gate.log"],
     [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
     [{ role: "partition-check", invocation: 2 }, "partition-check-2.log"],

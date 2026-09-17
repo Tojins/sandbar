@@ -638,7 +638,7 @@ export type RunConfig = {
   // A role routed to another provider (below) puts THAT vendor's id in the same
   // field: the fields name the model, not the vendor — and must then name it,
   // since the default is a claude alias (`assertRoleModelIdNamed`).
-  // Defaults: implementer/reviewer/reviewer-quality/merger all "opus"; the UI
+  // Defaults: implementer/reviewer/reviewer-quality/adjudicator/merger all "opus"; the UI
   // checker follows the effective implementer model.
   readonly implementerModelId?: string;
   // The one pre-attempt UI classifier (#126). Its routing follows the
@@ -659,6 +659,9 @@ export type RunConfig = {
   // may name another vendor's model, paired with `reviewerQualityAgent`.
   // Renamed from `reviewerFollowupModelId`, which is now refused by name.
   readonly reviewerQualityModelId?: string;
+  // Independent judge for an unchanged rejected head (#167). Defaults to the
+  // correctness reviewer's routing, not the quality pass's routing.
+  readonly adjudicatorModelId?: string;
   readonly mergerModelId?: string;
 
   // Which CLI each role runs (#72, #74) — the vendor knob beside the tiering one.
@@ -677,6 +680,7 @@ export type RunConfig = {
   // while the deciding verdict stays where it was; it is only possible because
   // the passes no longer share a session.
   readonly reviewerQualityAgent?: AgentProviderName;
+  readonly adjudicatorAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
 
   // Reasoning effort per call, beside the model id and the CLI (#130). A plain
@@ -694,6 +698,7 @@ export type RunConfig = {
   readonly uiCheckEffort?: string;
   readonly reviewerEffort?: string;
   readonly reviewerQualityEffort?: string;
+  readonly adjudicatorEffort?: string;
   readonly mergerEffort?: string;
 
   // Trailer appended to merge commits. Default: a `Co-authored-by:` line built
@@ -884,6 +889,7 @@ export type ResolvedConfig = Required<
     | "uiCheckEffort"
     | "reviewerEffort"
     | "reviewerQualityEffort"
+    | "adjudicatorEffort"
     | "mergerEffort"
     | "maxConcurrentGates"
     | "copyToWorktree"
@@ -897,6 +903,7 @@ export type ResolvedConfig = Required<
   readonly uiCheckEffort?: string;
   readonly reviewerEffort?: string;
   readonly reviewerQualityEffort?: string;
+  readonly adjudicatorEffort?: string;
   readonly mergerEffort?: string;
   // Optional after resolution because absence is the unlimited default.
   readonly maxConcurrentGates?: number;
@@ -2125,6 +2132,17 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "reviewerQualityAgent",
     config.reviewerQualityAgent ?? reviewerAgent,
   );
+  const adjudicatorAgent = parseAgentProviderName(
+    "adjudicatorAgent",
+    config.adjudicatorAgent ?? reviewerAgent,
+  );
+  // The adjudicator inherits the correctness model only while it also uses
+  // the correctness provider. Once its provider is split, the correctness
+  // model says nothing about that provider's model-id namespace (#167).
+  const inheritedAdjudicatorModelId =
+    config.adjudicatorAgent === undefined || adjudicatorAgent === reviewerAgent
+      ? config.reviewerModelId
+      : undefined;
   const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
   assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
   if (uiPrototypeCheck) {
@@ -2156,6 +2174,16 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       config.reviewerQualityAgent === undefined ? "reviewerAgent" : "reviewerQualityAgent",
     modelField: "reviewerQualityModelId",
   });
+  assertRoleModelIdNamed(
+    "adjudicator",
+    adjudicatorAgent,
+    config.adjudicatorModelId ?? inheritedAdjudicatorModelId,
+    {
+      agentField:
+        config.adjudicatorAgent === undefined ? "reviewerAgent" : "adjudicatorAgent",
+      modelField: "adjudicatorModelId",
+    },
+  );
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   // Shape only (#130): a non-empty string or absent. The level itself is the
   // CLI's to refuse — see the field's note.
@@ -2164,6 +2192,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "uiCheckEffort",
     "reviewerEffort",
     "reviewerQualityEffort",
+    "adjudicatorEffort",
     "mergerEffort",
   ] as const) {
     const value = config[field];
@@ -2194,12 +2223,18 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
     reviewerQualityModelId:
       config.reviewerQualityModelId ?? DEFAULT_REVIEWER_QUALITY_MODEL_ID,
+    adjudicatorModelId:
+      config.adjudicatorModelId ??
+      inheritedAdjudicatorModelId ??
+      DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     implementerAgent,
     uiCheckAgent,
     reviewerAgent,
     reviewerQualityAgent,
+    adjudicatorAgent,
     mergerAgent,
+    adjudicatorEffort: config.adjudicatorEffort ?? config.reviewerEffort,
     coauthorTrailer:
       config.coauthorTrailer ??
       defaultCoauthorTrailer(config.botName, config.botEmail),

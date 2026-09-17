@@ -134,6 +134,9 @@ describe("run event reducer", () => {
       { kind: "gate", issue: 2, attempt: 1, gate: "gate-1", ok: true, durationMs: 6 },
       { kind: "review-pass", issue: 2, attempt: 1, round: 1, pass: "quality", invocation: 1,
         provider: "codex", model: "m", effort: null, result: "completed", durationMs: 7 },
+      { kind: "adjudication", issue: 2, attempt: 2, round: 1, pass: "quality",
+        head: "abc", ruling: "OVERRULED", provider: "codex", model: "m",
+        effort: null, durationMs: 4 },
       { kind: "resolve-attempt", issue: 2, attempt: 1, container: "resolve-1",
         end: "exit", exitCode: 137, signal: null, durationMs: 8,
         peakMemoryBytes: 7000, oomKilled: true },
@@ -172,6 +175,7 @@ describe("run event reducer", () => {
       [2, "round 1 · approved", "good"],
       [2, "sandbox container db stopped", "bad"],
       [2, "resolve attempt 1 · exit", "bad"],
+      [2, "round 1 · quality adjudication · OVERRULED", "good"],
       [2, "round 1 · quality pass · invocation 1", ""],
       [2, "gate-1 passed", "good"],
       [2, "attempt 1 complete · 1 commit", ""],
@@ -254,6 +258,15 @@ describe("run event reducer", () => {
         kind: "phase", issue: 102, title: "Capacity error", attempt: 1, phases: ["gate-1", "review"],
       }),
       at(5, "2026-09-07T09:21:00Z", {
+        kind: "phase", issue: 102, title: "Capacity error", attempt: 2,
+        phases: ["adjudication"],
+      }),
+      at(6, "2026-09-07T09:22:00Z", {
+        kind: "adjudication", issue: 102, title: "Capacity error", attempt: 2,
+        round: 1, pass: "quality", head: "abc", ruling: "UPHELD",
+        provider: "codex", model: "judge", effort: null, durationMs: 60000,
+      }),
+      at(7, "2026-09-07T09:23:00Z", {
         kind: "recompute", n: 2, trigger: "slot-freed", admitted: [],
         active: [{ issue: 102, title: "Capacity error" }],
         waiting: [
@@ -272,10 +285,12 @@ describe("run event reducer", () => {
       now: new Date("2026-09-07T09:30:00Z"), pidAlive: true,
     });
     expect(state.run).toMatchObject({ status: "live", slots: { used: 1, max: 3 } });
-    expect(state.pool[0]).toMatchObject({ issue: 102, phase: "gate-1 + review", attempt: 1 });
+    expect(state.pool[0]).toMatchObject({ issue: 102, phase: "adjudication", attempt: 2 });
     expect(state.pool[0]?.spans).toEqual([
       { kind: "impl", from: "2026-09-07T09:02:00Z", to: "2026-09-07T09:20:00Z", label: "a1" },
-      { kind: "review", from: "2026-09-07T09:20:00Z", to: null, label: "gate + review" },
+      { kind: "review", from: "2026-09-07T09:20:00Z", to: "2026-09-07T09:21:00Z", label: "gate + review" },
+      { kind: "adjudication", from: "2026-09-07T09:21:00Z", to: null,
+        label: "quality · UPHELD", verdict: "no" },
     ]);
     expect(state.waiting).toEqual([
       { issue: 87, title: "Nightly job", why: "parked · unknown terminal · before this run", parked: true },

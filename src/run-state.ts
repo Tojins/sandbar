@@ -19,7 +19,7 @@ import type {
 import type { ContainerResources } from "./container-resources.js";
 
 export type TimelineSpan = {
-  readonly kind: "impl" | "review";
+  readonly kind: "impl" | "review" | "adjudication";
   readonly from: string;
   readonly to: string | null;
   readonly label: string;
@@ -196,6 +196,10 @@ function feedText(event: RunEvent): FeedEvent | null {
     case "review-pass":
       text = `round ${event.round} · ${event.pass} pass · invocation ${event.invocation}`;
       break;
+    case "adjudication":
+      text = `round ${event.round} · ${event.pass} adjudication · ${event.ruling}`;
+      tone = event.ruling === "UPHELD" ? "bad" : "good";
+      break;
     case "resolve-attempt":
       text = `resolve attempt ${event.attempt} · ${event.end}`;
       tone = event.oomKilled === true ? "bad" : "";
@@ -323,6 +327,13 @@ function applyPhase(issue: MutableIssue, event: Extract<RunEvent, { kind: "phase
     issue.spans.push({ kind: "impl", from: event.ts, to: null, label: `a${event.attempt}` });
   } else if (event.phases.some((phase) => phase === "gate-1" || phase === "review")) {
     issue.spans.push({ kind: "review", from: event.ts, to: null, label: "gate + review" });
+  } else if (event.phases.includes("adjudication")) {
+    issue.spans.push({
+      kind: "adjudication",
+      from: event.ts,
+      to: null,
+      label: "adjudication",
+    });
   }
 }
 
@@ -473,6 +484,18 @@ export function reduceRunEvents(
           if (issue && last?.kind === "review") {
             issue.spans[issue.spans.length - 1] = { ...last, verdict: "no" };
           }
+        }
+        break;
+      }
+      case "adjudication": {
+        const issue = issues.get(event.issue);
+        const last = issue?.spans.at(-1);
+        if (issue && last?.kind === "adjudication") {
+          issue.spans[issue.spans.length - 1] = {
+            ...last,
+            label: `${event.pass} · ${event.ruling}`,
+            ...(event.ruling === "UPHELD" ? { verdict: "no" as const } : {}),
+          };
         }
         break;
       }
