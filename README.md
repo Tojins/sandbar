@@ -225,7 +225,7 @@ export default {
 `splitRoleRouting` recognizes `SANDBAR_<ROLE>_AGENT`,
 `SANDBAR_<ROLE>_MODEL_ID`, and `SANDBAR_<ROLE>_EFFORT` for `IMPLEMENTER`,
 `UI_CHECK`, `REVIEWER`, `REVIEWER_QUALITY`, and `MERGER`. An absent or empty
-value keeps the committed field. The helper removes all fifteen reserved keys
+value keeps the committed field. The helper removes all eighteen reserved keys
 from `env`, so they never enter a sandbox; `resolveConfig` still performs the
 ordinary provider, model-pairing, and effort validation on the merged object.
 See `sandbar.env.example` for the complete list.
@@ -275,7 +275,7 @@ your `package.json` as `sandbar.config.mjs` and the second beside it as
 gitignored `sandbar.env`; the config reads that file at module load, even when
 all its values inherit from the launching process. Fill in the required config
 placeholders, then uncomment only the host settings this repository needs to
-change. Optional host fields are documented in the config; the fifteen
+change. Optional host fields are documented in the config; the eighteen
 per-installation role-routing fields are documented in the env template.
 
 ### Daemon operation
@@ -345,6 +345,14 @@ failure anywhere in one inner loop stops it. There is no total implementer-attem
 ceiling: each attempt is charged only to the pass or pre-review condition that
 rejected it.
 
+After a review rejection, an implementer attempt that completes with no commit
+at the rejected head sends that report to a cold, read-only adjudicator instead
+of repeating the review. `adjudicatorAgent`, `adjudicatorModelId`, and
+`adjudicatorEffort` default to the correctness reviewer's routing. An overruled
+rejection spends no pass budget; an upheld rejection remains chargeable and is
+offered for adjudication only once at that head/pass. Adjudicator harness
+failures share the review harness's two-failure inner-loop stop.
+
 ### `images` — what sandbar builds
 
 By default sandbar builds one image: `sandboxImage`, from `./Containerfile`.
@@ -353,7 +361,7 @@ or one of apt/apk/dnf so sandbar can install it. After resolving that image,
 sandbar adds a generated layer containing a uid-1000 `agent` user, git, and
 exactly the standalone agent CLIs routed by `implementerAgent`, `reviewerAgent`,
 `uiCheckAgent` (only when `uiPrototypeCheck` is enabled),
-`reviewerQualityAgent`, and `mergerAgent`, downloaded on the host and verified
+`reviewerQualityAgent`, `adjudicatorAgent`, and `mergerAgent`, downloaded on the host and verified
 against per-architecture hashes pinned by the driver. The same happens after resolving a per-branch
 variant, so an older branch's Containerfile cannot remove a CLI selected by the
 current run. Gate containers keep using the unaugmented image: they judge the

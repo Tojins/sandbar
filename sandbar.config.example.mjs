@@ -148,7 +148,7 @@ export default {
   // determine the chunk's membership and derived branch name.
   // defaultLane: "auto",
 
-  // Keep host defaults above. The fifteen SANDBAR_* entries documented in
+  // Keep host defaults above. The eighteen SANDBAR_* entries documented in
   // sandbar.env.example are this installation's per-role deviations.
   ...routing,
 };

@@ -46,6 +46,12 @@ export type AgentInvocationIdentity =
       readonly pass: "quality" | "correctness";
       readonly invocation: number;
     }
+  | {
+      readonly role: "adjudicator";
+      readonly attempt: number;
+      readonly pass: "quality" | "correctness";
+      readonly invocation: number;
+    }
   | { readonly role: "gate"; readonly attempt: number }
   | { readonly role: "ui-check"; readonly invocation: number }
   | { readonly role: "partition-check"; readonly invocation: number };
@@ -60,6 +66,8 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
       return `attempt-${identity.attempt}${identity.nudge ? "-nudge" : ""}.log`;
     case "reviewer":
       return `attempt-${identity.attempt}-reviewer-${identity.pass}-${identity.invocation}.log`;
+    case "adjudicator":
+      return `attempt-${identity.attempt}-adjudicator-${identity.pass}-${identity.invocation}.log`;
     case "gate":
       return `attempt-${identity.attempt}-gate.log`;
     case "ui-check":

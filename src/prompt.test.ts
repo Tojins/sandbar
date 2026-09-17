@@ -104,6 +104,30 @@ describe("renderAttemptSlot — retained reviewer disposition (#143)", () => {
   });
 });
 
+describe("adjudication prompt contracts (#167)", () => {
+  it("tells an unchanged implementer attempt how to dispute a false finding", () => {
+    const slot = renderAttemptSlot({
+      ...implementerInputs,
+      latestReviewerFeedback: {
+        disposition: "CHANGES-REQUESTED",
+        prose: "false finding",
+      },
+    });
+    expect(slot).toMatch(/If a finding is false at this\s+head, change nothing for it/);
+    expect(slot).toContain("independent adjudicator");
+  });
+
+  it("requires a fresh whole-report ruling with literal tokens and no implementer advocacy", () => {
+    const prompt = loadTemplate("adjudicator");
+    expect(prompt).toContain("Read every cited line");
+    expect(prompt).toContain("report as a whole");
+    expect(prompt).toContain("<ruling>UPHELD</ruling>");
+    expect(prompt).toContain("<ruling>OVERRULED</ruling>");
+    expect(prompt).not.toContain("implementer");
+    expect(prompt).not.toContain("prior round");
+  });
+});
+
 describe("UI-prototype prompt contracts (#126)", () => {
   const slot = renderAttemptSlot(implementerInputs);
   const uiCheck = loadTemplate("ui-check");
@@ -675,6 +699,26 @@ describe("reviewer prior-round history (#88, #121)", () => {
       "correctness: CHANGES-REQUESTED\nNull input crashes.";
     expect(correctness).toContain(expected);
     expect(quality).toContain(expected);
+  });
+
+  it("records an overruled pass without carrying its rejected report", () => {
+    const overruled = {
+      ...qualityRejection,
+      quality: {
+        verdict: "OVERRULED" as const,
+        prose: "" as const,
+        specGap: null,
+      },
+    };
+    const [correctness, quality] = renderBoth([overruled]);
+    for (const slot of [correctness, quality]) {
+      expect(slot).toContain("quality: OVERRULED");
+      expect(slot).not.toContain("The error branch is uncovered");
+    }
+    expect(qualityReviewContext([overruled])).toEqual({
+      mode: "verify",
+      anchor: "1111111",
+    });
   });
 
   // The strip recognises exactly what `parseVerdict` does (#113): well-formed

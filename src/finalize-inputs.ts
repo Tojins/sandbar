@@ -146,6 +146,8 @@ export function terminalFinalizeInputs(
             latestReviewerProse: t.latestReviewerProse,
             actor: t.cause === "reviewer-wrote"
               ? "reviewer"
+              : t.cause === "adjudicator-wrote"
+                ? "adjudicator"
               : t.cause === "ui-checker-wrote"
                 ? "UI checker"
                 : "partition checker",

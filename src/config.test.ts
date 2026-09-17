@@ -386,6 +386,7 @@ describe("resolveConfig", () => {
     expect(r.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
     expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
     expect(r.reviewerQualityModelId).toBe(DEFAULT_REVIEWER_QUALITY_MODEL_ID);
+    expect(r.adjudicatorModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
     expect(r.mergerModelId).toBe(DEFAULT_MERGER_MODEL_ID);
     expect(r.claudeMdPath).toBe(DEFAULT_CLAUDE_MD_PATH);
     expect(r.contextMdPath).toBe(DEFAULT_CONTEXT_MD_PATH);
@@ -694,6 +695,7 @@ describe("resolveConfig", () => {
     const r = resolveConfig(minimal);
     expect(r.implementerAgent).toBe("claude");
     expect(r.reviewerAgent).toBe("claude");
+    expect(r.adjudicatorAgent).toBe("claude");
     expect(r.mergerAgent).toBe("claude");
   });
 
@@ -734,11 +736,13 @@ describe("resolveConfig", () => {
       implementerEffort: "high",
       uiCheckEffort: "medium",
       reviewerQualityEffort: "high",
+      adjudicatorEffort: "max",
       mergerEffort: "xhigh",
     });
     expect(r.implementerEffort).toBe("high");
     expect(r.uiCheckEffort).toBe("medium");
     expect(r.reviewerQualityEffort).toBe("high");
+    expect(r.adjudicatorEffort).toBe("max");
     expect(r.mergerEffort).toBe("xhigh");
     expect(r.reviewerEffort).toBeUndefined();
     const none = resolveConfig(minimal);
@@ -746,6 +750,7 @@ describe("resolveConfig", () => {
     expect(none.uiCheckEffort).toBeUndefined();
     expect(none.reviewerEffort).toBeUndefined();
     expect(none.reviewerQualityEffort).toBeUndefined();
+    expect(none.adjudicatorEffort).toBeUndefined();
     expect(none.mergerEffort).toBeUndefined();
   });
 
@@ -765,6 +770,9 @@ describe("resolveConfig", () => {
     expect(() =>
       resolveConfig({ ...minimal, reviewerQualityEffort: null as never }),
     ).toThrow(/config\.reviewerQualityEffort/);
+    expect(() =>
+      resolveConfig({ ...minimal, adjudicatorEffort: "" }),
+    ).toThrow(/config\.adjudicatorEffort/);
     expect(() => resolveConfig({ ...minimal, mergerEffort: "" })).toThrow(
       /config\.mergerEffort/,
     );
@@ -857,6 +865,25 @@ describe("resolveConfig", () => {
         reviewerQualityModelId: "gpt-5.6-sol",
       }).reviewerQualityAgent,
     ).toBe("codex");
+  });
+
+  it("defaults adjudication to correctness routing and validates an explicit split (#167)", () => {
+    const inherited = resolveConfig({
+      ...minimal,
+      reviewerAgent: "codex",
+      reviewerModelId: "gpt-5.6-sol",
+      reviewerQualityModelId: "gpt-5.6-sol",
+    });
+    expect(inherited.adjudicatorAgent).toBe("codex");
+    expect(inherited.adjudicatorModelId).toBe("gpt-5.6-sol");
+    expect(resolveConfig({
+      ...minimal,
+      reviewerEffort: "high",
+    }).adjudicatorEffort).toBe("high");
+    expect(() => resolveConfig({
+      ...minimal,
+      adjudicatorAgent: "codex",
+    })).toThrow(/config\.adjudicatorModelId/);
   });
 
   // A renamed field is #66's silent failure by construction: the config is

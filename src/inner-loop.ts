@@ -37,6 +37,12 @@
 // including the rejecting pass, and charges only that pass (#129). Both passes
 // are cold — nothing resumes anything — which is what lets them run on
 // different vendors.
+// A rejected report whose next implementer attempt creates no commit at that
+// head is routed once per head/pass to a cold adjudicator (#167). The judge
+// sees that report without implementer speech or prior-round wording, is held
+// to the same read-only snapshot contract, and either leaves its charged
+// rejection upheld or rewrites history to OVERRULED and refunds it. A quality
+// overrule continues directly into the correctness pass at the same head.
 //
 // The other deliberate runner-side exception is #127's off-branch repair.
 // `headMismatch` has already made the mechanical ancestry decision; when the
@@ -69,7 +75,7 @@
 // A red gate keeps the quality result and reviewer history, while correctness
 // is not dispatched until both quality and gate-1 approve (#143). Reviewer
 // mutation still parks regardless of the gate result.
-// Partition-check, UI-check and reviewer invocations snapshot tip and status; any mutation
+// Partition-check, UI-check, reviewer and adjudicator invocations snapshot tip and status; any mutation
 // parks the issue and preserves the clone rather than trusting that call.
 // Invocation filenames use one run-owned, per-issue sequence across fresh
 // HARD-ERROR cycles and later admissions: the state machine's attempt and
@@ -168,6 +174,10 @@ import type { AgentInvocationSequence, AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
+import {
+  parseAdjudicationRuling,
+  stripAdjudicationRulingTokens,
+} from "./adjudication-parser.js";
 import { loadTemplate } from "./prompts.js";
 import {
   type SandboxContainerStatus,
@@ -198,6 +208,7 @@ import {
   type ProjectAnchorOptions,
   type PriorReviewRound,
   buildPrompt,
+  buildAdjudicatorPrompt,
   buildPartitionCheckPrompt,
   buildReviewerPrompts,
   buildUiCheckPrompt,
@@ -379,7 +390,11 @@ export type Terminal =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause: "reviewer-wrote" | "ui-checker-wrote" | "partition-checker-wrote";
+      readonly cause:
+        | "reviewer-wrote"
+        | "adjudicator-wrote"
+        | "ui-checker-wrote"
+        | "partition-checker-wrote";
       readonly commits: readonly { sha: string }[];
       readonly specGaps: readonly SpecGap[];
     }
@@ -549,6 +564,7 @@ export type InnerLoopConfig = {
   readonly implementerModelId: string;
   readonly reviewerModelId: string;
   readonly reviewerQualityModelId: string;
+  readonly adjudicatorModelId: string;
   readonly uiCheckModelId: string;
   // Which CLI each role runs (#72). Paired with the model id above rather than
   // folded into it: the two are independent choices, and every provider takes
@@ -559,6 +575,7 @@ export type InnerLoopConfig = {
   // The quality pass's CLI (#121). Resolution defaults it to `reviewerAgent`,
   // so this is a distinct provider only where the host asked for one.
   readonly reviewerQualityAgent: AgentProviderName;
+  readonly adjudicatorAgent: AgentProviderName;
   // The pre-attempt UI classifier (#126), defaulted during config resolution
   // to the implementer's provider and model but routed independently here.
   readonly uiCheckAgent: AgentProviderName;
@@ -568,6 +585,7 @@ export type InnerLoopConfig = {
   readonly implementerEffort?: string | undefined;
   readonly reviewerEffort?: string | undefined;
   readonly reviewerQualityEffort?: string | undefined;
+  readonly adjudicatorEffort?: string | undefined;
   readonly uiCheckEffort?: string | undefined;
   readonly uiPrototypeCheck: boolean;
   readonly partitionCheck: boolean;
@@ -1385,6 +1403,8 @@ async function executeAction(
       return runImplementer(action, ctx);
     case "run-gate-and-reviewer":
       return runGateAndReviewer(action, ctx);
+    case "run-adjudicator":
+      return runAdjudicator(action, ctx);
     case "terminate":
       throw new Error("executeAction called with terminate; runner should exit instead");
   }
@@ -2047,12 +2067,20 @@ export async function runImplementer(
       : { usage: eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit, measuredContextChars) }),
     ...attemptResources,
   });
+  const head = await branchTip(ctx.worktreePath, issue.branch);
+  if (head === null) {
+    throw new SandbarError(
+      `issue branch ${issue.branch} disappeared after implementer attempt ${action.attempt}`,
+    );
+  }
   return {
     kind: "implementer-result",
     signal,
     dirtyPaths,
     offBranch,
     fastForwarded,
+    commits: attemptCommits,
+    head,
   };
 }
 
@@ -2169,7 +2197,7 @@ export async function enforceReadOnlyAgentSnapshot(
   sandbox: Pick<Sandbox, "preserveWorktree" | "syncBranchToCache">,
   before: ReadOnlyAgentSnapshot,
   after: ReadOnlyAgentSnapshot,
-  role: "Reviewer" | "UI checker" | "Partition checker",
+  role: "Reviewer" | "Adjudicator" | "UI checker" | "Partition checker",
   transcript: string,
 ): Promise<string | null> {
   if (!readOnlyAgentSnapshotChanged(before, after)) return null;
@@ -2212,6 +2240,292 @@ export async function enforceReviewerSnapshot(
   };
 }
 
+function recordOverruledPass(
+  rounds: PriorReviewRound[],
+  round: number,
+  head: string,
+  pass: ReviewerPass,
+): void {
+  const index = rounds.findIndex((entry) => entry.round === round && entry.head === head);
+  if (index < 0) {
+    throw new SandbarError(
+      `cannot record ${pass} adjudication for round ${round} at ${head}: review history entry is missing`,
+    );
+  }
+  const entry = rounds[index]!;
+  const overruled = { verdict: "OVERRULED" as const, prose: "" as const, specGap: null };
+  rounds[index] = pass === "quality"
+    ? { ...entry, quality: overruled }
+    : { ...entry, correctness: overruled };
+}
+
+export async function runAdjudicator(
+  action: Extract<LoopAction, { kind: "run-adjudicator" }>,
+  ctx: ExecuteActionCtx,
+): Promise<Extract<LoopEvent, {
+  kind: "adjudicator-result" | "adjudicator-harness-failed" | "adjudicator-wrote";
+}>> {
+  const { issue, sandbox, opts, config } = ctx;
+  const { rejection } = action;
+  const prompt = await buildAdjudicatorPrompt({
+    issue,
+    repo: config.repo,
+    repoDir: config.layout.repoDir,
+    worktreePath: sandbox.worktreePath,
+    sourceBranch: config.sourceBranch,
+    base: ctx.base,
+    claudeMdPath: config.claudeMdPath,
+    contextMdPath: config.contextMdPath,
+    pass: rejection.pass,
+    head: rejection.head,
+    report: rejection.report,
+  });
+  const measuredContextChars = contextChars(
+    prompt,
+    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
+  );
+  if (measuredContextChars > config.maxContextChars) {
+    throw new PartitionRequiredError(
+      "adjudication",
+      measuredContextChars,
+      config.maxContextChars,
+      "The rejected report and branch exceed the configured context budget before adjudication.",
+    );
+  }
+  const timer = startTimer();
+  let usage: AgentUsage | undefined;
+  let toolCalls: number | undefined;
+  let peakContext: number | undefined;
+  let resources: ContainerResources = {};
+  const details: string[] = [];
+  const finishRuling = async (
+    ruling: "UPHELD" | "OVERRULED",
+    output: string,
+  ): Promise<Extract<LoopEvent, { kind: "adjudicator-result" }>> => {
+    let correctness: ReviewerResult | null = null;
+    if (ruling === "OVERRULED") {
+      recordOverruledPass(
+        ctx.priorReviewRounds,
+        action.reviewRound,
+        rejection.head,
+        rejection.pass,
+      );
+    }
+    if (ruling === "OVERRULED" && rejection.pass === "quality" && rejection.gateOk) {
+      // The adjudication bar ends at the ruling. Correctness is a review pass
+      // in the same logical round, but a distinct pool-lane span (#167).
+      await opts.onEvent({
+        kind: "phase",
+        issue: Number(issue.id),
+        title: issue.title,
+        attempt: action.attempt,
+        phases: ["review"],
+      });
+      const reviewAction = {
+        kind: "run-gate-and-reviewer" as const,
+        attempt: action.attempt,
+        reviewRound: action.reviewRound,
+      };
+      const continued = await runReviewer(
+        reviewAction,
+        ctx,
+        Promise.resolve({ ok: true, failureTrace: "" }),
+        undefined,
+        { skipQuality: true },
+      );
+      correctness = continued.event;
+      if (continued.historyEntry?.correctness !== undefined) {
+        const index = ctx.priorReviewRounds.findIndex(
+          (entry) => entry.round === action.reviewRound && entry.head === rejection.head,
+        );
+        const entry = ctx.priorReviewRounds[index]!;
+        ctx.priorReviewRounds[index] = {
+          ...entry,
+          correctness: continued.historyEntry.correctness,
+        };
+      }
+      if (continued.specGap) {
+        ctx.specGaps.push({ round: action.reviewRound, text: continued.specGap });
+      }
+    }
+    return {
+      kind: "adjudicator-result",
+      pass: rejection.pass,
+      head: rejection.head,
+      ruling,
+      reasoning: stripAdjudicationRulingTokens(output).trim(),
+      correctness,
+    };
+  };
+  for (let invocation = 1; invocation <= REVIEWER_MAX_INVOCATIONS; invocation += 1) {
+    const before = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
+    if (before.tip !== rejection.head) {
+      throw new SandbarError(
+        `refusing to adjudicate issue #${issue.id} round ${action.reviewRound}: ` +
+          `rejected head ${rejection.head} moved to ${before.tip}`,
+      );
+    }
+    let output = "";
+    const [settled] = await Promise.allSettled([
+      runWithProviderState(
+        opts.providerState,
+        config.adjudicatorAgent,
+        () => sandbox.run({
+          name: `adjudicator-${issue.id}-round-${action.reviewRound}-${rejection.pass}` +
+            (invocation > 1 ? `-invocation-${invocation}` : ""),
+          model: config.adjudicatorModelId,
+          agent: buildAgentProvider(config.adjudicatorAgent, config.adjudicatorModelId, {
+            effort: config.adjudicatorEffort,
+          }),
+          prompt,
+          completionSignal: [],
+          ...invocationLog(
+            opts.attemptLogger,
+            ctx.invocationSequence.filename({
+              role: "adjudicator",
+              attempt: action.attempt,
+              pass: rejection.pass,
+              invocation,
+            }),
+          ),
+        }),
+      ),
+    ]);
+    if (settled.status === "fulfilled") {
+      const run = settled.value;
+      output = run.stdout;
+      usage = sumAgentUsage(usage, run.usage);
+      toolCalls = toolCalls === undefined && run.toolCalls === undefined
+        ? undefined
+        : (toolCalls ?? 0) + (run.toolCalls ?? 0);
+      peakContext = maxContextDepth(peakContext, run.peakContext);
+      resources = mergeContainerResources(resources, run);
+      const after = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
+      const write = await enforceReadOnlyAgentSnapshot(
+        sandbox,
+        before,
+        after,
+        "Adjudicator",
+        output,
+      );
+      if (write !== null) return { kind: "adjudicator-wrote", detail: write };
+      const ruling = parseAdjudicationRuling(output);
+      if (ruling === null) {
+        details.push(
+          `invocation ${invocation}/${REVIEWER_MAX_INVOCATIONS}: completed without a ruling token`,
+        );
+        if (invocation < REVIEWER_MAX_INVOCATIONS) {
+          await opts.onEvent({
+            kind: "complaint",
+            severity: "warning",
+            message:
+              `issue=${issue.id} attempt=${action.attempt} adjudication ` +
+              `pass=${rejection.pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} ` +
+              "no-ruling — retrying",
+          });
+        }
+        continue;
+      }
+      await opts.onEvent({
+        kind: "adjudication",
+        issue: Number(issue.id),
+        title: issue.title,
+        attempt: action.attempt,
+        round: action.reviewRound,
+        pass: rejection.pass,
+        head: rejection.head,
+        ruling,
+        provider: config.adjudicatorAgent,
+        model: config.adjudicatorModelId,
+        effort: config.adjudicatorEffort ?? null,
+        durationMs: timer(),
+        maxGapMs: run.maxGapMs,
+        ...(eventUsage(
+          usage,
+          toolCalls,
+          peakContext,
+          run.rateLimit,
+          measuredContextChars,
+        ) === undefined
+          ? {}
+          : { usage: eventUsage(
+              usage,
+              toolCalls,
+              peakContext,
+              run.rateLimit,
+              measuredContextChars,
+            ) }),
+        ...resources,
+      });
+      return await finishRuling(ruling, output);
+    } else {
+      const err = settled.reason;
+      const partial = agentPartialUsage(err);
+      output = agentPartialOutput(err);
+      usage = sumAgentUsage(usage, partial.usage);
+      toolCalls = toolCalls === undefined && partial.toolCalls === undefined
+        ? undefined
+        : (toolCalls ?? 0) + (partial.toolCalls ?? 0);
+      peakContext = maxContextDepth(peakContext, partial.peakContext);
+      resources = mergeContainerResources(resources, agentPartialContainerResources(err));
+      const after = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
+      const write = await enforceReadOnlyAgentSnapshot(
+        sandbox,
+        before,
+        after,
+        "Adjudicator",
+        output,
+      );
+      if (write !== null) return { kind: "adjudicator-wrote", detail: write };
+      if (err instanceof AgentInputTooLargeError) {
+        throw providerSizeRefusal(
+          err,
+          "adjudication",
+          measuredContextChars,
+          config.maxContextChars,
+        );
+      }
+      if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) throw err;
+      const ruling = parseAdjudicationRuling(output);
+      if (ruling !== null) {
+        // A decision emitted before a teardown failure is still a decision,
+        // matching reviewer invocation semantics (#41).
+        await opts.onEvent({
+          kind: "adjudication",
+          issue: Number(issue.id),
+          title: issue.title,
+          attempt: action.attempt,
+          round: action.reviewRound,
+          pass: rejection.pass,
+          head: rejection.head,
+          ruling,
+          provider: config.adjudicatorAgent,
+          model: config.adjudicatorModelId,
+          effort: config.adjudicatorEffort ?? null,
+          durationMs: timer(),
+          ...(eventUsage(usage, toolCalls, peakContext, undefined, measuredContextChars) === undefined
+            ? {}
+            : { usage: eventUsage(
+                usage,
+                toolCalls,
+                peakContext,
+                undefined,
+                measuredContextChars,
+              ) }),
+          ...resources,
+        });
+        return await finishRuling(ruling, output);
+      }
+      details.push(
+        `invocation ${invocation}/${REVIEWER_MAX_INVOCATIONS}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return { kind: "adjudicator-harness-failed", detail: details.join("\n\n") };
+}
+
 export async function runReviewer(
   action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
@@ -2220,6 +2534,7 @@ export async function runReviewer(
     readonly prompts: Readonly<Record<ReviewerPass, string>>;
     readonly netDiffChars: number;
   },
+  reviewOptions: { readonly skipQuality?: boolean } = {},
 ): Promise<{
   readonly event: ReviewerResult;
   readonly historyEntry: PriorReviewRound | null;
@@ -2412,7 +2727,19 @@ export async function runReviewer(
     );
   };
 
-  const quality = await runPass("quality");
+  const syntheticQuality: CompletedReviewerOutcome = {
+    kind: "reviewed",
+    verdict: {
+      verdict: "APPROVED",
+      prose: "<verdict>APPROVED</verdict>",
+      specGap: null,
+    },
+    transcript: "",
+    invocations: 0,
+  };
+  const quality: ReviewerOutcome = reviewOptions.skipQuality
+    ? syntheticQuality
+    : await runPass("quality");
   if (quality.kind === "aborted") {
     return {
       event: quality.event,

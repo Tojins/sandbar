@@ -3,8 +3,9 @@
 // one place that says what credential each provider needs.
 //
 // The config splits the MODEL per call (`implementerModelId`, `uiCheckModelId`,
-// correctness `reviewerModelId`, `reviewerQualityModelId`, and
-// `mergerModelId`); this is the vendor knob beside it, and `*Effort` (#130) is
+// correctness `reviewerModelId`, `reviewerQualityModelId`,
+// `adjudicatorModelId`, and `mergerModelId`); this is the vendor knob beside
+// it, and `*Effort` (#130) is
 // the third per-call knob:
 // the reasoning effort, passed through `buildAgentProvider` for the provider
 // to spell in its own argv. It exists because the sandbox reads no host
@@ -15,6 +16,8 @@
 // because a resumed session cannot cross vendor CLIs; #121 deleted the resume,
 // so `reviewerQualityAgent` is a routing knob — defaulting to
 // `reviewerAgent`, so a config that says nothing still has one reviewer vendor.
+// The dispute adjudicator (#167) defaults all three routing knobs to that
+// correctness reviewer and may likewise be split explicitly.
 // The earlier, single-call UI classifier (#126) similarly names
 // `uiCheckAgent`, defaulting to `implementerAgent`; when its gate is disabled,
 // that provider is absent from `requiredAgentProviders` because no call uses it.
@@ -373,6 +376,7 @@ export function requiredAgentProviders(roles: {
   readonly uiCheckAgent: AgentProviderName;
   readonly reviewerAgent: AgentProviderName;
   readonly reviewerQualityAgent: AgentProviderName;
+  readonly adjudicatorAgent: AgentProviderName;
   readonly mergerAgent: AgentProviderName;
 }): readonly AgentProviderName[] {
   const named = new Set<AgentProviderName>([
@@ -380,6 +384,7 @@ export function requiredAgentProviders(roles: {
     ...(roles.uiPrototypeCheck ? [roles.uiCheckAgent] : []),
     roles.reviewerAgent,
     roles.reviewerQualityAgent,
+    roles.adjudicatorAgent,
     roles.mergerAgent,
   ]);
   // Ordered by the canonical list, not by insertion: the set feeds a refusal

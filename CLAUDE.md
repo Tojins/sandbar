@@ -104,7 +104,7 @@ default is unlimited, so existing hosts keep their prior concurrency.
    leave the convergence streaks unchanged, and the second failure anywhere in
    one inner loop stops it under #41's guard. There is no total
    implementer-attempt ceiling. `src/config.ts` owns all three defaults. The
-   partition classifier, UI classifier and reviewer are strictly advisory and read-only; each
+   partition classifier, UI classifier, reviewer and adjudicator are strictly advisory and read-only; each
    invocation snapshots branch tip, status and HEAD, and any mutation parks the
    issue with the managed clone preserved. After a clean, on-branch
    COMPLETE, the rendered review prompts plus seed-anchored net diff are
@@ -127,6 +127,11 @@ default is unlimited, so existing hosts keep their prior concurrency.
    #107 for two thirds of the reviewer minutes, and the second pass discarded 7
    of those approvals inside the same round. `src/reviewer-run.ts` owns the
    order, the aggregation and what a failed reviewer invocation means (#41).
+   After a rejection, a zero-commit implementer attempt at the same head routes
+   that head/pass once to the cold `adjudicatorAgent` (#167), defaulted to the
+   correctness reviewer. UPHELD retains the rejection and its budget charge;
+   OVERRULED removes the report from history and refunds the charge, continuing
+   a quality round directly into correctness or completing a correctness round.
    Terminals: `DONE | NEEDS-INFO |
    NEEDS-UI-PROTOTYPE (#21) | NEEDS-PARTITION (#158) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
    CREDENTIAL | HARD-ERROR` (infra-only).
@@ -413,7 +418,7 @@ outcomes.
   `config.env` is an allowlist record (empty value ⇒ inherit from
   `process.env`); `readEnvFile` is the opt-in loader. A host may keep
   per-installation role routing in that same gitignored record:
-  `splitRoleRouting` consumes the fifteen
+  `splitRoleRouting` consumes the eighteen
   `SANDBAR_<ROLE>_{AGENT,MODEL_ID,EFFORT}` keys, omits absent/empty deviations,
   and returns the remainder for `config.env`, so no routing key crosses into a
   sandbox. The committed config remains a program and spreads `routing` over

@@ -35,6 +35,11 @@
 // and history, then ends the round; correctness runs only after quality approval
 // AND a green gate. Thus red+quality-rejected spends both relevant counters,
 // while red+quality-approved spends only the gate counter.
+// A zero-commit COMPLETE at the head of a pending rejection enters one
+// adjudication per head/pass (#167). UPHELD keeps the original charge and
+// makes another zero-commit attempt take the ordinary review path; OVERRULED
+// refunds that pass and either continues quality into correctness or finishes
+// a correctness round as approved.
 //
 // A reviewer that produced NO review is not a verdict (#41); that judgment is
 // reviewer-run.ts's. `reviewer-harness-failed` consumes no review round,
@@ -57,8 +62,19 @@ export type ContextSlot =
   | "partition-check"
   | "ui-check"
   | "implementer"
+  | "adjudication"
   | "review-quality"
   | "review-correctness";
+
+export type ReviewPass = "quality" | "correctness";
+
+export type PendingRejection = {
+  readonly round: number;
+  readonly pass: ReviewPass;
+  readonly head: string;
+  readonly report: string;
+  readonly gateOk: boolean;
+};
 
 export const HARD_ERROR_MAX_RETRIES = 2;
 export const REVIEWER_HARNESS_FAILURE_LIMIT = 2;
@@ -75,6 +91,7 @@ export type LoopPhase =
   | "needs-ui-check"
   | "needs-implementer"
   | "needs-gate-and-reviewer"
+  | "needs-adjudicator"
   | "terminated";
 
 export type LoopState = {
@@ -103,6 +120,12 @@ export type LoopState = {
   // #143). Never reset: infrastructure faults are bounded independently of
   // convergence streaks, including when ordinary verdicts occur between them.
   readonly reviewerHarnessFailures: number;
+  readonly pendingRejection: PendingRejection | null;
+  readonly adjudicatedRejections: readonly string[];
+  readonly upheldAdjudication: {
+    readonly key: string;
+    readonly reasoning: string;
+  } | null;
   readonly uiPrototypeCheck: boolean;
   readonly phase: LoopPhase;
 };
@@ -201,7 +224,11 @@ export type Verdict =
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause: "reviewer-wrote" | "ui-checker-wrote" | "partition-checker-wrote";
+      readonly cause:
+        | "reviewer-wrote"
+        | "adjudicator-wrote"
+        | "ui-checker-wrote"
+        | "partition-checker-wrote";
     }
   | { readonly type: "HARD-ERROR"; readonly reason: string }
   | {
@@ -231,6 +258,12 @@ export type LoopAction =
       readonly attempt: number;
       readonly reviewRound: number;
     }
+  | {
+      readonly kind: "run-adjudicator";
+      readonly attempt: number;
+      readonly reviewRound: number;
+      readonly rejection: PendingRejection;
+    }
   | { readonly kind: "terminate"; readonly verdict: Verdict };
 
 // The UI phase is derived from the machine's transition result, never guessed
@@ -238,12 +271,13 @@ export type LoopAction =
 // after COMPLETE (#123, #132).
 export function visiblePhases(
   action: LoopAction,
-): readonly ("partition-check" | "ui-check" | "implementer" | "gate-1" | "review")[] {
+): readonly ("partition-check" | "ui-check" | "implementer" | "gate-1" | "review" | "adjudication")[] {
   switch (action.kind) {
     case "run-partition-check": return ["partition-check"];
     case "run-ui-check": return ["ui-check"];
     case "run-implementer": return ["implementer"];
     case "run-gate-and-reviewer": return ["gate-1", "review"];
+    case "run-adjudicator": return ["adjudication"];
     case "terminate": return [];
   }
 }
@@ -284,6 +318,8 @@ export type LoopEvent =
         readonly fromSha: string;
         readonly toSha: string;
       } | null;
+      readonly commits: number;
+      readonly head: string;
     }
   | {
       readonly kind: "gate-and-reviewer-result";
@@ -300,7 +336,17 @@ export type LoopEvent =
         readonly rejectingPass: "quality" | "correctness" | null;
         readonly durationMs: number;
       };
-    };
+    }
+  | {
+      readonly kind: "adjudicator-result";
+      readonly pass: ReviewPass;
+      readonly head: string;
+      readonly ruling: "UPHELD" | "OVERRULED";
+      readonly reasoning: string;
+      readonly correctness: ReviewerResult | null;
+    }
+  | { readonly kind: "adjudicator-wrote"; readonly detail: string }
+  | { readonly kind: "adjudicator-harness-failed"; readonly detail: string };
 
 export type Gate1Result = {
   readonly ok: boolean;
@@ -374,6 +420,9 @@ export function initialState(opts: InitialStateOptions): LoopState {
     lastDirtyPaths: null,
     lastOffBranch: false,
     reviewerHarnessFailures: 0,
+    pendingRejection: null,
+    adjudicatedRejections: [],
+    upheldAdjudication: null,
     uiPrototypeCheck: opts.uiPrototypeCheck,
     phase: opts.partitionCheck
       ? "needs-partition-check"
@@ -493,6 +542,8 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
         event.dirtyPaths,
         event.offBranch,
         event.fastForwarded,
+        event.commits,
+        event.head,
       );
 
     case "gate-and-reviewer-result":
@@ -501,7 +552,44 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
           `gate-and-reviewer-result event in phase ${state.phase}; expected needs-gate-and-reviewer`,
         );
       }
-      return onGateAndReviewerResult(state, event.gate, event.reviewer);
+      return onGateAndReviewerResult(
+        state,
+        event.gate,
+        event.reviewer,
+        event.reviewRound,
+      );
+
+    case "adjudicator-result":
+      if (state.phase !== "needs-adjudicator") {
+        throw new Error(
+          `adjudicator-result event in phase ${state.phase}; expected needs-adjudicator`,
+        );
+      }
+      return onAdjudicatorResult(state, event);
+
+    case "adjudicator-wrote":
+      if (state.phase !== "needs-adjudicator") {
+        throw new Error(
+          `adjudicator-wrote event in phase ${state.phase}; expected needs-adjudicator`,
+        );
+      }
+      return terminate(state, {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "adjudicator-wrote",
+        latestReviewerProse: event.detail,
+      });
+
+    case "adjudicator-harness-failed":
+      if (state.phase !== "needs-adjudicator") {
+        throw new Error(
+          `adjudicator-harness-failed event in phase ${state.phase}; expected needs-adjudicator`,
+        );
+      }
+      return onReviewerHarnessFailed(
+        state,
+        { ok: true, failureTrace: "" },
+        `adjudicator: ${event.detail}`,
+      );
   }
 }
 
@@ -644,6 +732,18 @@ export function reviewerHarnessFailedReprompt(
   ].join("\n");
 }
 
+function adjudicatorHarnessFailedReprompt(): string {
+  return [
+    "The independent adjudicator could not be run: every invocation returned",
+    "no ruling at all. That is an orchestrator harness fault, not a judgment",
+    "about either the rejected report or your work. No review-pass budget was",
+    "charged or refunded, and the rejection remains pending.",
+    "",
+    "If the finding is still false at this head, leave it unchanged and report",
+    "COMPLETE again so adjudication can be retried.",
+  ].join("\n");
+}
+
 // Order-insensitive: `git status --porcelain` order is stable in practice, but
 // "the same files are still dirty" is the question being asked, and a reordering
 // is not progress.
@@ -665,6 +765,8 @@ function onImplementerResult(
     LoopEvent,
     { kind: "implementer-result" }
   >["fastForwarded"],
+  commits: number,
+  head: string,
 ): StepResult {
   const fastForwardedNote = fastForwarded === null
     ? null
@@ -785,6 +887,24 @@ function onImplementerResult(
         },
       );
     }
+    const rejection = state.pendingRejection;
+    if (
+      commits === 0 &&
+      rejection !== null &&
+      rejection.head === head &&
+      !state.adjudicatedRejections.includes(rejectionKey(rejection))
+    ) {
+      const adjudicating: LoopState = { ...state, phase: "needs-adjudicator" };
+      return {
+        state: adjudicating,
+        action: {
+          kind: "run-adjudicator",
+          attempt: state.attempt,
+          reviewRound: rejection.round,
+          rejection,
+        },
+      };
+    }
     return {
       state: {
         ...state,
@@ -833,6 +953,7 @@ function onGateAndReviewerResult(
   state: LoopState,
   gate: Gate1Result,
   reviewer: ReviewerResult,
+  round: Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>["reviewRound"],
 ): StepResult {
   const gatedState: LoopState = gate.ok
     ? { ...state, gateFailures: 0, lastFailureTrace: "" }
@@ -854,15 +975,16 @@ function onGateAndReviewerResult(
       },
     };
   }
-  if (!gate.ok) return onRedGateReviewerResult(gatedState, reviewer);
+  if (!gate.ok) return onRedGateReviewerResult(gatedState, reviewer, round);
   return reviewer.kind === "reviewer-result"
-    ? onReviewerResult(gatedState, reviewer)
+    ? onReviewerResult(gatedState, reviewer, round)
     : onReviewerHarnessFailed(gatedState, gate, reviewer.detail);
 }
 
 function onRedGateReviewerResult(
   state: LoopState,
   reviewer: Exclude<ReviewerResult, { kind: "reviewer-wrote" }>,
+  round: Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>["reviewRound"],
 ): StepResult {
   if (reviewer.kind === "reviewer-harness-failed") {
     return onReviewerHarnessFailed(
@@ -879,18 +1001,21 @@ function onRedGateReviewerResult(
   }
 
   if (reviewer.verdict === "CHANGES-REQUESTED") {
+    const pendingRejection = rejectionFrom(reviewer, round, false, state.attempt);
+    const prose = adjudicationNotice(state, pendingRejection, reviewer.prose);
     const reviewedState: LoopState = {
       ...state,
       qualityFailures: state.qualityFailures + 1,
       latestReviewerFeedback: {
         disposition: "CHANGES-REQUESTED",
-        prose: reviewer.prose,
+        prose,
       },
+      pendingRejection,
     };
     if (reviewedState.gateFailures >= reviewedState.maxGateRounds) {
       return terminate(
         reviewedState,
-        gateRedExhaustion(reviewedState, reviewer.prose),
+        gateRedExhaustion(reviewedState, prose),
       );
     }
     if (reviewedState.qualityFailures >= reviewedState.maxQualityRounds) {
@@ -898,7 +1023,7 @@ function onRedGateReviewerResult(
         type: "NEEDS-HUMAN-REVIEW",
         cause: "quality-budget-exhausted",
         roundsUsed: reviewedState.qualityFailures,
-        latestReviewerProse: reviewer.prose,
+        latestReviewerProse: prose,
       });
     }
     return advanceAttempt(reviewedState, {
@@ -913,6 +1038,8 @@ function onRedGateReviewerResult(
   // and keep the paid-for quality prose for the implementer and history.
   const reviewedState: LoopState = {
     ...state,
+    pendingRejection: null,
+    upheldAdjudication: null,
     latestReviewerFeedback: {
       disposition: "APPROVED-CORRECTNESS-SKIPPED",
       prose: reviewer.prose,
@@ -934,18 +1061,25 @@ function onRedGateReviewerResult(
 function onReviewerResult(
   state: LoopState,
   reviewer: Extract<ReviewerResult, { kind: "reviewer-result" }>,
+  round: Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>["reviewRound"],
 ): StepResult {
   if (reviewer.verdict === "APPROVED") {
-    return terminate({ ...state, qualityFailures: 0 }, { type: "DONE" });
+    return terminate(
+      { ...state, qualityFailures: 0, pendingRejection: null },
+      { type: "DONE" },
+    );
   }
   if (reviewer.rejectingPass === "quality") {
+    const pendingRejection = rejectionFrom(reviewer, round, true, state.attempt);
+    const prose = adjudicationNotice(state, pendingRejection, reviewer.prose);
     const reviewingState: LoopState = {
       ...state,
       latestReviewerFeedback: {
         disposition: "CHANGES-REQUESTED",
-        prose: reviewer.prose,
+        prose,
       },
       lastFailureTrace: "",
+      pendingRejection,
     };
     return transitionAfterQualityFailure(
       reviewingState,
@@ -958,28 +1092,31 @@ function onReviewerResult(
         type: "NEEDS-HUMAN-REVIEW",
         cause: "quality-budget-exhausted",
         roundsUsed: state.qualityFailures + 1,
-        latestReviewerProse: reviewer.prose,
+        latestReviewerProse: prose,
       },
     );
   }
 
   const correctnessFailures = state.correctnessFailures + 1;
+  const pendingRejection = rejectionFrom(reviewer, round, true, state.attempt);
+  const prose = adjudicationNotice(state, pendingRejection, reviewer.prose);
   const reviewedState: LoopState = {
     ...state,
     qualityFailures: 0,
     correctnessFailures,
     latestReviewerFeedback: {
       disposition: "CHANGES-REQUESTED",
-      prose: reviewer.prose,
+      prose,
     },
     lastFailureTrace: "",
+    pendingRejection,
   };
   if (correctnessFailures >= state.maxReviewRounds) {
     return terminate(reviewedState, {
       type: "NEEDS-HUMAN-REVIEW",
       cause: "correctness-budget-exhausted",
       roundsUsed: correctnessFailures,
-      latestReviewerProse: reviewer.prose,
+      latestReviewerProse: prose,
     });
   }
   return advanceAttempt(
@@ -990,6 +1127,138 @@ function onReviewerResult(
       latestReviewerFeedback: reviewedState.latestReviewerFeedback,
     },
   );
+}
+
+function rejectionKey(rejection: PendingRejection): string {
+  return `${rejection.pass}:${rejection.head}`;
+}
+
+function adjudicationNotice(
+  state: LoopState,
+  rejection: PendingRejection | null,
+  prose: string,
+): string {
+  if (
+    rejection === null ||
+    state.upheldAdjudication?.key !== rejectionKey(rejection)
+  ) return prose;
+  return [
+    "This head/pass rejection was independently upheld by the adjudicator.",
+    state.upheldAdjudication.reasoning,
+    "",
+    prose,
+  ].join("\n");
+}
+
+function rejectionFrom(
+  reviewer: Extract<ReviewerResult, { kind: "reviewer-result" }>,
+  round: Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>["reviewRound"],
+  gateOk: boolean,
+  roundNumber: number,
+): PendingRejection | null {
+  if (reviewer.verdict !== "CHANGES-REQUESTED" || round === undefined) return null;
+  return {
+    round: roundNumber,
+    pass: reviewer.rejectingPass,
+    head: round.head,
+    report: reviewer.prose,
+    gateOk,
+  };
+}
+
+function onAdjudicatorResult(
+  state: LoopState,
+  event: Extract<LoopEvent, { kind: "adjudicator-result" }>,
+): StepResult {
+  const rejection = state.pendingRejection;
+  if (
+    rejection === null ||
+    rejection.pass !== event.pass ||
+    rejection.head !== event.head
+  ) {
+    throw new Error("adjudicator ruled on a rejection other than the pending head/pass");
+  }
+  const adjudicatedRejections = [
+    ...state.adjudicatedRejections,
+    rejectionKey(rejection),
+  ];
+  if (event.ruling === "UPHELD") {
+    const feedback: ReviewerFeedback = {
+      disposition: "CHANGES-REQUESTED",
+      prose: `Independent adjudicator: UPHELD\n\n${event.reasoning.trim()}`,
+    };
+    return advanceAttempt(
+      {
+        ...state,
+        adjudicatedRejections,
+        upheldAdjudication: {
+          key: rejectionKey(rejection),
+          reasoning: event.reasoning.trim(),
+        },
+        latestReviewerFeedback: feedback,
+      },
+      {
+        failureTrace: state.lastFailureTrace,
+        extraReprompt: state.extraReprompt,
+        latestReviewerFeedback: feedback,
+      },
+    );
+  }
+
+  const uncharged: LoopState = {
+    ...state,
+    adjudicatedRejections,
+    pendingRejection: null,
+    upheldAdjudication: null,
+    latestReviewerFeedback: null,
+    qualityFailures: rejection.pass === "quality"
+      ? Math.max(0, state.qualityFailures - 1)
+      : state.qualityFailures,
+    correctnessFailures: rejection.pass === "correctness"
+      ? Math.max(0, state.correctnessFailures - 1)
+      : state.correctnessFailures,
+  };
+  if (rejection.pass === "correctness") {
+    if (event.correctness !== null) {
+      throw new Error("correctness overrule unexpectedly carried another correctness pass");
+    }
+    return terminate(uncharged, { type: "DONE" });
+  }
+  if (!rejection.gateOk) {
+    return advanceAttempt(uncharged, {
+      failureTrace: uncharged.lastFailureTrace,
+      extraReprompt: uncharged.extraReprompt,
+      latestReviewerFeedback: null,
+    });
+  }
+  if (event.correctness === null) {
+    throw new Error("quality overrule on a green head omitted correctness review");
+  }
+  if (event.correctness.kind === "reviewer-wrote") {
+    return terminate(uncharged, {
+      type: "NEEDS-HUMAN-REVIEW",
+      cause: "reviewer-wrote",
+      latestReviewerProse: event.correctness.detail,
+    });
+  }
+  if (event.correctness.kind === "reviewer-harness-failed") {
+    return onReviewerHarnessFailed(
+      uncharged,
+      { ok: true, failureTrace: "" },
+      event.correctness.detail,
+    );
+  }
+  const correctnessRound = {
+    head: rejection.head,
+    qualityMode: "verify" as const,
+    quality: "APPROVED" as const,
+    correctness: event.correctness.verdict,
+    rejectingPass: event.correctness.verdict === "CHANGES-REQUESTED"
+      ? "correctness" as const
+      : null,
+    durationMs: 0,
+  };
+  return onReviewerResult(uncharged, event.correctness, correctnessRound);
 }
 
 // The reviewer produced no review at all (#41/#143). No convergence budget is
@@ -1034,10 +1303,12 @@ function onReviewerHarnessFailed(
       failureTrace: gate.failureTrace,
       extraReprompt: joinOrchestratorNotes(
         state.extraReprompt,
-        reviewerHarnessFailedReprompt(
-          gate.ok,
-          state.latestReviewerFeedback?.disposition ?? null,
-        ),
+        detail.startsWith("adjudicator:")
+          ? adjudicatorHarnessFailedReprompt()
+          : reviewerHarnessFailedReprompt(
+              gate.ok,
+              state.latestReviewerFeedback?.disposition ?? null,
+            ),
       ),
       latestReviewerFeedback: state.latestReviewerFeedback,
     },
