@@ -2392,10 +2392,14 @@ export async function run(
                 onOutcome: recordLandingOutcome,
               },
               ...(verified ? { verified } : {}),
-              ...(landRequests.length > 0
+              // Scheduling sees only runnable requests, but a pass started for
+              // another reason must still let the merger observe deferred
+              // requests. That is where the PR notice about newly landed or
+              // ongoing member work is posted (#64, #168).
+              ...(selectedLandRequests.length > 0
                 ? {
                     chunkLanding: {
-                      requests: landRequests,
+                      requests: selectedLandRequests,
                       sourceBranch: config.sourceBranch,
                     },
                   }

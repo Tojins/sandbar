@@ -2117,6 +2117,52 @@ describe("run quota orchestration (#109)", () => {
     expect(eventsOf("idle").length).toBeGreaterThan(0);
   });
 
+  it("hands a deferred request to a landing pass triggered by its completed member", async () => {
+    const target = {
+      root: 42,
+      branch: "sandbar/chunk-42-test",
+      title: "Chunk 42",
+      members: [{ number: 42, title: "Issue 42" }],
+      closeOrder: [{ number: 42, title: "Issue 42" }],
+      rework: [],
+      pullRequest: 9,
+    };
+    const member = {
+      ...issue("42"),
+      chunk: { root: target.root, branch: target.branch },
+    };
+    seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) => ({
+      ...resolution(options.excluded?.has(42) ? [] : [member]),
+      landedChunks: [target],
+    }));
+    seams.landRequestPullRequests
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        number: target.pullRequest,
+        headRefName: target.branch,
+        title: target.title,
+      }])
+      .mockResolvedValue([]);
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "member" }] });
+    seams.merger.mockImplementation(async (batch: typeof member[]) => ({
+      ...summary(batch),
+      deferredChunks: [{ target, landedNow: target.members }],
+    }));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(seams.merger.mock.calls[0]?.[0]).toEqual([member]);
+    expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkLanding).toEqual({
+      requests: [target],
+      sourceBranch: "main",
+    });
+  });
+
   it("records request queueing and merger progress while unrelated work runs", async () => {
     const done = issue("156");
     const running = issue("169");
