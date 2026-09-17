@@ -1273,6 +1273,15 @@ async function attemptMerge(
   await deps.onProgress?.(args.gateKey, "merge");
   await emit(`merge-attempt ${label} ${unit.branch}`);
   const preMergeSha = await adapter.getHeadSha();
+  const resolveDeps = {
+    projectAnchor,
+    promptExtension: deps.promptExtension,
+    preMergeSha,
+    target: describeMergeTarget(target),
+    ...(onAttempt ? { onAttempt } : {}),
+    beforeGate: () => deps.onProgress?.(args.gateKey, "gate-2"),
+    onGate,
+  };
   const m = await adapter.mergeNoFf(unit);
 
   // The version collision is settled mechanically first (#68); only what it
@@ -1288,14 +1297,7 @@ async function attemptMerge(
       args.related,
       { kind: "conflict" },
       adapter,
-      {
-        projectAnchor,
-        promptExtension: deps.promptExtension,
-        preMergeSha,
-        target: describeMergeTarget(target),
-        ...(onAttempt ? { onAttempt } : {}),
-        onGate,
-      },
+      resolveDeps,
       resolveLog,
     );
     if (outcome.kind === "abandon") {
@@ -1367,14 +1369,7 @@ async function attemptMerge(
         },
       },
       adapter,
-      {
-        projectAnchor,
-        promptExtension: deps.promptExtension,
-        preMergeSha,
-        target: describeMergeTarget(target),
-        ...(onAttempt ? { onAttempt } : {}),
-        onGate,
-      },
+      resolveDeps,
       resolveLog,
     );
     if (outcome.kind === "abandon") {

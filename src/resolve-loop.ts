@@ -323,6 +323,9 @@ export type ResolveLoopDeps = {
   // nothing, and the loop then reports `logPath: null` rather than pretending
   // a file exists.
   readonly onAttempt?: ResolveAttemptSink;
+  // Announce a re-gate before it starts, so live observers do not retain the
+  // preceding merge step throughout a long conflict-resolution gate.
+  readonly beforeGate?: () => void | Promise<void>;
   readonly onGate?: (
     gate: Awaited<ReturnType<ResolveAdapter["runGate"]>>,
   ) => void | Promise<void>;
@@ -525,6 +528,7 @@ export async function runResolveLoop(
       continue;
     }
 
+    await deps.beforeGate?.();
     const gate = await adapter.runGate();
     // The same one rendering the other three consumers use, on green and red
     // alike; the verdict-specific lines below keep their own wording.

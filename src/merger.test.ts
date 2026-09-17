@@ -2638,6 +2638,30 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(summary.skippedChunks).toEqual([]);
   });
 
+  it("reports gate-2 while a conflicting chunk merge is resolved", async () => {
+    const progress: Array<{ key: string; step: string }> = [];
+    const { adapter } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      chunkRefs: originHas(42),
+    });
+
+    await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...landing(request(42)),
+      observations: {
+        ...DISCARD_MERGER_OBSERVATIONS,
+        onProgress: (key, step) => { progress.push({ key, step }); },
+      },
+    });
+
+    expect(progress).toEqual([
+      { key: "chunk-42", step: "merge" },
+      { key: "chunk-42", step: "gate-2" },
+      { key: "chunk-42", step: "push" },
+    ]);
+  });
+
   it("merges the chunk before the cycle's own branches, into one landing", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok", "ok"],
