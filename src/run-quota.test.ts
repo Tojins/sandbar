@@ -2117,6 +2117,95 @@ describe("run quota orchestration (#109)", () => {
     expect(eventsOf("idle").length).toBeGreaterThan(0);
   });
 
+  it("records request queueing and merger progress while unrelated work runs", async () => {
+    const done = issue("156");
+    const running = issue("169");
+    const runningResult = deferred<{ type: "DONE"; commits: { sha: string }[] }>();
+    const requests = [
+      {
+        root: 177, branch: "sandbar/chunk-177-test", title: "Migrations",
+        members: [{ number: 177, title: "Issue 177" }],
+        closeOrder: [{ number: 177, title: "Issue 177" }], rework: [], pullRequest: 305,
+      },
+      {
+        root: 157, branch: "sandbar/chunk-157-test", title: "Review hotfix",
+        members: [{ number: 157, title: "Issue 157" }],
+        closeOrder: [{ number: 157, title: "Issue 157" }], rework: [], pullRequest: 306,
+      },
+    ];
+    seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) => ({
+      ...resolution([done, running].filter((candidate) =>
+        !options.excluded?.has(Number(candidate.id)))),
+      landedChunks: requests,
+    }));
+    seams.landRequestPullRequests
+      .mockResolvedValueOnce(requests.map((request) => ({
+        number: request.pullRequest,
+        headRefName: request.branch,
+        title: request.title,
+      })))
+      .mockResolvedValue([]);
+    seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
+      candidate.id === running.id
+        ? runningResult.promise
+        : Promise.resolve({ type: "DONE", commits: [{ sha: candidate.id }] }));
+    seams.merger.mockImplementation(async (
+      batch: ReturnType<typeof issue>[],
+      _adapter,
+      _log,
+      _gateLog,
+      options: RunMergerOptions,
+    ) => {
+      if (seams.merger.mock.calls.length === 1) {
+        expect(batch).toEqual([]);
+        await options.observations.onProgress?.("chunk-157", "merge");
+        await options.observations.onProgress?.("chunk-157", "gate-2");
+        await options.observations.onProgress?.("chunk-157", "push");
+        await options.observations.onProgress?.("chunk-177", "merge");
+        await options.observations.onProgress?.("chunk-177", "gate-2");
+        await options.observations.onProgress?.("chunk-177", "push");
+        runningResult.resolve({ type: "DONE", commits: [{ sha: running.id }] });
+      }
+      return summary(batch);
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+
+    expect(eventsOf("land-request").map((event) => ({
+      pullRequest: event.pullRequest,
+      status: event.status,
+    }))).toEqual([
+      { pullRequest: 306, status: { kind: "queued", reason: "lands next" } },
+      { pullRequest: 305, status: { kind: "queued", reason: "lands after PR #306" } },
+      { pullRequest: 306, status: {
+        kind: "landing", step: "merge", reason: "landing together with PR #305",
+      } },
+      { pullRequest: 305, status: { kind: "queued", reason: "lands after PR #306" } },
+      { pullRequest: 306, status: {
+        kind: "landing", step: "merge", reason: "landing together with PR #305",
+      } },
+      { pullRequest: 306, status: {
+        kind: "landing", step: "gate-2", reason: "landing together with PR #305",
+      } },
+      { pullRequest: 306, status: {
+        kind: "landing", step: "push", reason: "landing together with PR #305",
+      } },
+      { pullRequest: 305, status: {
+        kind: "landing", step: "merge", reason: "landing together with PR #306",
+      } },
+      { pullRequest: 305, status: {
+        kind: "landing", step: "gate-2", reason: "landing together with PR #306",
+      } },
+      { pullRequest: 305, status: {
+        kind: "landing", step: "push", reason: "landing together with PR #306",
+      } },
+    ]);
+  });
+
   it("exits quota from the shared provider state when the closing issue returned no terminal", async () => {
     seams.plan.mockResolvedValue(resolution([issue("1")]));
     seams.innerLoop.mockImplementation(async (
