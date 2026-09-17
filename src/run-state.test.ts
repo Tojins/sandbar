@@ -342,6 +342,68 @@ describe("run event reducer", () => {
     }]);
   });
 
+  it("removes ended requests and timestamps a later request anew", () => {
+    const requested = [
+      at(1, "2026-09-17T13:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
+        configPath: null, workdir: "/r", maxParallelIssues: 2, pid: 1,
+      }),
+      at(2, "2026-09-17T13:08:00Z", {
+        kind: "recompute", n: 1, trigger: "poll", admitted: [], active: [],
+        waiting: [], landRequests: ["sandbar/chunk-177-c"], deferredChunks: [],
+        candidates: [], refs: [],
+      }),
+      at(3, "2026-09-17T13:08:01Z", {
+        kind: "land-request", pullRequest: 305, branch: "sandbar/chunk-177-c",
+        title: "Migrations", members: [177],
+        status: { kind: "queued", reason: "lands next" },
+      }),
+    ];
+    const noLongerLabelled = [
+      ...requested,
+      at(4, "2026-09-17T13:09:00Z", {
+        kind: "recompute", n: 2, trigger: "poll", admitted: [], active: [],
+        waiting: [], landRequests: [], deferredChunks: [], candidates: [], refs: [],
+      }),
+    ];
+    expect(reduceRunEvents(noLongerLabelled, {
+      now: new Date("2026-09-17T13:09:30Z"), pidAlive: true,
+    }).landing).toEqual([]);
+
+    const parked = [
+      ...requested,
+      at(4, "2026-09-17T13:09:00Z", {
+        kind: "landed", outcome: "chunk-parked", branch: "sandbar/chunk-177-c",
+        target: null, pullRequest: 305, title: "Migrations", members: [177],
+        reason: "conflict", durationMs: 60_000,
+      }),
+    ];
+    expect(reduceRunEvents(parked, {
+      now: new Date("2026-09-17T13:09:30Z"), pidAlive: true,
+    }).landing).toEqual([]);
+
+    const requestedAgain = reduceRunEvents([
+      ...parked,
+      at(5, "2026-09-17T13:15:00Z", {
+        kind: "recompute", n: 2, trigger: "poll", admitted: [], active: [],
+        waiting: [], landRequests: ["sandbar/chunk-177-c"], deferredChunks: [],
+        candidates: [], refs: [],
+      }),
+      at(6, "2026-09-17T13:15:01Z", {
+        kind: "land-request", pullRequest: 305, branch: "sandbar/chunk-177-c",
+        title: "Migrations", members: [177],
+        status: { kind: "queued", reason: "lands next" },
+      }),
+    ], { now: new Date("2026-09-17T13:15:30Z"), pidAlive: true });
+    expect(requestedAgain.landing).toEqual([
+      expect.objectContaining({
+        pullRequest: 305,
+        requestedAt: "2026-09-17T13:15:01Z",
+        statusSince: "2026-09-17T13:15:01Z",
+      }),
+    ]);
+  });
+
   it("renders a historical parked ref with its recorded first-line cause", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
