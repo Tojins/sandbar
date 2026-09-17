@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { RunEvent } from "./events.js";
+import { EVENT_SCHEMA_VERSION, type RunEvent } from "./events.js";
 import { reduceRunEvents, waitingReasonText } from "./run-state.js";
 
 const at = (seq: number, ts: string, event: object): RunEvent =>
@@ -18,7 +18,7 @@ describe("run event reducer", () => {
   it("keeps a pending restart visible for the whole drain", () => {
     const events = [
       at(1, "2026-09-11T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: "/i/c.mjs",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: "/i/c.mjs",
         workdir: "/r", maxParallelIssues: 1, pid: 1,
       }),
       at(2, "2026-09-11T09:01:00Z", { kind: "restart-requested", detail: "abc1234" }),
@@ -44,7 +44,7 @@ describe("run event reducer", () => {
   it("reports no pending restart on a run nobody asked to stop", () => {
     const state = reduceRunEvents([
       at(1, "2026-09-11T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
         workdir: "/r", maxParallelIssues: 1, pid: 1,
       }),
     ], { now: new Date("2026-09-11T09:01:00Z"), pidAlive: true });
@@ -57,7 +57,7 @@ describe("run event reducer", () => {
     };
     const state = reduceRunEvents([
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
         workdir: "/r", maxParallelIssues: 1, pid: 1,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -85,7 +85,7 @@ describe("run event reducer", () => {
       const terminal = signal === "FAILED" ? "HARD-ERROR" : signal;
       const state = reduceRunEvents([
         at(1, "2026-09-07T09:00:00Z", {
-          kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+          kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
           workdir: "/r", maxParallelIssues: 1, pid: 1,
         }),
         at(2, "2026-09-07T09:01:00Z", {
@@ -110,7 +110,7 @@ describe("run event reducer", () => {
 
   it("projects every event kind into a newest-first, attributed feed", () => {
     const rows: object[] = [
-      { kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+      { kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
         workdir: "/r", maxParallelIssues: 2, pid: 1 },
       { kind: "wake-lock", state: "held", detail: "held" },
       { kind: "preflight", action: "started", detail: "Preflight started" },
@@ -188,7 +188,7 @@ describe("run event reducer", () => {
       [null, "reconcile trace · checked chunks", "dim"],
       [null, "requeued #2", "dim"],
       [null, "recompute 1 · launch", "dim"],
-      [null, "landing batch 1 complete · 9ms", "dim"],
+      [null, "landing complete · 9ms", "dim"],
       [null, "image built · base", "dim"],
       [null, "startup sweep · 1 removed · 0 failed", "dim"],
       [null, "preflight started · Preflight started", "dim"],
@@ -216,7 +216,7 @@ describe("run event reducer", () => {
   ] as const)("projects the cause for %j", (event, expected) => {
     const state = reduceRunEvents([
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
         workdir: "/r", maxParallelIssues: 1, pid: 1,
       }),
       at(2, "2026-09-07T09:01:00Z", event),
@@ -226,7 +226,7 @@ describe("run event reducer", () => {
 
   it("limits recent feed rows to 200 without changing the total", () => {
     const events = [at(1, "2026-09-07T09:00:00Z", {
-      kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+      kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
       workdir: "/r", maxParallelIssues: 1, pid: 1,
     })];
     for (let index = 0; index < 205; index += 1) {
@@ -243,7 +243,7 @@ describe("run event reducer", () => {
   it("renders pool timelines, waiting reasons and parked refs from one recompute", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar 0.36.0",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar 0.36.0",
         configPath: "/r/sandbar.config.mjs", workdir: "/r/.sandbar",
         maxParallelIssues: 3, pid: 10,
       }),
@@ -299,10 +299,130 @@ describe("run event reducer", () => {
     ]);
   });
 
+  it("projects explicit landing status and moves a landed request into history", () => {
+    const base = [
+      at(1, "2026-09-17T13:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
+        configPath: null, workdir: "/r", maxParallelIssues: 2, pid: 1,
+      }),
+      at(2, "2026-09-17T13:08:00Z", {
+        kind: "recompute", n: 1, trigger: "poll", admitted: [], active: [],
+        waiting: [], landRequests: ["sandbar/chunk-177-c", "sandbar/chunk-157-c"],
+        deferredChunks: [], candidates: [], refs: [],
+      }),
+      at(3, "2026-09-17T13:08:01Z", {
+        kind: "land-request", pullRequest: 305, branch: "sandbar/chunk-177-c",
+        title: "Migrations", members: [177],
+        status: { kind: "landing", step: "merge", reason: "landing together with #156 → its chunk, PR #306" },
+      }),
+      at(4, "2026-09-17T13:08:02Z", {
+        kind: "land-request", pullRequest: 306, branch: "sandbar/chunk-157-c",
+        title: "Review hotfix", members: [157],
+        status: { kind: "queued", reason: "lands after PR #305" },
+      }),
+      at(5, "2026-09-17T14:12:00Z", {
+        kind: "land-request", pullRequest: 305, branch: "sandbar/chunk-177-c",
+        title: "Migrations", members: [177],
+        status: { kind: "landing", step: "gate-2", reason: "landing together with #156 → its chunk, PR #306" },
+      }),
+    ];
+    const active = reduceRunEvents(base, {
+      now: new Date("2026-09-17T14:12:30Z"), pidAlive: true,
+    });
+    expect(active.landing).toEqual([
+      {
+        pullRequest: 305, branch: "sandbar/chunk-177-c", title: "Migrations",
+        members: [177], requestedAt: "2026-09-17T13:08:01Z",
+        statusSince: "2026-09-17T14:12:00Z", status: "landing", step: "gate-2",
+        reason: "landing together with #156 → its chunk, PR #306",
+      },
+      expect.objectContaining({
+        pullRequest: 306, status: "queued", step: null,
+        reason: "lands after PR #305",
+      }),
+    ]);
+
+    const landed = reduceRunEvents([
+      ...base,
+      at(6, "2026-09-17T14:13:00Z", {
+        kind: "landed", outcome: "chunk-on-source", branch: "sandbar/chunk-177-c",
+        target: "main", pullRequest: 305, title: "Migrations", members: [177],
+        reason: null, durationMs: 60_000,
+      }),
+    ], { now: new Date("2026-09-17T14:13:30Z"), pidAlive: true });
+    expect(landed.landing.map((request) => request.pullRequest)).toEqual([306]);
+    expect(landed.landedChunks).toEqual([{
+      pullRequest: 305, title: "Migrations", members: [177], target: "main",
+      ms: 60_000, at: "2026-09-17T14:13:00Z",
+    }]);
+  });
+
+  it("removes ended requests and timestamps a later request anew", () => {
+    const requested = [
+      at(1, "2026-09-17T13:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
+        configPath: null, workdir: "/r", maxParallelIssues: 2, pid: 1,
+      }),
+      at(2, "2026-09-17T13:08:00Z", {
+        kind: "recompute", n: 1, trigger: "poll", admitted: [], active: [],
+        waiting: [], landRequests: ["sandbar/chunk-177-c"], deferredChunks: [],
+        candidates: [], refs: [],
+      }),
+      at(3, "2026-09-17T13:08:01Z", {
+        kind: "land-request", pullRequest: 305, branch: "sandbar/chunk-177-c",
+        title: "Migrations", members: [177],
+        status: { kind: "queued", reason: "lands next" },
+      }),
+    ];
+    const noLongerLabelled = [
+      ...requested,
+      at(4, "2026-09-17T13:09:00Z", {
+        kind: "recompute", n: 2, trigger: "poll", admitted: [], active: [],
+        waiting: [], landRequests: [], deferredChunks: [], candidates: [], refs: [],
+      }),
+    ];
+    expect(reduceRunEvents(noLongerLabelled, {
+      now: new Date("2026-09-17T13:09:30Z"), pidAlive: true,
+    }).landing).toEqual([]);
+
+    const parked = [
+      ...requested,
+      at(4, "2026-09-17T13:09:00Z", {
+        kind: "landed", outcome: "chunk-parked", branch: "sandbar/chunk-177-c",
+        target: null, pullRequest: 305, title: "Migrations", members: [177],
+        reason: "conflict", durationMs: 60_000,
+      }),
+    ];
+    expect(reduceRunEvents(parked, {
+      now: new Date("2026-09-17T13:09:30Z"), pidAlive: true,
+    }).landing).toEqual([]);
+
+    const requestedAgain = reduceRunEvents([
+      ...parked,
+      at(5, "2026-09-17T13:15:00Z", {
+        kind: "recompute", n: 2, trigger: "poll", admitted: [], active: [],
+        waiting: [], landRequests: ["sandbar/chunk-177-c"], deferredChunks: [],
+        candidates: [], refs: [],
+      }),
+      at(6, "2026-09-17T13:15:01Z", {
+        kind: "land-request", pullRequest: 305, branch: "sandbar/chunk-177-c",
+        title: "Migrations", members: [177],
+        status: { kind: "queued", reason: "lands next" },
+      }),
+    ], { now: new Date("2026-09-17T13:15:30Z"), pidAlive: true });
+    expect(requestedAgain.landing).toEqual([
+      expect.objectContaining({
+        pullRequest: 305,
+        requestedAt: "2026-09-17T13:15:01Z",
+        statusSince: "2026-09-17T13:15:01Z",
+      }),
+    ]);
+  });
+
   it("renders a historical parked ref with its recorded first-line cause", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -342,7 +462,7 @@ describe("run event reducer", () => {
 
   it("distinguishes a crash from an orderly end", () => {
     const start = at(1, "2026-09-07T09:00:00Z", {
-      kind: "run-start", schemaVersion: 2, driver: "sandbar", configPath: null,
+      kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
       workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
     });
     expect(reduceRunEvents([start], { now: new Date(), pidAlive: false }).run.status)
@@ -355,7 +475,7 @@ describe("run event reducer", () => {
   it("keeps DONE in the pool until its landing outcome is recorded", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -388,7 +508,7 @@ describe("run event reducer", () => {
   it("labels teardown 'finishing' until the terminal names the outcome", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -417,7 +537,7 @@ describe("run event reducer", () => {
   it("keeps a handoff visible until finalisation without occupying a slot", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -439,7 +559,7 @@ describe("run event reducer", () => {
   it("carries a terminal cause into finished and parked projections", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -465,7 +585,7 @@ describe("run event reducer", () => {
   it("clears a rejected issue task from the pool and occupied slots", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -491,7 +611,7 @@ describe("run event reducer", () => {
 
   it("counts work across fresh HARD-ERROR cycles and keeps the newest finished record", () => {
     const start = at(1, "2026-09-07T09:00:00Z", {
-      kind: "run-start", schemaVersion: 2, driver: "sandbar",
+      kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
       configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
     });
     const current = [
@@ -530,7 +650,7 @@ describe("run event reducer", () => {
   it("shows fresh-sandbox setup immediately after a retried HARD-ERROR", () => {
     const events = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -552,7 +672,7 @@ describe("run event reducer", () => {
   it("does not report a skipped DONE as finished before finalisation", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {
@@ -588,7 +708,7 @@ describe("run event reducer", () => {
   it("turns a finalised merger skip into a human handoff", () => {
     const events: RunEvent[] = [
       at(1, "2026-09-07T09:00:00Z", {
-        kind: "run-start", schemaVersion: 2, driver: "sandbar",
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
         configPath: null, workdir: "/r/.sandbar", maxParallelIssues: 1, pid: 10,
       }),
       at(2, "2026-09-07T09:01:00Z", {

@@ -192,6 +192,10 @@
 // not absorbing: the run still halts loud, the message still names the
 // underlying failure, and the original error rides along as `cause`.
 //
+// The observation adapter also announces each merge, gate-2 and push step.
+// These are display evidence for #168's Landing section, never control input;
+// durable outcomes remain the boundary that says what actually landed.
+//
 // Two exclusions, both deliberate. Throws BEFORE the first write (a malformed
 // issue id out of `sortIssuesAsc`, the opening `getHeadSha`) are left raw —
 // there is nothing to carry, and the top-level handler prints a stack this
@@ -320,6 +324,7 @@ import {
   type ChunkWrapup,
   LAND_LABEL,
   type PullRequestCloseOutcome,
+  chunkLandDeferral,
   chunkForgeWrites,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
@@ -922,6 +927,12 @@ export type MergerOutcome =
   | { readonly kind: "chunk-deferred"; readonly deferred: DeferredChunkLand; readonly durationMs: number };
 
 export type MergerObservations = {
+  // Current user-facing step for a landing unit. Optional so embedders that
+  // need outcomes but not live progress do not have to manufacture a sink.
+  readonly onProgress?: (
+    key: string,
+    step: "merge" | "gate-2" | "push",
+  ) => void | Promise<void>;
   readonly onGate: (
     key: string,
     gate: Awaited<ReturnType<MergerAdapter["runGate"]>>,
@@ -932,6 +943,7 @@ export type MergerObservations = {
 };
 
 export const DISCARD_MERGER_OBSERVATIONS: MergerObservations = {
+  onProgress: () => undefined,
   onGate: () => undefined,
   onOutcome: () => undefined,
 };
@@ -1119,6 +1131,7 @@ type MergeAttemptDeps = {
   readonly promptExtension?: PromptExtension;
   readonly resolveLog: ResolveLogger;
   readonly onGateRed?: MergerGateOutputSink | undefined;
+  readonly onProgress?: MergerObservations["onProgress"];
   readonly onGate: (
     key: string,
     gate: Awaited<ReturnType<MergerAdapter["runGate"]>>,
@@ -1257,8 +1270,18 @@ async function attemptMerge(
   // the number, and §3.F42 (one gate-2 per pass instead of per branch) is worth
   // exactly the per-branch gate minutes inside it (#82).
   const unitTimer = startTimer(deps.clock);
+  await deps.onProgress?.(args.gateKey, "merge");
   await emit(`merge-attempt ${label} ${unit.branch}`);
   const preMergeSha = await adapter.getHeadSha();
+  const resolveDeps = {
+    projectAnchor,
+    promptExtension: deps.promptExtension,
+    preMergeSha,
+    target: describeMergeTarget(target),
+    ...(onAttempt ? { onAttempt } : {}),
+    beforeGate: () => deps.onProgress?.(args.gateKey, "gate-2"),
+    onGate,
+  };
   const m = await adapter.mergeNoFf(unit);
 
   // The version collision is settled mechanically first (#68); only what it
@@ -1274,14 +1297,7 @@ async function attemptMerge(
       args.related,
       { kind: "conflict" },
       adapter,
-      {
-        projectAnchor,
-        promptExtension: deps.promptExtension,
-        preMergeSha,
-        target: describeMergeTarget(target),
-        ...(onAttempt ? { onAttempt } : {}),
-        onGate,
-      },
+      resolveDeps,
       resolveLog,
     );
     if (outcome.kind === "abandon") {
@@ -1319,6 +1335,7 @@ async function attemptMerge(
     return { kind: "install-failed", durationMs: unitTimer() };
   }
 
+  await deps.onProgress?.(args.gateKey, "gate-2");
   const g = await adapter.runGate();
   // On GREEN too. Until #82 gate-2 logged only on red, which is backwards for a
   // cost question — the green gates are the ones that happen every time — and
@@ -1352,14 +1369,7 @@ async function attemptMerge(
         },
       },
       adapter,
-      {
-        projectAnchor,
-        promptExtension: deps.promptExtension,
-        preMergeSha,
-        target: describeMergeTarget(target),
-        ...(onAttempt ? { onAttempt } : {}),
-        onGate,
-      },
+      resolveDeps,
       resolveLog,
     );
     if (outcome.kind === "abandon") {
@@ -1536,6 +1546,7 @@ export async function runMergerWithAdapter(
     promptExtension: opts.promptExtension,
     resolveLog,
     onGateRed,
+    onProgress: opts.observations.onProgress,
     onGate: opts.observations.onGate,
     resolveSinkFor,
     clock: opts.clock,
@@ -1900,25 +1911,20 @@ export async function runMergerWithAdapter(
         sourceBranch: chunkLanding.sourceBranch,
       };
       try {
-        if (request.rework.length > 0) {
+        const deferral = chunkLandDeferral(
+          request,
+          cycle.map((issue) => ({
+            number: issueNumberOf(issue),
+            title: issue.title,
+            chunkBranch: issue.chunk?.branch ?? null,
+          })),
+        );
+        if (deferral !== null) {
           await deferChunk(
             request,
-            request.rework,
+            deferral.members,
             pending.sourceBranch,
-            "rework",
-            requestTimer(),
-          );
-          continue;
-        }
-        const targeting = cycle
-          .filter((issue) => issue.chunk?.branch === request.branch)
-          .map((issue) => ({ number: issueNumberOf(issue), title: issue.title }));
-        if (targeting.length > 0) {
-          await deferChunk(
-            request,
-            targeting,
-            pending.sourceBranch,
-            "ongoing",
+            deferral.reason,
             requestTimer(),
           );
           continue;
@@ -1973,6 +1979,7 @@ export async function runMergerWithAdapter(
         );
         if (outcome.kind === "merged") {
           onHead.push({ ...unit, durationMs: outcome.durationMs });
+          await opts.observations.onProgress?.(`chunk-${request.root}`, "push");
           continue;
         }
         await parkChunk(

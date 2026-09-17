@@ -176,8 +176,9 @@ describe("scheduler decisions", () => {
     ["admits at post-landing quiescence", snapshot({ hasCandidates: true }), { kind: "admit", next: "wait" }],
     ["admits a retry", snapshot({ hasRetries: true, ongoing: 1 }), { kind: "admit", next: "wait" }],
     ["refill before landing", snapshot({ hasPendingTerminals: true, hasCandidates: true, ongoing: 1 }), { kind: "admit", next: "land" }],
+    ["refill before a requested landing", snapshot({ hasLandRequests: true, hasCandidates: true, active: 1, ongoing: 1 }), { kind: "admit", next: "land" }],
     ["no capacity: wait", snapshot({ active: 1, ongoing: 1, hasCapacity: false }), { kind: "wait" }],
-    ["full pool with a land request waits", snapshot({ active: 1, ongoing: 1, hasCapacity: false, hasLandRequests: true }), { kind: "wait" }],
+    ["full pool with a land request lands", snapshot({ active: 1, ongoing: 1, hasCapacity: false, hasLandRequests: true }), { kind: "land" }],
     ["land request with nothing running lands", snapshot({ hasLandRequests: true }), { kind: "land" }],
     ["idle waits for the poll", snapshot(), { kind: "wait" }],
   ] as const)("%s", (_name, state, action) => {

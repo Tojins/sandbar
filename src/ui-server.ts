@@ -39,8 +39,10 @@ import { fileURLToPath } from "node:url";
 import { EventRecordReadError, readEventsFile } from "./events.js";
 import { SandbarError, isErrno } from "./errors.js";
 import {
+  finishedChunks,
   finishedIssues,
   reduceRunEvents,
+  type FinishedChunkState,
   type FinishedIssueState,
   type UiState,
 } from "./run-state.js";
@@ -98,6 +100,7 @@ export async function readUiState(
     throw new Error(`Run ${newest} has no run-start event`);
   }
   const history: FinishedIssueState[] = [];
+  const chunkHistory: FinishedChunkState[] = [];
   const historyDirs = dirs
     .filter((dir) => resolve(dir) !== resolve(newest))
     .slice(0, HISTORY_RUN_LIMIT);
@@ -114,6 +117,7 @@ export async function readUiState(
       throw err;
     }
     history.push(...finishedIssues(events));
+    chunkHistory.push(...finishedChunks(events));
   }
   const pidAlive = options.liveRunDir !== undefined
     ? resolve(options.liveRunDir) === resolve(newest)
@@ -122,6 +126,7 @@ export async function readUiState(
     now: options.now ?? new Date(),
     pidAlive,
     recentFinished: history,
+    recentLandedChunks: chunkHistory,
   });
 }
 

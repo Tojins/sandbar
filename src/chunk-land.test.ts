@@ -10,6 +10,7 @@ import {
   CHUNK_RESIDUE_KEPT_BANNER,
   CHUNK_RESIDUE_RETIRED_BANNER,
   type ChunkWrapup,
+  chunkLandDeferral,
   chunkResidue,
   CHUNK_LAND_ABANDONED_PR_COMMENT,
   CHUNK_LAND_DEFERRED_PR_COMMENT,
@@ -138,6 +139,38 @@ describe("selectLandRequests (#64)", () => {
       [9, 30],
       [42, 11],
     ]);
+  });
+});
+
+describe("chunkLandDeferral (#168)", () => {
+  const target = selectLandRequests(
+    [pr(9, "sandbar/chunk-42-alpha")],
+    [chunk(42, "sandbar/chunk-42-alpha", [[42, "alpha"]])],
+  )[0]!;
+
+  it("defers only work that targets this chunk", () => {
+    expect(chunkLandDeferral(target, [
+      { number: 41, title: "other", chunkBranch: "sandbar/chunk-41-other" },
+      { number: 43, title: "follow-up", chunkBranch: target.branch },
+    ])).toEqual({
+      members: [{ number: 43, title: "follow-up" }],
+      reason: "ongoing",
+    });
+    expect(chunkLandDeferral(target, [
+      { number: 41, title: "other", chunkBranch: "sandbar/chunk-41-other" },
+    ])).toBeNull();
+  });
+
+  it("gives tracker-visible rework precedence", () => {
+    expect(chunkLandDeferral({
+      ...target,
+      rework: [{ number: 42, title: "root rework" }],
+    }, [
+      { number: 43, title: "follow-up", chunkBranch: target.branch },
+    ])).toEqual({
+      members: [{ number: 42, title: "root rework" }],
+      reason: "rework",
+    });
   });
 });
 

@@ -75,9 +75,15 @@ describe("run UI server", () => {
           { kind: "impl", from: "2026-09-07T10:21:00Z", to: null, label: "a2" },
         ] }],
       waiting: [{ issue: 3, title: "Waiting title", why: PARKED_WHY, parked: true }],
+      landing: [{ pullRequest: 305, branch: "sandbar/chunk-177", title: "Migrations",
+        members: [177], requestedAt: "2026-09-07T09:25:00Z",
+        statusSince: "2026-09-07T10:27:00Z", status: "landing", step: "gate-2",
+        reason: "landing together with #156 → its chunk, PR #306" }],
       finished: [{ issue: 1, title: "Finished title", outcome: "HARD-ERROR",
         reason: "provider cause\n(codex exited with code 1)", attempts: 1,
         rounds: 1, ms: 60_000, landed: "main", at: "2026-09-07T09:40:00Z" }],
+      landedChunks: [{ pullRequest: 304, title: "Landed chunk", members: [299],
+        target: "main", ms: 60_000, at: "2026-09-07T09:45:00Z" }],
       eventCount: 1,
       events: [{ at: "2026-09-07T09:50:00Z", issue: 2, text: "attempt started", tone: "" }],
     };
@@ -98,6 +104,19 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("<details id=\"events\"><summary>Events");
     expect(app.innerHTML).toContain("Pool title");
     expect(app.innerHTML).toContain("Waiting title");
+    expect(app.innerHTML).toContain("Landing · 1 requested");
+    expect(app.innerHTML).toContain(">gate-2 2m</b> · landing together with #156 → its chunk, PR #306 · requested 1h04 ago");
+    expect(app.innerHTML).toContain("PR #304");
+    expect(app.innerHTML).toContain("LANDED → main · #299");
+    expect(app.innerHTML.indexOf("Waiting</h2>")).toBeLessThan(
+      app.innerHTML.indexOf("Landing · 1 requested"),
+    );
+    expect(app.innerHTML.indexOf("Landing · 1 requested")).toBeLessThan(
+      app.innerHTML.indexOf("Finished recently"),
+    );
+    expect(app.innerHTML.indexOf("PR #304")).toBeLessThan(
+      app.innerHTML.indexOf("#1</span>"),
+    );
     // This run has been live for 60h54, but the timeline begins at the first
     // pool span. Ten-minute ticks stay readable and the eight-minute current
     // span occupies useful width instead of being crushed against `now`.
@@ -321,6 +340,49 @@ describe("run UI server", () => {
 
     await expect(readUiState(live.logsDir, { liveRunDir: live.runDir }))
       .resolves.toMatchObject({ run: { driver: "sandbar test" } });
+  });
+
+  it("loads historical chunk landings and keeps the newest record per PR", async () => {
+    const live = await runTree(false);
+    const currentPath = join(live.runDir, "events.jsonl");
+    const current = await readFile(currentPath, "utf8");
+    await writeFile(currentPath, current + `${JSON.stringify({
+      kind: "landed", outcome: "chunk-on-source", branch: "sandbar/chunk-305-new",
+      target: "main", pullRequest: 305, title: "New PR 305", members: [305],
+      reason: null, durationMs: 30_000, seq: 2, ts: "2026-09-07T10:05:00.000Z",
+    })}\n`);
+
+    const older = join(live.logsDir, "run-2026-09-06T10-00-00-000Z");
+    await mkdir(older);
+    await writeFile(join(older, "events.jsonl"), [
+      {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar old",
+        configPath: null, workdir: "/old", maxParallelIssues: 1, pid: 999_999,
+        seq: 1, ts: "2026-09-06T10:00:00.000Z",
+      },
+      {
+        kind: "landed", outcome: "chunk-on-source", branch: "sandbar/chunk-304-old",
+        target: "main", pullRequest: 304, title: "PR 304", members: [299],
+        reason: null, durationMs: 60_000, seq: 2, ts: "2026-09-06T10:04:00.000Z",
+      },
+      {
+        kind: "landed", outcome: "chunk-on-source", branch: "sandbar/chunk-305-old",
+        target: "main", pullRequest: 305, title: "Old PR 305", members: [300],
+        reason: null, durationMs: 90_000, seq: 3, ts: "2026-09-06T10:03:00.000Z",
+      },
+    ].map((event) => JSON.stringify(event)).join("\n") + "\n");
+
+    const state = await readUiState(live.logsDir, { liveRunDir: live.runDir });
+    expect(state.landedChunks).toEqual([
+      {
+        pullRequest: 305, title: "New PR 305", members: [305], target: "main",
+        ms: 30_000, at: "2026-09-07T10:05:00.000Z",
+      },
+      {
+        pullRequest: 304, title: "PR 304", members: [299], target: "main",
+        ms: 60_000, at: "2026-09-06T10:04:00.000Z",
+      },
+    ]);
   });
 
   it("serves the page and reduced state from the same event file", async () => {
