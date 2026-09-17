@@ -37,6 +37,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { sourceBranchBase } from "./git-ops.js";
 import {
+  buildAdjudicatorPrompt,
   buildPrompt,
   buildProjectAnchor,
   buildReviewerPrompts,
@@ -201,6 +202,30 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     expect(prompt).toContain("# UI prototype check");
     expect(prompt).not.toContain("Last 10 commits");
     expect(prompt).not.toContain("Coding standards");
+  });
+
+  it("assembles adjudication from both anchors and only the rejected report", async () => {
+    const prompt = await buildAdjudicatorPrompt({
+      issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+      repo: CONFIGURED,
+      repoDir: target,
+      worktreePath: launchedFrom,
+      sourceBranch: "main",
+      base: sourceBranchBase("main"),
+      claudeMdPath: "CLAUDE.md",
+      pass: "quality",
+      head: "reviewed-head-123",
+      report: "The rejected report's one blocking finding.",
+    });
+
+    expect(prompt).toContain("commit-from-target-repo");
+    expect(prompt).not.toContain("commit-from-launch-dir");
+    expect(prompt).toContain("Issue #1: acme/app");
+    expect(prompt).toContain("The rejected report's one blocking finding.");
+    expect(prompt).toContain("head `reviewed-head-123`");
+    expect(prompt).toContain("branch `sandbar/issue-1-t`");
+    expect(prompt).toContain("seeded from `origin/main`");
+    expect(prompt).not.toContain("## Prior review rounds");
   });
 
   // The @refs the agent resolves inside its sandbox stay repo-relative; it is

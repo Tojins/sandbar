@@ -57,6 +57,11 @@ import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
 import type { UiCheckResult } from "./ui-check-parser.js";
 import type { PartitionCheckResult } from "./partition-check-parser.js";
+import { loadTemplate } from "./prompts.js";
+
+const ADJUDICATOR_HARNESS_FAILED_REPROMPT = loadTemplate(
+  "implementer-adjudicator-harness-failed",
+);
 
 export type ContextSlot =
   | "partition-check"
@@ -733,15 +738,7 @@ export function reviewerHarnessFailedReprompt(
 }
 
 function adjudicatorHarnessFailedReprompt(): string {
-  return [
-    "The independent adjudicator could not be run: every invocation returned",
-    "no ruling at all. That is an orchestrator harness fault, not a judgment",
-    "about either the rejected report or your work. No review-pass budget was",
-    "charged or refunded, and the rejection remains pending.",
-    "",
-    "If the finding is still false at this head, leave it unchanged and report",
-    "COMPLETE again so adjudication can be retried.",
-  ].join("\n");
+  return ADJUDICATOR_HARNESS_FAILED_REPROMPT;
 }
 
 // Order-insensitive: `git status --porcelain` order is stable in practice, but
@@ -1062,6 +1059,7 @@ function onReviewerResult(
   state: LoopState,
   reviewer: Extract<ReviewerResult, { kind: "reviewer-result" }>,
   round: Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>["reviewRound"],
+  historyRound = state.attempt,
 ): StepResult {
   if (reviewer.verdict === "APPROVED") {
     return terminate(
@@ -1070,7 +1068,7 @@ function onReviewerResult(
     );
   }
   if (reviewer.rejectingPass === "quality") {
-    const pendingRejection = rejectionFrom(reviewer, round, true, state.attempt);
+    const pendingRejection = rejectionFrom(reviewer, round, true, historyRound);
     const prose = adjudicationNotice(state, pendingRejection, reviewer.prose);
     const reviewingState: LoopState = {
       ...state,
@@ -1098,7 +1096,7 @@ function onReviewerResult(
   }
 
   const correctnessFailures = state.correctnessFailures + 1;
-  const pendingRejection = rejectionFrom(reviewer, round, true, state.attempt);
+  const pendingRejection = rejectionFrom(reviewer, round, true, historyRound);
   const prose = adjudicationNotice(state, pendingRejection, reviewer.prose);
   const reviewedState: LoopState = {
     ...state,
@@ -1258,7 +1256,12 @@ function onAdjudicatorResult(
       : null,
     durationMs: 0,
   };
-  return onReviewerResult(uncharged, event.correctness, correctnessRound);
+  return onReviewerResult(
+    uncharged,
+    event.correctness,
+    correctnessRound,
+    rejection.round,
+  );
 }
 
 // The reviewer produced no review at all (#41/#143). No convergence budget is

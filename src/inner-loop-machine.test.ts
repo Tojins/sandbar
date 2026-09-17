@@ -133,9 +133,50 @@ describe("unchanged rejection adjudication (#167)", () => {
     expect(ruled.state.qualityFailures).toBe(0);
     expect(ruled.state.correctnessFailures).toBe(1);
     expect(ruled.state.pendingRejection).toMatchObject({
+      round: 1,
       pass: "correctness",
       head: "abc",
     });
+  });
+
+  it("keeps the original round through consecutive quality and correctness overrulings", () => {
+    const rejected = reachRejection("quality");
+    const qualityDispute = step(
+      rejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    const correctnessRejected = step(qualityDispute.state, {
+      kind: "adjudicator-result",
+      pass: "quality",
+      head: "abc",
+      ruling: "OVERRULED",
+      reasoning: "false quality report",
+      correctness: changes("false correctness report"),
+    });
+    expect(correctnessRejected.state.pendingRejection).toMatchObject({
+      round: 1,
+      pass: "correctness",
+      head: "abc",
+    });
+
+    const correctnessDispute = step(
+      correctnessRejected.state,
+      impl(complete, [], null, null, 0, "abc"),
+    );
+    expect(correctnessDispute.action).toMatchObject({
+      kind: "run-adjudicator",
+      reviewRound: 1,
+      rejection: { round: 1, pass: "correctness", head: "abc" },
+    });
+    const ruled = step(correctnessDispute.state, {
+      kind: "adjudicator-result",
+      pass: "correctness",
+      head: "abc",
+      ruling: "OVERRULED",
+      reasoning: "false correctness report",
+      correctness: null,
+    });
+    expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
   });
 
   it("makes an overruled correctness rejection final approval", () => {

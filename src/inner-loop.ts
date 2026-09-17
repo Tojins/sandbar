@@ -2365,7 +2365,6 @@ export async function runAdjudicator(
           `rejected head ${rejection.head} moved to ${before.tip}`,
       );
     }
-    let output = "";
     const [settled] = await Promise.allSettled([
       runWithProviderState(
         opts.providerState,
@@ -2391,41 +2390,61 @@ export async function runAdjudicator(
         }),
       ),
     ]);
-    if (settled.status === "fulfilled") {
-      const run = settled.value;
-      output = run.stdout;
-      usage = sumAgentUsage(usage, run.usage);
-      toolCalls = toolCalls === undefined && run.toolCalls === undefined
-        ? undefined
-        : (toolCalls ?? 0) + (run.toolCalls ?? 0);
-      peakContext = maxContextDepth(peakContext, run.peakContext);
-      resources = mergeContainerResources(resources, run);
-      const after = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
-      const write = await enforceReadOnlyAgentSnapshot(
-        sandbox,
-        before,
-        after,
-        "Adjudicator",
-        output,
+    // Normalize an ordinary failed invocation with its partial measurements
+    // and speech. Named provider failures are classified after the shared
+    // read-only check, so a mutation can never hide behind another error.
+    const completed = settled.status === "fulfilled" ? settled.value : null;
+    const failure = settled.status === "rejected" ? settled.reason : null;
+    const partial = completed === null ? agentPartialUsage(failure) : {};
+    const output = completed?.stdout ?? agentPartialOutput(failure);
+    const invocationUsage = completed?.usage ?? partial.usage;
+    const invocationToolCalls = completed?.toolCalls ?? partial.toolCalls;
+    const invocationPeakContext = completed?.peakContext ?? partial.peakContext;
+    const invocationRateLimit = completed?.rateLimit ?? partial.rateLimit ??
+      (failure instanceof AgentQuotaError ? failure.measurement : undefined);
+    const invocationResources = completed === null
+      ? agentPartialContainerResources(failure)
+      : containerResourcesOf(completed);
+    usage = sumAgentUsage(usage, invocationUsage);
+    toolCalls = toolCalls === undefined && invocationToolCalls === undefined
+      ? undefined
+      : (toolCalls ?? 0) + (invocationToolCalls ?? 0);
+    peakContext = maxContextDepth(peakContext, invocationPeakContext);
+    resources = mergeContainerResources(resources, invocationResources);
+
+    const after = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
+    const write = await enforceReadOnlyAgentSnapshot(
+      sandbox,
+      before,
+      after,
+      "Adjudicator",
+      output,
+    );
+    if (write !== null) return { kind: "adjudicator-wrote", detail: write };
+
+    if (failure instanceof AgentInputTooLargeError) {
+      throw providerSizeRefusal(
+        failure,
+        "adjudication",
+        measuredContextChars,
+        config.maxContextChars,
       );
-      if (write !== null) return { kind: "adjudicator-wrote", detail: write };
-      const ruling = parseAdjudicationRuling(output);
-      if (ruling === null) {
-        details.push(
-          `invocation ${invocation}/${REVIEWER_MAX_INVOCATIONS}: completed without a ruling token`,
-        );
-        if (invocation < REVIEWER_MAX_INVOCATIONS) {
-          await opts.onEvent({
-            kind: "complaint",
-            severity: "warning",
-            message:
-              `issue=${issue.id} attempt=${action.attempt} adjudication ` +
-              `pass=${rejection.pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} ` +
-              "no-ruling — retrying",
-          });
-        }
-        continue;
-      }
+    }
+    if (failure instanceof AgentQuotaError || failure instanceof AgentCredentialError) {
+      throw failure;
+    }
+
+    const ruling = parseAdjudicationRuling(output);
+    if (ruling !== null) {
+      // A decision emitted before a teardown failure is still a decision,
+      // matching reviewer invocation semantics (#41).
+      const measuredUsage = eventUsage(
+        usage,
+        toolCalls,
+        peakContext,
+        invocationRateLimit,
+        measuredContextChars,
+      );
       await opts.onEvent({
         kind: "adjudication",
         issue: Number(issue.id),
@@ -2439,88 +2458,29 @@ export async function runAdjudicator(
         model: config.adjudicatorModelId,
         effort: config.adjudicatorEffort ?? null,
         durationMs: timer(),
-        maxGapMs: run.maxGapMs,
-        ...(eventUsage(
-          usage,
-          toolCalls,
-          peakContext,
-          run.rateLimit,
-          measuredContextChars,
-        ) === undefined
-          ? {}
-          : { usage: eventUsage(
-              usage,
-              toolCalls,
-              peakContext,
-              run.rateLimit,
-              measuredContextChars,
-            ) }),
+        ...(completed?.maxGapMs === undefined ? {} : { maxGapMs: completed.maxGapMs }),
+        ...(measuredUsage === undefined ? {} : { usage: measuredUsage }),
         ...resources,
       });
       return await finishRuling(ruling, output);
-    } else {
-      const err = settled.reason;
-      const partial = agentPartialUsage(err);
-      output = agentPartialOutput(err);
-      usage = sumAgentUsage(usage, partial.usage);
-      toolCalls = toolCalls === undefined && partial.toolCalls === undefined
-        ? undefined
-        : (toolCalls ?? 0) + (partial.toolCalls ?? 0);
-      peakContext = maxContextDepth(peakContext, partial.peakContext);
-      resources = mergeContainerResources(resources, agentPartialContainerResources(err));
-      const after = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
-      const write = await enforceReadOnlyAgentSnapshot(
-        sandbox,
-        before,
-        after,
-        "Adjudicator",
-        output,
-      );
-      if (write !== null) return { kind: "adjudicator-wrote", detail: write };
-      if (err instanceof AgentInputTooLargeError) {
-        throw providerSizeRefusal(
-          err,
-          "adjudication",
-          measuredContextChars,
-          config.maxContextChars,
-        );
-      }
-      if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) throw err;
-      const ruling = parseAdjudicationRuling(output);
-      if (ruling !== null) {
-        // A decision emitted before a teardown failure is still a decision,
-        // matching reviewer invocation semantics (#41).
-        await opts.onEvent({
-          kind: "adjudication",
-          issue: Number(issue.id),
-          title: issue.title,
-          attempt: action.attempt,
-          round: action.reviewRound,
-          pass: rejection.pass,
-          head: rejection.head,
-          ruling,
-          provider: config.adjudicatorAgent,
-          model: config.adjudicatorModelId,
-          effort: config.adjudicatorEffort ?? null,
-          durationMs: timer(),
-          ...(eventUsage(usage, toolCalls, peakContext, undefined, measuredContextChars) === undefined
-            ? {}
-            : { usage: eventUsage(
-                usage,
-                toolCalls,
-                peakContext,
-                undefined,
-                measuredContextChars,
-              ) }),
-          ...resources,
-        });
-        return await finishRuling(ruling, output);
-      }
-      details.push(
-        `invocation ${invocation}/${REVIEWER_MAX_INVOCATIONS}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+    }
+
+    details.push(
+      failure === null
+        ? `invocation ${invocation}/${REVIEWER_MAX_INVOCATIONS}: completed without a ruling token`
+        : `invocation ${invocation}/${REVIEWER_MAX_INVOCATIONS}: ${
+            failure instanceof Error ? failure.message : String(failure)
+          }`,
+    );
+    if (invocation < REVIEWER_MAX_INVOCATIONS) {
+      await opts.onEvent({
+        kind: "complaint",
+        severity: "warning",
+        message:
+          `issue=${issue.id} attempt=${action.attempt} adjudication ` +
+          `pass=${rejection.pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} ` +
+          "no-ruling — retrying",
+      });
     }
   }
   return { kind: "adjudicator-harness-failed", detail: details.join("\n\n") };
