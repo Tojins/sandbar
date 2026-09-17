@@ -1290,6 +1290,12 @@ describe("runAdjudicator (#167)", () => {
       kind: "adjudicator-result",
       ruling: "OVERRULED",
       correctness: { kind: "reviewer-result", verdict: "APPROVED" },
+      reviewRound: {
+        head: "head123",
+        quality: "APPROVED",
+        correctness: "APPROVED",
+        rejectingPass: null,
+      },
     });
     expect(names).toEqual([
       "adjudicator-167-round-1-quality",
@@ -1402,6 +1408,26 @@ describe("runAdjudicator (#167)", () => {
       },
     });
     expect(sandbox.run).toHaveBeenCalledOnce();
+  });
+
+  it("classifies an adjudication measured over budget before dispatch", async () => {
+    innerLoopMocks.buildAdjudicatorPrompt.mockResolvedValueOnce("0123456789");
+    innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(991);
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(),
+    } as unknown as Sandbox;
+
+    await expect(runAdjudicator(action, context(sandbox))).rejects.toMatchObject({
+      verdict: {
+        type: "NEEDS-PARTITION",
+        cause: "measured",
+        slot: "adjudication",
+        size: 1001,
+        budget: 1000,
+      },
+    });
+    expect(sandbox.run).not.toHaveBeenCalled();
   });
 
   it("retries a missing ruling once, then returns a harness failure", async () => {
@@ -1832,6 +1858,8 @@ describe("runInnerLoop context terminals (#158)", () => {
         reviewerAgent: "codex",
         reviewerQualityAgent: "codex",
         uiCheckAgent: "codex",
+        adjudicatorAgent: "codex",
+        adjudicatorModelId: "correctness-model",
         uiPrototypeCheck: false,
         partitionCheck: false,
         maxContextChars: 600_000,
@@ -1943,6 +1971,66 @@ describe("runInnerLoop context terminals (#158)", () => {
     });
     expect(sandbox.run).not.toHaveBeenCalled();
     expect(innerLoopMocks.buildPartitionCheckPrompt).not.toHaveBeenCalled();
+  });
+
+  it("emits the correctness round continued after a quality overrule", async () => {
+    const { sandbox, opts, events } = harness(async (options) => {
+      const name = options.name ?? "";
+      if (name === "implementer-158-attempt-1") return completeRun;
+      if (name === "implementer-158-attempt-2") {
+        return { ...completeRun, commits: [] };
+      }
+      if (name === "implementer-158-attempt-3") {
+        return {
+          ...completeRun,
+          stdout: "<promise>NEEDS-INFO</promise><questions>stop</questions>",
+          commits: [],
+        };
+      }
+      if (name.endsWith("-quality")) {
+        return {
+          ...approvedReview,
+          stdout: "quality finding\n<verdict>CHANGES-REQUESTED</verdict>",
+        };
+      }
+      if (name.startsWith("adjudicator-")) {
+        return {
+          ...approvedReview,
+          stdout: "false finding\n<ruling>OVERRULED</ruling>",
+        };
+      }
+      if (name.endsWith("-correctness")) {
+        return {
+          ...approvedReview,
+          stdout: "correctness finding\n<verdict>CHANGES-REQUESTED</verdict>",
+        };
+      }
+      throw new Error(`unexpected agent invocation ${name}`);
+    });
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+      type: "NEEDS-INFO",
+      questions: "stop",
+    });
+    const rounds = events.filter(
+      (event): event is Extract<EventInput, { kind: "review-round" }> =>
+        event.kind === "review-round",
+    );
+    expect(rounds).toHaveLength(2);
+    expect(rounds[1]).toMatchObject({
+      attempt: 2,
+      round: 1,
+      head: "head123",
+      gateOk: true,
+      quality: "APPROVED",
+      correctness: "CHANGES-REQUESTED",
+      rejectingPass: "correctness",
+      qualityFailures: 0,
+      correctnessFailures: 1,
+    });
+    expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toContain(
+      "reviewer-158-round-1-correctness",
+    );
   });
 
   it("admits a resumed branch at budget and skips the partition classifier", async () => {

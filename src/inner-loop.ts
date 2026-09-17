@@ -162,6 +162,7 @@ import {
   type LoopAction,
   type LoopEvent,
   type LoopState,
+  type ReviewRoundObservation,
   type ReviewerResult,
   type Verdict,
   decideAfterTerminal,
@@ -514,11 +515,13 @@ class PartitionRequiredError extends Error {
     size: number,
     budget: number,
     detail: string,
+    cause: Extract<Verdict, { readonly type: "NEEDS-PARTITION" }>["cause"] =
+      "provider-refused",
   ) {
     super(detail);
     this.verdict = {
       type: "NEEDS-PARTITION",
-      cause: "provider-refused",
+      cause,
       slot,
       size,
       budget,
@@ -1204,18 +1207,36 @@ async function runSandboxCycle(
       const r = step(state, event);
       state = r.state;
       action = r.action;
-      if (event.kind === "gate-and-reviewer-result" && event.reviewRound) {
-        if (executedAction.kind !== "run-gate-and-reviewer") {
-          throw new Error("review-round metadata came from a non-review action");
+      if (
+        (event.kind === "gate-and-reviewer-result" && event.reviewRound) ||
+        (event.kind === "adjudicator-result" && event.reviewRound)
+      ) {
+        let reviewAttempt: number;
+        let reviewRound: number;
+        let gateOk: boolean;
+        if (event.kind === "gate-and-reviewer-result") {
+          if (executedAction.kind !== "run-gate-and-reviewer") {
+            throw new Error("review-round metadata came from a non-review action");
+          }
+          reviewAttempt = executedAction.attempt;
+          reviewRound = executedAction.reviewRound;
+          gateOk = event.gate.ok;
+        } else {
+          if (executedAction.kind !== "run-adjudicator") {
+            throw new Error("continued review metadata came from a non-adjudicator action");
+          }
+          reviewAttempt = executedAction.attempt;
+          reviewRound = executedAction.reviewRound;
+          gateOk = true;
         }
         await opts.onEvent({
           kind: "review-round",
           issue: Number(issue.id),
           title: issue.title,
-          attempt: executedAction.attempt,
-          round: executedAction.reviewRound,
+          attempt: reviewAttempt,
+          round: reviewRound,
           ...event.reviewRound,
-          gateOk: event.gate.ok,
+          gateOk,
           rejectingPass: event.reviewRound.rejectingPass,
           qualityFailures: state.qualityFailures,
           gateFailures: state.gateFailures,
@@ -2290,6 +2311,7 @@ export async function runAdjudicator(
       measuredContextChars,
       config.maxContextChars,
       "The rejected report and branch exceed the configured context budget before adjudication.",
+      "measured",
     );
   }
   const timer = startTimer();
@@ -2303,6 +2325,7 @@ export async function runAdjudicator(
     output: string,
   ): Promise<Extract<LoopEvent, { kind: "adjudicator-result" }>> => {
     let correctness: ReviewerResult | null = null;
+    let reviewRound: ReviewRoundObservation | null = null;
     if (ruling === "OVERRULED") {
       recordOverruledPass(
         ctx.priorReviewRounds,
@@ -2334,6 +2357,7 @@ export async function runAdjudicator(
         { skipQuality: true },
       );
       correctness = continued.event;
+      reviewRound = continued.round;
       if (continued.historyEntry?.correctness !== undefined) {
         const index = ctx.priorReviewRounds.findIndex(
           (entry) => entry.round === action.reviewRound && entry.head === rejection.head,
@@ -2355,6 +2379,7 @@ export async function runAdjudicator(
       ruling,
       reasoning: stripAdjudicationRulingTokens(output).trim(),
       correctness,
+      reviewRound,
     };
   };
   for (let invocation = 1; invocation <= REVIEWER_MAX_INVOCATIONS; invocation += 1) {
@@ -2499,14 +2524,7 @@ export async function runReviewer(
   readonly event: ReviewerResult;
   readonly historyEntry: PriorReviewRound | null;
   readonly specGap: string | null;
-  readonly round: {
-    readonly head: string;
-    readonly qualityMode: "list" | "verify";
-    readonly quality: FinishedReviewRoundDecision["quality"];
-    readonly correctness: FinishedReviewRoundDecision["correctness"];
-    readonly rejectingPass: "quality" | "correctness" | null;
-    readonly durationMs: number;
-  } | null;
+  readonly round: ReviewRoundObservation | null;
 }> {
   const { issue, sandbox, opts, config } = ctx;
   const head = ctx.accumulated.at(-1)?.sha;

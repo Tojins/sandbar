@@ -224,7 +224,7 @@ export default {
 
 `splitRoleRouting` recognizes `SANDBAR_<ROLE>_AGENT`,
 `SANDBAR_<ROLE>_MODEL_ID`, and `SANDBAR_<ROLE>_EFFORT` for `IMPLEMENTER`,
-`UI_CHECK`, `REVIEWER`, `REVIEWER_QUALITY`, and `MERGER`. An absent or empty
+`UI_CHECK`, `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, and `MERGER`. An absent or empty
 value keeps the committed field. The helper removes all eighteen reserved keys
 from `env`, so they never enter a sandbox; `resolveConfig` still performs the
 ordinary provider, model-pairing, and effort validation on the merged object.

@@ -91,6 +91,15 @@ export type ReviewerFeedback = {
   readonly prose: string;
 };
 
+export type ReviewRoundObservation = {
+  readonly head: string;
+  readonly qualityMode: "list" | "verify";
+  readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED";
+  readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
+  readonly rejectingPass: "quality" | "correctness" | null;
+  readonly durationMs: number;
+};
+
 export type LoopPhase =
   | "needs-partition-check"
   | "needs-ui-check"
@@ -333,14 +342,7 @@ export type LoopEvent =
       // Observation produced beside the machine decision. The runner emits it
       // only after this event has been applied once, using the returned state
       // for the three post-round budgets (#132/#143).
-      readonly reviewRound?: {
-        readonly head: string;
-        readonly qualityMode: "list" | "verify";
-        readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED";
-        readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
-        readonly rejectingPass: "quality" | "correctness" | null;
-        readonly durationMs: number;
-      };
+      readonly reviewRound?: ReviewRoundObservation;
     }
   | {
       readonly kind: "adjudicator-result";
@@ -349,6 +351,10 @@ export type LoopEvent =
       readonly ruling: "UPHELD" | "OVERRULED";
       readonly reasoning: string;
       readonly correctness: ReviewerResult | null;
+      // A quality overrule can continue the original round through correctness.
+      // Preserve that pass's observation so the runner emits the same durable
+      // review-round record as an ordinary reviewer action.
+      readonly reviewRound: ReviewRoundObservation | null;
     }
   | { readonly kind: "adjudicator-wrote"; readonly detail: string }
   | { readonly kind: "adjudicator-harness-failed"; readonly detail: string };
@@ -1141,7 +1147,7 @@ function adjudicationNotice(
     state.upheldAdjudication?.key !== rejectionKey(rejection)
   ) return prose;
   return [
-    "This head/pass rejection was independently upheld by the adjudicator.",
+    "Independent adjudicator: UPHELD",
     state.upheldAdjudication.reasoning,
     "",
     prose,
@@ -1181,18 +1187,22 @@ function onAdjudicatorResult(
     rejectionKey(rejection),
   ];
   if (event.ruling === "UPHELD") {
+    const upheldAdjudication = {
+      key: rejectionKey(rejection),
+      reasoning: event.reasoning.trim(),
+    };
+    const upheldState: LoopState = {
+      ...state,
+      adjudicatedRejections,
+      upheldAdjudication,
+    };
     const feedback: ReviewerFeedback = {
       disposition: "CHANGES-REQUESTED",
-      prose: `Independent adjudicator: UPHELD\n\n${event.reasoning.trim()}`,
+      prose: adjudicationNotice(upheldState, rejection, rejection.report),
     };
     return advanceAttempt(
       {
-        ...state,
-        adjudicatedRejections,
-        upheldAdjudication: {
-          key: rejectionKey(rejection),
-          reasoning: event.reasoning.trim(),
-        },
+        ...upheldState,
         latestReviewerFeedback: feedback,
       },
       {

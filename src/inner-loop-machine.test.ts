@@ -110,6 +110,7 @@ describe("unchanged rejection adjudication (#167)", () => {
       ruling: "OVERRULED",
       reasoning: "the cited call has five arguments",
       correctness: approved(),
+      reviewRound: null,
     });
     expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
     expect(ruled.state.qualityFailures).toBe(0);
@@ -128,6 +129,7 @@ describe("unchanged rejection adjudication (#167)", () => {
       ruling: "OVERRULED",
       reasoning: "false quality report",
       correctness: changes("real correctness finding"),
+      reviewRound: null,
     });
     expect(ruled.action.kind).toBe("run-implementer");
     expect(ruled.state.qualityFailures).toBe(0);
@@ -152,6 +154,7 @@ describe("unchanged rejection adjudication (#167)", () => {
       ruling: "OVERRULED",
       reasoning: "false quality report",
       correctness: changes("false correctness report"),
+      reviewRound: null,
     });
     expect(correctnessRejected.state.pendingRejection).toMatchObject({
       round: 1,
@@ -175,6 +178,7 @@ describe("unchanged rejection adjudication (#167)", () => {
       ruling: "OVERRULED",
       reasoning: "false correctness report",
       correctness: null,
+      reviewRound: null,
     });
     expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
   });
@@ -192,6 +196,7 @@ describe("unchanged rejection adjudication (#167)", () => {
       ruling: "OVERRULED",
       reasoning: "false correctness report",
       correctness: null,
+      reviewRound: null,
     });
     expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
     expect(ruled.state.correctnessFailures).toBe(0);
@@ -210,6 +215,7 @@ describe("unchanged rejection adjudication (#167)", () => {
       ruling: "UPHELD",
       reasoning: "the test is genuinely missing",
       correctness: null,
+      reviewRound: null,
     });
     const repeated = step(
       upheld.state,
@@ -218,6 +224,10 @@ describe("unchanged rejection adjudication (#167)", () => {
     expect(repeated.action.kind).toBe("run-gate-and-reviewer");
     if (upheld.action.kind !== "run-implementer") throw new Error("expected implementer");
     expect(upheld.action.latestReviewerFeedback?.prose).toContain("UPHELD");
+    expect(upheld.action.latestReviewerFeedback?.prose).toContain(
+      "the test is genuinely missing",
+    );
+    expect(upheld.action.latestReviewerFeedback?.prose).toContain("finding");
   });
 
   it("parks immediately if the read-only adjudicator writes", () => {
