@@ -96,10 +96,10 @@ export default {
     reviewerQuality: { path: "CODING_STANDARDS.md" },
   },
 
-  // deploy.yml trusts main blindly and tests.yml ignores it, so a direct push
-  // would deploy a sha no CI run ever saw. "gate" is the job name in
-  // .github/workflows/tests.yml.
-  mergeMode: { kind: "verified", requiredChecks: ["gate"] },
+  // gate-2 on the composed sha is the only gate on a landing, by decision:
+  // Tojins/outdoor#316 deleted tests.yml, so there is no "gate" check to
+  // require and verified mode would halt every cycle on `no-checks`.
+  mergeMode: { kind: "direct" },
 
   // Merging main deploys to prod, so nothing lands unreviewed unless the issue
   // opts in with the `auto-land` label. The repo carries the `auto-land`,
