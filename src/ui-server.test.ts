@@ -342,6 +342,49 @@ describe("run UI server", () => {
       .resolves.toMatchObject({ run: { driver: "sandbar test" } });
   });
 
+  it("loads historical chunk landings and keeps the newest record per PR", async () => {
+    const live = await runTree(false);
+    const currentPath = join(live.runDir, "events.jsonl");
+    const current = await readFile(currentPath, "utf8");
+    await writeFile(currentPath, current + `${JSON.stringify({
+      kind: "landed", outcome: "chunk-on-source", branch: "sandbar/chunk-305-new",
+      target: "main", pullRequest: 305, title: "New PR 305", members: [305],
+      reason: null, durationMs: 30_000, seq: 2, ts: "2026-09-07T10:05:00.000Z",
+    })}\n`);
+
+    const older = join(live.logsDir, "run-2026-09-06T10-00-00-000Z");
+    await mkdir(older);
+    await writeFile(join(older, "events.jsonl"), [
+      {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar old",
+        configPath: null, workdir: "/old", maxParallelIssues: 1, pid: 999_999,
+        seq: 1, ts: "2026-09-06T10:00:00.000Z",
+      },
+      {
+        kind: "landed", outcome: "chunk-on-source", branch: "sandbar/chunk-304-old",
+        target: "main", pullRequest: 304, title: "PR 304", members: [299],
+        reason: null, durationMs: 60_000, seq: 2, ts: "2026-09-06T10:04:00.000Z",
+      },
+      {
+        kind: "landed", outcome: "chunk-on-source", branch: "sandbar/chunk-305-old",
+        target: "main", pullRequest: 305, title: "Old PR 305", members: [300],
+        reason: null, durationMs: 90_000, seq: 3, ts: "2026-09-06T10:03:00.000Z",
+      },
+    ].map((event) => JSON.stringify(event)).join("\n") + "\n");
+
+    const state = await readUiState(live.logsDir, { liveRunDir: live.runDir });
+    expect(state.landedChunks).toEqual([
+      {
+        pullRequest: 305, title: "New PR 305", members: [305], target: "main",
+        ms: 30_000, at: "2026-09-07T10:05:00.000Z",
+      },
+      {
+        pullRequest: 304, title: "PR 304", members: [299], target: "main",
+        ms: 60_000, at: "2026-09-06T10:04:00.000Z",
+      },
+    ]);
+  });
+
   it("serves the page and reduced state from the same event file", async () => {
     const tree = await runTree(false);
     const server = await startUiServer({
