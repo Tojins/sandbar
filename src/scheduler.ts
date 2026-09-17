@@ -46,8 +46,10 @@
 //   5. admit    — a free slot and something to put in it: a retry first, then
 //      a candidate. Refill BEFORE landing, so a slot does
 //      not idle through gate-2; `next` says which of `land`/`wait` follows.
-//   6. land     — terminals are pending, or a human's `land` request is the
-//      only work and nothing is running to grow the chunk under it.
+//   6. land     — terminals are pending, or a human has made a non-deferred
+//      `land` request. Chunk-specific growth is already excluded before the
+//      snapshot reaches this decision; unrelated running work is not a reason
+//      to starve a safe request (#168).
 //   7. wait     — wait on one cancellable race between a freed slot and the
 //      poll timer. This is also the empty-plan action: the daemon stays alive.
 //
@@ -179,13 +181,14 @@ export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction
     state.hasCapacity &&
     (state.hasRetries || state.hasCandidates)
   ) {
-    return { kind: "admit", next: state.hasPendingTerminals ? "land" : "wait" };
+    return {
+      kind: "admit",
+      next: state.hasPendingTerminals || state.hasLandRequests ? "land" : "wait",
+    };
   }
-  if (state.hasPendingTerminals || (state.hasLandRequests && state.active === 0)) {
+  if (state.hasPendingTerminals || state.hasLandRequests) {
     return { kind: "land" };
   }
-  if (state.active > 0) return { kind: "wait" };
-  if (state.hasLandRequests) return { kind: "land" };
   return { kind: "wait" };
 }
 

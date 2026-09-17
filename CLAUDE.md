@@ -190,8 +190,10 @@ The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
 Provider closure by quota or a permanent credential refusal stops admissions
 and drains running and landing work before exit 4. Six consecutive issue
 terminals without a landing stop admissions and drain
-running work before exit 2. An unchanged `land` deferral waits for another
-trigger and advances no counter. A `restart-requested` file in the
+running work before exit 2. An unrelated running issue does not hold a
+non-deferred `land` request: the request starts a landing at that recompute
+(#168). An unchanged chunk-specific `land` deferral waits for another trigger
+and advances no counter. A `restart-requested` file in the
 installation directory (#146) drains exactly the same way and exits 75, the one
 code an installation unit turns back into a start: the converging deploy writes
 it, the daemon reads it at the top of every recompute — ahead of the poll, so a
