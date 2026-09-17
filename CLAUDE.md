@@ -460,14 +460,14 @@ outcomes.
   repo's installation reads the dedicated `sandbar` Linux user's own
   `~/.codex/auth.json`, so the operator's ordinary TUI never shares that family.
   `src/codex-auth.ts`.
-- **A role names its CLI as well as its model (#19, #72, #74, #121, #126).**
+- **A role names its CLI as well as its model (#19, #72, #74, #121, #126, #167).**
   `implementerAgent` / `reviewerAgent` / `mergerAgent`, all defaulting to
   `claude`, plus `uiCheckAgent` defaulting to `implementerAgent` and
-  `reviewerQualityAgent` defaulting to `reviewerAgent`, beside
+  `reviewerQualityAgent` and `adjudicatorAgent` defaulting to `reviewerAgent`, beside
   model ids that are per call: the reviewer's two passes are independently
-  routed since nothing resumes a session between them, and
-  `assertRoleModelIdNamed` therefore runs per PASS against that pass's own
-  provider. The tiering knob and
+  routed since nothing resumes a session between them, while adjudication is a
+  third cold route. `assertRoleModelIdNamed` therefore runs against each
+  route's own provider. The tiering knob and
   the vendor knob are independent, and
   every provider takes whatever id its role's field holds — which is why a role
   routed off claude must NAME its model (`assertRoleModelIdNamed`), the default
@@ -549,9 +549,11 @@ outcomes.
   only), then `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`. The gap records
   the unanswered specification question and the answer the reviewer applied;
   it is posted at finalise and never feeds a loop decision (#108).
+  Adjudicator: `<ruling>UPHELD|OVERRULED</ruling>` after its reasoning.
   A run without a verdict token is a reviewer harness failure, never a
-  fabricated CHANGES-REQUESTED (#41, #83). A token is one of those LITERAL
-  strings and nothing else (#113): a tag quoted in prose, an unclosed opener,
+  fabricated CHANGES-REQUESTED (#41, #83); a run without a ruling is the same
+  class of harness failure (#167). A token is one of those LITERAL strings and
+  nothing else (#113): a tag quoted in prose, an unclosed opener,
   a mis-cased or empty tag are prose, the last well-formed token wins, and
   the free-text blocks (`<questions>`, `<reason>`) cannot be swallowed by a
   quoted opener. `src/token-scan.ts` is the one spelling of both scans and
