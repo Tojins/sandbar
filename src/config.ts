@@ -2168,13 +2168,13 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     modelField: "reviewerQualityModelId",
   });
   assertRoleModelIdNamed(
-    "reviewer",
+    "adjudicator",
     adjudicatorAgent,
     config.adjudicatorModelId ?? config.reviewerModelId,
     {
-    agentField:
-      config.adjudicatorAgent === undefined ? "reviewerAgent" : "adjudicatorAgent",
-    modelField: "adjudicatorModelId",
+      agentField:
+        config.adjudicatorAgent === undefined ? "reviewerAgent" : "adjudicatorAgent",
+      modelField: "adjudicatorModelId",
     },
   );
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
