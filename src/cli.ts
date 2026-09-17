@@ -14,8 +14,8 @@
 // second installation. The hook belongs here, rather than in `index.ts`,
 // because `run(config)` receives an object that its library caller has already
 // imported; changing that caller's module resolution would be an unrelated
-// global side effect. All three bin modes use `loadConfig`, so run, gate and ui
-// share the same hook.
+// global side effect. All four bin modes use `loadConfig`, so run, gate, ui and
+// pulled-images share the same hook.
 //
 // The four constraints, written down so they are decisions and not drift:
 //   - EXACTLY ONE flag that carries configuration: `--config`. Every flag that
@@ -45,6 +45,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveConfig, type RunConfig } from "./config.js";
 import { onCleanup, installCleanupTraps } from "./cleanup.js";
 import { SandbarError, faultDetail, isErrno } from "./errors.js";
+import { pulledImagesOf } from "./ensure-images.js";
 import { GATE_EXIT_NO_VERDICT, runGateCommand } from "./gate-run.js";
 import { run } from "./run.js";
 import { repoLayout } from "./repo-cache.js";
@@ -62,14 +63,21 @@ register(
 
 const DEFAULT_CONFIG_FILE = "sandbar.config.mjs";
 
-// The two subcommands are kept as literals: a registry would hide the small,
+// The subcommands are kept as literals: a registry would hide the small,
 // intentionally distinct argument contracts without buying extensibility.
 const GATE_SUBCOMMAND = "gate";
 const UI_SUBCOMMAND = "ui";
+// A run refuses to pull what the gate stack references and config.images does
+// not build (#24 D7), so whoever hosts the daemon has to pull it — and since
+// the config is a program, only the driver can say which images those are.
+// This prints them, one per line, for a host's provisioning to pull; the
+// deployment role in deploy/ansible is that host here.
+const PULLED_IMAGES_SUBCOMMAND = "pulled-images";
 
 const USAGE = `Usage: sandbar [--config <path>]
        sandbar gate [--config <path>] [--worktree <path>] [--keep]
        sandbar ui [--config <path>] [--port <n>]
+       sandbar pulled-images [--config <path>]
 
   --config <path>   Config file to load. Default: ./${DEFAULT_CONFIG_FILE}
                     (resolved against the current directory). The file is an
@@ -83,7 +91,9 @@ record for post-mortem browsing; \`--port\` overrides uiPort for this standalone
 host only. \`sandbar gate\` runs config.gateStack
 against one worktree and nothing else — no tracker, no agents, no lock — and
 exits 0 green, 1 red, 2 if it could not reach a verdict. It is what a laptop and
-a CI job run, so the gate has one implementation.
+a CI job run, so the gate has one implementation. \`sandbar pulled-images\`
+prints, one per line, the images config.gateStack runs that config.images does
+not build — the ones a run refuses to start without and never pulls itself.
 
   --worktree <path> The tree to gate. Default: the current directory.
   --keep            Leave the stack up afterwards, to inspect a red gate. The
@@ -95,6 +105,7 @@ Everything else is configured in that file — see the RunConfig type.`;
 export type ParsedArgs =
   | { readonly kind: "run"; readonly configPath: string }
   | { readonly kind: "ui"; readonly configPath: string; readonly port: number | null }
+  | { readonly kind: "pulled-images"; readonly configPath: string }
   | {
       readonly kind: "gate";
       readonly configPath: string;
@@ -116,7 +127,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   // meant to spot-check.
   const isGate = argv[0] === GATE_SUBCOMMAND;
   const isUi = argv[0] === UI_SUBCOMMAND;
-  const rest = isGate || isUi ? argv.slice(1) : argv;
+  const isPulledImages = argv[0] === PULLED_IMAGES_SUBCOMMAND;
+  const rest = isGate || isUi || isPulledImages ? argv.slice(1) : argv;
 
   let configPath: string | null = null;
   let worktree: string | null = null;
@@ -194,6 +206,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   }
   const resolvedConfigPath = configPath ?? DEFAULT_CONFIG_FILE;
   if (isUi) return { kind: "ui", configPath: resolvedConfigPath, port };
+  if (isPulledImages) return { kind: "pulled-images", configPath: resolvedConfigPath };
   return isGate
     ? {
         kind: "gate",
@@ -266,6 +279,13 @@ export async function main(
   // reasonably mean by a relative path — and the last place process.cwd() is
   // allowed to decide anything. From here on `cwd` is the config's directory.
   const configPath = resolve(invocationCwd, parsed.configPath);
+  if (parsed.kind === "pulled-images") {
+    const config = resolveConfig(
+      withDefaultCwd(await loadConfig(configPath), configPath),
+    );
+    for (const image of pulledImagesOf(config)) console.log(image);
+    return 0;
+  }
   if (parsed.kind === "ui") {
     const config = resolveConfig(
       withDefaultCwd(await loadConfig(configPath), configPath),

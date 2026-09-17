@@ -120,6 +120,16 @@ the commit, the time and the result, and the Caddy index page at `/` renders it
 beside the installation links. A box stuck on an old commit therefore says so;
 a stale timestamp means the timer itself stopped.
 
+Every play also pulls the images each installation's gate stack runs but its
+config does not build — the images a run refuses to start without and never
+pulls itself (#24 D7). The list is the driver's `sandbar pulled-images` over the
+installation config, because the config is a program that may read its gate
+stack from the consumer clone; only images podman lacks are pulled. The pull
+channel is `--only-if-changed` on THIS repository, so an image a consumer commit
+adds is pulled at the next sandbar landing, or by running the play by hand;
+until then the daemon's next start refuses at preflight and names the
+`podman pull` line.
+
 The UI unit runs the same driver's `ui` command on the entry's `reader_port`,
 and it is the one thing the play does restart: a reader aborts no work by being
 restarted, systemd's automatic restart of the daemon does not propagate to it,

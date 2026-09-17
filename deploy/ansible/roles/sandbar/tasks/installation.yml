@@ -48,6 +48,51 @@
     group: "{{ sandbar_user }}"
     mode: "0644"
 
+# A run refuses to start while an image its gate stack references and its
+# config does not build is missing, and never pulls one itself (#24 D7). So the
+# host pulls them here. The list comes from the driver, not from this role: the
+# config is a program that may compute its gate stack from the clone updated
+# above, and the driver is already the build this installation will run.
+- name: List the gate images this installation's config needs pulled
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/node
+      - "{{ sandbar_driver_current }}/dist/cli.js"
+      - pulled-images
+      - --config
+      - "{{ sandbar_installation_dir }}/sandbar.config.mjs"
+    chdir: "{{ sandbar_checkout }}"
+  become: true
+  become_user: "{{ sandbar_user }}"
+  register: sandbar_pulled_images
+  changed_when: false
+
+- name: Ask podman which of those images it already has
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ item }}"]
+    chdir: "{{ sandbar_home }}"
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_uid.stdout }}"
+  loop: "{{ sandbar_pulled_images.stdout_lines }}"
+  register: sandbar_pulled_image_presence
+  changed_when: false
+  failed_when: sandbar_pulled_image_presence.rc not in [0, 1]
+
+- name: Pull the gate images podman lacks
+  ansible.builtin.command:
+    argv: [podman, pull, "{{ item.item }}"]
+    chdir: "{{ sandbar_home }}"
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_uid.stdout }}"
+  loop: "{{ sandbar_pulled_image_presence.results | selectattr('rc', 'equalto', 1) | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+
 - name: Install the daemon unit
   ansible.builtin.include_tasks: service.yml
 

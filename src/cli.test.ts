@@ -176,6 +176,28 @@ describe("parseArgs: the ui subcommand", () => {
   });
 });
 
+describe("parseArgs: the pulled-images subcommand", () => {
+  it("uses the same config-path contract as a run", () => {
+    expect(parseArgs(["pulled-images"])).toEqual({
+      kind: "pulled-images",
+      configPath: "sandbar.config.mjs",
+    });
+    expect(parseArgs(["pulled-images", "--config=other.mjs"])).toEqual({
+      kind: "pulled-images",
+      configPath: "other.mjs",
+    });
+  });
+
+  it("refuses the other subcommands' flags and a stray positional", () => {
+    expect(() => parseArgs(["pulled-images", "--keep"])).toThrow(/sandbar gate/);
+    expect(() => parseArgs(["pulled-images", "--port=7332"])).toThrow(/sandbar ui --port/);
+    expect(() => parseArgs(["pulled-images", "extra"])).toThrow(/Unrecognised argument/);
+    expect(() => parseArgs(["--config", "x.mjs", "pulled-images"])).toThrow(
+      /Unrecognised argument 'pulled-images'/,
+    );
+  });
+});
+
 // The bin's headline behaviour. A test that runs from the directory it points
 // at cannot see this — `process.cwd()` and `dirname(configPath)` coincide and
 // it passes with the default deleted — so every case here names a config path

@@ -36,9 +36,10 @@ run, check `ps -ef | grep [f]orks.js` for leftovers.
 `sandbar` is a **library with a thin bin** (#38): `run(config)` is
 the contract (`src/index.ts`), and `src/cli.ts` resolves `--config` (default
 `./sandbar.config.mjs`) and hands the default export to `run()`. The bin also
-dispatches two subcommands: `sandbar gate` → `runGateCommand` (#45), exported
-from the package root beside `run`, and `sandbar ui` (#132), the standalone
-host of the run UI for post-mortem browsing.
+dispatches three subcommands: `sandbar gate` → `runGateCommand` (#45), exported
+from the package root beside `run`; `sandbar ui` (#132), the standalone
+host of the run UI for post-mortem browsing; and `sandbar pulled-images`, the
+images a host must pull because a run refuses to (the deploy role consumes it).
 
 An installation supplies `sandbar.config.mjs`, credentials and a driver outside
 its consumer repository — an exact-tag install for an `npm i -D sandbar`

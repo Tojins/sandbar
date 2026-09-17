@@ -561,6 +561,27 @@ describe("multi-installation role orchestration", () => {
     expect(exclude).toContain('line: "/{{ sandbar_work_dir }}/"');
   });
 
+  it("pulls the gate images the driver says the installation config does not build", () => {
+    const list = taskNamed(installationTasks, "List the gate images this installation's config needs pulled");
+    expect(list).toContain('- "{{ sandbar_driver_current }}/dist/cli.js"');
+    expect(list).toContain("- pulled-images");
+    expect(list).toContain('- "{{ sandbar_installation_dir }}/sandbar.config.mjs"');
+    expect(list).toContain('become_user: "{{ sandbar_user }}"');
+    const presence = taskNamed(installationTasks, "Ask podman which of those images it already has");
+    expect(presence).toContain('loop: "{{ sandbar_pulled_images.stdout_lines }}"');
+    expect(presence).toContain("failed_when: sandbar_pulled_image_presence.rc not in [0, 1]");
+    const pull = taskNamed(installationTasks, "Pull the gate images podman lacks");
+    expect(pull).toContain('argv: [podman, pull, "{{ item.item }}"]');
+    expect(pull).toContain("selectattr('rc', 'equalto', 1)");
+    expect(pull).toContain('become_user: "{{ sandbar_user }}"');
+    // After the clone a config may read its gate stack from, and before the
+    // restart request whose daemon would otherwise refuse at preflight.
+    expect(installationTasks.indexOf("- name: Clone the consumer repository"))
+      .toBeLessThan(installationTasks.indexOf("- name: List the gate images"));
+    expect(installationTasks.indexOf("- name: Pull the gate images podman lacks"))
+      .toBeLessThan(installationTasks.indexOf("- name: Ask the daemon to restart"));
+  });
+
   it("validates isolation-critical installation fields before host tasks", () => {
     const host = taskNamed(mainTasks, "Refuse to run without the host variables the role cannot default");
     expect(host).toContain("sandbar_installations is sequence");
