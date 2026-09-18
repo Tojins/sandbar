@@ -641,8 +641,8 @@ describe("buildArgv", () => {
       { scope, root: "/worktree" },
     )).toEqual([
       "build", "-t", "t",
-      "--label", label,
-      "--layer-label", label,
+      `--label=${label}`,
+      `--layer-label=${label}`,
       "-f", "/worktree/Containerfile", "/worktree",
     ]);
   });
@@ -693,6 +693,19 @@ describe("buildArgv", () => {
     });
     expect(args).toEqual(["build", "-t", "t", "-"]);
     expect(args).not.toContain("-f");
+  });
+
+  it("hands a generated directory context to the Podman client", () => {
+    const scope = runScope("/generated-context");
+    expect(buildArgv(
+      { tag: "t", containerfile: "<generated>" },
+      { scope, root: "", contextRoot: "/tmp/context" },
+    )).toEqual([
+      "build", "-t", "t",
+      `--label=${imageScopeLabel(scope)}`,
+      `--layer-label=${imageScopeLabel(scope)}`,
+      "-f", "/tmp/context/Containerfile", "/tmp/context",
+    ]);
   });
 
   it("passes buildArgs through verbatim — sandbar injects no magic ARG name", () => {

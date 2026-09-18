@@ -23,7 +23,6 @@ import {
   formatImageRecord,
 } from "./ensure-images.js";
 import {
-  isToolsImageTagIn,
   runScope,
   toolsImageTag,
   variantImageTag,
@@ -309,6 +308,11 @@ describe("run-owned agent images", () => {
 
   it("retries a tools build after a transient failure", async () => {
     const scope = runScope("/tools-retry");
+    const glibcToolsTag = toolsImageTag(
+      scope,
+      "glibc",
+      agentToolsFingerprint(["claude"], "glibc"),
+    );
     let toolsAttempts = 0;
     const images = await createAgentImages({
       declaredBaseTag: "base",
@@ -316,7 +320,7 @@ describe("run-owned agent images", () => {
       scope,
       detectLibc: async (base) => base === "base" ? "glibc" : "musl",
       inputsLabel: async (tag) =>
-        isToolsImageTagIn(scope, tag) && tag.includes("-glibc-")
+        tag === glibcToolsTag
           ? agentToolsFingerprint(["claude"], "glibc")
           : null,
       build: async (image) => {

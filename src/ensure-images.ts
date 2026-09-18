@@ -237,13 +237,14 @@ export type BuildOptions = {
   readonly capture?: boolean;
   // Deadline for the whole build. Defaults to DEFAULT_BUILD_TIMEOUT_MS.
   readonly timeoutMs?: number;
-  // A generated tar build context. The directory is streamed through host tar
-  // to `podman build -`, so COPY instructions can use it.
+  // A generated build context containing `Containerfile`. Podman's client
+  // transfers the directory to a remote service when necessary, so COPY works
+  // without requiring the service host to see this path.
   readonly contextRoot?: string;
 };
 
 function buildUsesStdin(image: BuiltImage, opts?: BuildOptions): boolean {
-  return image.stdinContext === true || opts?.contextRoot !== undefined;
+  return image.stdinContext === true;
 }
 
 // The `podman build` argv for one entry. Pure so the stdin-context, build-arg
@@ -252,7 +253,8 @@ export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
   const args = ["build", "-t", image.tag];
   if (opts?.scope !== undefined) {
     const label = imageScopeLabel(opts.scope);
-    args.push("--label", label, "--layer-label", label);
+    args.push(`--label=${label}`);
+    args.push(`--layer-label=${label}`);
   }
   if (image.target !== undefined) args.push("--target", image.target);
   for (const [k, v] of Object.entries(image.buildArgs ?? {})) {
@@ -261,10 +263,11 @@ export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
   if (opts?.fingerprint) {
     args.push("--label", `${IMAGE_INPUTS_LABEL}=${opts.fingerprint}`);
   }
-  if (buildUsesStdin(image, opts)) {
-    // Stdin is either the Containerfile alone or a generated tar context. `-f`
-    // would be redundant and podman rejects it alongside the `-` context.
+  if (image.stdinContext) {
+    // Stdin is the Containerfile alone, with no build context.
     args.push("-");
+  } else if (opts?.contextRoot !== undefined) {
+    args.push("-f", join(opts.contextRoot, "Containerfile"), opts.contextRoot);
   } else {
     const containerfile = containerfilePath(image, opts?.root ?? "");
     const context = effectiveImageBuildContext(image);
@@ -305,12 +308,6 @@ export async function buildImage(
   let output = "";
   let timedOut = false;
   await new Promise<void>((resolve, reject) => {
-    let tar: ChildProcess | undefined;
-    // A generated context has its own stderr stream. `podman` can exit as soon
-    // as that producer fails, before Node has delivered the producer's final
-    // stderr chunk, so a failing build must not snapshot `output` until the tar
-    // process and its stdio have closed.
-    let contextStreamClosed = Promise.resolve();
     const child = spawn(RUNTIME, args, {
       stdio: [
         buildUsesStdin(image, opts) ? "pipe" : "ignore",
@@ -324,13 +321,12 @@ export async function buildImage(
     // bound that cannot fail.
     const timer = setTimeout(() => {
       timedOut = true;
-      tar?.kill("SIGKILL");
       child.kill("SIGKILL");
     }, timeoutMs);
     // Tracked for the run's cleanup, because a signal during a build would
     // otherwise leave `podman build` running detached: it finishes minutes
-    // after sandbar exited and applies a tag `builtTags()` never saw, so the
-    // startup sweep is the only thing that ever reclaims it.
+    // after sandbar exited and applies a tag `builtTags()` never saw; the next
+    // scope-label reconciliation still finds its image ID.
     const untrack = trackBuild(child);
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -341,7 +337,6 @@ export async function buildImage(
       output = appendTail(output, c);
     });
     child.on("error", (err) => {
-      tar?.kill("SIGKILL");
       untrack();
       clearTimeout(timer);
       reject(err);
@@ -350,10 +345,8 @@ export async function buildImage(
     // events, which would make a captured ImageBuildError intermittently lose
     // the diagnosis at the end of the build.
     child.on("close", async (code) => {
-      tar?.kill("SIGKILL");
       untrack();
       clearTimeout(timer);
-      await contextStreamClosed;
       if (code === 0 && !timedOut) {
         resolve();
         return;
@@ -374,25 +367,7 @@ export async function buildImage(
         ),
       );
     });
-    if (opts.contextRoot !== undefined && child.stdin) {
-      tar = spawn("tar", ["-cf", "-", "-C", opts.contextRoot, "."], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      contextStreamClosed = new Promise((closed) => tar!.on("close", closed));
-      const untrackTar = trackBuild(tar);
-      tar.stderr?.on("data", (c: Buffer) => { output = appendTail(output, c.toString()); });
-      tar.on("error", (err) => {
-        untrackTar();
-        child.kill("SIGKILL");
-        reject(err);
-      });
-      tar.on("exit", (code) => {
-        untrackTar();
-        if (code !== 0 && !timedOut) child.kill("SIGKILL");
-      });
-      child.stdin.on("error", () => {});
-      tar.stdout?.pipe(child.stdin);
-    } else if (image.stdinContext && child.stdin) {
+    if (image.stdinContext && child.stdin) {
       const src = createReadStream(
         containerfilePath(image, opts.root),
       );
@@ -593,9 +568,8 @@ export type BranchImages = {
     worktreePath: string,
     only: ReadonlySet<string>,
   ) => Promise<ImageMap>;
-  // Every per-branch tag this run built, oldest first. Removed at the end of
-  // the run; the layers stay in podman's build cache, so the next run's rebuild
-  // of the same inputs is cache hits.
+  // Every per-branch tag this resolver built or reused, oldest first. This is
+  // the resolver's live set at quiescent image reconciliation boundaries.
   readonly builtTags: () => readonly string[];
 };
 

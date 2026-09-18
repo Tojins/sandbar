@@ -115,7 +115,10 @@
 // The origin lease renewal wraps that same wait and therefore precedes either
 // wake's effects. A separate heartbeat uses the same serialized renewal
 // operation so a long gate or forge wait cannot consume the lease between
-// scheduler wakes.
+// scheduler wakes. Every recompute also measures free space on Podman's
+// graphroot (#169). A low reading closes admission and drains; reconciliation
+// and the deciding remeasurement happen only once the pool is quiescent, so
+// image removal cannot race a live gate or sandbox build.
 
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
@@ -167,6 +170,13 @@ import {
 import { reconcileImages } from "./image-lifecycle.js";
 import { makeEnvReader } from "./env.js";
 import { startTimer } from "./timing.js";
+import {
+  type GraphRootSpace,
+  formatLowGraphRootSpace,
+  graphRootSpace,
+  graphRootSpaceIsLow,
+  podmanGraphRoot,
+} from "./disk-space.js";
 import { SandbarError, faultDetail } from "./errors.js";
 import {
   runStampFromDate,
@@ -181,6 +191,7 @@ import {
   credentialExit,
   quotaExit,
   restartExit,
+  storageExit,
   stuckExit,
 } from "./exit-conditions.js";
 import {
@@ -444,6 +455,7 @@ function schedulerExit(
     readonly pool: ContinuousPool<PlannedIssue, Terminal>;
     readonly providerExit: TerminalExit | null;
     readonly restartDetail: string | null;
+    readonly storage: GraphRootSpace | null;
   },
 ): TerminalExit {
   switch (reason) {
@@ -458,6 +470,15 @@ function schedulerExit(
         throw new Error("scheduler selected provider closure without an exit");
       }
       return state.providerExit;
+    }
+    case "storage-low": {
+      if (state.storage === null) {
+        throw new Error("scheduler selected a storage exit without a measurement");
+      }
+      return storageExit(
+        `${formatLowGraphRootSpace(state.storage)} after image reconciliation; ` +
+          "admissions were stopped and the pool drained",
+      );
     }
     case "stuck": return stuckExit(state.pool.noProgressSinceLanding);
   }
@@ -1035,10 +1056,12 @@ export async function run(
   //     invisible and unreapable. Only `realpathSync` closes that one.
   // acquireLock has already mkdirSync'd the directory, so this cannot ENOENT.
   const scope = runScope(realpathSync(lockPaths.workDir));
+  let graphRoot!: string;
 
-  // ALL THREE SWEEPS IN ONE `try`, because all three THROW on a failed LIST
-  // and none of them used to sit inside anything (#70). The throw is right at
-  // the other end — `containers.ts` and `ensure-images.ts` both argue that a
+  // THE STARTUP INVENTORY IN ONE `try`, because both reconcilers throw on a
+  // failed list and graphroot discovery is part of the same Podman snapshot.
+  // The throw is right at the other end — `containers.ts` and
+  // `image-lifecycle.ts` both argue that a
   // failed list is a blind sweep, which cannot know what it missed, so stopping
   // beats asserting "no debris" on no evidence — but the stop it produced
   // escaped `run()` to the bin, which is the exact shape this issue exists to
@@ -1048,10 +1071,11 @@ export async function run(
   // that went away between two podman calls — host state an operator can act
   // on, and now host state they can still read afterwards.
   //
-  // One `try` and one cause for the three: they are one step (take stock of
+  // One `try` and one cause: this is one step (take stock of
   // what a previous run left behind), they fail for one reason, and the
   // complaint recorded beside the cause names which podman call it was.
   try {
+    graphRoot = await podmanGraphRoot();
     const orphans = await cleanupOrphanContainers(scope);
     if (orphans.removed.length > 0) {
       await runRecord.emit({ kind: "sweep", scope: "startup", removed: orphans.removed, failures: [] });
@@ -1339,6 +1363,7 @@ export async function run(
     (issue) => issue.id,
   );
   let providerExitPending: TerminalExit | null = null;
+  let storageLow: GraphRootSpace | null = null;
   // What the observed request carried, and the whole of the drain's state.
   let restartRequested: string | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
@@ -1746,6 +1771,7 @@ export async function run(
                 pool,
                 providerExit: providerExitPending ?? closedProviderExit(config, providerState),
                 restartDetail: restartRequested,
+                storage: storageLow,
               }),
             );
             break;
@@ -1811,6 +1837,26 @@ export async function run(
           (event) => runRecord.emit(event),
           "quiescent",
         );
+      }
+
+      const previousStorageLow = storageLow;
+      const measuredSpace = await graphRootSpace(graphRoot);
+      storageLow = graphRootSpaceIsLow(measuredSpace) ? measuredSpace : null;
+      if (storageLow !== null && previousStorageLow === null) {
+        await runRecord.emit({
+          kind: "complaint",
+          severity: "error",
+          message: `${formatLowGraphRootSpace(storageLow)}. Sandbar is stopping ` +
+            "admissions and draining; once quiescent it reconciles owned images " +
+            "and measures again before deciding whether to exit.",
+        });
+      } else if (storageLow === null && previousStorageLow !== null) {
+        await runRecord.emit({
+          kind: "preflight",
+          action: "disk-space-recovered",
+          detail: `Podman graphroot '${measuredSpace.graphRoot}' recovered to ` +
+            `${measuredSpace.availableBytes} bytes free after image reconciliation`,
+        });
       }
 
       // ---------------------------------------------------------------------
@@ -2021,6 +2067,7 @@ export async function run(
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         providerClosed,
         restartRequested: restartRequested !== null,
+        storageLow: storageLow !== null,
       });
       const pollDidWork =
         sourceChangedOnPoll || planDiagnosticsChanged ||
@@ -2041,6 +2088,7 @@ export async function run(
             pool,
             providerExit: providerExitPending ?? closedProviderExit(config, providerState),
             restartDetail: restartRequested,
+            storage: storageLow,
           }),
         );
         break;

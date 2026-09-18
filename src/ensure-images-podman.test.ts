@@ -350,7 +350,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       );
       await expect(buildImage(
         { tag: ambiguousTag, containerfile: "<generated-agent-tools-download>" },
-        { root: "", contextRoot: context, capture: true, timeoutMs: 600_000 },
+        { scope: SCOPE, root: "", contextRoot: context, capture: true, timeoutMs: 600_000 },
       )).rejects.toMatchObject({
         output: expect.stringContaining("archive contains no unique codex binary"),
       });
@@ -376,7 +376,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       );
       const checksumError = await buildImage(
         { tag: checksumTag, containerfile: "<generated-agent-tools-download>" },
-        { root: "", contextRoot: context, capture: true, timeoutMs: 600_000 },
+        { scope: SCOPE, root: "", contextRoot: context, capture: true, timeoutMs: 600_000 },
       ).catch((error: unknown) => error);
       expect(checksumError).toBeInstanceOf(ImageBuildError);
       expect((checksumError as ImageBuildError).output).toMatch(
@@ -393,10 +393,12 @@ describe.runIf(available)("ensureImages against real podman", () => {
       const missing = join(root, "does-not-exist");
       const error = await buildImage(
         { tag, containerfile: "<generated>" },
-        { root: "", contextRoot: missing, capture: true },
+        { scope: SCOPE, root: "", contextRoot: missing, capture: true },
       ).catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(ImageBuildError);
-      expect((error as ImageBuildError).output).toMatch(/tar:|Cannot open|cannot open/i);
+      expect((error as ImageBuildError).output).toMatch(
+        /context must be a directory|Cannot open|cannot open/i,
+      );
     },
     120_000,
   );

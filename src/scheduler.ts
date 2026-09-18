@@ -33,24 +33,27 @@
 //      immediately, while a no-progress streak that the landed code fixes
 //      should not outlive it. It cannot loop — the request file is removed at
 //      startup, so the new process has nothing left to obey.
-//   3. provider — a provider closed for the process (#109, #134). No new starts;
+//   3. storage  — graphroot remained below its fixed free-space floor after
+//      reconciliation (#169). No new starts; committed terminals drain, then
+//      the process exits for human inspection before another build begins.
+//   4. provider — a provider closed for the process (#109, #134). No new starts;
 //      pending terminals land first, because committed-but-unlanded work is
 //      the expensive thing in this system; running work drains to its
 //      terminal (under a two-vendor config an issue routed to the other
 //      provider may genuinely finish); then exit 4. Outranks the backstop.
-//   4. stuck    — `noProgressBackstop` consecutive no-progress observations.
+//   5. stuck    — `noProgressBackstop` consecutive no-progress observations.
 //      Same shape as provider closure: land pending, drain active work, exit
 //      2. Evaluated on EVERY observation, not at quiescence — a deep queue
 //      refills every freed slot and is never quiescent until the candidates
 //      run out, which is the one case the backstop exists for.
-//   5. admit    — a free slot and something to put in it: a retry first, then
+//   6. admit    — a free slot and something to put in it: a retry first, then
 //      a candidate. Refill BEFORE landing, so a slot does
 //      not idle through gate-2; `next` says which of `land`/`wait` follows.
-//   6. land     — terminals are pending, or a human has made a non-deferred
+//   7. land     — terminals are pending, or a human has made a non-deferred
 //      `land` request. Chunk-specific growth is already excluded before the
 //      snapshot reaches this decision; unrelated running work is not a reason
 //      to starve a safe request (#168).
-//   7. wait     — wait on one cancellable race between a freed slot and the
+//   8. wait     — wait on one cancellable race between a freed slot and the
 //      poll timer. This is also the empty-plan action: the daemon stays alive.
 //
 // Restart and provider closure share `drainToward` because they are the same
@@ -95,7 +98,7 @@ export type SettledIssue<T, R> =
 
 export type PoolWake = "slot-freed" | "poll";
 
-export type SchedulerExit = "restart" | "provider-closed" | "stuck";
+export type SchedulerExit = "restart" | "storage-low" | "provider-closed" | "stuck";
 export type SchedulerAction =
   | { readonly kind: "recompute" }
   | { readonly kind: "admit"; readonly next: "land" | "wait" }
@@ -117,6 +120,7 @@ export type SchedulerSnapshot = {
   readonly noProgressBackstop: number;
   readonly providerClosed: boolean;
   readonly restartRequested: boolean;
+  readonly storageLow: boolean;
 };
 
 // Stop admitting, land what is committed, drain the rest, then exit — the shape
@@ -172,6 +176,12 @@ export function decideAfterFailedRefresh(
 export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction {
   if (state.hasCompleted) return { kind: "recompute" };
   if (state.restartRequested) return drainToward("restart", state);
+  if (state.storageLow) {
+    if (state.hasPendingTerminals) return { kind: "land" };
+    return state.active > 0
+      ? { kind: "drain" }
+      : { kind: "exit", reason: "storage-low" };
+  }
   if (state.providerClosed) return drainToward("provider-closed", state);
   if (state.noProgressSinceLanding >= state.noProgressBackstop) {
     if (state.hasPendingTerminals) return { kind: "land" };

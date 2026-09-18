@@ -28,8 +28,6 @@ import { SandbarError } from "./errors.js";
 import { fingerprintImageInputs } from "./image-inputs.js";
 import {
   type RunScope,
-  isToolsImageTagIn,
-  isVariantImageTagIn,
   runScope,
   toolsImageTag,
   variantImageTag,
@@ -269,31 +267,6 @@ describe("variantImageTag", () => {
     );
   });
 
-  it("recognises its own output under the same scope, and nothing else", () => {
-    // What makes the scope segment more than a comment: the startup sweep uses
-    // this to reclaim ~6GB-class images a crashed run left, and it must not
-    // reach another workdir's live ones.
-    const other = runScope("/elsewhere") as RunScope;
-    for (const base of [
-      "sandbar-outdoor",
-      "sandbar-outdoor:latest",
-      "localhost/x/y:v1",
-      "registry.example:5000/x",
-    ]) {
-      const tag = variantImageTag(base, scope, "9f2e1d70ab");
-      expect(isVariantImageTagIn(scope, tag)).toBe(true);
-      expect(isVariantImageTagIn(other, tag)).toBe(false);
-      // The base image itself is never swept — it is what `ensureImages` built.
-      expect(isVariantImageTagIn(scope, base)).toBe(false);
-    }
-    // An untagged reference and a coincidental lookalike are not ours.
-    expect(isVariantImageTagIn(scope, "localhost/x/y")).toBe(false);
-    expect(isVariantImageTagIn(scope, `app:sb-${scope}-nothex12`)).toBe(false);
-    expect(isVariantImageTagIn(scope, `app:sb-${scope}-9f2e1d70-more`)).toBe(
-      false,
-    );
-  });
-
   it("stays inside podman's 128-char tag limit for a realistic base tag", () => {
     const tag = variantImageTag("sandbar-outdoor:latest", scope, "9f2e1d70ab");
     expect(tag.slice(tag.lastIndexOf(":") + 1).length).toBeLessThan(128);
@@ -304,13 +277,6 @@ describe("variantImageTag", () => {
     expect(tag).toBe(
       `localhost/sandbar-agent-tools:sb-tools-${scope}-glibc-9f2e1d70`,
     );
-    expect(isToolsImageTagIn(scope, tag)).toBe(true);
-    expect(isVariantImageTagIn(scope, tag)).toBe(false);
-    expect(isToolsImageTagIn(runScope("/elsewhere"), tag)).toBe(false);
-    expect(isToolsImageTagIn(
-      scope,
-      tag.replace("localhost/sandbar-agent-tools", "localhost/unrelated"),
-    )).toBe(false);
   });
 });
 

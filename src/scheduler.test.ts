@@ -147,7 +147,8 @@ describe("scheduler decisions", () => {
     active: 0, ongoing: 0, hasCompleted: false, hasPendingTerminals: false,
     hasCandidates: false, hasRetries: false, hasLandRequests: false, hasCapacity: true,
     noProgressSinceLanding: 0,
-    noProgressBackstop: 6, providerClosed: false, restartRequested: false, ...overrides,
+    noProgressBackstop: 6, providerClosed: false, restartRequested: false,
+    storageLow: false, ...overrides,
   });
 
   // Every row names the WHOLE action, reason included: the exit tags are the
@@ -168,7 +169,13 @@ describe("scheduler decisions", () => {
     ["restart outranks admission", snapshot({ restartRequested: true, hasCandidates: true }), { kind: "exit", reason: "restart" }],
     ["restart outranks provider closure", snapshot({ restartRequested: true, providerClosed: true }), { kind: "exit", reason: "restart" }],
     ["restart outranks stuck", snapshot({ restartRequested: true, noProgressSinceLanding: 6 }), { kind: "exit", reason: "restart" }],
+    ["restart outranks low storage", snapshot({ restartRequested: true, storageLow: true }), { kind: "exit", reason: "restart" }],
     ["a completion still outranks restart", snapshot({ restartRequested: true, hasCompleted: true, active: 1, ongoing: 1 }), { kind: "recompute" }],
+    ["low storage lands pending terminals", snapshot({ storageLow: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
+    ["low storage drains running work", snapshot({ storageLow: true, active: 1, ongoing: 1, hasCandidates: true }), { kind: "drain" }],
+    ["low storage exits when drained", snapshot({ storageLow: true }), { kind: "exit", reason: "storage-low" }],
+    ["low storage does not start a fresh land request", snapshot({ storageLow: true, hasLandRequests: true }), { kind: "exit", reason: "storage-low" }],
+    ["low storage outranks provider closure", snapshot({ storageLow: true, providerClosed: true }), { kind: "exit", reason: "storage-low" }],
     ["stuck exits", snapshot({ noProgressSinceLanding: 6 }), { kind: "exit", reason: "stuck" }],
     ["stuck outranks admission", snapshot({ noProgressSinceLanding: 6, hasCandidates: true }), { kind: "exit", reason: "stuck" }],
     ["stuck drains on every observation, not at quiescence", snapshot({ noProgressSinceLanding: 6, active: 3, ongoing: 3, hasCandidates: true }), { kind: "drain" }],

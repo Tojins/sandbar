@@ -191,6 +191,14 @@ vi.mock("./image-lifecycle.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./image-lifecycle.js")>(),
   reconcileImages: vi.fn(async () => ({ removed: [], failures: [] })),
 }));
+vi.mock("./disk-space.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./disk-space.js")>(),
+  podmanGraphRoot: vi.fn(async () => "/podman/store"),
+  graphRootSpace: vi.fn(async () => ({
+    graphRoot: "/podman/store",
+    availableBytes: 20n * 1024n * 1024n * 1024n,
+  })),
+}));
 vi.mock("./agent-tools.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./agent-tools.js")>(),
   createAgentImages: vi.fn(async () => ({
@@ -259,6 +267,7 @@ import { realAdapter as realFinalizeAdapter } from "./finalize.js";
 import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { createAgentImages } from "./agent-tools.js";
 import { reconcileImages } from "./image-lifecycle.js";
+import { graphRootSpace } from "./disk-space.js";
 import { cleanupOrphanContainers } from "./containers.js";
 import { UiPortInUseError, startUiServer } from "./ui-server.js";
 import {
@@ -371,6 +380,11 @@ describe("run quota orchestration (#109)", () => {
       declaredTag: "image", augment: vi.fn(async () => "image"),
       builtTags: () => [], liveTags: () => ["image"],
     });
+    vi.mocked(graphRootSpace).mockReset();
+    vi.mocked(graphRootSpace).mockResolvedValue({
+      graphRoot: "/podman/store",
+      availableBytes: 20n * 1024n * 1024n * 1024n,
+    });
     seams.cleanupCallbacks.length = 0;
     seams.wakeLocks.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -396,6 +410,32 @@ describe("run quota orchestration (#109)", () => {
       expect.stringContaining("SANDBAR HALTED — internal failure"),
     );
     expect(seams.originRelease).toHaveBeenCalledOnce();
+  });
+
+  it("reconciles, reports exact graphroot free space, and exits 3 before admission", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("169")]));
+    vi.mocked(graphRootSpace).mockResolvedValue({
+      graphRoot: "/podman/store",
+      availableBytes: 9n * 1024n * 1024n * 1024n,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:3");
+    expect(exit).toHaveBeenCalledWith(3);
+    expect(seams.innerLoop).not.toHaveBeenCalled();
+    expect(reconcileImages).toHaveBeenCalledTimes(2);
+    expect(graphRootSpace).toHaveBeenCalledOnce();
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      severity: "error",
+      message: expect.stringContaining("9663676416 bytes (9.0 GiB) free"),
+    }));
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "storage",
+      exitCode: 3,
+      reason: expect.stringContaining("after image reconciliation"),
+    }));
   });
 
   it("releases the origin lease when the UI port is already in use", async () => {

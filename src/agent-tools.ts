@@ -464,7 +464,10 @@ export async function createAgentImages(opts: {
       () => rm(contextRoot, { recursive: true, force: true }),
     );
     try {
-      await writeFile(join(contextRoot, "Containerfile"), containerfile);
+      await writeFile(
+        join(contextRoot, "Containerfile"),
+        containerfile,
+      );
       await build(
         { tag, containerfile: identity },
         { scope: opts.scope, root: "", contextRoot, fingerprint, capture: true },
@@ -546,8 +549,8 @@ export async function createAgentImages(opts: {
         // An unlabelled base has unknown provenance. Its derived tag can be a
         // cache hint, never proof, so rebuild it and let podman's layer cache
         // make the common case cheap.
-        // Since #75 this invokes a build on EVERY run — the end-of-run cleanup
-        // removes the tag unconditionally, so the next startup finds it gone —
+        // Since #75 this invokes a build on EVERY run — the next startup's
+        // reconciliation removes the prior run's unpinned augmented tag —
         // and the honest line says `built=true`. Whether podman's layer cache
         // made that cheap is what `durationMs` is for; papering it over as
         // "reused" would hide the one number that decides whether the

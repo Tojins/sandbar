@@ -149,13 +149,16 @@ export async function reconcileImages(args: {
   const failures: string[] = [];
   for (const id of candidates) {
     const argv = ["rmi", "-f", "--no-prune", id];
-    try {
-      await run(argv);
+    const failure = await run(argv).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    if (failure === null) {
       removed.push(id);
-    } catch (err) {
+    } else {
       failures.push(
         `  ${RUNTIME} ${argv.join(" ")}\n    ${
-          err instanceof Error ? err.message : String(err)
+          failure instanceof Error ? failure.message : String(failure)
         }`,
       );
     }
