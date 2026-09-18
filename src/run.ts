@@ -2421,6 +2421,7 @@ export async function run(
             (line) => landingLogger.appendMerger(line),
             (issueId, gate) => landingLogger.writeMergerGate(issueId, gate),
             {
+              agentStuckLabel: config.labels.agentStuck,
               ongoingIssues: pool.ongoingIssues(),
               projectAnchor,
               promptExtension: config.promptExtensions.merger,

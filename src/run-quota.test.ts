@@ -2303,7 +2303,11 @@ describe("run quota orchestration (#109)", () => {
       for (const member of batch) landed.add(member.id);
       return {
         ...summary([]),
-        chunkLanded: batch.map((member) => ({ issue: member, chunkBranch: "sandbar/chunk-1-x" })),
+        chunkLanded: batch.map((member) => ({
+          issue: member,
+          chunkBranch: "sandbar/chunk-1-x",
+          pullRequestNumber: 17,
+        })),
       };
     });
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {

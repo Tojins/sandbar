@@ -31,11 +31,13 @@ const runMergerWithAdapter = (
   adapter: MergerAdapter,
   log?: Parameters<typeof runMergerCore>[2],
   onGateRed?: Parameters<typeof runMergerCore>[3],
-  options: Omit<RunMergerOptions, "observations"> & {
+  options: Omit<RunMergerOptions, "observations" | "agentStuckLabel"> & {
     readonly observations?: RunMergerOptions["observations"];
+    readonly agentStuckLabel?: string;
   } = {},
 ) => runMergerCore(issues, adapter, log, onGateRed, {
   ...options,
+  agentStuckLabel: options.agentStuckLabel ?? "agent-stuck",
   observations: options.observations ?? DISCARD_MERGER_OBSERVATIONS,
 });
 
@@ -581,8 +583,11 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
     expect(calls.aborts).toBe(1);
     expect(calls.resets).toEqual([]);
     expect(calls.comments).toHaveLength(1);
-    expect(calls.comments[0]!.msg).toContain("agentic resolve loop");
+    expect(calls.comments[0]!.msg).toContain("stopped on conflicts after 1 resolve attempt");
     expect(calls.comments[0]!.msg).toContain(reason);
+    expect(calls.comments[0]!.msg.endsWith(
+      "drop `agent-stuck` and re-apply `ready-for-agent`.",
+    )).toBe(true);
     expect(calls.removedLabels).toEqual([
       { n: 42, label: READY_FOR_AGENT_LABEL },
     ]);
@@ -649,7 +654,7 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
       ],
     });
     await runMergerWithAdapter([issue(42)], adapter);
-    expect(calls.comments[0]!.msg).toContain("bailed after 1 attempt.");
+    expect(calls.comments[0]!.msg).toContain("after 1 resolve attempt.");
   });
 
   // The case from the run in #67: three sub-three-second containers that never
@@ -1000,7 +1005,7 @@ describe("runMergerWithAdapter — gate-red enters resolve loop", () => {
     expect(calls.aborts).toBe(0);
     expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
     expect(calls.comments).toHaveLength(1);
-    expect(calls.comments[0]!.msg).toContain("agentic fix attempt");
+    expect(calls.comments[0]!.msg).toContain("after 1 fix attempt");
     expect(calls.comments[0]!.msg).toContain(reason);
     expect(calls.removedLabels).toEqual([
       { n: 42, label: READY_FOR_AGENT_LABEL },
@@ -2015,7 +2020,11 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
       }],
     }]);
     expect(summary.chunkLanded).toEqual([
-      { issue: chunkIssue(42), chunkBranch: "sandbar/chunk-42-c" },
+      {
+        issue: chunkIssue(42),
+        chunkBranch: "sandbar/chunk-42-c",
+        pullRequestNumber: 7,
+      },
     ]);
     // Nothing reached the source branch: no merge, no push, no close.
     expect(summary.merged).toEqual([]);
@@ -2238,8 +2247,7 @@ describe("runMergerWithAdapter — the chunk PR (#62)", () => {
     const pr = calls.chunkPrs[0]!;
     expect(pr.chunkBranch).toBe("sandbar/chunk-42-c");
     expect(pr.title).toBe("Sandbar chunk #42: t-42");
-    expect(pr.body).toContain("- #42 — t-42");
-    expect(pr.body).toContain("sandbar/chunk-42-c");
+    expect(pr.body).toBe("- #42 — t-42");
   });
 
   it("describes the members already on the branch as well as the ones landing now", async () => {

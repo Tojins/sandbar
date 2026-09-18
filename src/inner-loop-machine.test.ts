@@ -319,10 +319,11 @@ const needsUiPrototype = (uiImpact: string): ParseSignal => ({
   uiImpact,
 });
 
-const gate1Ok: Gate1Result = { ok: true, failureTrace: "" };
+const gate1Ok: Gate1Result = { ok: true, failureTrace: "", failedStep: null };
 const gate1Red = (trace: string): Gate1Result => ({
   ok: false,
   failureTrace: trace,
+  failedStep: "test",
 });
 const approved = (prose: string = "lgtm"): ReviewerResult => ({
   kind: "reviewer-result",
@@ -1022,7 +1023,7 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
       cause: "gate-red",
       failureTrace: "only red",
       latestReviewerProse: null,
-      budgetExhausted: { budget: "gate", roundsUsed: 1 },
+      budgetExhausted: { budget: "gate", roundsUsed: 1, failedStep: "test" },
       strandedHead: null,
     });
   });
@@ -1216,7 +1217,7 @@ describe("inner-loop-machine — quality and gate budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "red",
       latestReviewerProse: "reject",
-      budgetExhausted: { budget: "gate", roundsUsed: 1 },
+      budgetExhausted: { budget: "gate", roundsUsed: 1, failedStep: "test" },
       strandedHead: null,
     });
   });
@@ -1250,7 +1251,11 @@ describe("inner-loop-machine — quality and gate budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "trace 4",
       latestReviewerProse: "approved 4",
-      budgetExhausted: { budget: "gate", roundsUsed: DEFAULT_MAX_GATE_ROUNDS },
+      budgetExhausted: {
+        budget: "gate",
+        roundsUsed: DEFAULT_MAX_GATE_ROUNDS,
+        failedStep: "test",
+      },
       strandedHead: null,
     });
   });
@@ -1315,7 +1320,7 @@ describe("inner-loop-machine — quality and gate budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "trace",
       latestReviewerProse: "quality approved",
-      budgetExhausted: { budget: "gate", roundsUsed: 1 },
+      budgetExhausted: { budget: "gate", roundsUsed: 1, failedStep: "test" },
       strandedHead: null,
     });
   });
@@ -1461,7 +1466,7 @@ describe("decideAfterTerminal", () => {
         cause: "gate-red",
         failureTrace: "trace",
         latestReviewerProse: null,
-        budgetExhausted: { budget: "gate", roundsUsed: 4 },
+          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         strandedHead: null,
       },
       {

@@ -252,6 +252,7 @@ export function mergeFinalizeInputs(
       kind: "chunk-landed",
       issue: c.issue,
       chunkBranch: c.chunkBranch,
+      pullRequestNumber: c.pullRequestNumber,
     }));
   }
   return { inputs, bumpedSilentNoop };

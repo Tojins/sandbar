@@ -166,6 +166,8 @@ default is unlimited, so existing hosts keep their prior concurrency.
    `labels.needsInfo`/`labels.agentStuck`, plus `needs-review` for a
    chunk-landed member, are the only labels sandbar applies — `land` (#64) it only ever
    REMOVES, from a pull request a human labelled).
+   Human parking comments contain only a stop line, their variable payload
+   (with traces collapsed), and a final branch/relabel action line (#170).
    A terminal is finalised before its landing is attempted. Every non-DONE
    terminal attempts to publish an issue branch that is structurally ahead of
    its seed; this cache-derived check replaces per-sandbox-cycle commit

@@ -576,7 +576,7 @@ describe("the prose (#64)", () => {
     expect(body).not.toContain("next cycle");
   });
 
-  it("says the land label was removed when the merge was abandoned", () => {
+  it("ends an abandoned merge comment with the action that restores land", () => {
     const body = CHUNK_LAND_ABANDONED_PR_COMMENT({
       chunkBranch: "sandbar/chunk-42-alpha",
       sourceBranch: "main",
@@ -589,9 +589,10 @@ describe("the prose (#64)", () => {
     // The COUNT comes from the journal, not from the budget: a loop that
     // halted on an infra failure spent fewer attempts than it was allowed, and
     // reporting the cap would describe attempts that never happened (#67).
-    expect(body).toContain("2 attempts");
+    expect(body).toContain("2 resolve attempts");
     expect(body).toContain("two branches rewrote the same file");
-    expect(body).toContain(`\`${LAND_LABEL}\` label has been removed`);
+    expect(body).toContain(`re-apply \`${LAND_LABEL}\``);
+    expect(body.endsWith(`re-apply \`${LAND_LABEL}\`.`)).toBe(true);
   });
 
   // #67 — a reviewer looking at a parked chunk gets the same diagnostics an

@@ -46,7 +46,7 @@ describe("terminalFinalizeInputs", () => {
           cause: "gate-red",
           failureTrace: "boom",
           latestReviewerProse: null,
-          budgetExhausted: { budget: "gate", roundsUsed: 4 },
+          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         },
       },
       {
@@ -129,7 +129,7 @@ describe("terminalFinalizeInputs", () => {
           cause: "gate-red",
           failureTrace: "tests failed",
           latestReviewerProse: "earlier review",
-          budgetExhausted: { budget: "gate", roundsUsed: 4 },
+          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
           strandedHead: null,
           specGaps: [{ round: 2, text: "gap" }],
         },
@@ -141,7 +141,7 @@ describe("terminalFinalizeInputs", () => {
       cause: "gate-red",
       failureTrace: "tests failed",
       latestReviewerProse: "earlier review",
-      budgetExhausted: { budget: "gate", roundsUsed: 4 },
+          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
       strandedHead: null,
       specGaps: [{ round: 2, text: "gap" }],
     });
@@ -361,7 +361,11 @@ describe("mergeFinalizeInputs", () => {
     const { inputs } = mergeFinalizeInputs(
       summary({
         chunkLanded: [
-          { issue: issue("4"), chunkBranch: "sandbar/chunk-4-thing" },
+          {
+            issue: issue("4"),
+            chunkBranch: "sandbar/chunk-4-thing",
+            pullRequestNumber: 14,
+          },
         ],
       }),
       new Map(),
@@ -372,6 +376,7 @@ describe("mergeFinalizeInputs", () => {
         kind: "chunk-landed",
         issue: issue("4"),
         chunkBranch: "sandbar/chunk-4-thing",
+        pullRequestNumber: 14,
         specGaps: [],
       },
     ]);
@@ -387,7 +392,11 @@ describe("mergeFinalizeInputs", () => {
       summary({
         merged: [issue("3")],
         chunkLanded: [
-          { issue: issue("5"), chunkBranch: "sandbar/chunk-5-thing" },
+          {
+            issue: issue("5"),
+            chunkBranch: "sandbar/chunk-5-thing",
+            pullRequestNumber: null,
+          },
         ],
         skipped: [
           { issue: issue("1"), reason: "conflict" },
