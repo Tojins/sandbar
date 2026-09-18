@@ -3,11 +3,11 @@
 //
 // A chunk branch on origin is where a review-gated group's work lands (#60),
 // but a branch is not a review surface: it has no threads, no diff a reviewer
-// can comment on line by line, and nothing that tells whoever finds it what it
-// is or why the issues it came from are still open. The pull request is that
-// surface, and this module is the prose on it. Opening it is `merger.ts`'s job,
-// one create-or-update per chunk per cycle, immediately after the push that
-// made the branch durable; the `gh` dance itself is `forge-pr.ts`.
+// can comment on line by line, and no member links. The pull request is that
+// surface, while its body is deliberately only the complete member list—no
+// explanation of chunk mechanics. Opening it is `merger.ts`'s job, one
+// create-or-update per chunk per cycle, immediately after the push that made
+// the branch durable; the `gh` dance itself is `forge-pr.ts`.
 //
 // DRAFT is the mechanism, and it is chosen for exactly one property (#54 Q14):
 // a draft PR disables GitHub's merge button while leaving review completely

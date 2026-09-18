@@ -21,6 +21,9 @@
 // a preserved clone. The reviewer-write handoff is the one caller that asks for
 // the clone to be kept when the rule would reclaim it: the human is told to
 // inspect it, and uncommitted evidence cannot travel through a push.
+// Human-facing parking comments use the same three-part contract throughout:
+// one stop line, the variable payload (with diagnostics collapsed), and one
+// final action line naming the branch and label transition (#170).
 //
 // A SERVER-REFUSED PUSH is the other deliberate local park (#163), for every
 // terminal that publishes an issue branch. The shared classifier reads Git's
@@ -127,7 +130,9 @@ export const PUSH_REFUSED_COMMENT_TEMPLATE = (args: {
   `${BOT_COMMENT_PREFIX} origin refused to publish \`${args.branch}\`.\n\n` +
   `${pushRefusedRecoveryNote(args)}` +
   (args.context ? `\n\n${args.context}` : "") +
-  `\n\nAction: use \`${args.branch}\`; drop \`${args.stuckLabel}\` and re-apply ` +
+  `\n\nAction: use \`${args.branch}\`; ` +
+  (args.context ? "resolve the handoff above, then " : "") +
+  `drop \`${args.stuckLabel}\` and re-apply ` +
   `\`${args.readyLabel}\`.`;
 
 // A note that applies to every template below, and to the ones in
@@ -292,6 +297,10 @@ const gateRedStop = (failedStep: string, roundsUsed: number): string =>
   `round${roundsUsed === 1 ? "" : "s"}; latest failing step: ` +
   `\`${failedStep}\`.`;
 
+const noSignalStop = (roundsUsed: number): string =>
+  `the quality pass stopped after ${roundsUsed} consecutive ` +
+  `failure${roundsUsed === 1 ? "" : "s"}; the final attempt had no actionable signal.`;
+
 const needsHumanNoSignalExplanation = (failureTrace: string): string =>
   `<details><summary>Attempt summary</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
@@ -303,8 +312,7 @@ export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} the quality pass stopped after ${roundsUsed} consecutive ` +
-  `failure${roundsUsed === 1 ? "" : "s"}; the final attempt had no actionable signal.\n\n` +
+  `${BOT_COMMENT_PREFIX} ${noSignalStop(roundsUsed)}\n\n` +
   `${needsHumanNoSignalExplanation(failureTrace)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "inspect the transcripts and push a fix");
 
@@ -321,6 +329,11 @@ const needsHumanUncommittableExplanation = (
   `<details><summary>Uncommitted paths</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+const uncommittableStop = (qualityRounds: number | null): string =>
+  qualityRounds === null
+    ? "stopped because the worktree stayed uncommitted."
+    : `the quality pass stopped after ${qualityRounds} consecutive failures; the worktree stayed uncommitted.`;
+
 export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
   branch: string,
   qualityRounds: number | null,
@@ -328,11 +341,7 @@ export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} ${
-    qualityRounds === null
-      ? "stopped because the worktree stayed uncommitted."
-      : `the quality pass stopped after ${qualityRounds} consecutive failures; the worktree stayed uncommitted.`
-  }\n\n` +
+  `${BOT_COMMENT_PREFIX} ${uncommittableStop(qualityRounds)}\n\n` +
   `${needsHumanUncommittableExplanation(failureTrace)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "commit or ignore the paths");
 
@@ -395,6 +404,11 @@ const needsHumanOffBranchExplanation = (
   `<details><summary>What the implementer was told</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+const offBranchStop = (branch: string, qualityRounds: number | null): string =>
+  qualityRounds === null
+    ? `stopped because the implementer remained off \`${branch}\`.`
+    : `the quality pass stopped after ${qualityRounds} consecutive failures; the implementer remained off \`${branch}\`.`;
+
 export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   branch: string,
   qualityRounds: number | null,
@@ -404,11 +418,8 @@ export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} ${
-    qualityRounds === null
-      ? `stopped because the implementer remained off \`${branch}\`.`
-      : `the quality pass stopped after ${qualityRounds} consecutive failures; the implementer remained off \`${branch}\`.`
-  }\n\n${needsHumanOffBranchExplanation(failureTrace)}` +
+  `${BOT_COMMENT_PREFIX} ${offBranchStop(branch, qualityRounds)}\n\n` +
+  `${needsHumanOffBranchExplanation(failureTrace)}` +
   `${STRANDED_COMMITS_NOTE(strandedHead, reclaim)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "fold in the stranded commits");
 
@@ -429,6 +440,10 @@ const needsHumanReviewerHarnessExplanation = (
   `<details><summary>Reviewer-harness trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+const REVIEWER_HARNESS_STOP =
+  "stopped after 2 reviewer-harness failures; no reviewer verdict was produced " +
+  "in the failing round.";
+
 export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   branch: string,
   failureTrace: string,
@@ -436,8 +451,7 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} stopped after 2 reviewer-harness failures; no reviewer ` +
-  `verdict was produced in the failing round.\n\n` +
+  `${BOT_COMMENT_PREFIX} ${REVIEWER_HARNESS_STOP}\n\n` +
   `${needsHumanReviewerHarnessExplanation(failureTrace, latestReviewerProse)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "review the branch or repair the harness");
 
@@ -796,10 +810,12 @@ function needsHumanComments(
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
-          refused: needsHumanReviewerHarnessExplanation(
-            input.failureTrace,
-            input.latestReviewerProse,
-          ),
+          refused:
+            `${REVIEWER_HARNESS_STOP}\n\n` +
+            needsHumanReviewerHarnessExplanation(
+              input.failureTrace,
+              input.latestReviewerProse,
+            ),
         };
       case "uncommittable-worktree":
         return {
@@ -810,7 +826,9 @@ function needsHumanComments(
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
-          refused: needsHumanUncommittableExplanation(input.failureTrace),
+          refused:
+            `${uncommittableStop(qualityRounds)}\n\n` +
+            needsHumanUncommittableExplanation(input.failureTrace),
         };
       case "off-branch-head":
         if (input.strandedHead === null) {
@@ -827,6 +845,7 @@ function needsHumanComments(
             READY_FOR_AGENT_LABEL,
           ),
           refused:
+            `${offBranchStop(input.issue.branch, qualityRounds)}\n\n` +
             needsHumanOffBranchExplanation(input.failureTrace) +
             STRANDED_COMMITS_NOTE(input.strandedHead, reclaim),
         };
@@ -862,7 +881,9 @@ function needsHumanComments(
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
-          refused: needsHumanNoSignalExplanation(input.failureTrace),
+          refused:
+            `${noSignalStop(qualityRounds)}\n\n` +
+            needsHumanNoSignalExplanation(input.failureTrace),
         };
       }
     }
@@ -872,12 +893,18 @@ function needsHumanComments(
 
 const readOnlyAgentWroteExplanation = (
   input: Extract<FinalizeInput, { readonly kind: "read-only-agent-wrote" }>,
+  reclaim: Extract<IssueCloneReclaim, { readonly kind: "preserved" }>,
   pushFailure?: string,
 ): string =>
+  `Preserved clone: \`${reclaim.worktreePath}\`.\n\n` +
   `Read-only ${input.actor} output:\n\n${input.latestReviewerProse}` +
   (pushFailure === undefined
     ? ""
     : `\n\nPush failed: ${pushFailure}. Inspect the preserved clone.`);
+
+const readOnlyAgentWroteStop = (
+  actor: Extract<FinalizeInput, { readonly kind: "read-only-agent-wrote" }>["actor"],
+): string => `stopped because the read-only ${actor} changed the repository.`;
 
 type PushRefusal = Extract<PushResult, { readonly kind: "refused" }>;
 
@@ -1310,8 +1337,13 @@ export async function finalizeOne(
       // push, and deleting it would destroy the evidence this terminal exists
       // to hand to a human. Reclaiming still publishes the branch first, which
       // is what the push below reads.
-      await reclaimClone(input, adapter);
-      const explanation = readOnlyAgentWroteExplanation(input);
+      const reclaim = await reclaimClone(input, adapter);
+      if (reclaim.kind !== "preserved") {
+        throw new Error("read-only agent handoff missing its preserved clone");
+      }
+      const explanation =
+        `${readOnlyAgentWroteStop(input.actor)}\n\n` +
+        readOnlyAgentWroteExplanation(input, reclaim);
       const push = await adapter.pushBranch(input.issue.branch);
       if (push.kind === "refused") {
         return parkRefusedPush(input, adapter, labels, push, {
@@ -1325,8 +1357,8 @@ export async function finalizeOne(
         : undefined;
       await adapter.postComment(
         n,
-        `${BOT_COMMENT_PREFIX} stopped because the read-only ${input.actor} changed the repository.\n\n` +
-          `${readOnlyAgentWroteExplanation(input, pushFailure)}\n\n` +
+        `${BOT_COMMENT_PREFIX} ${readOnlyAgentWroteStop(input.actor)}\n\n` +
+          `${readOnlyAgentWroteExplanation(input, reclaim, pushFailure)}\n\n` +
           handoffAction(
             input.issue.branch,
             labels.agentStuck,

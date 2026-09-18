@@ -125,7 +125,13 @@ function makeAdapter(
     },
     async reclaimIssueClone(branch, keep) {
       calls.reclaims.push(keep === undefined ? { branch } : { branch, keep });
-      return script.reclaim ?? { kind: "removed" };
+      return script.reclaim ?? (keep === undefined
+        ? { kind: "removed" }
+        : {
+            kind: "preserved",
+            reason: keep,
+            worktreePath: `/host/.sandbar/worktrees/${branch.replaceAll("/", "-")}`,
+          });
     },
     async branchIsContainedInOrigin(branch) {
       calls.containmentChecks.push(branch);
@@ -1374,11 +1380,35 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("read-only UI checker");
   });
 
+  it("read-only-agent-wrote fails before publishing when its preserved clone is missing", async () => {
+    const { adapter, calls } = makeAdapter({ reclaim: { kind: "absent" } });
+
+    await expect(finalizeOne(
+      {
+        kind: "read-only-agent-wrote",
+        issue: issue(45),
+        actor: "reviewer",
+        latestReviewerProse: "Reviewer changed git state.",
+      },
+      adapter,
+      LABELS,
+    )).rejects.toThrow("missing its preserved clone");
+
+    expect(calls.pushes).toEqual([]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([]);
+  });
+
   it("read-only-agent-wrote: parks and comments when origin refuses the branch", async () => {
     const refusal =
       "! [remote rejected] topic -> topic (push protection declined)";
     const { adapter, calls } = makeAdapter({
       pushResult: { kind: "refused", reasons: [refusal] },
+      reclaim: {
+        kind: "preserved",
+        reason: "kept for human inspection",
+        worktreePath: "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
+      },
     });
     const i = issue(45);
 
@@ -1404,7 +1434,16 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("abc123");
     expect(calls.comments[0]!.body).toContain("refs/heads/");
     expect(calls.comments[0]!.body).toContain("/host/.sandbar/repo.git");
+    expect(calls.comments[0]!.body).toContain(
+      "stopped because the read-only reviewer changed the repository",
+    );
+    expect(calls.comments[0]!.body).toContain(
+      "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
+    );
     expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
+    expect(calls.comments[0]!.body.endsWith(
+      "resolve the handoff above, then drop `agent-stuck` and re-apply `ready-for-agent`.",
+    )).toBe(true);
   });
 
   it.each([
@@ -1494,7 +1533,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("<details><summary>Git refusal</summary>");
     expect(calls.comments[0]!.body).toContain("git -C '/host/.sandbar/repo.git' push");
     expect(calls.comments[0]!.body.endsWith(
-      "drop `agent-stuck` and re-apply `ready-for-agent`.",
+      "resolve the handoff above, then drop `agent-stuck` and re-apply `ready-for-agent`.",
     )).toBe(true);
     expect(calls.labelEdits).toEqual([{
       n: 63,
@@ -1520,6 +1559,7 @@ describe("finalizeOne", () => {
 
     expect(action).toEqual({ kind: "parked-local" });
     expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.body).not.toContain("resolve the handoff above");
     expect(calls.labelEdits).toEqual([{
       n: 64,
       remove: [READY_FOR_AGENT],
@@ -1577,7 +1617,7 @@ describe("finalizeOne", () => {
       remove: [READY_FOR_AGENT],
     },
     {
-      name: "needs-human",
+      name: "gate-red",
       input: {
         kind: "needs-human",
         issue: issue(74),
@@ -1588,6 +1628,68 @@ describe("finalizeOne", () => {
         strandedHead: null,
       } as const,
       context: "gate exploded",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "uncommittable worktree",
+      input: {
+        kind: "needs-human",
+        issue: issue(741),
+        cause: "uncommittable-worktree",
+        failureTrace: "?? node_modules/.cache/foo",
+        latestReviewerProse: null,
+        budgetExhausted: null,
+        strandedHead: null,
+      } as const,
+      context: "stopped because the worktree stayed uncommitted",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "no-signal exhaustion",
+      input: {
+        kind: "needs-human",
+        issue: issue(742),
+        cause: "no-signal-exhausted",
+        failureTrace: "attempt produced no commit or promise",
+        latestReviewerProse: null,
+        budgetExhausted: { budget: "quality", roundsUsed: 4 },
+        strandedHead: null,
+      } as const,
+      context: "quality pass stopped after 4 consecutive failures",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "reviewer harness failure",
+      input: {
+        kind: "needs-human",
+        issue: issue(743),
+        cause: "reviewer-harness-failed",
+        failureTrace: "reviewer emitted no verdict",
+        latestReviewerProse: "Earlier report",
+        budgetExhausted: null,
+        strandedHead: null,
+      } as const,
+      context: "stopped after 2 reviewer-harness failures",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "off-branch head",
+      input: {
+        kind: "needs-human",
+        issue: issue(744),
+        cause: "off-branch-head",
+        failureTrace: "HEAD stayed detached",
+        latestReviewerProse: null,
+        budgetExhausted: null,
+        strandedHead: {
+          branch: "sandbar/issue-744-t-744",
+          headRef: null,
+          headSha: "deadbeef744",
+          branchSha: "base744",
+          branchIsAncestor: false,
+        },
+      } as const,
+      context: "implementer remained off `sandbar/issue-744-t-744`",
       remove: [READY_FOR_AGENT],
     },
     {
