@@ -1103,49 +1103,55 @@ describe("finalizeOne", () => {
     expect(body).not.toContain("without a green gate");
   });
 
-  it("needs-human off-branch-head: names the branch, the stranded sha, and how to rescue it (#27)", async () => {
-    const { adapter, calls } = makeAdapter();
-    const i = issue(45);
-    const action = await finalizeOne(
-      {
-        kind: "needs-human",
-        issue: i,
-        cause: "off-branch-head",
-        failureTrace:
-          "You are not on the issue branch. HEAD is DETACHED at deadbeef1234,",
-        latestReviewerProse: null,
-        budgetExhausted: null,
-        strandedHead: {
-          branch: `sandbar/issue-45-t-45`,
-          headRef: null,
-          headSha: "deadbeef1234",
-          branchSha: "base00",
-          branchIsAncestor: false,
+  it.each([
+    { kind: "removed" },
+    { kind: "absent" },
+  ] as const)(
+    "needs-human off-branch-head: names the cache pin after a $kind clone reclaim (#27)",
+    async (reclaim) => {
+      const { adapter, calls } = makeAdapter({ reclaim });
+      const i = issue(45);
+      const action = await finalizeOne(
+        {
+          kind: "needs-human",
+          issue: i,
+          cause: "off-branch-head",
+          failureTrace:
+            "You are not on the issue branch. HEAD is DETACHED at deadbeef1234,",
+          latestReviewerProse: null,
+          budgetExhausted: null,
+          strandedHead: {
+            branch: `sandbar/issue-45-t-45`,
+            headRef: null,
+            headSha: "deadbeef1234",
+            branchSha: "base00",
+            branchIsAncestor: false,
+          },
         },
-      },
-      adapter,
-      LABELS,
-    );
+        adapter,
+        LABELS,
+      );
 
-    expect(action).toEqual({ kind: "pushed" });
-    const body = calls.comments[0]!.body;
-    expect(body).toContain(i.branch);
-    // The comment and the cache pin it names are the only places this sha
-    // survives: reclaiming the clone takes the per-worktree HEAD reflog with it.
-    expect(body).toContain("deadbeef1234");
-    expect(body).toContain("git branch <rescue-name> deadbeef1234");
-    // Must NOT claim no gate ran / the branch never moved: on the path that
-    // actually reaches this terminal, attempt 1 committed on the branch and a
-    // gate went green on it.
-    expect(body).not.toContain("without a green gate");
-    expect(body).not.toContain("No gate ran");
-    expect(body).not.toContain("never moved");
-    expect(body).toContain("refs/sandbar/stranded/deadbeef1234");
-    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
-    expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
-    ]);
-  });
+      expect(action).toEqual({ kind: "pushed" });
+      const body = calls.comments[0]!.body;
+      expect(body).toContain(i.branch);
+      // The comment and the cache pin it names are the only places this sha
+      // survives: reclaiming the clone takes the per-worktree HEAD reflog with it.
+      expect(body).toContain("deadbeef1234");
+      expect(body).toContain("git branch <rescue-name> deadbeef1234");
+      // Must NOT claim no gate ran / the branch never moved: on the path that
+      // actually reaches this terminal, attempt 1 committed on the branch and a
+      // gate went green on it.
+      expect(body).not.toContain("without a green gate");
+      expect(body).not.toContain("No gate ran");
+      expect(body).not.toContain("never moved");
+      expect(body).toContain("refs/sandbar/stranded/deadbeef1234");
+      expect(calls.reclaims).toEqual([{ branch: i.branch }]);
+      expect(calls.labelEdits).toEqual([
+        { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      ]);
+    },
+  );
 
   // #27, #98. The structural branch check cannot see an off-branch UI
   // escalation's detached commit. Its private clone remains the only store for

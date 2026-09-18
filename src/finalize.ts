@@ -153,7 +153,8 @@ export const PUSH_REFUSED_COMMENT_TEMPLATE = (args: {
 // the name is handed in, never reconstructed, and says only where the branch
 // is—not what an off-branch attempt may have written. #27's stranded-work note
 // is the only text entitled to locate those commits. It names the durable cache
-// pin only after reclamation established it; otherwise it points at the exact
+// pin after this reclamation established it, or after an earlier sandbox-close
+// reclamation left no clone for finalization; otherwise it points at the exact
 // preserved clone. A terminal with no pushed branch says so instead of
 // inventing one.
 
@@ -352,9 +353,11 @@ export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
 //
 // The prose branches on `headRef`, and that distinction is not cosmetic. A
 // DETACHED head needs a new branch name; a scratch BRANCH already has one.
-// Successful reclamation names the cache pin that outlives the clone. Failed
-// reclamation names the preserved clone instead, because claiming a pin the
-// cache refused to create would send the human to a nonexistent recovery ref.
+// Successful reclamation names the cache pin that outlives the clone. `absent`
+// means sandbox.close() already completed that same reclamation before
+// finalization, so it names the pin too. Failed reclamation names the preserved
+// clone instead, because claiming a pin the cache refused to create would send
+// the human to a nonexistent recovery ref.
 export const STRANDED_COMMITS_NOTE = (
   m: StrandedHead,
   reclaim: IssueCloneReclaim,
@@ -369,9 +372,7 @@ export const STRANDED_COMMITS_NOTE = (
         `preserved clone \`${reclaim.worktreePath}\`; from that clone, cherry-pick ` +
         `or merge it into \`${m.branch}\`.`;
   }
-  const location = reclaim.kind === "removed"
-    ? ` is pinned as \`${strandedHeadRef(m.headSha)}\``
-    : " is off the issue branch";
+  const location = ` is pinned as \`${strandedHeadRef(m.headSha)}\``;
   return m.headRef === null
     ? `\n\nStranded work: \`${m.headSha}\`${location}; recover it with ` +
       `\`git branch <rescue-name> ${m.headSha}\`, then cherry-pick or merge it into ` +
