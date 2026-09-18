@@ -215,10 +215,18 @@ instruction rather than a condition, and both of those are run-local state a
 fresh process re-derives in seconds. `src/restart-request.ts` owns the channel,
 including why it is a file beside the config rather than a signal or a per-poll
 commit compare. Remaining exits are `stuck`, `quota`,
-`credential`, `restart` and `halted`; plan-empty, relaunch, budget, and the
+`credential`, `storage`, `restart` and `halted`; plan-empty, relaunch, budget, and the
 recompute ceiling are gone.
 
-All five are one type, `TerminalExit`, and the run ends with exactly one
+After startup reconciliation and before image preparation, then at every
+recompute, sandbar checks the free bytes on the filesystem containing Podman's
+graphroot against a fixed 10 GiB floor (#169). A low reading latches admission
+closed and drains; active-cycle measurements cannot reopen it. At quiescence
+the owned-image reconciler runs and the filesystem is measured again.
+Source-image refresh work observed while low stays pending until that deciding
+measurement recovers, and is skipped entirely when the drain exits. If space
+remains low, the daemon exits 3 with the graphroot and exact byte count. All
+six exits are one type, `TerminalExit`, and the run ends with exactly one
 `exit` event whichever fired (#70/#132). `EXIT_TAGS` is exhaustive over the
 union and a table test asserts every tag has a code and reason. The pool owns
 run-wide starts, ongoing work, landings, and the terminal-without-landing
@@ -275,6 +283,14 @@ outcomes.
 - **Runtime is podman**, hard-coded (`src/runtime.ts`). The agent sandbox runs
   under `--init` (#42), and every container gets `--image-volume=ignore` (#50)
   — see `src/agent-sandbox.ts` and `src/containers.ts` headers.
+- **Sandbar owns the lifecycle of images it builds (#169).** Every declared,
+  branch-variant, tools and augmented build labels both final and intermediate
+  images with its workdir scope. At startup and each quiescent boundary one
+  reconciler removes every labelled image ID outside the live declared/current
+  tag set while preserving anything an existing container references. This is
+  deliberately not blanket `podman prune`: pulled images and another tool's
+  images are outside sandbar's authority. `src/image-lifecycle.ts` owns the
+  inventory and live-set contract; `src/disk-space.ts` owns the graphroot floor.
 - **The gate stack is config-driven (#24)** and `resolveGateStack` validates it
   before the lock. `src/gate-stack.ts`'s header is authoritative for the rest:
   lifecycles, readiness, wedge detection, bounded podman calls, timeouts, one
@@ -771,7 +787,7 @@ npm run build && node dist/cli.js --config <path>
   CLI against the installation config with no pre-start action and no consumer
   `git pull` or `npm ci`. The one timer is root-level convergence, never a
   daemon retry: the play writes `restart-requested` and the daemon decides
-  when, so exits 1, 2 and 4 remain stops a human inspects. Every attempt
+  when, so exits 1, 2, 3 and 4 remain stops a human inspects. Every attempt
   records a commit, time and result the Caddy index renders, so a box stuck on
   an old commit is visible rather than journalled. The standalone reader is the
   one unit the play restarts — it aborts no work, and a systemd auto-restart of

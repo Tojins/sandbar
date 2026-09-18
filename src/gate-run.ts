@@ -503,6 +503,7 @@ async function gate(
   let baseFingerprints: ReadonlyMap<string, string>;
   try {
     baseFingerprints = await ensureImages(gateImages, worktreePath, {
+      scope,
       rebuildInPlace: false,
     });
   } catch (e) {

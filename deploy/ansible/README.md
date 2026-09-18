@@ -87,7 +87,7 @@ The daemon reads that file at the top of every recompute. It then **drains** —
 stops admitting, keeps landing every pending terminal and every landable `land`
 request — and exits 75 once nothing is running, ongoing or landing. The unit's
 `RestartForceExitStatus=75` turns exactly that exit back into a start; `Restart=no`
-stays, so exits 1, 2 and 4 remain stops for a human to inspect. The new process
+stays, so exits 1, 2, 3 and 4 remain stops for a human to inspect. The new process
 removes that request at startup, so the exit cannot repeat — and only that one:
 a play that lands the next commit while a daemon is still starting leaves a
 request the daemon honours instead of deleting, so no commit is skipped.
@@ -278,7 +278,7 @@ Root-level convergence is `systemctl status sandbar-pull.timer` and
 `journalctl -u sandbar-pull`. A stop uses `KillMode=control-group`,
 `ExitType=cgroup`, and a 900-second default timeout so the driver can release
 containers, pods, the wake lock, and the origin lease. There are no automatic
-retries on exits 1, 2 and 4, no log sweeps, no memory limits, no GitHub Actions
+retries on exits 1, 2, 3 and 4, no log sweeps, no memory limits, no GitHub Actions
 deploy, and no automatic reboots.
 
 ## Validation

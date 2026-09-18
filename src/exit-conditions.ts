@@ -10,7 +10,7 @@
 //
 // 75 is the one code an installation unit turns back into a start
 // (`RestartForceExitStatus=`, #146), so it has to be a code nothing else in
-// this system can produce: 1, 2 and 4 are the deliberate stops a human
+// this system can produce: 1, 2, 3 and 4 are the deliberate stops a human
 // inspects, and an unhandled Node throw is 1. EX_TEMPFAIL is the sysexits name
 // for exactly this claim — nothing is wrong, ask again — and sandbar spelled
 // the retired per-landing relaunch (#65) with it for the same reason.
@@ -21,7 +21,7 @@
 // deferrals do not count: the daemon suppresses an immediate retry and lets the
 // poll timer provide the next observation instead.
 //
-// All five are `TerminalExit`s. `run.ts` writes that value as one exit event;
+// All six are `TerminalExit`s. `run.ts` writes that value as one exit event;
 // the UI renders it and service supervision reads only the process code (#132).
 // `EXIT_TAGS` is exhaustive over the union so its table test moves with it.
 
@@ -43,6 +43,7 @@ export const MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING = 6;
 // so `haltedExit` can spell it the way its siblings do.
 export const EXIT_CODE_HALTED = 1;
 export const EXIT_CODE_STUCK = 2;
+export const EXIT_CODE_STORAGE = 3;
 export const EXIT_CODE_QUOTA = 4;
 export const EXIT_CODE_RESTART = 75;
 
@@ -54,6 +55,7 @@ export const EXIT_TAGS = [
   "quota",
   "credential",
   "stuck",
+  "storage",
   "halted",
   "restart",
 ] as const;
@@ -132,5 +134,13 @@ export function stuckExit(terminals: number): TerminalExit {
     tag: "stuck",
     reason: `${terminals} consecutive issue terminals with zero landings`,
     exitCode: EXIT_CODE_STUCK,
+  };
+}
+
+export function storageExit(reason: string): TerminalExit {
+  return {
+    tag: "storage",
+    reason,
+    exitCode: EXIT_CODE_STORAGE,
   };
 }

@@ -17,15 +17,12 @@ import {
   hostAgentArchitecture,
   selectedAgentArtifact,
   selectedAgentArtifacts,
-  sweepAgentToolsImages,
 } from "./agent-tools.js";
 import {
   type BuildOptions,
   formatImageRecord,
-  sweepBranchImages,
 } from "./ensure-images.js";
 import {
-  isToolsImageTagIn,
   runScope,
   toolsImageTag,
   variantImageTag,
@@ -116,6 +113,7 @@ describe("run-owned agent images", () => {
     expect(builds[1]!.recipe).not.toContain("ADD --checksum");
     expect(images.builtTags()).toEqual([images.declaredTag]);
     expect(images.builtTags()).not.toContain(builds[0]!.tag);
+    expect(images.liveTags()).toEqual([builds[0]!.tag, images.declaredTag]);
     for (const build of builds) {
       await expect(access(build.options.contextRoot!)).rejects.toMatchObject({
         code: "ENOENT",
@@ -183,6 +181,7 @@ describe("run-owned agent images", () => {
       { tag: toolsTag, built: false, reason: "tools-current" },
       { tag: augmentedTag, built: false, reason: "variant-current" },
     ]);
+    expect(images.liveTags()).toEqual([toolsTag, augmentedTag]);
   });
 
   it("rebuilds a matching augmented image when the base is unlabelled", async () => {
@@ -262,6 +261,11 @@ describe("run-owned agent images", () => {
     expect(builds.filter(
       (build) => build.identity === "<generated-agent-tools-augmentation>",
     )).toHaveLength(3);
+    expect(images.liveTags()).toEqual([
+      toolsImageTag(scope, "musl", agentToolsFingerprint(["claude"], "musl")),
+      toolsImageTag(scope, "glibc", agentToolsFingerprint(["claude"], "glibc")),
+      ...images.builtTags(),
+    ]);
   });
 
   it("deduplicates concurrent augmentation of the same base", async () => {
@@ -311,6 +315,11 @@ describe("run-owned agent images", () => {
 
   it("retries a tools build after a transient failure", async () => {
     const scope = runScope("/tools-retry");
+    const glibcToolsTag = toolsImageTag(
+      scope,
+      "glibc",
+      agentToolsFingerprint(["claude"], "glibc"),
+    );
     let toolsAttempts = 0;
     const images = await createAgentImages({
       declaredBaseTag: "base",
@@ -318,7 +327,7 @@ describe("run-owned agent images", () => {
       scope,
       detectLibc: async (base) => base === "base" ? "glibc" : "musl",
       inputsLabel: async (tag) =>
-        isToolsImageTagIn(scope, tag) && tag.includes("-glibc-")
+        tag === glibcToolsTag
           ? agentToolsFingerprint(["claude"], "glibc")
           : null,
       build: async (image) => {
@@ -349,38 +358,6 @@ describe("run-owned agent images", () => {
     );
   });
 
-  it("sweeps obsolete scoped tools tags and keeps current and sibling scopes", async () => {
-    const scope = runScope("/tools-sweep");
-    const current = toolsImageTag(
-      scope, "glibc", agentToolsFingerprint(["codex"], "glibc"),
-    );
-    const changedPackages = {
-      ...AGENT_PROVIDER_PACKAGES,
-      codex: { ...AGENT_PROVIDER_PACKAGES.codex, version: "0.0.0" },
-    };
-    const obsolete = toolsImageTag(
-      scope,
-      "glibc",
-      agentToolsFingerprint(["codex"], "glibc", { packages: changedPackages }),
-    );
-    const sibling = toolsImageTag(
-      runScope("/other-tools-sweep"),
-      "glibc",
-      agentToolsFingerprint(["codex"], "glibc"),
-    );
-    const removed: string[] = [];
-    const result = await sweepAgentToolsImages(scope, ["codex"], async (args) => {
-      if (args[0] === "images") {
-        return { stdout: [current, obsolete, sibling].join("\n") + "\n" };
-      }
-      removed.push(args.at(-1) ?? "");
-      return { stdout: "" };
-    });
-    expect(result.failures).toEqual([]);
-    expect(result.removed).toEqual([obsolete]);
-    expect(removed).toEqual([obsolete]);
-  });
-
   it("changes the tools fingerprint for each independently pinned digest", () => {
     const baseline = agentToolsFingerprint(
       ["codex"], "glibc", { arch: "x64" },
@@ -406,20 +383,6 @@ describe("run-owned agent images", () => {
         packages: changedPackages,
       })).not.toBe(baseline);
     }
-  });
-
-  it("sweeps augmented children before their branch-variant parents", async () => {
-    const scope = runScope("/nested-agent-images");
-    const parent = variantImageTag("base", scope, "a".repeat(64));
-    const child = variantImageTag(parent, scope, "b".repeat(64));
-    const removed: string[] = [];
-    const result = await sweepBranchImages(scope, async (args) => {
-      if (args[0] === "images") return { stdout: `${parent}\n${child}\n` };
-      removed.push(args.at(-1) ?? "");
-      return { stdout: "" };
-    });
-    expect(result.failures).toEqual([]);
-    expect(removed).toEqual([child, parent]);
   });
 
   it("selects every provider binary and static artifacts before libc-specific ones", () => {

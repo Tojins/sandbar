@@ -106,7 +106,9 @@
 // reads no refs at all (#146); startup preflight remains fatal. A no-op poll is silent. A stable label-actor
 // exclusion is recorded on each poll because its required diagnostic
 // makes that recompute reportable. Source movement from either
-// a human push or this process refreshes the image inputs.
+// a human push or this process latches an image-input refresh; the next
+// healthy storage measurement performs it, while a low-space drain keeps it
+// pending without starting another build.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
 // Every gate-1 and gate-2 call passes through one run-wide FIFO semaphore
@@ -115,7 +117,12 @@
 // The origin lease renewal wraps that same wait and therefore precedes either
 // wake's effects. A separate heartbeat uses the same serialized renewal
 // operation so a long gate or forge wait cannot consume the lease between
-// scheduler wakes.
+// scheduler wakes. Free space on Podman's graphroot is measured after startup
+// reconciliation but before image preparation, then at every recompute (#169).
+// A low reading latches admission closed and drains; active-cycle healthy
+// readings cannot reopen it. Reconciliation and the deciding remeasurement
+// happen only once the pool is quiescent, so image removal cannot race a live
+// gate or sandbox build.
 
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
@@ -149,9 +156,9 @@ import {
   readDriverIdentity,
 } from "./driver-identity.js";
 import {
+  agentToolsImageTags,
   type AgentImages,
   createAgentImages,
-  sweepAgentToolsImages,
 } from "./agent-tools.js";
 import { type CodexAuthMount, prepareCodexAuth } from "./codex-auth.js";
 import {
@@ -162,12 +169,18 @@ import {
   ensureImages,
   formatImageRecord,
   pulledImagesOf,
-  removeBranchImages,
-  sweepBranchImages,
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
+import { reconcileImages } from "./image-lifecycle.js";
 import { makeEnvReader } from "./env.js";
 import { startTimer } from "./timing.js";
+import {
+  type GraphRootSpace,
+  formatLowGraphRootSpace,
+  graphRootSpace,
+  graphRootSpaceIsLow,
+  podmanGraphRoot,
+} from "./disk-space.js";
 import { SandbarError, faultDetail } from "./errors.js";
 import {
   runStampFromDate,
@@ -182,6 +195,7 @@ import {
   credentialExit,
   quotaExit,
   restartExit,
+  storageExit,
   stuckExit,
 } from "./exit-conditions.js";
 import {
@@ -445,6 +459,7 @@ function schedulerExit(
     readonly pool: ContinuousPool<PlannedIssue, Terminal>;
     readonly providerExit: TerminalExit | null;
     readonly restartDetail: string | null;
+    readonly storage: GraphRootSpace | null;
   },
 ): TerminalExit {
   switch (reason) {
@@ -460,8 +475,21 @@ function schedulerExit(
       }
       return state.providerExit;
     }
+    case "storage-low": {
+      if (state.storage === null) {
+        throw new Error("scheduler selected a storage exit without a measurement");
+      }
+      return lowStorageExit(state.storage);
+    }
     case "stuck": return stuckExit(state.pool.noProgressSinceLanding);
   }
+}
+
+function lowStorageExit(space: GraphRootSpace): TerminalExit {
+  return storageExit(
+    `${formatLowGraphRootSpace(space)} after image reconciliation; ` +
+      "admissions were stopped and the pool drained",
+  );
 }
 
 type RunActivity = {
@@ -967,10 +995,17 @@ export async function run(
   // naming a pid that will be dead, which the next launch's takeover reads as a
   // crashed run and clears. Cheap, and it keeps every exit path in this file
   // uniform rather than one of them relying on a dependency's exit hook.
-  const stopAtStartup = async (
-    cause: string,
-    err: unknown,
+  const exitAtStartup = async (
+    message: string,
+    exit: TerminalExit,
   ): Promise<never> => {
+    await runRecord.emit({ kind: "complaint", severity: "error", message });
+    const announced = await announceExit(exit);
+    await runCleanup();
+    process.exit(announced.exitCode);
+  };
+
+  const stopAtStartup = async (cause: string, err: unknown): Promise<never> => {
     // `faultDetail` already renders a SandbarError as its bare message and
     // anything else as a stack — errors.ts owns that rule. The one case it does
     // not know about is
@@ -978,10 +1013,7 @@ export async function run(
     // message IS the operator-actionable report.
     const detail =
       err instanceof PreflightError ? err.message : faultDetail(err);
-    await runRecord.emit({ kind: "complaint", severity: "error", message: detail });
-    const exit = await announceExit(haltedExit([cause]));
-    await runCleanup();
-    process.exit(exit.exitCode);
+    return await exitAtStartup(detail, haltedExit([cause]));
   };
 
   let codexAuthMount: CodexAuthMount | undefined;
@@ -1036,10 +1068,13 @@ export async function run(
   //     invisible and unreapable. Only `realpathSync` closes that one.
   // acquireLock has already mkdirSync'd the directory, so this cannot ENOENT.
   const scope = runScope(realpathSync(lockPaths.workDir));
+  let graphRoot!: string;
+  let startupSpace!: GraphRootSpace;
 
-  // ALL THREE SWEEPS IN ONE `try`, because all three THROW on a failed LIST
-  // and none of them used to sit inside anything (#70). The throw is right at
-  // the other end — `containers.ts` and `ensure-images.ts` both argue that a
+  // THE STARTUP INVENTORY IN ONE `try`, because both reconcilers throw on a
+  // failed list and graphroot discovery is part of the same Podman snapshot.
+  // The throw is right at the other end — `containers.ts` and
+  // `image-lifecycle.ts` both argue that a
   // failed list is a blind sweep, which cannot know what it missed, so stopping
   // beats asserting "no debris" on no evidence — but the stop it produced
   // escaped `run()` to the bin, which is the exact shape this issue exists to
@@ -1049,38 +1084,28 @@ export async function run(
   // that went away between two podman calls — host state an operator can act
   // on, and now host state they can still read afterwards.
   //
-  // One `try` and one cause for the three: they are one step (take stock of
+  // One `try` and one cause: this is one step (take stock of
   // what a previous run left behind), they fail for one reason, and the
   // complaint recorded beside the cause names which podman call it was.
   try {
+    graphRoot = await podmanGraphRoot();
     const orphans = await cleanupOrphanContainers(scope);
     if (orphans.removed.length > 0) {
       await runRecord.emit({ kind: "sweep", scope: "startup", removed: orphans.removed, failures: [] });
     }
     await reportSweepFailures(orphans, (event) => runRecord.emit(event), "startup");
 
-    // The image half of the same sweep (#37). Per-branch gate images are
-    // removed at the end of a run, but that removal is an `onCleanup` action
-    // and so does not run on SIGKILL, a hard crash, or a `podman build` that
-    // outlived its parent — and these are the largest things sandbar creates.
-    // Startup only: within a run they are reused, and they carry this scope, so
-    // anything found here belongs to a predecessor of this workdir that is
-    // provably not running.
-    const staleImages = await sweepBranchImages(scope);
+    const staleImages = await reconcileImages({
+      scope,
+      liveTags: new Set([
+        ...config.images.map((image) => image.tag),
+        ...agentToolsImageTags(scope, agentProviders),
+      ]),
+    });
     if (staleImages.removed.length > 0) {
       await runRecord.emit({ kind: "sweep", scope: "startup", removed: staleImages.removed, failures: [] });
     }
-    await reportSweepFailures(staleImages, (event) => runRecord.emit(event), "startup");
-
-    // Unlike per-branch variants, the current tools images survive clean run
-    // teardown so restarts reuse their large, checksum-addressed downloads.
-    // A predecessor's other pin fingerprints are no longer reusable and are
-    // swept only inside this workdir's scope.
-    const staleTools = await sweepAgentToolsImages(scope, agentProviders);
-    if (staleTools.removed.length > 0) {
-      await runRecord.emit({ kind: "sweep", scope: "startup", removed: staleTools.removed, failures: [] });
-    }
-    await reportSweepFailures(staleTools, (event) => runRecord.emit(event), "startup");
+    startupSpace = await graphRootSpace(graphRoot);
 
     // Debris no run's scope claims: from a build predating #28, or the
     // sandcastle era. Reported rather than removed, because a bare-prefix match
@@ -1101,6 +1126,14 @@ export async function run(
     }
   } catch (err) {
     return await stopAtStartup("startup-sweep-failed", err);
+  }
+
+  if (graphRootSpaceIsLow(startupSpace)) {
+    return await exitAtStartup(
+      `${formatLowGraphRootSpace(startupSpace)} after startup image reconciliation. ` +
+        "Sandbar will not begin image preparation or admit work.",
+      lowStorageExit(startupSpace),
+    );
   }
 
   // Build the sandbar image in the runtime if missing. No-op when it already
@@ -1149,6 +1182,7 @@ export async function run(
   try {
     initialSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
     initialBaseFingerprints = await ensureImages(config.images, initialSourceWorktree, {
+      scope,
       onImage: recordImage,
       log: () => undefined,
       captureBuild: true,
@@ -1172,9 +1206,6 @@ export async function run(
   // and two branches that make the same dependency change must produce one
   // build rather than two.
   //
-  // Registered for cleanup HERE, before the first stack exists, so LIFO order
-  // puts the image removal after every container that could still be running
-  // one of them.
   const makeBranchImages = (fingerprints: ReadonlyMap<string, string>): BranchImages =>
     createBranchImages({
       images: config.images,
@@ -1190,29 +1221,6 @@ export async function run(
     agentImages: initialAgentImages,
     branchImages: initialBranchImages,
   };
-  const branchImageRuns = [initialBranchImages];
-  const agentImageRuns = [initialAgentImages];
-  onCleanup(async () => {
-    // Augmented images are FROM-children of branch variants. Remove leaves
-    // first so podman can then remove their parents.
-    const tags = [
-      ...agentImageRuns.flatMap((images) => [...images.builtTags()]),
-      ...branchImageRuns.flatMap((images) => [...images.builtTags()]),
-    ];
-    if (tags.length === 0) return;
-    const failures = await removeBranchImages(tags);
-    if (failures.length > 0) {
-      await runRecord.emit({
-        kind: "complaint",
-        severity: "warning",
-        message: `Could not remove ${failures.length} per-branch gate image(s) built ` +
-          "for this run. They cost disk and nothing else — the tags are " +
-          "content-addressed and scoped, so a leftover is reused rather than " +
-          `mistaken for something current:\n${failures.join("\n")}`,
-      });
-      // Cleanup is LIFO, so this outcome is recorded before run-end.
-    }
-  });
 
   // After the builds, because the images have to exist to be probed and a
   // freshly-built one is the likeliest to be wrong. Before any stack starts,
@@ -1376,6 +1384,12 @@ export async function run(
     (issue) => issue.id,
   );
   let providerExitPending: TerminalExit | null = null;
+  let storageLow: GraphRootSpace | null = null;
+  // Source movement creates refresh WORK, not an instruction to build at the
+  // point it was observed. The next recompute measures storage first; a low
+  // reading keeps this latched through the drain so recovery can perform it,
+  // while an exit leaves it untouched and starts no unnecessary build.
+  let pendingSourceImageRefresh: "poll" | "landing" | null = null;
   // What the observed request carried, and the whole of the drain's state.
   let restartRequested: string | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
@@ -1692,6 +1706,7 @@ export async function run(
     activity.enterBusy();
     const nextSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
     const nextBaseFingerprints = await ensureImages(config.images, nextSourceWorktree, {
+      scope,
       onImage: recordImage,
       log: () => undefined,
       captureBuild: true,
@@ -1711,8 +1726,6 @@ export async function run(
       agentImages: nextAgentImages,
       branchImages: nextBranchImages,
     };
-    agentImageRuns.push(nextAgentImages);
-    branchImageRuns.push(nextBranchImages);
   };
 
   // The request read before this startup began has been answered by this very
@@ -1784,6 +1797,7 @@ export async function run(
                 pool,
                 providerExit: providerExitPending ?? closedProviderExit(config, providerState),
                 restartDetail: restartRequested,
+                storage: storageLow,
               }),
             );
             break;
@@ -1804,9 +1818,7 @@ export async function run(
         // gate-2 resolves its branch images from the merger worktree, which is
         // the merge result rather than either input.
         if (sourceChangedOnPoll && restartRequested === null) {
-          const line = `origin/${config.sourceBranch} moved during poll; refreshing source images`;
-          await runRecord.emit({ kind: "preflight", action: "origin-refreshed", detail: line });
-          await refreshSourceImages();
+          pendingSourceImageRefresh ??= "poll";
         }
       }
       // -----------------------------------------------------------------------
@@ -1826,6 +1838,70 @@ export async function run(
           await runRecord.emit({ kind: "sweep", scope: "quiescent", removed: cycleOrphans.removed, failures: [] });
         }
         await reportSweepFailures(cycleOrphans, (event) => runRecord.emit(event), "quiescent");
+      }
+      if (pool.isQuiescent) {
+        const cycleImages = await reconcileImages({
+          scope,
+          liveTags: new Set([
+            ...config.images.map((image) => image.tag),
+            ...currentImages.agentImages.liveTags(),
+            ...currentImages.branchImages.builtTags(),
+          ]),
+        });
+        if (cycleImages.removed.length > 0) {
+          await runRecord.emit({
+            kind: "sweep",
+            scope: "quiescent",
+            removed: cycleImages.removed,
+            failures: [],
+          });
+        }
+      }
+
+      const previousStorageLow: GraphRootSpace | null = storageLow;
+      const measuredSpace = await graphRootSpace(graphRoot);
+      const measuredStorageLow = graphRootSpaceIsLow(measuredSpace)
+        ? measuredSpace
+        : null;
+      // A low reading is a drain latch, not a momentary admission pause. Only
+      // the quiescent boundary can reconcile safely, so only its post-reconcile
+      // measurement may reopen admission. Measurements continue while work
+      // drains, both for evidence and so the final boundary is not special I/O.
+      storageLow = previousStorageLow !== null && !pool.isQuiescent
+        ? measuredStorageLow ?? previousStorageLow
+        : measuredStorageLow;
+      if (storageLow !== null && previousStorageLow === null) {
+        await runRecord.emit({
+          kind: "complaint",
+          severity: "error",
+          message: `${formatLowGraphRootSpace(storageLow)}. Sandbar is stopping ` +
+            "admissions and draining; once quiescent it reconciles owned images " +
+            "and measures again before deciding whether to exit.",
+        });
+      } else if (storageLow === null && previousStorageLow !== null) {
+        await runRecord.emit({
+          kind: "preflight",
+          action: "disk-space-recovered",
+          detail: `Podman graphroot '${measuredSpace.graphRoot}' recovered to ` +
+            `${measuredSpace.availableBytes} bytes free after image reconciliation`,
+        });
+      }
+      if (
+        storageLow === null &&
+        restartRequested === null &&
+        pendingSourceImageRefresh !== null
+      ) {
+        if (pendingSourceImageRefresh === "poll") {
+          const line =
+            `origin/${config.sourceBranch} moved during poll; refreshing source images`;
+          await runRecord.emit({
+            kind: "preflight",
+            action: "origin-refreshed",
+            detail: line,
+          });
+        }
+        await refreshSourceImages();
+        pendingSourceImageRefresh = null;
       }
 
       // ---------------------------------------------------------------------
@@ -2036,6 +2112,7 @@ export async function run(
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         providerClosed,
         restartRequested: restartRequested !== null,
+        storageLow: storageLow !== null,
       });
       const pollDidWork =
         sourceChangedOnPoll || planDiagnosticsChanged ||
@@ -2056,6 +2133,7 @@ export async function run(
             pool,
             providerExit: providerExitPending ?? closedProviderExit(config, providerState),
             restartDetail: restartRequested,
+            storage: storageLow,
           }),
         );
         break;
@@ -2679,7 +2757,7 @@ export async function run(
         ? "landing-finished"
         : "terminal-finalized";
       if (sourceLandings > 0) {
-        await refreshSourceImages();
+        pendingSourceImageRefresh ??= "landing";
       }
       if (selectedExit?.tag === "quota" || selectedExit?.tag === "credential") {
         providerExitPending = selectedExit;

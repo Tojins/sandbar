@@ -66,9 +66,9 @@ import {
 import type { RuntimeExec, SweepResult } from "./containers.js";
 import { SandbarError, isExitCode } from "./errors.js";
 import { IMAGE_INPUTS_LABEL, fingerprintImageInputs } from "./image-inputs.js";
+import { imageScopeLabel } from "./image-lifecycle.js";
 import {
   type RunScope,
-  isVariantImageTagIn,
   variantImageTag,
 } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
@@ -220,6 +220,8 @@ export function parseInputsLabel(json: string): string | null {
 }
 
 export type BuildOptions = {
+  // Owner applied to both the final image and intermediate build images.
+  readonly scope: RunScope;
   // Directory the containerfile path is resolved against — the host checkout
   // for a base build, the gated worktree for a per-branch one. It is what makes
   // the same `BuiltImage` entry buildable from two different trees.
@@ -235,34 +237,39 @@ export type BuildOptions = {
   readonly capture?: boolean;
   // Deadline for the whole build. Defaults to DEFAULT_BUILD_TIMEOUT_MS.
   readonly timeoutMs?: number;
-  // A generated tar build context. The directory is streamed through host tar
-  // to `podman build -`, so COPY instructions can use it.
+  // A generated build context containing `Containerfile`. Podman's client
+  // transfers the directory to a remote service when necessary, so COPY works
+  // without requiring the service host to see this path.
   readonly contextRoot?: string;
 };
 
-function buildUsesStdin(image: BuiltImage, opts?: BuildOptions): boolean {
-  return image.stdinContext === true || opts?.contextRoot !== undefined;
+function buildUsesStdin(image: BuiltImage): boolean {
+  return image.stdinContext === true;
 }
 
 // The `podman build` argv for one entry. Pure so the stdin-context, build-arg
 // and label wiring is table-testable — the real-adapter blind spot.
-export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
+export function buildArgv(image: BuiltImage, opts: BuildOptions): string[] {
   const args = ["build", "-t", image.tag];
+  const label = imageScopeLabel(opts.scope);
+  args.push(`--label=${label}`);
+  args.push(`--layer-label=${label}`);
   if (image.target !== undefined) args.push("--target", image.target);
   for (const [k, v] of Object.entries(image.buildArgs ?? {})) {
     args.push("--build-arg", `${k}=${v}`);
   }
-  if (opts?.fingerprint) {
+  if (opts.fingerprint) {
     args.push("--label", `${IMAGE_INPUTS_LABEL}=${opts.fingerprint}`);
   }
-  if (buildUsesStdin(image, opts)) {
-    // Stdin is either the Containerfile alone or a generated tar context. `-f`
-    // would be redundant and podman rejects it alongside the `-` context.
+  if (image.stdinContext) {
+    // Stdin is the Containerfile alone, with no build context.
     args.push("-");
+  } else if (opts.contextRoot !== undefined) {
+    args.push("-f", join(opts.contextRoot, "Containerfile"), opts.contextRoot);
   } else {
-    const containerfile = containerfilePath(image, opts?.root ?? "");
+    const containerfile = containerfilePath(image, opts.root);
     const context = effectiveImageBuildContext(image);
-    const root = opts?.root ?? "";
+    const root = opts.root;
     const contextPath = isAbsolute(context) || !root ? context || "." : join(root, context);
     args.push("-f", containerfile, contextPath);
   }
@@ -299,15 +306,9 @@ export async function buildImage(
   let output = "";
   let timedOut = false;
   await new Promise<void>((resolve, reject) => {
-    let tar: ChildProcess | undefined;
-    // A generated context has its own stderr stream. `podman` can exit as soon
-    // as that producer fails, before Node has delivered the producer's final
-    // stderr chunk, so a failing build must not snapshot `output` until the tar
-    // process and its stdio have closed.
-    let contextStreamClosed = Promise.resolve();
     const child = spawn(RUNTIME, args, {
       stdio: [
-        buildUsesStdin(image, opts) ? "pipe" : "ignore",
+        buildUsesStdin(image) ? "pipe" : "ignore",
         capture ? "pipe" : "inherit",
         capture ? "pipe" : "inherit",
       ],
@@ -318,13 +319,12 @@ export async function buildImage(
     // bound that cannot fail.
     const timer = setTimeout(() => {
       timedOut = true;
-      tar?.kill("SIGKILL");
       child.kill("SIGKILL");
     }, timeoutMs);
     // Tracked for the run's cleanup, because a signal during a build would
     // otherwise leave `podman build` running detached: it finishes minutes
-    // after sandbar exited and applies a tag `builtTags()` never saw, so the
-    // startup sweep is the only thing that ever reclaims it.
+    // after sandbar exited and applies a tag `builtTags()` never saw; the next
+    // scope-label reconciliation still finds its image ID.
     const untrack = trackBuild(child);
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -335,7 +335,6 @@ export async function buildImage(
       output = appendTail(output, c);
     });
     child.on("error", (err) => {
-      tar?.kill("SIGKILL");
       untrack();
       clearTimeout(timer);
       reject(err);
@@ -344,10 +343,8 @@ export async function buildImage(
     // events, which would make a captured ImageBuildError intermittently lose
     // the diagnosis at the end of the build.
     child.on("close", async (code) => {
-      tar?.kill("SIGKILL");
       untrack();
       clearTimeout(timer);
-      await contextStreamClosed;
       if (code === 0 && !timedOut) {
         resolve();
         return;
@@ -368,25 +365,7 @@ export async function buildImage(
         ),
       );
     });
-    if (opts.contextRoot !== undefined && child.stdin) {
-      tar = spawn("tar", ["-cf", "-", "-C", opts.contextRoot, "."], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      contextStreamClosed = new Promise((closed) => tar!.on("close", closed));
-      const untrackTar = trackBuild(tar);
-      tar.stderr?.on("data", (c: Buffer) => { output = appendTail(output, c.toString()); });
-      tar.on("error", (err) => {
-        untrackTar();
-        child.kill("SIGKILL");
-        reject(err);
-      });
-      tar.on("exit", (code) => {
-        untrackTar();
-        if (code !== 0 && !timedOut) child.kill("SIGKILL");
-      });
-      child.stdin.on("error", () => {});
-      tar.stdout?.pipe(child.stdin);
-    } else if (image.stdinContext && child.stdin) {
+    if (image.stdinContext && child.stdin) {
       const src = createReadStream(
         containerfilePath(image, opts.root),
       );
@@ -481,7 +460,8 @@ export type ImageRecorder = (r: ImageBuildRecord) => void | Promise<void>;
 export async function ensureImages(
   images: readonly BuiltImage[],
   contextRoot: string,
-  opts?: {
+  opts: {
+    readonly scope: RunScope;
     readonly rebuildInPlace?: boolean;
     readonly onImage?: ImageRecorder;
     readonly log?: (line: string) => void;
@@ -514,6 +494,7 @@ export async function ensureImages(
           `Building ${image.tag} in ${RUNTIME} (one-time setup; cached afterwards)...`,
         );
         await buildImage(image, {
+          scope: opts.scope,
           root: contextRoot,
           capture: captureBuild,
           timeoutMs: image.buildTimeoutMs,
@@ -548,6 +529,7 @@ export async function ensureImages(
         : `Rebuilding ${image.tag} in ${RUNTIME}: its declared inputs in ${contextRoot} changed since it was built...`,
     );
     await buildImage(image, {
+      scope: opts.scope,
       root: contextRoot,
       fingerprint,
       capture: captureBuild,
@@ -584,9 +566,8 @@ export type BranchImages = {
     worktreePath: string,
     only: ReadonlySet<string>,
   ) => Promise<ImageMap>;
-  // Every per-branch tag this run built, oldest first. Removed at the end of
-  // the run; the layers stay in podman's build cache, so the next run's rebuild
-  // of the same inputs is cache hits.
+  // Every per-branch tag this resolver built or reused, oldest first. This is
+  // the resolver's live set at quiescent image reconciliation boundaries.
   readonly builtTags: () => readonly string[];
 };
 
@@ -664,6 +645,7 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
             await build(
               { ...image, tag },
               {
+                scope: opts.scope,
                 root: worktreePath,
                 fingerprint,
                 capture: true,
@@ -771,10 +753,9 @@ async function checkVariantUid(
   );
 }
 
-// Best-effort removal of the per-branch tags a run built, returning what could
-// not be removed. Teardown, so a failure is reported rather than thrown: it
-// leaks an image, which costs disk and nothing else — and `sweepBranchImages`
-// reclaims it at the next run of this workdir.
+// Best-effort removal used only by the lock-free standalone gate. A daemon run
+// uses the scope-label reconciler instead, which can also reach predecessors
+// and intermediate images (#169).
 export async function removeBranchImages(
   tags: readonly string[],
 ): Promise<readonly string[]> {
@@ -784,20 +765,6 @@ export async function removeBranchImages(
 const runImageQuery: RuntimeExec = (args) => exec(RUNTIME, [...args], {
   timeout: IMAGE_QUERY_TIMEOUT_MS,
 });
-
-// Listing and removing podman image tags are shared lifecycle operations. The
-// callers retain the authority-specific selection and ordering rules: branch
-// variants are transient and child-first, while current tools pins persist.
-export async function listImageTags(
-  run: RuntimeExec = runImageQuery,
-): Promise<readonly string[]> {
-  const { stdout } = await run([
-    "images",
-    "--format",
-    "{{.Repository}}:{{.Tag}}",
-  ]);
-  return stdout.split("\n").map((tag) => tag.trim()).filter(Boolean);
-}
 
 export async function removeImageTags(
   tags: readonly string[],
@@ -819,35 +786,6 @@ export async function removeImageTags(
     }
   }
   return { removed, failures };
-}
-
-// Per-branch images left behind in THIS scope, swept at startup — the image
-// half of `cleanupOrphanContainers`, with the same licence and the same
-// asymmetry.
-//
-// The licence: one lock ⇔ one scope, so a variant tag carrying our scope is
-// ours or a dead predecessor's on this workdir, and we hold the lock, so
-// nothing in it can be live. Another scope's variants are another workdir's to
-// reap and are not touched. Without this the scope segment in the tag would be
-// a claim nothing implements: the run-end removal does not run on SIGKILL, a
-// hard crash, or a `podman build` that outlived its parent, and these are
-// ~6GB-class images that no other code path names.
-//
-// The asymmetry: a failed LIST throws (a blind sweep would be asserting "no
-// debris" on no evidence), a failed REMOVE is collected and reported (it knows
-// exactly what leaked, the tag is content-addressed so a leftover is reused
-// rather than mistaken for something current, and throwing would let one wedged
-// image block every future run).
-export async function sweepBranchImages(
-  scope: RunScope,
-  run: RuntimeExec = runImageQuery,
-): Promise<SweepResult> {
-  const tags = (await listImageTags(run))
-    .filter((t) => isVariantImageTagIn(scope, t))
-    // Augmented sandbox images are children of branch variants and carry one
-    // more suffix. Remove the more-derived (longer) tags first.
-    .sort((a, b) => b.length - a.length);
-  return removeImageTags(tags, run);
 }
 
 // `--entrypoint id` rather than `run <image> id -u`: with a plain command the

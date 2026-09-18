@@ -3,12 +3,14 @@ import {
   EXIT_CODE_HALTED,
   EXIT_CODE_QUOTA,
   EXIT_CODE_RESTART,
+  EXIT_CODE_STORAGE,
   EXIT_CODE_STUCK,
   EXIT_TAGS,
   credentialExit,
   haltedExit,
   quotaExit,
   restartExit,
+  storageExit,
   stuckExit,
 } from "./exit-conditions.js";
 
@@ -17,6 +19,7 @@ describe("daemon-pool exits", () => {
     ["quota", quotaExit({ provider: "claude", window: "five_hour", resetsAt: 42 }), EXIT_CODE_QUOTA, /1970-01-01T00:00:42/],
     ["credential", credentialExit({ provider: "codex", detail: "refresh refused" }), EXIT_CODE_QUOTA, /Log in again on the host and restart/],
     ["stuck", stuckExit(6), EXIT_CODE_STUCK, /6 consecutive issue terminals/],
+    ["storage", storageExit("12 bytes free"), EXIT_CODE_STORAGE, /12 bytes free/],
     ["halted", haltedExit(["merge", "tracker"]), EXIT_CODE_HALTED, /merge \+ tracker/],
     ["restart", restartExit("abc1234"), EXIT_CODE_RESTART, /deployment of abc1234/],
   ] as const;
@@ -37,6 +40,7 @@ describe("daemon-pool exits", () => {
     expect(EXIT_CODE_RESTART).not.toBe(EXIT_CODE_HALTED);
     expect(EXIT_CODE_RESTART).not.toBe(EXIT_CODE_STUCK);
     expect(EXIT_CODE_RESTART).not.toBe(EXIT_CODE_QUOTA);
+    expect(EXIT_CODE_RESTART).not.toBe(EXIT_CODE_STORAGE);
   });
 
   it("reports an unknown quota reset and an unspecified halt", () => {
