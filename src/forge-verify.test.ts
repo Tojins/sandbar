@@ -862,7 +862,7 @@ describe("runVerifiedLanding", () => {
     expect(calls.prClosed.map((p) => p.number)).toEqual([99]);
   });
 
-  it("puts the real generated body on the pull request, with no auto-closing keyword", async () => {
+  it("puts only the member list on the pull request", async () => {
     // `Closes #n` would be a trap: GitHub only honours it on the default
     // branch, so on any other sourceBranch the issues silently stay open while
     // the body claims otherwise. Sandbar closes its own issues in Phase 4.
@@ -871,11 +871,7 @@ describe("runVerifiedLanding", () => {
       { openPullRequest: true },
     );
     const body = calls.prBodies[0] ?? "";
-    expect(body).not.toMatch(/\b(Closes|Fixes|Resolves) #/i);
-    // …and it is the real generated body, not an empty string or a fixture
-    // that would satisfy the assertion above for free.
-    expect(body).toContain("#7 — t-7");
-    expect(body).toContain("#9 — t-9");
+    expect(body).toBe("- #7 — t-7\n- #9 — t-9");
   });
 
   it("never fast-forwards on an unknown verdict (checks that never conclude)", async () => {

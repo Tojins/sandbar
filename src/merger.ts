@@ -1758,7 +1758,6 @@ export async function runMergerWithAdapter(
         chunkBranch: branch,
         ...chunkPullRequestContent({
           root: group.root,
-          branch,
           members: prMembers,
         }),
       })

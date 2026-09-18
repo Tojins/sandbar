@@ -112,6 +112,11 @@
 // an audit/review handle *around* that push (the forge marks it merged once its
 // commits become ancestors of the base), so turning it on never changes who
 // authored what.
+//
+// Its body is the member list alone: one `- #N — title` line per merged issue.
+// It contains no `Closes` trailer (#14), no mechanics and no claim about what
+// the forge or sandbar will do. Per-PR facts belong in comments; a stable body
+// readers learn to skip is a bad place to reserve for important information.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -772,31 +777,13 @@ export function verifiedLandingOptionsFrom(
   };
 }
 
-function pullRequestBody(opts: VerifiedLandingOptions): string {
+function pullRequestBody(issues: readonly IssueRef[]): string {
   // Deliberately NOT `Closes #n`. Auto-close only fires for PRs merged into the
   // repository's DEFAULT branch, and sandbar's sourceBranch need not be it —
   // relying on it would silently strand issues open on any other source branch.
   // Sandbar closes its own issues after the push (see merger.ts), which also
   // keeps the #14 unclosed-retry machinery intact and identical in both modes.
-  const lines = [
-    "Sandbar cycle integration branch. Every commit here already passed the",
-    "local post-merge gate; this PR exists so the forge verifies the composed",
-    "result before it reaches `" + opts.sourceBranch + "`.",
-    "",
-    "Issues in this merge result:",
-    "",
-  ];
-  for (const i of opts.mergedIssues) {
-    lines.push(`- #${i.id} — ${i.title}`);
-  }
-  lines.push(
-    "",
-    "Sandbar lands this by fast-forwarding `" +
-      opts.sourceBranch +
-      "` to the verified sha, so the commits are authored exactly as they were",
-    "locally. Do not merge this PR by hand while a run is in progress.",
-  );
-  return lines.join("\n");
+  return issues.map((i) => `- #${i.id} — ${i.title}`).join("\n");
 }
 
 export async function runVerifiedLanding(
@@ -866,7 +853,7 @@ export async function runVerifiedLanding(
       pr = await deps.verify.ensurePullRequest({
         head: opts.integrationBranch,
         title: `Sandbar: land ${opts.mergedIssues.length} issue(s) into ${opts.sourceBranch}`,
-        body: pullRequestBody(opts),
+        body: pullRequestBody(opts.mergedIssues),
       });
       await log(`verify: pull request ${pr.url}`);
     }
