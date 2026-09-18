@@ -17,12 +17,10 @@ import {
   hostAgentArchitecture,
   selectedAgentArtifact,
   selectedAgentArtifacts,
-  sweepAgentToolsImages,
 } from "./agent-tools.js";
 import {
   type BuildOptions,
   formatImageRecord,
-  sweepBranchImages,
 } from "./ensure-images.js";
 import {
   isToolsImageTagIn,
@@ -349,38 +347,6 @@ describe("run-owned agent images", () => {
     );
   });
 
-  it("sweeps obsolete scoped tools tags and keeps current and sibling scopes", async () => {
-    const scope = runScope("/tools-sweep");
-    const current = toolsImageTag(
-      scope, "glibc", agentToolsFingerprint(["codex"], "glibc"),
-    );
-    const changedPackages = {
-      ...AGENT_PROVIDER_PACKAGES,
-      codex: { ...AGENT_PROVIDER_PACKAGES.codex, version: "0.0.0" },
-    };
-    const obsolete = toolsImageTag(
-      scope,
-      "glibc",
-      agentToolsFingerprint(["codex"], "glibc", { packages: changedPackages }),
-    );
-    const sibling = toolsImageTag(
-      runScope("/other-tools-sweep"),
-      "glibc",
-      agentToolsFingerprint(["codex"], "glibc"),
-    );
-    const removed: string[] = [];
-    const result = await sweepAgentToolsImages(scope, ["codex"], async (args) => {
-      if (args[0] === "images") {
-        return { stdout: [current, obsolete, sibling].join("\n") + "\n" };
-      }
-      removed.push(args.at(-1) ?? "");
-      return { stdout: "" };
-    });
-    expect(result.failures).toEqual([]);
-    expect(result.removed).toEqual([obsolete]);
-    expect(removed).toEqual([obsolete]);
-  });
-
   it("changes the tools fingerprint for each independently pinned digest", () => {
     const baseline = agentToolsFingerprint(
       ["codex"], "glibc", { arch: "x64" },
@@ -406,20 +372,6 @@ describe("run-owned agent images", () => {
         packages: changedPackages,
       })).not.toBe(baseline);
     }
-  });
-
-  it("sweeps augmented children before their branch-variant parents", async () => {
-    const scope = runScope("/nested-agent-images");
-    const parent = variantImageTag("base", scope, "a".repeat(64));
-    const child = variantImageTag(parent, scope, "b".repeat(64));
-    const removed: string[] = [];
-    const result = await sweepBranchImages(scope, async (args) => {
-      if (args[0] === "images") return { stdout: `${parent}\n${child}\n` };
-      removed.push(args.at(-1) ?? "");
-      return { stdout: "" };
-    });
-    expect(result.failures).toEqual([]);
-    expect(removed).toEqual([child, parent]);
   });
 
   it("selects every provider binary and static artifacts before libc-specific ones", () => {

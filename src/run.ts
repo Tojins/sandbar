@@ -149,9 +149,9 @@ import {
   readDriverIdentity,
 } from "./driver-identity.js";
 import {
+  agentToolsImageTags,
   type AgentImages,
   createAgentImages,
-  sweepAgentToolsImages,
 } from "./agent-tools.js";
 import { type CodexAuthMount, prepareCodexAuth } from "./codex-auth.js";
 import {
@@ -162,10 +162,9 @@ import {
   ensureImages,
   formatImageRecord,
   pulledImagesOf,
-  removeBranchImages,
-  sweepBranchImages,
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
+import { reconcileImages } from "./image-lifecycle.js";
 import { makeEnvReader } from "./env.js";
 import { startTimer } from "./timing.js";
 import { SandbarError, faultDetail } from "./errors.js";
@@ -1059,28 +1058,17 @@ export async function run(
     }
     await reportSweepFailures(orphans, (event) => runRecord.emit(event), "startup");
 
-    // The image half of the same sweep (#37). Per-branch gate images are
-    // removed at the end of a run, but that removal is an `onCleanup` action
-    // and so does not run on SIGKILL, a hard crash, or a `podman build` that
-    // outlived its parent — and these are the largest things sandbar creates.
-    // Startup only: within a run they are reused, and they carry this scope, so
-    // anything found here belongs to a predecessor of this workdir that is
-    // provably not running.
-    const staleImages = await sweepBranchImages(scope);
+    const staleImages = await reconcileImages({
+      scope,
+      liveTags: new Set([
+        ...config.images.map((image) => image.tag),
+        ...agentToolsImageTags(scope, agentProviders),
+      ]),
+    });
     if (staleImages.removed.length > 0) {
       await runRecord.emit({ kind: "sweep", scope: "startup", removed: staleImages.removed, failures: [] });
     }
     await reportSweepFailures(staleImages, (event) => runRecord.emit(event), "startup");
-
-    // Unlike per-branch variants, the current tools images survive clean run
-    // teardown so restarts reuse their large, checksum-addressed downloads.
-    // A predecessor's other pin fingerprints are no longer reusable and are
-    // swept only inside this workdir's scope.
-    const staleTools = await sweepAgentToolsImages(scope, agentProviders);
-    if (staleTools.removed.length > 0) {
-      await runRecord.emit({ kind: "sweep", scope: "startup", removed: staleTools.removed, failures: [] });
-    }
-    await reportSweepFailures(staleTools, (event) => runRecord.emit(event), "startup");
 
     // Debris no run's scope claims: from a build predating #28, or the
     // sandcastle era. Reported rather than removed, because a bare-prefix match
@@ -1149,6 +1137,7 @@ export async function run(
   try {
     initialSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
     initialBaseFingerprints = await ensureImages(config.images, initialSourceWorktree, {
+      scope,
       onImage: recordImage,
       log: () => undefined,
       captureBuild: true,
@@ -1172,9 +1161,6 @@ export async function run(
   // and two branches that make the same dependency change must produce one
   // build rather than two.
   //
-  // Registered for cleanup HERE, before the first stack exists, so LIFO order
-  // puts the image removal after every container that could still be running
-  // one of them.
   const makeBranchImages = (fingerprints: ReadonlyMap<string, string>): BranchImages =>
     createBranchImages({
       images: config.images,
@@ -1190,29 +1176,6 @@ export async function run(
     agentImages: initialAgentImages,
     branchImages: initialBranchImages,
   };
-  const branchImageRuns = [initialBranchImages];
-  const agentImageRuns = [initialAgentImages];
-  onCleanup(async () => {
-    // Augmented images are FROM-children of branch variants. Remove leaves
-    // first so podman can then remove their parents.
-    const tags = [
-      ...agentImageRuns.flatMap((images) => [...images.builtTags()]),
-      ...branchImageRuns.flatMap((images) => [...images.builtTags()]),
-    ];
-    if (tags.length === 0) return;
-    const failures = await removeBranchImages(tags);
-    if (failures.length > 0) {
-      await runRecord.emit({
-        kind: "complaint",
-        severity: "warning",
-        message: `Could not remove ${failures.length} per-branch gate image(s) built ` +
-          "for this run. They cost disk and nothing else — the tags are " +
-          "content-addressed and scoped, so a leftover is reused rather than " +
-          `mistaken for something current:\n${failures.join("\n")}`,
-      });
-      // Cleanup is LIFO, so this outcome is recorded before run-end.
-    }
-  });
 
   // After the builds, because the images have to exist to be probed and a
   // freshly-built one is the likeliest to be wrong. Before any stack starts,
@@ -1692,6 +1655,7 @@ export async function run(
     activity.enterBusy();
     const nextSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
     const nextBaseFingerprints = await ensureImages(config.images, nextSourceWorktree, {
+      scope,
       onImage: recordImage,
       log: () => undefined,
       captureBuild: true,
@@ -1711,8 +1675,6 @@ export async function run(
       agentImages: nextAgentImages,
       branchImages: nextBranchImages,
     };
-    agentImageRuns.push(nextAgentImages);
-    branchImageRuns.push(nextBranchImages);
   };
 
   // The request read before this startup began has been answered by this very
@@ -1826,6 +1788,29 @@ export async function run(
           await runRecord.emit({ kind: "sweep", scope: "quiescent", removed: cycleOrphans.removed, failures: [] });
         }
         await reportSweepFailures(cycleOrphans, (event) => runRecord.emit(event), "quiescent");
+      }
+      if (pool.isQuiescent) {
+        const cycleImages = await reconcileImages({
+          scope,
+          liveTags: new Set([
+            ...config.images.map((image) => image.tag),
+            ...currentImages.agentImages.liveTags(),
+            ...currentImages.branchImages.builtTags(),
+          ]),
+        });
+        if (cycleImages.removed.length > 0) {
+          await runRecord.emit({
+            kind: "sweep",
+            scope: "quiescent",
+            removed: cycleImages.removed,
+            failures: [],
+          });
+        }
+        await reportSweepFailures(
+          cycleImages,
+          (event) => runRecord.emit(event),
+          "quiescent",
+        );
       }
 
       // ---------------------------------------------------------------------

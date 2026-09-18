@@ -47,7 +47,6 @@ import {
 } from "./agent-providers.js";
 import { registerDisposable } from "./cleanup.js";
 import type { BuiltImage } from "./config.js";
-import type { RuntimeExec, SweepResult } from "./containers.js";
 import { SandbarError } from "./errors.js";
 import {
   IMAGE_QUERY_TIMEOUT_MS,
@@ -55,13 +54,10 @@ import {
   type BuildOptions,
   type ImageRecorder,
   buildImage,
-  listImageTags,
   readInputsLabel,
-  removeImageTags,
 } from "./ensure-images.js";
 import {
   type RunScope,
-  isToolsImageTagIn,
   toolsImageTag,
   variantImageTag,
 } from "./naming.js";
@@ -394,44 +390,20 @@ export function agentToolsFingerprint(
     .digest("hex");
 }
 
-function imageTagComponent(ref: string): string | null {
-  const colon = ref.lastIndexOf(":");
-  return colon > ref.lastIndexOf("/") ? ref.slice(colon + 1) : null;
-}
-
-// Persistent is deliberate for the current pins; everything else in this
-// workdir's tools namespace is a download no running driver will ask for again.
-// Listing failure propagates because a blind sweep cannot establish that stale
-// images are absent. Individual removal failures are reported like the other
-// scoped startup sweeps.
-export async function sweepAgentToolsImages(
+export function agentToolsImageTags(
   scope: RunScope,
   providers: readonly AgentProviderName[],
-  run: RuntimeExec = (args) => exec(RUNTIME, [...args], {
-    timeout: IMAGE_QUERY_TIMEOUT_MS,
-  }),
-): Promise<SweepResult> {
-  const current = new Set(
-    (["glibc", "musl"] as const).map((libc) =>
-      imageTagComponent(toolsImageTag(
-        scope,
-        libc,
-        agentToolsFingerprint(providers, libc),
-      ))
-    ),
+): readonly string[] {
+  return (["glibc", "musl"] as const).map((libc) =>
+    toolsImageTag(scope, libc, agentToolsFingerprint(providers, libc))
   );
-  const tags = (await listImageTags(run))
-    .filter((tag) =>
-      isToolsImageTagIn(scope, tag) &&
-      !current.has(imageTagComponent(tag))
-    );
-  return removeImageTags(tags, run);
 }
 
 export type AgentImages = {
   readonly declaredTag: string;
   readonly augment: (baseTag: string) => Promise<string>;
   readonly builtTags: () => readonly string[];
+  readonly liveTags: () => readonly string[];
 };
 
 // Named so the inner loop can classify this driver/host failure as
@@ -478,6 +450,7 @@ export async function createAgentImages(opts: {
   );
   const pending = new Map<string, Promise<string>>();
   const toolsPending = new Map<"glibc" | "musl", Promise<string>>();
+  const toolsUsed = new Set<string>();
   const order: string[] = [];
 
   const buildGenerated = async (
@@ -494,7 +467,7 @@ export async function createAgentImages(opts: {
       await writeFile(join(contextRoot, "Containerfile"), containerfile);
       await build(
         { tag, containerfile: identity },
-        { root: "", contextRoot, fingerprint, capture: true },
+        { scope: opts.scope, root: "", contextRoot, fingerprint, capture: true },
       );
     } finally {
       await rm(contextRoot, { recursive: true, force: true });
@@ -509,6 +482,7 @@ export async function createAgentImages(opts: {
         const elapsed = startTimer();
         const fingerprint = agentToolsFingerprint(opts.providers, libc, { arch });
         const tag = toolsImageTag(opts.scope, libc, fingerprint);
+        toolsUsed.add(tag);
         if ((await inputsLabel(tag)) !== fingerprint) {
           log(`Building persistent agent tools image '${tag}' for ${toolset}...`);
           await buildGenerated(
@@ -620,7 +594,12 @@ export async function createAgentImages(opts: {
   };
 
   const declaredTag = await augment(opts.declaredBaseTag);
-  return { declaredTag, augment, builtTags: () => [...order] };
+  return {
+    declaredTag,
+    augment,
+    builtTags: () => [...order],
+    liveTags: () => [...toolsUsed, ...order],
+  };
 }
 
 // ---------------------------------------------------------------------------

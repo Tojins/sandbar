@@ -13,6 +13,8 @@ import {
   checkWorktreeImageUids,
   effectiveUidArgv,
 } from "./ensure-images.js";
+import { imageScopeLabel } from "./image-lifecycle.js";
+import { runScope } from "./naming.js";
 import {
   type BoundedResult,
   CONTAINER_RM_ARGS,
@@ -631,6 +633,20 @@ describe("lastProbeText", () => {
 });
 
 describe("buildArgv", () => {
+  it("labels final and intermediate images with the owning scope", () => {
+    const scope = runScope("/build-argv");
+    const label = imageScopeLabel(scope);
+    expect(buildArgv(
+      { tag: "t", containerfile: "Containerfile" },
+      { scope, root: "/worktree" },
+    )).toEqual([
+      "build", "-t", "t",
+      "--label", label,
+      "--layer-label", label,
+      "-f", "/worktree/Containerfile", "/worktree",
+    ]);
+  });
+
   it("builds with the containerfile's directory as context", () => {
     expect(buildArgv({ tag: "t", containerfile: "gate/Containerfile.php" })).toEqual([
       "build",

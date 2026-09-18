@@ -66,9 +66,9 @@ import {
 import type { RuntimeExec, SweepResult } from "./containers.js";
 import { SandbarError, isExitCode } from "./errors.js";
 import { IMAGE_INPUTS_LABEL, fingerprintImageInputs } from "./image-inputs.js";
+import { imageScopeLabel } from "./image-lifecycle.js";
 import {
   type RunScope,
-  isVariantImageTagIn,
   variantImageTag,
 } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
@@ -220,6 +220,8 @@ export function parseInputsLabel(json: string): string | null {
 }
 
 export type BuildOptions = {
+  // Owner applied to both the final image and intermediate build images.
+  readonly scope: RunScope;
   // Directory the containerfile path is resolved against — the host checkout
   // for a base build, the gated worktree for a per-branch one. It is what makes
   // the same `BuiltImage` entry buildable from two different trees.
@@ -248,6 +250,10 @@ function buildUsesStdin(image: BuiltImage, opts?: BuildOptions): boolean {
 // and label wiring is table-testable — the real-adapter blind spot.
 export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
   const args = ["build", "-t", image.tag];
+  if (opts?.scope !== undefined) {
+    const label = imageScopeLabel(opts.scope);
+    args.push("--label", label, "--layer-label", label);
+  }
   if (image.target !== undefined) args.push("--target", image.target);
   for (const [k, v] of Object.entries(image.buildArgs ?? {})) {
     args.push("--build-arg", `${k}=${v}`);
@@ -481,7 +487,8 @@ export type ImageRecorder = (r: ImageBuildRecord) => void | Promise<void>;
 export async function ensureImages(
   images: readonly BuiltImage[],
   contextRoot: string,
-  opts?: {
+  opts: {
+    readonly scope: RunScope;
     readonly rebuildInPlace?: boolean;
     readonly onImage?: ImageRecorder;
     readonly log?: (line: string) => void;
@@ -514,6 +521,7 @@ export async function ensureImages(
           `Building ${image.tag} in ${RUNTIME} (one-time setup; cached afterwards)...`,
         );
         await buildImage(image, {
+          scope: opts.scope,
           root: contextRoot,
           capture: captureBuild,
           timeoutMs: image.buildTimeoutMs,
@@ -548,6 +556,7 @@ export async function ensureImages(
         : `Rebuilding ${image.tag} in ${RUNTIME}: its declared inputs in ${contextRoot} changed since it was built...`,
     );
     await buildImage(image, {
+      scope: opts.scope,
       root: contextRoot,
       fingerprint,
       capture: captureBuild,
@@ -664,6 +673,7 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
             await build(
               { ...image, tag },
               {
+                scope: opts.scope,
                 root: worktreePath,
                 fingerprint,
                 capture: true,
@@ -771,10 +781,9 @@ async function checkVariantUid(
   );
 }
 
-// Best-effort removal of the per-branch tags a run built, returning what could
-// not be removed. Teardown, so a failure is reported rather than thrown: it
-// leaks an image, which costs disk and nothing else — and `sweepBranchImages`
-// reclaims it at the next run of this workdir.
+// Best-effort removal used only by the lock-free standalone gate. A daemon run
+// uses the scope-label reconciler instead, which can also reach predecessors
+// and intermediate images (#169).
 export async function removeBranchImages(
   tags: readonly string[],
 ): Promise<readonly string[]> {
@@ -784,20 +793,6 @@ export async function removeBranchImages(
 const runImageQuery: RuntimeExec = (args) => exec(RUNTIME, [...args], {
   timeout: IMAGE_QUERY_TIMEOUT_MS,
 });
-
-// Listing and removing podman image tags are shared lifecycle operations. The
-// callers retain the authority-specific selection and ordering rules: branch
-// variants are transient and child-first, while current tools pins persist.
-export async function listImageTags(
-  run: RuntimeExec = runImageQuery,
-): Promise<readonly string[]> {
-  const { stdout } = await run([
-    "images",
-    "--format",
-    "{{.Repository}}:{{.Tag}}",
-  ]);
-  return stdout.split("\n").map((tag) => tag.trim()).filter(Boolean);
-}
 
 export async function removeImageTags(
   tags: readonly string[],
@@ -819,35 +814,6 @@ export async function removeImageTags(
     }
   }
   return { removed, failures };
-}
-
-// Per-branch images left behind in THIS scope, swept at startup — the image
-// half of `cleanupOrphanContainers`, with the same licence and the same
-// asymmetry.
-//
-// The licence: one lock ⇔ one scope, so a variant tag carrying our scope is
-// ours or a dead predecessor's on this workdir, and we hold the lock, so
-// nothing in it can be live. Another scope's variants are another workdir's to
-// reap and are not touched. Without this the scope segment in the tag would be
-// a claim nothing implements: the run-end removal does not run on SIGKILL, a
-// hard crash, or a `podman build` that outlived its parent, and these are
-// ~6GB-class images that no other code path names.
-//
-// The asymmetry: a failed LIST throws (a blind sweep would be asserting "no
-// debris" on no evidence), a failed REMOVE is collected and reported (it knows
-// exactly what leaked, the tag is content-addressed so a leftover is reused
-// rather than mistaken for something current, and throwing would let one wedged
-// image block every future run).
-export async function sweepBranchImages(
-  scope: RunScope,
-  run: RuntimeExec = runImageQuery,
-): Promise<SweepResult> {
-  const tags = (await listImageTags(run))
-    .filter((t) => isVariantImageTagIn(scope, t))
-    // Augmented sandbox images are children of branch variants and carry one
-    // more suffix. Remove the more-derived (longer) tags first.
-    .sort((a, b) => b.length - a.length);
-  return removeImageTags(tags, run);
 }
 
 // `--entrypoint id` rather than `run <image> id -u`: with a plain command the

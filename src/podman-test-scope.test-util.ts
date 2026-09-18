@@ -202,7 +202,7 @@ import { promisify } from "node:util";
 import type { TestContext } from "vitest";
 
 import { cleanupOrphanContainers } from "./containers.js";
-import { sweepBranchImages } from "./ensure-images.js";
+import { reconcileImages } from "./image-lifecycle.js";
 import { type RunScope, runScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -378,16 +378,15 @@ export function podmanTestScope(label: string): PodmanTestScope {
   };
 
   const cleanup = async (): Promise<void> => {
-    // The two production sweepers, dogfooded: `cleanupOrphanContainers` takes
+    // The two production reconcilers, dogfooded: `cleanupOrphanContainers` takes
     // the pod (and with it the infra container a name sweep cannot see), every
     // container in the scope — its container kind has an empty infix, so
     // bare-`podman run` fixtures named through `stackContainerNameFor` go too —
-    // and the network. `sweepBranchImages` takes the `variantImageTag` refs.
-    // `otherScope` is swept as well: it is ours, so its variants are debris
-    // rather than a sibling's live images.
+    // and the network. `reconcileImages` takes every labelled image, including
+    // untagged predecessors and intermediate stages.
     await cleanupOrphanContainers(scope).catch(() => {});
     for (const s of [scope, otherScope]) {
-      await sweepBranchImages(s).catch(() => {});
+      await reconcileImages({ scope: s, liveTags: new Set() }).catch(() => {});
     }
     // Neither sweeper reaches an unscoped fixture tag, so those are removed by
     // name from the record `testImageTag` kept.

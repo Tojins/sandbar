@@ -30,8 +30,8 @@ import {
   buildImage,
   ensureImages,
   readInputsLabel,
-  sweepBranchImages,
 } from "./ensure-images.js";
+import { reconcileImages } from "./image-lifecycle.js";
 import { stackContainerNameFor, variantImageTag } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
@@ -102,7 +102,7 @@ async function serveArtifacts(
   );
   const tag = testImageTag(`artifact-server-${taskId}`);
   await buildImage({ tag, containerfile: "<generated-artifact-server>" }, {
-    root: "", contextRoot: context, capture: true,
+    scope: SCOPE, root: "", contextRoot: context, capture: true,
   });
   const container = stackContainerNameFor(
     SCOPE,
@@ -191,7 +191,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         `FROM ${BASE}\nCOPY --chmod=0755 payload /usr/local/bin/payload\n`);
       await writeFile(join(context, "payload"), "generated-context\n");
       await buildImage({ tag, containerfile: "<generated>" }, {
-        root: "", contextRoot: context, capture: true,
+        scope: SCOPE, root: "", contextRoot: context, capture: true,
       });
       const result = await exec(RUNTIME, [
         "run", "--rm", tag, "sh", "-c",
@@ -292,6 +292,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         ),
       );
       await buildImage({ tag, containerfile: "<generated-agent-tools-download>" }, {
+        scope: SCOPE,
         root: "",
         contextRoot: context,
         capture: true,
@@ -438,7 +439,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
           `FROM scratch\nCOPY --chmod=0755 codex-${selectedVariant} /usr/local/bin/codex\n`,
         );
         await buildImage({ tag: toolsTag, containerfile: "<generated>" }, {
-          root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+          scope: SCOPE, root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
         });
         await writeFile(
           join(context, "Containerfile"),
@@ -447,7 +448,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
           }),
         );
         await buildImage({ tag, containerfile: "<generated>" }, {
-          root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+          scope: SCOPE, root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
         });
         const result = await exec(RUNTIME, [
           "run", "--rm", tag, "sh", "-c",
@@ -484,7 +485,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         "FROM docker.io/library/alpine:3.22\nRUN adduser -D -u 1000 -h /home/node node\n",
       );
       await buildImage({ tag: uidBaseTag, containerfile: "<generated>" }, {
-        root: "", contextRoot: baseContext, capture: true,
+        scope: SCOPE, root: "", contextRoot: baseContext, capture: true,
       });
       await exec(RUNTIME, ["run", "--rm", uidBaseTag, "test", "!", "-e", codexHome]);
       const context = await mkdtemp(join(tmpdir(), "sandbar-agent-uid-recipe-"));
@@ -505,7 +506,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
           "COPY --chmod=0755 codex-code-mode-host-static /usr/local/bin/codex-code-mode-host\n",
       );
       await buildImage({ tag: toolsTag, containerfile: "<generated>" }, {
-        root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+        scope: SCOPE, root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
       });
       await writeFile(
         join(context, "Containerfile"),
@@ -514,7 +515,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         }),
       );
       await buildImage({ tag, containerfile: "<generated>" }, {
-        root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
+        scope: SCOPE, root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
       });
       const result = await exec(RUNTIME, [
         "run", "--rm",
@@ -538,7 +539,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
     async ({ expect, task, onTestFinished }) => {
       const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
-      const first = await ensureImages([image], root);
+      const first = await ensureImages([image], root, { scope: SCOPE });
       const fingerprint = first.get(TAG);
       expect(fingerprint).toEqual(expect.any(String));
       // The round trip the whole staleness decision rests on.
@@ -547,14 +548,14 @@ describe.runIf(available)("ensureImages against real podman", () => {
       // Warm: same inputs, so no build at all. Asserted on the image ID rather
       // than on timing — a fully-cached rebuild is fast enough to be invisible.
       const id = await imageId(TAG);
-      const second = await ensureImages([image], root);
+      const second = await ensureImages([image], root, { scope: SCOPE });
       expect(second.get(TAG)).toBe(fingerprint);
       expect(await imageId(TAG)).toBe(id);
 
       // A change to a declared input rebuilds, which is the whole point: the
       // pre-#37 policy was "the tag exists, therefore this image is current".
       await writeFile(join(root, "package-lock.json"), '{"v":2}\n');
-      const third = await ensureImages([image], root);
+      const third = await ensureImages([image], root, { scope: SCOPE });
       expect(third.get(TAG)).not.toBe(fingerprint);
       expect(await readInputsLabel(TAG)).toBe(third.get(TAG));
       expect(await imageId(TAG)).not.toBe(id);
@@ -565,7 +566,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         join(root, "Containerfile"),
         `FROM ${BASE}\nCOPY package-lock.json /lock.json\nRUN true\n`,
       );
-      const fourth = await ensureImages([image], root);
+      const fourth = await ensureImages([image], root, { scope: SCOPE });
       expect(fourth.get(TAG)).not.toBe(third.get(TAG));
     },
     600_000,
@@ -585,12 +586,15 @@ describe.runIf(available)("ensureImages against real podman", () => {
     async ({ expect, task, onTestFinished }) => {
       const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
-      const first = await ensureImages([image], root);
+      const first = await ensureImages([image], root, { scope: SCOPE });
       const fingerprint = first.get(TAG);
       const id = await imageId(TAG);
 
       await writeFile(join(root, "package-lock.json"), '{"v":9}\n');
-      const held = await ensureImages([image], root, { rebuildInPlace: false });
+      const held = await ensureImages([image], root, {
+        scope: SCOPE,
+        rebuildInPlace: false,
+      });
 
       // Not rebuilt, and not re-tagged: this is the process that must not
       // clobber a tag someone else is relying on.
@@ -602,7 +606,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       expect(held.get(TAG)).toBe(fingerprint);
 
       // The default is unchanged, which is what a run still gets.
-      const rebuilt = await ensureImages([image], root);
+      const rebuilt = await ensureImages([image], root, { scope: SCOPE });
       expect(rebuilt.get(TAG)).not.toBe(fingerprint);
       expect(await imageId(TAG)).not.toBe(id);
     },
@@ -618,6 +622,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
       const built = await ensureImages([image], root, {
+        scope: SCOPE,
         rebuildInPlace: false,
       });
       expect(await readInputsLabel(TAG)).toBe(built.get(TAG));
@@ -640,7 +645,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         join(root, "Containerfile"),
         `FROM ${BASE}\nRUN echo LOCKFILE-IS-BROKEN >&2; exit 7\n`,
       );
-      const err = await buildImage(image, { root, capture: true }).then(
+      const err = await buildImage(image, { scope: SCOPE, root, capture: true }).then(
         () => null,
         (e: unknown) => e,
       );
@@ -663,7 +668,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         join(root, "Containerfile"),
         `FROM ${BASE}\nRUN exit 7\n`,
       );
-      await expect(ensureImages([image], root)).rejects.toBeInstanceOf(
+      await expect(ensureImages([image], root, { scope: SCOPE })).rejects.toBeInstanceOf(
         ImageBuildError,
       );
     },
@@ -671,7 +676,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
   );
 
   it.concurrent(
-    "sweeps this scope's leftover per-branch images and leaves another scope's alone",
+    "reconciles untagged predecessors and stopped tags without touching another scope",
     async ({ expect, task, onTestFinished }) => {
       const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
@@ -683,24 +688,29 @@ describe.runIf(available)("ensureImages against real podman", () => {
       // OTHER_SCOPE stands in for that other run and is derived from this
       // process's own token (#47), so it is a scope the sweep must be blind to
       // without ever being a scope somebody else is really using.
-      const ours = variantImageTag(TAG, SCOPE, "deadbeefcafe");
-      const theirs = variantImageTag(TAG, OTHER_SCOPE, "deadbeefcafe");
-      await ensureImages([image], root);
-      await exec(RUNTIME, ["tag", TAG, ours]);
-      await exec(RUNTIME, ["tag", TAG, theirs]);
+      const stopped = variantImageTag(TAG, SCOPE, "deadbeefcafe");
+      const sibling = variantImageTag(TAG, OTHER_SCOPE, "deadbeefcafe");
+      await ensureImages([image], root, { scope: SCOPE });
+      await buildImage({ ...image, tag: stopped }, {
+        scope: SCOPE, root, capture: true,
+      });
+      await buildImage({ ...image, tag: sibling }, {
+        scope: OTHER_SCOPE, root, capture: true,
+      });
+      await writeFile(join(root, "package-lock.json"), '{"v":99}\n');
+      await ensureImages([image], root, { scope: SCOPE });
 
-      const result = await sweepBranchImages(SCOPE);
+      const result = await reconcileImages({
+        scope: SCOPE,
+        liveTags: new Set([TAG]),
+      });
       expect(result.failures).toEqual([]);
-      expect(result.removed).toContain(ours);
-      expect(result.removed).not.toContain(theirs);
 
       const listed = (
         await exec(RUNTIME, ["images", "--format", "{{.Repository}}:{{.Tag}}"])
       ).stdout;
-      expect(listed).not.toContain(ours);
-      expect(listed).toContain(theirs);
-      // The BASE tag is untouched — `podman rmi -f` on a multi-tagged image
-      // untags rather than deleting, and the base is what `ensureImages` built.
+      expect(listed).not.toContain(stopped);
+      expect(listed).toContain(sibling);
       expect(listed).toContain(TAG);
     },
     600_000,
@@ -718,6 +728,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         ensureImages(
           [{ ...image, rebuildOn: ["package-lock.json", "bwoer.json"] }],
           root,
+          { scope: SCOPE },
         ),
       ).rejects.toThrow(/bwoer\.json/);
     },

@@ -107,8 +107,8 @@ export function runScope(lockedWorkDir: string): RunScope {
 // so cannot derive one from a locked workdir.
 //
 // It has to be BOTH stable and disjoint, and the two pull opposite ways.
-// Disjoint from every run's scope, because `cleanupOrphanContainers` and
-// `sweepBranchImages` force-remove everything in the scope they are handed: a
+// Disjoint from every run's scope, because the container and image reconcilers
+// remove everything in the scope they are handed: a
 // standalone gate sharing a run's scope would be swept away by that run's
 // between-cycle sweep mid-verdict, and #28's argument applies verbatim — the
 // two hold different locks (here, none at all), so neither may claim the
@@ -467,9 +467,8 @@ export function isVariantImageTagIn(scope: RunScope, ref: string): boolean {
 //
 //   localhost/sandbar-agent-tools:sb-tools-w1a2b3c4d-glibc-9f2e1d70
 //
-// The distinct `sb-tools-` infix keeps `sweepBranchImages` from treating the
-// current persistent image as a crashed run's branch debris. Its own startup
-// sweep uses the parser below and preserves only the current fingerprints.
+// The distinct `sb-tools-` infix keeps tools pins readable; the label-based
+// reconciler preserves the current fingerprints through its live-tag set.
 // ---------------------------------------------------------------------------
 
 const AGENT_TOOLS_IMAGE_REPOSITORY = "localhost/sandbar-agent-tools";
