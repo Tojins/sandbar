@@ -522,6 +522,7 @@ describe("run quota orchestration (#109)", () => {
       return { sourceChanged, failures: [] };
     });
     seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) => {
+      operations.push(`start:${candidate.id}`);
       if (candidate.id === resumed.id) {
         return { type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42 };
       }
@@ -544,7 +545,17 @@ describe("run quota orchestration (#109)", () => {
     vi.mocked(graphRootSpace).mockImplementation(async () => {
       const current = reading++;
       operations.push(`measure:${current}`);
-      if (current === 2) {
+      if (current === 3) {
+        // The low reading at 2 must remain latched while work is active even
+        // though the filesystem itself already reads healthy. Otherwise this
+        // recompute admits #170 and performs the pending source refresh before
+        // reconciliation has established what space is really recoverable.
+        expect(workRunning).toBe(true);
+        expect(seams.innerLoop.mock.calls.map(([candidate]) => candidate.id))
+          .toEqual(["169"]);
+        expect(ensureImages).toHaveBeenCalledOnce();
+      }
+      if (current === 4) {
         expect(workRunning).toBe(true);
         terminal.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null });
       }
@@ -572,9 +583,14 @@ describe("run quota orchestration (#109)", () => {
       (operation, index) => index > recoveryReconcile && operation.startsWith("measure:"),
     );
     const refresh = operations.indexOf("prepare", operations.indexOf("prepare") + 1);
+    const healthyWhileActive = operations.indexOf("measure:3");
+    const resumedStart = operations.indexOf("start:170");
+    expect(healthyWhileActive).toBeGreaterThan(lowMeasurement);
     expect(recoveryReconcile).toBeGreaterThan(lowMeasurement);
+    expect(recoveryReconcile).toBeGreaterThan(healthyWhileActive);
     expect(recoveryMeasurement).toBeGreaterThan(recoveryReconcile);
     expect(refresh).toBeGreaterThan(recoveryMeasurement);
+    expect(resumedStart).toBeGreaterThan(recoveryMeasurement);
     expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
       action: "disk-space-recovered",
     }));

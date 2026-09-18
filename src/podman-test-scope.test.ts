@@ -63,6 +63,11 @@ describe("removeFixtureContainerOnTestFinished", () => {
         "if [ \"$1 $2 $3\" = \"container exists exists-error\" ]; then\n" +
         "  printf 'existence check failed\\n' >&2; exit 125\n" +
         "fi\n" +
+        "if [ \"$1\" = images ] && [ \"${FAKE_PODMAN_RECONCILE_FAIL_ONCE:-}\" = 1 ] && " +
+          "[ ! -e \"$FAKE_PODMAN_CALLS.reconcile-failed\" ]; then\n" +
+        "  : > \"$FAKE_PODMAN_CALLS.reconcile-failed\"\n" +
+        "  printf 'image inventory failed\\n' >&2; exit 125\n" +
+        "fi\n" +
         "if [ \"$1\" = inspect ]; then printf '127\\n'; exit 0; fi\n" +
         "if [ \"$1\" = logs ]; then\n" +
         "  if [ \"$4\" = collect-rm-fail ]; then\n" +
@@ -93,6 +98,7 @@ describe("removeFixtureContainerOnTestFinished", () => {
     if (originalPath === undefined) delete process.env["PATH"];
     else process.env["PATH"] = originalPath;
     delete process.env["FAKE_PODMAN_CALLS"];
+    delete process.env["FAKE_PODMAN_RECONCILE_FAIL_ONCE"];
     await rm(binDir, { recursive: true, force: true });
   });
 
@@ -150,6 +156,21 @@ describe("removeFixtureContainerOnTestFinished", () => {
       expect.stringContaining("cleanup-primary"),
       expect.stringContaining("cleanup-secondary"),
     ]);
+  });
+
+  it("continues scope and tag cleanup after reconciliation fails", async () => {
+    const scope = podmanTestScope("cleanup-reconcile-error");
+    const tag = scope.testImageTag("cleanup-tag");
+    process.env["FAKE_PODMAN_RECONCILE_FAIL_ONCE"] = "1";
+
+    await expect(scope.cleanup()).rejects.toThrow(/image inventory failed/);
+
+    const recorded = await calls();
+    expect(recorded.filter((call) => call.startsWith("images -a"))).toHaveLength(2);
+    expect(recorded.filter((call) => call.startsWith("ps -a --external")))
+      .toHaveLength(1);
+    expect(recorded).toContain(`image exists ${tag}`);
+    expect(recorded).toContain(`rmi -f ${tag}`);
   });
 
   it("removes a passing fixture without reading or emitting diagnostics", async () => {

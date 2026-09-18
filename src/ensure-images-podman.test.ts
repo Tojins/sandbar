@@ -680,7 +680,11 @@ describe.runIf(available)("ensureImages against real podman", () => {
     600_000,
   );
 
-  it.concurrent(
+  // Reconciliation removes intermediate image records. Buildah may hand one
+  // of those records to a concurrent build as a cache hit before the removal,
+  // then fail that build with "layer not known" when it follows the hit. Keep
+  // this destructive case behind this file's concurrent build cases.
+  it(
     "reconciles untagged predecessors and stopped tags without touching another scope",
     async ({ expect, task, onTestFinished }) => {
       const isolated = podmanTestScope(`ensure-images-reconcile-${task.id}`);
