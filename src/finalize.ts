@@ -457,7 +457,8 @@ export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} the ${budget} review pass stopped after ${roundsUsed} ` +
-  `consecutive rejection${roundsUsed === 1 ? "" : "s"}.\n\n` +
+  `consecutive ${budget === "quality" ? "failure" : "rejection"}` +
+  `${roundsUsed === 1 ? "" : "s"}.\n\n` +
   `${reviewBudgetExhaustedExplanation(budget, latestReviewerProse)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "push a fix or correct the governing instructions");
 

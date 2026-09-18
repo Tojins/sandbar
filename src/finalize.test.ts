@@ -315,6 +315,10 @@ describe("comment templates", () => {
     // drops off the end: without this the whole call could slide one slot and
     // every other assertion here would still pass.
     expect(body).toContain(READY_FOR_AGENT);
+    expect(body).toContain(
+      "quality review pass stopped after 4 consecutive failures",
+    );
+    expect(body).not.toContain("consecutive rejections");
     expect(body.indexOf("foo not extracted")).toBeLessThan(
       body.indexOf("Action:"),
     );
@@ -979,7 +983,9 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     const body = calls.comments[0]!.body;
     expect(body).toContain("Extract the duplicated lifecycle dispatch");
-    expect(body).toContain("quality review pass stopped after 4 consecutive rejections");
+    expect(body).toContain(
+      "quality review pass stopped after 4 consecutive failures",
+    );
     expect(body).toContain(i.branch); // #70
     expect(body).not.toContain("standards-violation report");
     expect(calls.labelEdits).toEqual([
