@@ -75,7 +75,7 @@ describe("image lifecycle", () => {
         return { stdout: "" };
       },
     });
-    expect(result).toEqual({ removed: ["stale"], failures: [] });
+    expect(result).toEqual({ removed: ["stale"] });
     expect(calls).toEqual([
       ["images", "-a", "--no-trunc", "--format", "{{json .}}"],
       ["ps", "-a", "--external", "--no-trunc", "--format", "{{.ImageID}}"],

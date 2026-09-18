@@ -745,7 +745,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         scope: ownScope,
         liveTags: new Set([TAG]),
       });
-      expect(result.failures).toEqual([]);
+      expect(result.removed).toContain(predecessorId);
       await expect(exec(RUNTIME, ["image", "exists", predecessorId])).rejects.toMatchObject({
         code: 1,
       });

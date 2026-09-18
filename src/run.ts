@@ -106,7 +106,9 @@
 // reads no refs at all (#146); startup preflight remains fatal. A no-op poll is silent. A stable label-actor
 // exclusion is recorded on each poll because its required diagnostic
 // makes that recompute reportable. Source movement from either
-// a human push or this process refreshes the image inputs.
+// a human push or this process latches an image-input refresh; the next
+// healthy storage measurement performs it, while a low-space drain keeps it
+// pending without starting another build.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
 // Every gate-1 and gate-2 call passes through one run-wide FIFO semaphore
@@ -117,9 +119,10 @@
 // operation so a long gate or forge wait cannot consume the lease between
 // scheduler wakes. Free space on Podman's graphroot is measured after startup
 // reconciliation but before image preparation, then at every recompute (#169).
-// A low reading closes admission and drains; reconciliation and the deciding
-// remeasurement happen only once the pool is quiescent, so image removal cannot
-// race a live gate or sandbox build.
+// A low reading latches admission closed and drains; active-cycle healthy
+// readings cannot reopen it. Reconciliation and the deciding remeasurement
+// happen only once the pool is quiescent, so image removal cannot race a live
+// gate or sandbox build.
 
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
@@ -1102,7 +1105,6 @@ export async function run(
     if (staleImages.removed.length > 0) {
       await runRecord.emit({ kind: "sweep", scope: "startup", removed: staleImages.removed, failures: [] });
     }
-    await reportSweepFailures(staleImages, (event) => runRecord.emit(event), "startup");
     startupSpace = await graphRootSpace(graphRoot);
 
     // Debris no run's scope claims: from a build predating #28, or the
@@ -1383,6 +1385,11 @@ export async function run(
   );
   let providerExitPending: TerminalExit | null = null;
   let storageLow: GraphRootSpace | null = null;
+  // Source movement creates refresh WORK, not an instruction to build at the
+  // point it was observed. The next recompute measures storage first; a low
+  // reading keeps this latched through the drain so recovery can perform it,
+  // while an exit leaves it untouched and starts no unnecessary build.
+  let pendingSourceImageRefresh: "poll" | "landing" | null = null;
   // What the observed request carried, and the whole of the drain's state.
   let restartRequested: string | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
@@ -1811,9 +1818,7 @@ export async function run(
         // gate-2 resolves its branch images from the merger worktree, which is
         // the merge result rather than either input.
         if (sourceChangedOnPoll && restartRequested === null) {
-          const line = `origin/${config.sourceBranch} moved during poll; refreshing source images`;
-          await runRecord.emit({ kind: "preflight", action: "origin-refreshed", detail: line });
-          await refreshSourceImages();
+          pendingSourceImageRefresh ??= "poll";
         }
       }
       // -----------------------------------------------------------------------
@@ -1851,16 +1856,20 @@ export async function run(
             failures: [],
           });
         }
-        await reportSweepFailures(
-          cycleImages,
-          (event) => runRecord.emit(event),
-          "quiescent",
-        );
       }
 
-      const previousStorageLow = storageLow;
+      const previousStorageLow: GraphRootSpace | null = storageLow;
       const measuredSpace = await graphRootSpace(graphRoot);
-      storageLow = graphRootSpaceIsLow(measuredSpace) ? measuredSpace : null;
+      const measuredStorageLow = graphRootSpaceIsLow(measuredSpace)
+        ? measuredSpace
+        : null;
+      // A low reading is a drain latch, not a momentary admission pause. Only
+      // the quiescent boundary can reconcile safely, so only its post-reconcile
+      // measurement may reopen admission. Measurements continue while work
+      // drains, both for evidence and so the final boundary is not special I/O.
+      storageLow = previousStorageLow !== null && !pool.isQuiescent
+        ? measuredStorageLow ?? previousStorageLow
+        : measuredStorageLow;
       if (storageLow !== null && previousStorageLow === null) {
         await runRecord.emit({
           kind: "complaint",
@@ -1876,6 +1885,23 @@ export async function run(
           detail: `Podman graphroot '${measuredSpace.graphRoot}' recovered to ` +
             `${measuredSpace.availableBytes} bytes free after image reconciliation`,
         });
+      }
+      if (
+        storageLow === null &&
+        restartRequested === null &&
+        pendingSourceImageRefresh !== null
+      ) {
+        if (pendingSourceImageRefresh === "poll") {
+          const line =
+            `origin/${config.sourceBranch} moved during poll; refreshing source images`;
+          await runRecord.emit({
+            kind: "preflight",
+            action: "origin-refreshed",
+            detail: line,
+          });
+        }
+        await refreshSourceImages();
+        pendingSourceImageRefresh = null;
       }
 
       // ---------------------------------------------------------------------
@@ -2731,7 +2757,7 @@ export async function run(
         ? "landing-finished"
         : "terminal-finalized";
       if (sourceLandings > 0) {
-        await refreshSourceImages();
+        pendingSourceImageRefresh ??= "landing";
       }
       if (selectedExit?.tag === "quota" || selectedExit?.tag === "credential") {
         providerExitPending = selectedExit;

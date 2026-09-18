@@ -189,7 +189,7 @@ vi.mock("./ensure-images.js", async (importOriginal) => ({
 }));
 vi.mock("./image-lifecycle.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./image-lifecycle.js")>(),
-  reconcileImages: vi.fn(async () => ({ removed: [], failures: [] })),
+  reconcileImages: vi.fn(async () => ({ removed: [] })),
 }));
 vi.mock("./disk-space.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./disk-space.js")>(),
@@ -265,7 +265,7 @@ import type { InnerLoopOptions } from "./inner-loop.js";
 import { MergerError, realAdapter, type RunMergerOptions } from "./merger.js";
 import { realAdapter as realFinalizeAdapter } from "./finalize.js";
 import { createBranchImages, ensureImages } from "./ensure-images.js";
-import { createAgentImages } from "./agent-tools.js";
+import { agentToolsImageTags, createAgentImages } from "./agent-tools.js";
 import { reconcileImages } from "./image-lifecycle.js";
 import { graphRootSpace } from "./disk-space.js";
 import { cleanupOrphanContainers } from "./containers.js";
@@ -380,6 +380,8 @@ describe("run quota orchestration (#109)", () => {
       declaredTag: "image", augment: vi.fn(async () => "image"),
       builtTags: () => [], liveTags: () => ["image"],
     });
+    vi.mocked(reconcileImages).mockReset();
+    vi.mocked(reconcileImages).mockResolvedValue({ removed: [] });
     vi.mocked(graphRootSpace).mockReset();
     vi.mocked(graphRootSpace).mockResolvedValue({
       graphRoot: "/podman/store",
@@ -438,6 +440,176 @@ describe("run quota orchestration (#109)", () => {
       exitCode: 3,
       reason: expect.stringContaining("after image reconciliation"),
     }));
+  });
+
+  it("stops admissions on runtime exhaustion, drains, reconciles quiescently, and exits 3", async () => {
+    const running = issue("169");
+    const waiting = issue("170");
+    const terminal = deferred<{
+      type: "NEEDS-INFO"; questions: string; strandedHead: null;
+    }>();
+    const operations: string[] = [];
+    let workRunning = false;
+    let reading = 0;
+    let polled = false;
+    seams.plan.mockImplementation(async () =>
+      resolution(polled ? [running, waiting] : [running]));
+    vi.mocked(fetchOriginRefs).mockImplementation(async () => {
+      polled = true;
+      return { sourceChanged: false, failures: [] };
+    });
+    seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) => {
+      if (candidate.id !== running.id) throw new Error("storage drain admitted new work");
+      workRunning = true;
+      try {
+        return await terminal.promise;
+      } finally {
+        workRunning = false;
+      }
+    });
+    vi.mocked(reconcileImages).mockImplementation(async () => {
+      operations.push("reconcile");
+      if (workRunning) throw new Error("reconciled while issue work was live");
+      return { removed: [] };
+    });
+    vi.mocked(graphRootSpace).mockImplementation(async () => {
+      const current = reading++;
+      operations.push(`measure:${current}`);
+      if (current === 2) {
+        expect(workRunning).toBe(true);
+        terminal.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null });
+      }
+      return {
+        graphRoot: "/podman/store",
+        availableBytes: current < 2
+          ? 20n * 1024n * 1024n * 1024n
+          : 9n * 1024n * 1024n * 1024n,
+      };
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:3");
+
+    expect(exit).toHaveBeenCalledWith(3);
+    expect(seams.innerLoop.mock.calls.map(([candidate]) => candidate.id)).toEqual(["169"]);
+    const lowMeasurement = operations.indexOf("measure:2");
+    const decidingReconcile = operations.indexOf("reconcile", lowMeasurement);
+    const decidingMeasurement = operations.findIndex(
+      (operation, index) => index > decidingReconcile && operation.startsWith("measure:"),
+    );
+    expect(lowMeasurement).toBeGreaterThan(-1);
+    expect(decidingReconcile).toBeGreaterThan(lowMeasurement);
+    expect(decidingMeasurement).toBeGreaterThan(decidingReconcile);
+  });
+
+  it("defers a moved-source refresh while low and resumes it after recovery", async () => {
+    const running = issue("169");
+    const resumed = issue("170");
+    const terminal = deferred<{
+      type: "NEEDS-INFO"; questions: string; strandedHead: null;
+    }>();
+    const operations: string[] = [];
+    let workRunning = false;
+    let reading = 0;
+    let polls = 0;
+    seams.plan.mockImplementation(async () =>
+      resolution(polls > 0 ? [running, resumed] : [running]));
+    vi.mocked(fetchOriginRefs).mockImplementation(async () => {
+      const sourceChanged = polls++ === 0;
+      return { sourceChanged, failures: [] };
+    });
+    seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) => {
+      if (candidate.id === resumed.id) {
+        return { type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42 };
+      }
+      workRunning = true;
+      try {
+        return await terminal.promise;
+      } finally {
+        workRunning = false;
+      }
+    });
+    vi.mocked(reconcileImages).mockImplementation(async () => {
+      operations.push("reconcile");
+      if (workRunning) throw new Error("reconciled while issue work was live");
+      return { removed: [] };
+    });
+    vi.mocked(ensureImages).mockImplementation(async () => {
+      operations.push("prepare");
+      return new Map();
+    });
+    vi.mocked(graphRootSpace).mockImplementation(async () => {
+      const current = reading++;
+      operations.push(`measure:${current}`);
+      if (current === 2) {
+        expect(workRunning).toBe(true);
+        terminal.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null });
+      }
+      return {
+        graphRoot: "/podman/store",
+        availableBytes: current === 2
+          ? 9n * 1024n * 1024n * 1024n
+          : 20n * 1024n * 1024n * 1024n,
+      };
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:4");
+
+    expect(seams.innerLoop.mock.calls.map(([candidate]) => candidate.id)).toEqual([
+      "169", "170",
+    ]);
+    expect(ensureImages).toHaveBeenCalledTimes(2);
+    const lowMeasurement = operations.indexOf("measure:2");
+    const recoveryReconcile = operations.indexOf("reconcile", lowMeasurement);
+    const recoveryMeasurement = operations.findIndex(
+      (operation, index) => index > recoveryReconcile && operation.startsWith("measure:"),
+    );
+    const refresh = operations.indexOf("prepare", operations.indexOf("prepare") + 1);
+    expect(recoveryReconcile).toBeGreaterThan(lowMeasurement);
+    expect(recoveryMeasurement).toBeGreaterThan(recoveryReconcile);
+    expect(refresh).toBeGreaterThan(recoveryMeasurement);
+    expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
+      action: "disk-space-recovered",
+    }));
+    expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
+      action: "origin-refreshed",
+    }));
+  });
+
+  it("does not rebuild source images after landing into a low-space drain", async () => {
+    const done = issue("169");
+    let sourceLanded = false;
+    seams.plan.mockResolvedValue(resolution([done]));
+    seams.innerLoop.mockResolvedValue({
+      type: "DONE", commits: [{ sha: "abc" }], specGaps: [],
+    });
+    seams.merger.mockImplementation(async () => {
+      sourceLanded = true;
+      return summary([done]);
+    });
+    vi.mocked(graphRootSpace).mockImplementation(async () => ({
+      graphRoot: "/podman/store",
+      availableBytes: sourceLanded
+        ? 9n * 1024n * 1024n * 1024n
+        : 20n * 1024n * 1024n * 1024n,
+    }));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:3");
+
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(ensureImages).toHaveBeenCalledOnce();
+    expect(createAgentImages).toHaveBeenCalledOnce();
   });
 
   it("releases the origin lease when the UI port is already in use", async () => {
@@ -1169,17 +1341,17 @@ describe("run quota orchestration (#109)", () => {
     }>();
     const oldAgentImages = {
       declaredTag: "agent-old", augment: vi.fn(async () => "agent-old"),
-      builtTags: () => [], liveTags: () => ["agent-old"],
+      builtTags: () => ["agent-old"], liveTags: () => ["tools-old", "agent-old"],
     };
     const newAgentImages = {
       declaredTag: "agent-new", augment: vi.fn(async () => "agent-new"),
-      builtTags: () => [], liveTags: () => ["agent-new"],
+      builtTags: () => ["agent-new"], liveTags: () => ["tools-new", "agent-new"],
     };
     const oldBranchImages = {
-      resolve: vi.fn(async () => new Map()), builtTags: () => [],
+      resolve: vi.fn(async () => new Map()), builtTags: () => ["branch-old"],
     };
     const newBranchImages = {
-      resolve: vi.fn(async () => new Map()), builtTags: () => [],
+      resolve: vi.fn(async () => new Map()), builtTags: () => ["branch-new"],
     };
     vi.mocked(createAgentImages)
       .mockResolvedValueOnce(oldAgentImages)
@@ -1222,10 +1394,26 @@ describe("run quota orchestration (#109)", () => {
       .rejects.toThrow("EXIT:4");
     expect(ensureImages).toHaveBeenCalledTimes(2);
     expect(createAgentImages).toHaveBeenCalledTimes(2);
-    expect(reconcileImages).toHaveBeenCalled();
     for (const [options] of vi.mocked(createAgentImages).mock.calls) {
       expect(options).toEqual(expect.objectContaining({ codexHome }));
     }
+    const initialAgentOptions = vi.mocked(createAgentImages).mock.calls[0]![0];
+    const scope = initialAgentOptions.scope;
+    expect(vi.mocked(reconcileImages).mock.calls[0]?.[0]).toEqual({
+      scope,
+      liveTags: new Set([
+        "image",
+        ...agentToolsImageTags(scope, initialAgentOptions.providers),
+      ]),
+    });
+    expect(vi.mocked(reconcileImages).mock.calls.map(([args]) => args)).toContainEqual({
+      scope,
+      liveTags: new Set(["image", "tools-old", "agent-old", "branch-old"]),
+    });
+    expect(vi.mocked(reconcileImages).mock.calls.at(-1)?.[0]).toEqual({
+      scope,
+      liveTags: new Set(["image", "tools-new", "agent-new", "branch-new"]),
+    });
     expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
       action: "origin-refreshed",
       detail: "origin/main moved during poll; refreshing source images",

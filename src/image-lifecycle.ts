@@ -22,7 +22,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import type { RuntimeExec, SweepResult } from "./containers.js";
+import type { RuntimeExec } from "./containers.js";
 import type { RunScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -165,7 +165,7 @@ export async function reconcileImages(args: {
   readonly scope: RunScope;
   readonly liveTags: ReadonlySet<string>;
   readonly run?: RuntimeExec;
-}): Promise<SweepResult> {
+}): Promise<{ readonly removed: readonly string[] }> {
   const run = args.run ?? defaultExec;
   const inventory = parseImageInventory((await run([
     "images", "-a", "--no-trunc", "--format", "{{json .}}",
@@ -185,5 +185,5 @@ export async function reconcileImages(args: {
     await run(argv);
     removed.push(id);
   }
-  return { removed, failures: [] };
+  return { removed };
 }

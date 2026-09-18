@@ -220,10 +220,13 @@ recompute ceiling are gone.
 
 After startup reconciliation and before image preparation, then at every
 recompute, sandbar checks the free bytes on the filesystem containing Podman's
-graphroot against a fixed 10 GiB floor (#169). A low reading stops admission
-and drains; at quiescence the owned-image reconciler runs and the filesystem is
-measured again. If it remains low, the daemon exits 3 with the graphroot and
-exact byte count. All six exits are one type, `TerminalExit`, and the run ends with exactly one
+graphroot against a fixed 10 GiB floor (#169). A low reading latches admission
+closed and drains; active-cycle measurements cannot reopen it. At quiescence
+the owned-image reconciler runs and the filesystem is measured again.
+Source-image refresh work observed while low stays pending until that deciding
+measurement recovers, and is skipped entirely when the drain exits. If space
+remains low, the daemon exits 3 with the graphroot and exact byte count. All
+six exits are one type, `TerminalExit`, and the run ends with exactly one
 `exit` event whichever fired (#70/#132). `EXIT_TAGS` is exhaustive over the
 union and a table test asserts every tag has a code and reason. The pool owns
 run-wide starts, ongoing work, landings, and the terminal-without-landing
