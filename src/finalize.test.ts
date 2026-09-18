@@ -560,12 +560,12 @@ describe("finalizeOne", () => {
     });
     await expect(
       finalizeOne(
-      {
-        kind: "chunk-landed",
-        issue: issue(45),
-        chunkBranch: "sandbar/chunk-45-x",
-        pullRequestNumber: null,
-      },
+        {
+          kind: "chunk-landed",
+          issue: issue(45),
+          chunkBranch: "sandbar/chunk-45-x",
+          pullRequestNumber: null,
+        },
         adapter,
         LABELS,
       ),
@@ -922,7 +922,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "AssertionError: red",
         latestReviewerProse: "quality review from the red round",
-          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
       },
       adapter,
       LABELS,
@@ -2228,7 +2228,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "boom",
         latestReviewerProse: null,
-          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
       },
       adapter,
       custom,
@@ -2254,7 +2254,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "boom",
         latestReviewerProse: null,
-          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         specGaps: [{ round: 1, text: "must not be posted" }],
       },
       adapter,

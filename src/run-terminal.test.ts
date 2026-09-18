@@ -32,7 +32,7 @@ describe("terminal event reasons (#132)", () => {
         cause: "gate-red",
         failureTrace: "trace",
         latestReviewerProse: null,
-          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         strandedHead: null,
       },
       "gate-red: trace",

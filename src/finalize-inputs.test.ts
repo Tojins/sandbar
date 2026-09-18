@@ -141,7 +141,7 @@ describe("terminalFinalizeInputs", () => {
       cause: "gate-red",
       failureTrace: "tests failed",
       latestReviewerProse: "earlier review",
-          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
+      budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
       strandedHead: null,
       specGaps: [{ round: 2, text: "gap" }],
     });
