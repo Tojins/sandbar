@@ -11,7 +11,6 @@ import {
   type FinalizeAdapter,
   type FinalizeInput,
   NEEDS_HUMAN_COMMENT_TEMPLATE,
-  NEEDS_HUMAN_REVIEWER_BLOCKED_COMMENT_TEMPLATE,
   NEEDS_INFO_COMMENT_TEMPLATE,
   NEEDS_PARTITION_COMMENT_TEMPLATE,
   NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE,
@@ -126,7 +125,13 @@ function makeAdapter(
     },
     async reclaimIssueClone(branch, keep) {
       calls.reclaims.push(keep === undefined ? { branch } : { branch, keep });
-      return script.reclaim ?? { kind: "removed" };
+      return script.reclaim ?? (keep === undefined
+        ? { kind: "removed" }
+        : {
+            kind: "preserved",
+            reason: keep,
+            worktreePath: `/host/.sandbar/worktrees/${branch.replaceAll("/", "-")}`,
+          });
     },
     async branchIsContainedInOrigin(branch) {
       calls.containmentChecks.push(branch);
@@ -185,6 +190,8 @@ describe("comment templates", () => {
       "Q1?\nQ2?",
       NEEDS_INFO,
       READY_FOR_AGENT,
+      null,
+      { kind: "removed" },
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/issue-45-t-45"); // #70
@@ -198,7 +205,7 @@ describe("comment templates", () => {
     // Asserted as the absence of the WORD, not of the sentence that once said
     // it: "push" is what a payload claim is built out of, and the note below
     // this one in the composed comment is the only part entitled to use it.
-    expect(body).not.toMatch(/push/i);
+    expect(body.endsWith("re-apply `ready-for-agent`.")).toBe(true);
   });
   it("NEEDS-UI-PROTOTYPE body includes bot prefix, the impact prose, both unblock routes, and the configured labels", () => {
     const body = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
@@ -207,6 +214,8 @@ describe("comment templates", () => {
       NEEDS_INFO,
       READY_FOR_AGENT,
       null,
+      null,
+      { kind: "removed" },
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("tab order and empty state invented");
@@ -214,7 +223,11 @@ describe("comment templates", () => {
     // agent may decide for itself (#21 — the acknowledgement is what stops the
     // next run from escalating again).
     expect(body).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
-    expect(body).toContain("cannot see images");
+    expect(body).toContain("A screenshot alone does not work");
+    expect(body).toContain("inline fenced markup");
+    expect(body).toContain("ASCII wireframe");
+    expect(body).toContain("precise prose specification");
+    expect(body).toContain("push it to the source branch before re-labelling");
     expect(body).toContain(NEEDS_INFO);
     expect(body).toContain(READY_FOR_AGENT);
     // The suggested path carries the real issue number, not a literal <n>.
@@ -225,16 +238,17 @@ describe("comment templates", () => {
   // The escalation is accepted after commits (see promise-parser), and then the
   // branch IS pushed — telling the human nothing was written would contradict
   // the branch they've just been handed.
-  it("NEEDS-UI-PROTOTYPE body claims 'before writing any code' only when nothing was pushed", () => {
+  it("NEEDS-UI-PROTOTYPE action names whether a branch was pushed", () => {
     const early = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
       45,
       "x",
       NEEDS_INFO,
       READY_FOR_AGENT,
       null,
+      null,
+      { kind: "removed" },
     );
-    expect(early).toContain("before writing any code");
-    expect(early).not.toContain("pushed");
+    expect(early).toContain("no issue branch was pushed");
 
     const late = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
       45,
@@ -242,8 +256,9 @@ describe("comment templates", () => {
       NEEDS_INFO,
       READY_FOR_AGENT,
       "sandbar/issue-45-t-45",
+      null,
+      { kind: "removed" },
     );
-    expect(late).not.toContain("before writing any code");
     expect(late).toContain("sandbar/issue-45-t-45");
   });
   it("NEEDS-PARTITION names the cause, slot, size, chain, and pushed branch", () => {
@@ -257,7 +272,7 @@ describe("comment templates", () => {
       READY_FOR_AGENT,
       "sandbar/issue-45-t-45",
     );
-    expect(body).toContain("NEEDS-PARTITION (measured)");
+    expect(body).toContain("stopped for partitioning (measured");
     expect(body).toContain("`review-quality`");
     expect(body).toContain("700,000");
     expect(body).toContain("600,000");
@@ -267,8 +282,10 @@ describe("comment templates", () => {
   it("NEEDS-HUMAN body includes bot prefix, the branch, the failure trace, and the configured labels", () => {
     const body = NEEDS_HUMAN_COMMENT_TEMPLATE(
       "sandbar/issue-45-t-45",
+      "tests",
+      4,
       "E: boom\nstack…",
-      null,
+      "Reviewer report",
       AGENT_STUCK,
       READY_FOR_AGENT,
     );
@@ -278,10 +295,19 @@ describe("comment templates", () => {
     expect(body).toContain("stack…");
     expect(body).toContain(AGENT_STUCK);
     expect(body).toContain(READY_FOR_AGENT);
+    expect(body).toContain("gate-1 was red for 4 consecutive rounds");
+    expect(body).toContain("latest failing step: `tests`");
+    expect(body).not.toContain("step `tests` was red for 4");
+    expect(body.indexOf("Latest quality review")).toBeLessThan(
+      body.indexOf("<details>"),
+    );
+    expect(body.endsWith("re-apply `ready-for-agent`.")).toBe(true);
   });
   it("REVIEW_BUDGET_EXHAUSTED body includes bot prefix, the branch, the latest reviewer prose verbatim, and the configured labels", () => {
     const body = REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
       "sandbar/issue-45-t-45",
+      "quality",
+      4,
       "## Bar violations\n- foo not extracted\n- naming is unclear",
       AGENT_STUCK,
       READY_FOR_AGENT,
@@ -295,6 +321,13 @@ describe("comment templates", () => {
     // drops off the end: without this the whole call could slide one slot and
     // every other assertion here would still pass.
     expect(body).toContain(READY_FOR_AGENT);
+    expect(body).toContain(
+      "quality review pass stopped after 4 consecutive failures",
+    );
+    expect(body).not.toContain("consecutive rejections");
+    expect(body.indexOf("foo not extracted")).toBeLessThan(
+      body.indexOf("Action:"),
+    );
   });
 
   // A comment body is posted into the HOST repository, where `#64` is not this
@@ -304,12 +337,15 @@ describe("comment templates", () => {
   // mechanism belongs in the module header, never in the prose. The only `#N`
   // any template here may carry is one it was HANDED — a host issue number.
   it("chunk-landed body cites no sandbar issue number, which would autolink in the host repo", () => {
-    const body = CHUNK_LANDED_COMMENT_TEMPLATE("sandbar/chunk-42-alpha");
+    const body = CHUNK_LANDED_COMMENT_TEMPLATE("sandbar/chunk-42-alpha", null);
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/chunk-42-alpha");
-    expect(body).toContain("contained by the chunk branch");
-    expect(body).toContain("Re-apply `ready-for-agent`");
+    expect(body).toBe(
+      "**Sandbar:** merged to `sandbar/chunk-42-alpha`; lands with chunk PR.",
+    );
     expect(body).not.toMatch(/#\d/);
+    expect(CHUNK_LANDED_COMMENT_TEMPLATE("sandbar/chunk-42-alpha", 17))
+      .toContain("chunk PR #17");
   });
 });
 
@@ -470,7 +506,12 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "chunk-landed", issue: i, chunkBranch: "sandbar/chunk-45-x" },
+      {
+        kind: "chunk-landed",
+        issue: i,
+        chunkBranch: "sandbar/chunk-45-x",
+        pullRequestNumber: null,
+      },
       adapter,
       LABELS,
     );
@@ -487,7 +528,7 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([]);
     expect(calls.comments).toHaveLength(1);
     expect(calls.comments[0]!.body).toContain("sandbar/chunk-45-x");
-    expect(calls.comments[0]!.body).toContain("contained by the chunk branch");
+    expect(calls.comments[0]!.body).toContain("lands with chunk PR");
   });
 
   it("chunk-landed with -d refusal: escalates to -D, on the merger's certainty", async () => {
@@ -498,7 +539,12 @@ describe("finalizeOne", () => {
       deleteError: "branch X not fully merged",
     });
     const action = await finalizeOne(
-      { kind: "chunk-landed", issue: issue(45), chunkBranch: "sandbar/chunk-45-x" },
+      {
+        kind: "chunk-landed",
+        issue: issue(45),
+        chunkBranch: "sandbar/chunk-45-x",
+        pullRequestNumber: null,
+      },
       adapter,
       LABELS,
     );
@@ -514,7 +560,12 @@ describe("finalizeOne", () => {
     });
     await expect(
       finalizeOne(
-        { kind: "chunk-landed", issue: issue(45), chunkBranch: "sandbar/chunk-45-x" },
+        {
+          kind: "chunk-landed",
+          issue: issue(45),
+          chunkBranch: "sandbar/chunk-45-x",
+          pullRequestNumber: null,
+        },
         adapter,
         LABELS,
       ),
@@ -528,7 +579,12 @@ describe("finalizeOne", () => {
     const i = issue(45);
 
     await expect(finalizeOne(
-      { kind: "chunk-landed", issue: i, chunkBranch: "sandbar/chunk-45-x" },
+      {
+        kind: "chunk-landed",
+        issue: i,
+        chunkBranch: "sandbar/chunk-45-x",
+        pullRequestNumber: null,
+      },
       adapter,
       LABELS,
     )).resolves.toEqual({ kind: "deleted-local" });
@@ -546,7 +602,12 @@ describe("finalizeOne", () => {
     // membership, and the optional display-label edit remains harmless.
     const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
     const action = await finalizeOne(
-      { kind: "chunk-landed", issue: issue(45), chunkBranch: "sandbar/chunk-45-x" },
+      {
+        kind: "chunk-landed",
+        issue: issue(45),
+        chunkBranch: "sandbar/chunk-45-x",
+        pullRequestNumber: null,
+      },
       adapter,
       LABELS,
     );
@@ -632,7 +693,7 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-info", issue: i, questions: "Should X be Y?" },
+      { kind: "needs-info", issue: i, questions: "Should X be Y?", strandedHead: null },
       adapter,
       LABELS,
     );
@@ -661,6 +722,7 @@ describe("finalizeOne", () => {
         kind: "needs-ui-prototype",
         issue: i,
         uiImpact: "New settings screen; tab order invented.",
+        strandedHead: null,
       },
       adapter,
       LABELS,
@@ -689,7 +751,7 @@ describe("finalizeOne", () => {
     });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", strandedHead: null },
       adapter,
       LABELS,
     );
@@ -710,7 +772,7 @@ describe("finalizeOne", () => {
     });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", strandedHead: null },
       adapter,
       LABELS,
     );
@@ -735,6 +797,7 @@ describe("finalizeOne", () => {
         kind: "needs-ui-prototype",
         issue: issue(45),
         uiImpact: "x",
+        strandedHead: null,
       },
       adapter,
       LABELS,
@@ -749,7 +812,7 @@ describe("finalizeOne", () => {
     const i = issue(45);
     await expect(
       finalizeOne(
-        { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
+        { kind: "needs-ui-prototype", issue: i, uiImpact: "x", strandedHead: null },
         adapter,
         LABELS,
       ),
@@ -764,7 +827,7 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", strandedHead: null },
       adapter,
       LABELS,
     );
@@ -783,7 +846,7 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", strandedHead: null },
       adapter,
       LABELS,
     );
@@ -838,7 +901,7 @@ describe("finalizeOne", () => {
     const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
     const i = issue(45);
     const action = await finalizeOne(
-      { kind: "needs-ui-prototype", issue: i, uiImpact: "x" },
+      { kind: "needs-ui-prototype", issue: i, uiImpact: "x", strandedHead: null },
       adapter,
       LABELS,
     );
@@ -859,7 +922,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "AssertionError: red",
         latestReviewerProse: "quality review from the red round",
-        budgetExhausted: { budget: "gate", roundsUsed: 4 },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
       },
       adapter,
       LABELS,
@@ -870,8 +933,8 @@ describe("finalizeOne", () => {
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
-    expect(calls.comments[0]!.body).toContain("maxGateRounds");
-    expect(calls.comments[0]!.body).toContain("4 consecutive red gates");
+    expect(calls.comments[0]!.body).toContain("latest failing step: `tests`");
+    expect(calls.comments[0]!.body).toContain("4 consecutive rounds");
     expect(calls.comments[0]!.body).toContain("quality review from the red round");
     // #70 — "push a fix on this branch" used to never say which.
     expect(calls.comments[0]!.body).toContain(i.branch);
@@ -897,14 +960,13 @@ describe("finalizeOne", () => {
       LABELS,
     );
 
-    expect(calls.comments[0]!.body).toContain("actionable completion signal");
-    expect(calls.comments[0]!.body).toContain("attempt transcripts");
+    expect(calls.comments[0]!.body).toContain("no actionable signal");
+    expect(calls.comments[0]!.body).toContain("Attempt summary");
     expect(calls.comments[0]!.body).toContain("guard correction");
     expect(calls.comments[0]!.body).not.toContain("never emitted");
     expect(calls.comments[0]!.body).not.toContain("no gate ran");
     expect(calls.comments[0]!.body).not.toContain("Last failure trace");
-    expect(calls.comments[0]!.body).toContain("maxQualityRounds");
-    expect(calls.comments[0]!.body).toContain("4 consecutive quality failures");
+    expect(calls.comments[0]!.body).toContain("quality pass stopped after 4 consecutive failures");
   });
 
   it("quality review exhaustion names its budget, count, and latest prose", async () => {
@@ -927,8 +989,9 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     const body = calls.comments[0]!.body;
     expect(body).toContain("Extract the duplicated lifecycle dispatch");
-    expect(body).toContain("maxQualityRounds");
-    expect(body).toContain("4 consecutive quality failures");
+    expect(body).toContain(
+      "quality review pass stopped after 4 consecutive failures",
+    );
     expect(body).toContain(i.branch); // #70
     expect(body).not.toContain("standards-violation report");
     expect(calls.labelEdits).toEqual([
@@ -959,9 +1022,8 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([i.branch]);
     const body = calls.comments[0]!.body;
     expect(body).toContain("Agent idle for 600 seconds");
-    expect(body).toContain("no verdict was reached");
-    expect(body).toContain("harness or environment failure");
-    expect(body).toContain("No reviewer has said anything about this branch at all");
+    expect(body).toContain("no reviewer verdict was produced in the failing round");
+    expect(body).toContain("Reviewer-harness trace");
     // #70 — and this one is telling the reader to review it themselves, so it
     // had better say what to check out.
     expect(body).toContain(i.branch);
@@ -1003,10 +1065,10 @@ describe("finalizeOne", () => {
     const body = calls.comments[0]!.body;
     expect(body).toContain("Agent idle for 600 seconds");
     expect(body).toContain(earlier);
-    expect(body).toContain("earlier round");
-    expect(body).toContain("whether it was addressed is unverified");
+    expect(body).toContain("Earlier-round reviewer report");
+    expect(body).toContain("not a verdict on the current commits");
     // Scoped, not global — the two sentences that would be untrue.
-    expect(body).toContain("second code-reviewer harness failure");
+    expect(body).toContain("stopped after 2 reviewer-harness failures");
     expect(body).not.toContain("No reviewer has said anything about this branch at all");
     // And still not presented as the blocker: this is not a CHANGES-REQUESTED
     // terminal, and the harness trace is not the reviewer speaking.
@@ -1041,49 +1103,55 @@ describe("finalizeOne", () => {
     expect(body).not.toContain("without a green gate");
   });
 
-  it("needs-human off-branch-head: names the branch, the stranded sha, and how to rescue it (#27)", async () => {
-    const { adapter, calls } = makeAdapter();
-    const i = issue(45);
-    const action = await finalizeOne(
-      {
-        kind: "needs-human",
-        issue: i,
-        cause: "off-branch-head",
-        failureTrace:
-          "You are not on the issue branch. HEAD is DETACHED at deadbeef1234,",
-        latestReviewerProse: null,
-        budgetExhausted: null,
-        strandedHead: {
-          branch: `sandbar/issue-45-t-45`,
-          headRef: null,
-          headSha: "deadbeef1234",
-          branchSha: "base00",
-          branchIsAncestor: false,
+  it.each([
+    { kind: "removed" },
+    { kind: "absent" },
+  ] as const)(
+    "needs-human off-branch-head: names the cache pin after a $kind clone reclaim (#27)",
+    async (reclaim) => {
+      const { adapter, calls } = makeAdapter({ reclaim });
+      const i = issue(45);
+      const action = await finalizeOne(
+        {
+          kind: "needs-human",
+          issue: i,
+          cause: "off-branch-head",
+          failureTrace:
+            "You are not on the issue branch. HEAD is DETACHED at deadbeef1234,",
+          latestReviewerProse: null,
+          budgetExhausted: null,
+          strandedHead: {
+            branch: `sandbar/issue-45-t-45`,
+            headRef: null,
+            headSha: "deadbeef1234",
+            branchSha: "base00",
+            branchIsAncestor: false,
+          },
         },
-      },
-      adapter,
-      LABELS,
-    );
+        adapter,
+        LABELS,
+      );
 
-    expect(action).toEqual({ kind: "pushed" });
-    const body = calls.comments[0]!.body;
-    expect(body).toContain(i.branch);
-    // The comment and the cache pin it names are the only places this sha
-    // survives: reclaiming the clone takes the per-worktree HEAD reflog with it.
-    expect(body).toContain("deadbeef1234");
-    expect(body).toContain("git branch <rescue-name> deadbeef1234");
-    // Must NOT claim no gate ran / the branch never moved: on the path that
-    // actually reaches this terminal, attempt 1 committed on the branch and a
-    // gate went green on it.
-    expect(body).not.toContain("without a green gate");
-    expect(body).not.toContain("No gate ran");
-    expect(body).not.toContain("never moved");
-    expect(body).toContain("refs/sandbar/stranded/deadbeef1234");
-    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
-    expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
-    ]);
-  });
+      expect(action).toEqual({ kind: "pushed" });
+      const body = calls.comments[0]!.body;
+      expect(body).toContain(i.branch);
+      // The comment and the cache pin it names are the only places this sha
+      // survives: reclaiming the clone takes the per-worktree HEAD reflog with it.
+      expect(body).toContain("deadbeef1234");
+      expect(body).toContain("git branch <rescue-name> deadbeef1234");
+      // Must NOT claim no gate ran / the branch never moved: on the path that
+      // actually reaches this terminal, attempt 1 committed on the branch and a
+      // gate went green on it.
+      expect(body).not.toContain("without a green gate");
+      expect(body).not.toContain("No gate ran");
+      expect(body).not.toContain("never moved");
+      expect(body).toContain("refs/sandbar/stranded/deadbeef1234");
+      expect(calls.reclaims).toEqual([{ branch: i.branch }]);
+      expect(calls.labelEdits).toEqual([
+        { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      ]);
+    },
+  );
 
   // #27, #98. The structural branch check cannot see an off-branch UI
   // escalation's detached commit. Its private clone remains the only store for
@@ -1094,6 +1162,7 @@ describe("finalizeOne", () => {
       reclaim: {
         kind: "preserved",
         reason: "could not publish its git state into the cache: cannot lock ref",
+        worktreePath: "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
       },
     });
     const i = issue(45);
@@ -1124,8 +1193,50 @@ describe("finalizeOne", () => {
     const body = calls.comments[0]!.body;
     expect(body).toContain("a new settings screen");
     expect(body).toContain("abc9999");
-    expect(body).toContain("git branch <rescue-name> abc9999");
+    expect(body).toContain(
+      "git -C '/host/.sandbar/worktrees/sandbar-issue-45-t-45' branch <rescue-name> abc9999",
+    );
+    expect(body).not.toContain("refs/sandbar/stranded/abc9999");
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
+  });
+
+  it("needs-ui-prototype: recovers a stranded scratch branch from its preserved clone", async () => {
+    const worktreePath = "/host/.sandbar/worktrees/sandbar-issue-45-t-45";
+    const { adapter, calls } = makeAdapter({
+      reclaim: {
+        kind: "preserved",
+        reason: "could not publish its git state into the cache: cannot lock ref",
+        worktreePath,
+      },
+    });
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-ui-prototype",
+        issue: i,
+        uiImpact: "a new settings screen",
+        strandedHead: {
+          branch: i.branch,
+          headRef: "scratch/settings-screen",
+          headSha: "abc9999",
+          branchSha: "base00",
+          branchIsAncestor: false,
+        },
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({
+      kind: "kept-branch",
+      reason: expect.stringContaining("cannot lock ref"),
+    });
+    const body = calls.comments[0]!.body;
+    expect(body).toContain(`preserved clone \`${worktreePath}\``);
+    expect(body).toContain(
+      "from that clone, cherry-pick or merge it into `sandbar/issue-45-t-45`",
+    );
+    expect(body).not.toContain("refs/sandbar/stranded/abc9999");
   });
 
   it("needs-info: appends the stranded-commits note when the run went off-branch (#27)", async () => {
@@ -1219,10 +1330,11 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.n).toBe(45);
     expect(calls.comments[0]!.body).toContain("too much indirection");
-    expect(calls.comments[0]!.body).toContain("maxReviewRounds");
-    expect(calls.comments[0]!.body).toContain("4 consecutive correctness failures");
     expect(calls.comments[0]!.body).toContain(
-      "governing issue or project instructions",
+      "correctness review pass stopped after 4 consecutive rejections",
+    );
+    expect(calls.comments[0]!.body).toContain(
+      "correct the governing instructions",
     );
     expect(calls.comments[0]!.body).not.toContain("rewrite the standards");
     // #70 — "Push a fix on this branch" is only actionable with a name on it.
@@ -1252,7 +1364,7 @@ describe("finalizeOne", () => {
     expect(calls.reclaims).toEqual([
       { branch: i.branch, keep: expect.stringContaining("human inspection") },
     ]);
-    expect(calls.comments[0]!.body).toContain("preserved for human inspection");
+    expect(calls.comments[0]!.body).toContain("inspect the preserved clone");
     expect(calls.comments[0]!.body).toContain("read-only reviewer");
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
@@ -1274,11 +1386,35 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("read-only UI checker");
   });
 
+  it("read-only-agent-wrote fails before publishing when its preserved clone is missing", async () => {
+    const { adapter, calls } = makeAdapter({ reclaim: { kind: "absent" } });
+
+    await expect(finalizeOne(
+      {
+        kind: "read-only-agent-wrote",
+        issue: issue(45),
+        actor: "reviewer",
+        latestReviewerProse: "Reviewer changed git state.",
+      },
+      adapter,
+      LABELS,
+    )).rejects.toThrow("missing its preserved clone");
+
+    expect(calls.pushes).toEqual([]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([]);
+  });
+
   it("read-only-agent-wrote: parks and comments when origin refuses the branch", async () => {
     const refusal =
       "! [remote rejected] topic -> topic (push protection declined)";
     const { adapter, calls } = makeAdapter({
       pushResult: { kind: "refused", reasons: [refusal] },
+      reclaim: {
+        kind: "preserved",
+        reason: "kept for human inspection",
+        worktreePath: "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
+      },
     });
     const i = issue(45);
 
@@ -1304,7 +1440,16 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("abc123");
     expect(calls.comments[0]!.body).toContain("refs/heads/");
     expect(calls.comments[0]!.body).toContain("/host/.sandbar/repo.git");
+    expect(calls.comments[0]!.body).toContain(
+      "stopped because the read-only reviewer changed the repository",
+    );
+    expect(calls.comments[0]!.body).toContain(
+      "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
+    );
     expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
+    expect(calls.comments[0]!.body.endsWith(
+      "resolve the handoff above, then drop `agent-stuck` and re-apply `ready-for-agent`.",
+    )).toBe(true);
   });
 
   it.each([
@@ -1339,7 +1484,7 @@ describe("finalizeOne", () => {
       { branch: i.branch, keep: expect.stringContaining("human inspection") },
     ]);
     expect(calls.comments[0]!.body).toContain(failure);
-    expect(calls.comments[0]!.body).toContain("authoritative state");
+    expect(calls.comments[0]!.body).toContain("Inspect the preserved clone");
     expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
@@ -1391,6 +1536,11 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("Which deployment account");
     expect(calls.comments[0]!.body).toContain("abc123");
     expect(calls.comments[0]!.body).toContain(i.branch);
+    expect(calls.comments[0]!.body).toContain("<details><summary>Git refusal</summary>");
+    expect(calls.comments[0]!.body).toContain("git -C '/host/.sandbar/repo.git' push");
+    expect(calls.comments[0]!.body.endsWith(
+      "resolve the handoff above, then drop `agent-stuck` and re-apply `ready-for-agent`.",
+    )).toBe(true);
     expect(calls.labelEdits).toEqual([{
       n: 63,
       remove: [READY_FOR_AGENT],
@@ -1415,6 +1565,7 @@ describe("finalizeOne", () => {
 
     expect(action).toEqual({ kind: "parked-local" });
     expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.body).not.toContain("resolve the handoff above");
     expect(calls.labelEdits).toEqual([{
       n: 64,
       remove: [READY_FOR_AGENT],
@@ -1472,17 +1623,79 @@ describe("finalizeOne", () => {
       remove: [READY_FOR_AGENT],
     },
     {
-      name: "needs-human",
+      name: "gate-red",
       input: {
         kind: "needs-human",
         issue: issue(74),
         cause: "gate-red",
         failureTrace: "gate exploded",
         latestReviewerProse: null,
-        budgetExhausted: null,
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         strandedHead: null,
       } as const,
       context: "gate exploded",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "uncommittable worktree",
+      input: {
+        kind: "needs-human",
+        issue: issue(741),
+        cause: "uncommittable-worktree",
+        failureTrace: "?? node_modules/.cache/foo",
+        latestReviewerProse: null,
+        budgetExhausted: null,
+        strandedHead: null,
+      } as const,
+      context: "stopped because the worktree stayed uncommitted",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "no-signal exhaustion",
+      input: {
+        kind: "needs-human",
+        issue: issue(742),
+        cause: "no-signal-exhausted",
+        failureTrace: "attempt produced no commit or promise",
+        latestReviewerProse: null,
+        budgetExhausted: { budget: "quality", roundsUsed: 4 },
+        strandedHead: null,
+      } as const,
+      context: "quality pass stopped after 4 consecutive failures",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "reviewer harness failure",
+      input: {
+        kind: "needs-human",
+        issue: issue(743),
+        cause: "reviewer-harness-failed",
+        failureTrace: "reviewer emitted no verdict",
+        latestReviewerProse: "Earlier report",
+        budgetExhausted: null,
+        strandedHead: null,
+      } as const,
+      context: "stopped after 2 reviewer-harness failures",
+      remove: [READY_FOR_AGENT],
+    },
+    {
+      name: "off-branch head",
+      input: {
+        kind: "needs-human",
+        issue: issue(744),
+        cause: "off-branch-head",
+        failureTrace: "HEAD stayed detached",
+        latestReviewerProse: null,
+        budgetExhausted: null,
+        strandedHead: {
+          branch: "sandbar/issue-744-t-744",
+          headRef: null,
+          headSha: "deadbeef744",
+          branchSha: "base744",
+          branchIsAncestor: false,
+        },
+      } as const,
+      context: "implementer remained off `sandbar/issue-744-t-744`",
       remove: [READY_FOR_AGENT],
     },
     {
@@ -1759,6 +1972,7 @@ describe("finalizeOne", () => {
       reclaim: {
         kind: "preserved",
         reason: "could not publish its git state into the cache: cannot lock ref",
+        worktreePath: "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
       },
     });
     const i = issue(45);
@@ -1781,7 +1995,11 @@ describe("finalizeOne", () => {
   it("hard-error with commits: still pushes when the clone was preserved, and says the clone may hold more", async () => {
     const { adapter, calls } = makeAdapter({
       aheadOfSeed: true,
-      reclaim: { kind: "preserved", reason: "the worktree has uncommitted changes" },
+      reclaim: {
+        kind: "preserved",
+        reason: "the worktree has uncommitted changes",
+        worktreePath: "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
+      },
     });
     const i = issue(45);
     const action = await finalizeOne(
@@ -1865,7 +2083,7 @@ describe("finalizeOne", () => {
           cause: "gate-red",
           failureTrace: "boom",
           latestReviewerProse: null,
-          budgetExhausted: { budget: "gate", roundsUsed: 4 },
+          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         },
         adapter,
         LABELS,
@@ -1891,7 +2109,7 @@ describe("finalizeOne", () => {
           cause: "gate-red",
           failureTrace: "boom",
           latestReviewerProse: null,
-          budgetExhausted: { budget: "gate", roundsUsed: 4 },
+          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         },
         adapter,
         LABELS,
@@ -1989,7 +2207,7 @@ describe("finalizeOne", () => {
           cause: "gate-red",
           failureTrace: "t",
           latestReviewerProse: null,
-          budgetExhausted: { budget: "gate", roundsUsed: 4 },
+          budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         },
         throwing,
         LABELS,
@@ -2010,7 +2228,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "boom",
         latestReviewerProse: null,
-        budgetExhausted: { budget: "gate", roundsUsed: 4 },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
       },
       adapter,
       custom,
@@ -2036,7 +2254,7 @@ describe("finalizeOne", () => {
         cause: "gate-red",
         failureTrace: "boom",
         latestReviewerProse: null,
-        budgetExhausted: { budget: "gate", roundsUsed: 4 },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         specGaps: [{ round: 1, text: "must not be posted" }],
       },
       adapter,
@@ -2081,7 +2299,13 @@ describe("finalizeAll", () => {
     const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
     const inputs: FinalizeInput[] = [
       { kind: "merged", issue: issue(10), specGaps: [] },
-      { kind: "needs-info", issue: issue(11), questions: "?", specGaps: [] },
+      {
+        kind: "needs-info",
+        issue: issue(11),
+        questions: "?",
+        strandedHead: null,
+        specGaps: [],
+      },
       { kind: "merge-gate-red", issue: issue(12), specGaps: [] },
       {
         kind: "hard-error",

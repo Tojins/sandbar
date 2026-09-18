@@ -66,6 +66,23 @@ async function standaloneFixture(taskId: string, onTestFinished: FinishedHook) {
     await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", gName(name)])
       .then((result) => result.stdout.trim())
       .catch(() => null);
+  const readNonEmptyFile = async (
+    name: string,
+    path: string,
+  ): Promise<string> => {
+    // These fixtures only call this for files whose writers cannot produce an
+    // empty value. Remote podman can still transiently return empty stdout
+    // from a successful exec, so retry only that impossible observation.
+    let value = "";
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      value = (
+        await exec(RUNTIME, ["exec", gName(name), "cat", path])
+      ).stdout.trim();
+      if (value) return value;
+      if (attempt < 19) await delay(250);
+    }
+    return value;
+  };
   const spec = (expectedMarker = "v1") =>
     resolveGateStack({
       containers: [
@@ -97,32 +114,17 @@ async function standaloneFixture(taskId: string, onTestFinished: FinishedHook) {
     await rm(repo, { recursive: true, force: true });
   }, 120_000);
 
-  return { stackId, gName, podName, repo, idOf, spec };
+  return { stackId, gName, podName, repo, idOf, readNonEmptyFile, spec };
 }
 
 describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "keeps the stack up, then adopts its issue container on the same token and rebuilds it on a different one",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, repo, spec, idOf, gName } = await standaloneFixture(
-        task.id,
-        onTestFinished,
-      );
-      const seededValue = async (): Promise<string> => {
-        // A successful read of this file cannot be empty: its writer emits a
-        // timestamp, and the test never truncates it. Remote podman can still
-        // transiently return empty stdout from a successful exec, so retry
-        // only that impossible observation without weakening the value check.
-        let value = "";
-        for (let attempt = 0; attempt < 20; attempt += 1) {
-          value = (
-            await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
-          ).stdout.trim();
-          if (value) return value;
-          if (attempt < 19) await delay(250);
-        }
-        return value;
-      };
+      const { stackId, repo, spec, idOf, readNonEmptyFile } =
+        await standaloneFixture(task.id, onTestFinished);
+      const seededValue = async (): Promise<string> =>
+        await readNonEmptyFile("db", "/seeded");
 
       const first = await startStack({
         stackId: stackId,
@@ -339,7 +341,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "does not keep — and so cannot adopt — a stack whose bringup never finished",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, gName, podName, repo, idOf } =
+      const { stackId, podName, repo, idOf, readNonEmptyFile } =
         await standaloneFixture(task.id, onTestFinished);
 
       const seedFlag = join(repo, "seed-flag");
@@ -410,11 +412,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // …and the seed the first invocation never got to has now run, which is
       // what `reused: []` is worth asserting FOR: an adopted container would
       // have skipped it and gated against an unseeded database.
-      expect(
-        (
-          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
-        ).stdout.trim(),
-      ).not.toBe("");
+      expect(await readNonEmptyFile("db", "/seeded")).not.toBe("");
       await fixed.stop();
     },
     600_000,
@@ -439,10 +437,8 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
   it.concurrent(
     "does not recreate an adopted container because the image it runs is spelled differently",
     async ({ expect, task, onTestFinished }) => {
-      const { stackId, gName, repo, idOf, spec } = await standaloneFixture(
-        task.id,
-        onTestFinished,
-      );
+      const { stackId, repo, idOf, readNonEmptyFile, spec } =
+        await standaloneFixture(task.id, onTestFinished);
 
       const variantA = testImageTag("reuse-variant");
       const variantB = testImageTag("reuse-variant-alias");
@@ -468,9 +464,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       const first = await start(variantA);
       expect((await first.runGate()).ok).toBe(true);
       const dbId = await idOf("db");
-      const seeded = (
-        await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
-      ).stdout.trim();
+      const seeded = await readNonEmptyFile("db", "/seeded");
       expect(dbId).not.toBeNull();
       await first.stop();
 
@@ -482,11 +476,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       expect(await idOf("db")).toBe(dbId);
       // The id alone would be satisfied by podman handing an identical one
       // back; the seed is what says the container was never recreated.
-      expect(
-        (
-          await exec(RUNTIME, ["exec", gName("db"), "cat", "/seeded"])
-        ).stdout.trim(),
-      ).toBe(seeded);
+      expect(await readNonEmptyFile("db", "/seeded")).toBe(seeded);
       await second.stop();
     },
     600_000,

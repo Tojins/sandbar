@@ -144,7 +144,15 @@ describe("UI-prototype prompt contracts (#126)", () => {
   it("recognises the exact escape phrase finalize's comment asks the human for", () => {
     expect(uiCheck).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
     expect(
-      NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(42, "impact", "needs-info", "ready-for-agent", null),
+      NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
+        42,
+        "impact",
+        "needs-info",
+        "ready-for-agent",
+        null,
+        null,
+        { kind: "removed" },
+      ),
     ).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
   });
 

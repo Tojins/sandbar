@@ -146,8 +146,9 @@ default is unlimited, so existing hosts keep their prior concurrency.
    word); the check-reading safety argument — its invariant: no unknown verdict
    ever lands — is in the `src/forge-verify.ts` and `src/merger.ts` headers. An
    issue carrying a `chunk` lands on its chunk branch instead (#60) and each
-   pushed chunk gets a **draft PR** updated at each landing (#62): `src/chunk-pr.ts` is the
-   prose, `src/forge-pr.ts` the `gh pr` create-or-update both PR kinds share. A
+   pushed chunk gets a **draft PR** updated at each landing (#62): `src/chunk-pr.ts`
+   builds its member-list-only body, `src/forge-pr.ts` the `gh pr`
+   create-or-update both PR kinds share. A
    **`land` label on that PR** (#64) makes the next landing merge
    `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
    so one gate-2 and one landing cover both; the wrap-up then closes the
@@ -165,6 +166,8 @@ default is unlimited, so existing hosts keep their prior concurrency.
    `labels.needsInfo`/`labels.agentStuck`, plus `needs-review` for a
    chunk-landed member, are the only labels sandbar applies — `land` (#64) it only ever
    REMOVES, from a pull request a human labelled).
+   Human parking comments contain only a stop line, their variable payload
+   (with traces collapsed), and a final branch/relabel action line (#170).
    A terminal is finalised before its landing is attempted. Every non-DONE
    terminal attempts to publish an issue branch that is structurally ahead of
    its seed; this cache-derived check replaces per-sandbox-cycle commit
@@ -363,7 +366,8 @@ outcomes.
   the `land` bullet below states.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
   created or updated after every landing push; sandbar never re-drafts a PR a
-  human made ready. `src/chunk-pr.ts` owns the prose and what it may claim.
+  human made ready. Its body is only the complete member list;
+  `src/chunk-pr.ts` owns what it may claim.
 - **A changes-requested review on that PR re-queues its landed member(s)
   (#95).** Each thread routes to the unique member whose merge brought its path
   onto the chunk branch, or to the lowest-numbered tip when ownership is absent

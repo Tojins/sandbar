@@ -372,8 +372,12 @@ export type Terminal =
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
       readonly budgetExhausted: {
-        readonly budget: "quality" | "gate";
+        readonly budget: "quality";
         readonly roundsUsed: number;
+      } | {
+        readonly budget: "gate";
+        readonly roundsUsed: number;
+        readonly failedStep: string;
       } | null;
       readonly strandedHead: HeadMismatch | null;
       readonly specGaps: readonly SpecGap[];
@@ -2144,7 +2148,7 @@ export async function runSandboxAndPublish(
 export async function runGate1(
   action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
   ctx: ExecuteActionCtx,
-): Promise<{ readonly ok: boolean; readonly failureTrace: string }> {
+): Promise<Gate1Result> {
   const { issue, opts, gateStack } = ctx;
   const admitted = await opts.gateSemaphore.run(() => gateStack.runGate());
   const gate1 = admitted.value;
@@ -2175,6 +2179,7 @@ export async function runGate1(
   });
   return {
     ok: gate1.ok,
+    failedStep: gate1.failedStep,
     // Summarize the STEP output, then append the container logs — never the
     // other way round. The cascade collapse looks for many lines sharing one
     // signature, and a service log is full of them (see GateResult.containerLogs).
@@ -2352,7 +2357,7 @@ export async function runAdjudicator(
       const continued = await runReviewer(
         reviewAction,
         ctx,
-        Promise.resolve({ ok: true, failureTrace: "" }),
+        Promise.resolve({ ok: true, failureTrace: "", failedStep: null }),
         undefined,
         { skipQuality: true },
       );

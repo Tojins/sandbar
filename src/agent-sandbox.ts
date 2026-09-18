@@ -1558,8 +1558,13 @@ export type IssueCloneReclaim =
   | { readonly kind: "removed" }
   // Nothing at the managed path.
   | { readonly kind: "absent" }
-  // The clone stays, and this is why. Whatever DID publish is in the cache.
-  | { readonly kind: "preserved"; readonly reason: string };
+  // The clone stays, and this is why. `worktreePath` is the authoritative
+  // recovery location even when publishing into the cache failed.
+  | {
+      readonly kind: "preserved";
+      readonly reason: string;
+      readonly worktreePath: string;
+    };
 
 // Remove an issue clone without losing what it holds — the one rule every
 // removal goes through (see the module header). "What it holds" is the two
@@ -1596,12 +1601,19 @@ export const reclaimIssueClone = async (
     return {
       kind: "preserved",
       reason: `could not publish its git state into the cache: ${(err as Error).message}`,
+      worktreePath,
     };
   }
   if (await hasUncommittedChanges(worktreePath)) {
-    return { kind: "preserved", reason: "the worktree has uncommitted changes" };
+    return {
+      kind: "preserved",
+      reason: "the worktree has uncommitted changes",
+      worktreePath,
+    };
   }
-  if (keep !== undefined) return { kind: "preserved", reason: keep };
+  if (keep !== undefined) {
+    return { kind: "preserved", reason: keep, worktreePath };
+  }
   await rm(worktreePath, { recursive: true, force: true });
   return { kind: "removed" };
 };

@@ -319,10 +319,11 @@ const needsUiPrototype = (uiImpact: string): ParseSignal => ({
   uiImpact,
 });
 
-const gate1Ok: Gate1Result = { ok: true, failureTrace: "" };
-const gate1Red = (trace: string): Gate1Result => ({
+const gate1Ok: Gate1Result = { ok: true, failureTrace: "", failedStep: null };
+const gate1Red = (trace: string, failedStep = "test"): Gate1Result => ({
   ok: false,
   failureTrace: trace,
+  failedStep,
 });
 const approved = (prose: string = "lgtm"): ReviewerResult => ({
   kind: "reviewer-result",
@@ -1022,7 +1023,7 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
       cause: "gate-red",
       failureTrace: "only red",
       latestReviewerProse: null,
-      budgetExhausted: { budget: "gate", roundsUsed: 1 },
+      budgetExhausted: { budget: "gate", roundsUsed: 1, failedStep: "test" },
       strandedHead: null,
     });
   });
@@ -1216,7 +1217,7 @@ describe("inner-loop-machine — quality and gate budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "red",
       latestReviewerProse: "reject",
-      budgetExhausted: { budget: "gate", roundsUsed: 1 },
+      budgetExhausted: { budget: "gate", roundsUsed: 1, failedStep: "test" },
       strandedHead: null,
     });
   });
@@ -1234,10 +1235,10 @@ describe("inner-loop-machine — quality and gate budget exhaustion", () => {
     });
   });
 
-  it("repeated gate-1 red exhausts the gate budget with the last trace and review", () => {
+  it("repeated gate-1 red exhausts the gate budget with the latest step, trace and review", () => {
     const { verdict } = drive(defaultOpts, [
       impl(complete),
-      judged(gate1Red("trace 1"), approved("approved 1")),
+      judged(gate1Red("trace 1", "compile"), approved("approved 1")),
       impl(complete),
       judged(gate1Red("trace 2"), approved("approved 2")),
       impl(complete),
@@ -1250,7 +1251,11 @@ describe("inner-loop-machine — quality and gate budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "trace 4",
       latestReviewerProse: "approved 4",
-      budgetExhausted: { budget: "gate", roundsUsed: DEFAULT_MAX_GATE_ROUNDS },
+      budgetExhausted: {
+        budget: "gate",
+        roundsUsed: DEFAULT_MAX_GATE_ROUNDS,
+        failedStep: "test",
+      },
       strandedHead: null,
     });
   });
@@ -1315,7 +1320,7 @@ describe("inner-loop-machine — quality and gate budget exhaustion", () => {
       cause: "gate-red",
       failureTrace: "trace",
       latestReviewerProse: "quality approved",
-      budgetExhausted: { budget: "gate", roundsUsed: 1 },
+      budgetExhausted: { budget: "gate", roundsUsed: 1, failedStep: "test" },
       strandedHead: null,
     });
   });
@@ -1461,7 +1466,7 @@ describe("decideAfterTerminal", () => {
         cause: "gate-red",
         failureTrace: "trace",
         latestReviewerProse: null,
-        budgetExhausted: { budget: "gate", roundsUsed: 4 },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
         strandedHead: null,
       },
       {

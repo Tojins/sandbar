@@ -118,6 +118,7 @@ export type LoopState = {
   readonly gateFailures: number;
   readonly correctnessFailures: number;
   readonly lastFailureTrace: string;
+  readonly lastFailedStep: string | null;
   readonly extraReprompt: string | null;
   // Includes disposition because paid-for quality prose under a red gate can
   // be an approval even though correctness was deliberately skipped (#143).
@@ -220,8 +221,12 @@ export type Verdict =
       // Present exactly when a convergence budget, rather than a dedicated
       // early-stop rule, ended the loop.
       readonly budgetExhausted: {
-        readonly budget: "quality" | "gate";
+        readonly budget: "quality";
         readonly roundsUsed: number;
+      } | {
+        readonly budget: "gate";
+        readonly roundsUsed: number;
+        readonly failedStep: string;
       } | null;
       // Set only by `off-branch-head`, so finalize can render the rescue note
       // from structure rather than parse it back out of the trace prose.
@@ -362,6 +367,7 @@ export type LoopEvent =
 export type Gate1Result = {
   readonly ok: boolean;
   readonly failureTrace: string;
+  readonly failedStep: string | null;
 };
 export type ReviewerResult =
   | {
@@ -426,6 +432,7 @@ export function initialState(opts: InitialStateOptions): LoopState {
     gateFailures: 0,
     correctnessFailures: 0,
     lastFailureTrace: "",
+    lastFailedStep: null,
     extraReprompt: null,
     latestReviewerFeedback: null,
     lastDirtyPaths: null,
@@ -604,6 +611,7 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
         {
           ok: state.pendingRejection.gateOk,
           failureTrace: state.lastFailureTrace,
+          failedStep: state.lastFailedStep,
         },
         `adjudicator: ${event.detail}`,
       );
@@ -965,11 +973,12 @@ function onGateAndReviewerResult(
   round: Extract<LoopEvent, { kind: "gate-and-reviewer-result" }>["reviewRound"],
 ): StepResult {
   const gatedState: LoopState = gate.ok
-    ? { ...state, gateFailures: 0, lastFailureTrace: "" }
+    ? { ...state, gateFailures: 0, lastFailureTrace: "", lastFailedStep: null }
     : {
         ...state,
         gateFailures: state.gateFailures + 1,
         lastFailureTrace: gate.failureTrace,
+        lastFailedStep: gate.failedStep,
       };
   if (reviewer.kind === "reviewer-wrote") {
     return {
@@ -998,7 +1007,11 @@ function onRedGateReviewerResult(
   if (reviewer.kind === "reviewer-harness-failed") {
     return onReviewerHarnessFailed(
       state,
-      { ok: false, failureTrace: state.lastFailureTrace },
+      {
+        ok: false,
+        failureTrace: state.lastFailureTrace,
+        failedStep: state.lastFailedStep,
+      },
       reviewer.detail,
     );
   }
@@ -1258,7 +1271,7 @@ function onAdjudicatorResult(
   if (event.correctness.kind === "reviewer-harness-failed") {
     return onReviewerHarnessFailed(
       uncharged,
-      { ok: true, failureTrace: "" },
+      { ok: true, failureTrace: "", failedStep: null },
       event.correctness.detail,
     );
   }
@@ -1340,6 +1353,9 @@ function gateRedExhaustion(
   state: LoopState,
   latestReviewerProse: string | null,
 ): Verdict {
+  if (state.lastFailedStep === null) {
+    throw new Error("red gate exhausted without a failing step");
+  }
   return {
     type: "NEEDS-HUMAN",
     cause: "gate-red",
@@ -1348,6 +1364,7 @@ function gateRedExhaustion(
     budgetExhausted: {
       budget: "gate",
       roundsUsed: state.gateFailures,
+      failedStep: state.lastFailedStep,
     },
     strandedHead: null,
   };

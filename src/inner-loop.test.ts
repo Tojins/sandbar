@@ -1713,8 +1713,16 @@ describe("runGate1 admission (#142)", () => {
     expect(starts).toEqual(["attempt-1"]);
     now = 12;
     firstGate.resolve(result);
-    await expect(first).resolves.toEqual({ ok: true, failureTrace: "" });
-    await expect(second).resolves.toEqual({ ok: true, failureTrace: "" });
+    await expect(first).resolves.toEqual({
+      ok: true,
+      failureTrace: "",
+      failedStep: null,
+    });
+    await expect(second).resolves.toEqual({
+      ok: true,
+      failureTrace: "",
+      failedStep: null,
+    });
     expect(starts).toEqual(["attempt-1", "attempt-2"]);
     expect(events).toEqual([
       expect.objectContaining({ kind: "gate", issue: 1, gate: "gate-1" }),
@@ -1761,6 +1769,7 @@ describe("runGate1 admission (#142)", () => {
       ctx,
     );
     expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("test");
     expect(writeGate).toHaveBeenCalledWith("attempt-5-gate.log", {
       ok: false,
       stdout: "=== test ===\nfail",

@@ -537,29 +537,23 @@ export const CHUNK_LAND_ABANDONED_PR_COMMENT = (args: {
 }): string => {
   const what =
     args.mode === "conflict"
-      ? `merging \`${args.chunkBranch}\` into \`${args.sourceBranch}\` conflicted, and ` +
-        `the agentic resolve loop bailed after ${args.attempts.length} attempt${args.attempts.length === 1 ? "" : "s"}`
+      ? `merge into \`${args.sourceBranch}\` stopped on conflicts after ` +
+        `${args.attempts.length} resolve attempt${args.attempts.length === 1 ? "" : "s"}`
       : args.mode === "gate-red"
-        ? `\`${args.chunkBranch}\` merged into \`${args.sourceBranch}\` cleanly, but the ` +
-          `post-merge gate was still red after ${args.attempts.length} agentic fix ` +
+        ? `the post-merge gate stayed red after ${args.attempts.length} fix ` +
           `attempt${args.attempts.length === 1 ? "" : "s"}`
-        : `\`${args.chunkBranch}\` merged into \`${args.sourceBranch}\` cleanly, but ` +
-          "`npm install` against the merged tree failed, so the post-merge gate " +
-          "could not run";
+        : "`npm install` failed before the post-merge gate";
   const paths = formatConflictPaths(args.conflictPaths);
-  return (
-    `${BOT_COMMENT_PREFIX} this chunk was NOT landed: ${what}.\n\n` +
+  const diagnostics = [
+    paths,
+    args.attempts.length === 0 ? "" : formatResolveAttempts(args.attempts),
+  ].filter((part) => part.length > 0).join("\n\n");
+  return `${BOT_COMMENT_PREFIX} ${what}.\n\n` +
     (args.reason ? `Agent's reason: ${args.reason}\n\n` : "") +
-    (paths ? `${paths}\n\n` : "") +
-    (args.attempts.length > 0
-      ? `**What each attempt did:**\n${formatResolveAttempts(args.attempts)}\n\n`
+    (diagnostics
+      ? `<details><summary>Resolve diagnostics</summary>\n\n${diagnostics}\n\n</details>\n\n`
       : "") +
-    `The merge was reverted, nothing reached \`${args.sourceBranch}\`, and the ` +
-    `\`${LAND_LABEL}\` label has been removed so the same failing merge is not ` +
-    `retried every cycle. The chunk branch and its issues are untouched — fix the ` +
-    `collision (most likely by rebuilding on a \`${args.sourceBranch}\` that has ` +
-    `since moved) and re-apply \`${LAND_LABEL}\` when it is worth another try.`
-  );
+    `Action: fix \`${args.chunkBranch}\`; re-apply \`${LAND_LABEL}\`.`;
 };
 
 // Verified merge mode (#22) rejected the cycle's composed result, and this
@@ -573,19 +567,15 @@ export const CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT = (args: {
   readonly detail: string;
   readonly siblings: readonly number[];
 }): string =>
-  `${BOT_COMMENT_PREFIX} this chunk was NOT landed. \`${args.chunkBranch}\` merged ` +
-  `into \`${args.sourceBranch}\` cleanly and the post-merge gate passed, but the ` +
-  `forge's verification of the cycle's composed result did not — so nothing was ` +
-  `landed on \`${args.sourceBranch}\` and the merge was reverted.\n\n` +
+  `${BOT_COMMENT_PREFIX} forge verification stopped the chunk landing.\n\n` +
   `Verification failure: ${args.detail}\n\n` +
   (args.siblings.length > 0
-    ? `The forge judged this chunk together with ${args.siblings
+    ? `Composed alongside ${args.siblings
         .map((n) => `#${n}`)
-        .join(", ")}, so the failure is not necessarily this chunk's. ` +
-      "Those were reverted and parked too.\n\n"
+        .join(", ")}.\n\n`
     : "") +
-  `The \`${LAND_LABEL}\` label has been removed. Nothing about the chunk changed — ` +
-  `re-apply it once the composition has a reason to pass.`;
+  `Action: fix \`${args.chunkBranch}\` or the composed cycle; re-apply ` +
+  `\`${LAND_LABEL}\`.`;
 
 // Ongoing work or tracker-visible rework targets the chunk (#87, #94). Nothing
 // is merged and the label is untouched; this explains why the request remains queued.
@@ -615,11 +605,9 @@ export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
 export const CHUNK_BRANCH_MISSING_PR_COMMENT = (args: {
   readonly chunkBranch: string;
 }): string =>
-  `${BOT_COMMENT_PREFIX} this pull request is labelled \`${LAND_LABEL}\`, but origin ` +
-  `has no \`${args.chunkBranch}\` to land — the branch is gone. Nothing was merged ` +
-  `and the \`${LAND_LABEL}\` label has been removed. If the work landed some other ` +
-  `way, close this pull request and its issues by hand; if the branch was deleted ` +
-  `by mistake, it is recoverable only from a clone that still has it.`;
+  `${BOT_COMMENT_PREFIX} origin has no \`${args.chunkBranch}\` to land.\n\n` +
+  `Action: restore \`${args.chunkBranch}\` from a surviving clone and re-apply ` +
+  `\`${LAND_LABEL}\`, or close the pull request and issues by hand.`;
 
 // ---------------------------------------------------------------------------
 // The wrap-up

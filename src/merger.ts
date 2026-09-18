@@ -492,13 +492,10 @@ export function buildChunkPushRefusedComment(args: {
   );
 }
 
-// The one artefact a human reads when they find a stuck issue in the morning,
-// which is why it says so much more than it used to (#67). Before, it named no
-// conflicted file, no timing, no agent output and no log path — so "bailed
-// after 4 attempts" read identically whether four agents had genuinely failed
-// at a hard conflict or one had timed out and three containers had died at
-// startup in eleven seconds. The two want completely different things done
-// about them.
+// The resolve-loop handoff follows the same three-part contract as finalise:
+// one stop line, the agent's reason plus collapsed diagnostics, one action
+// line. #67's paths, timing, outcomes and log paths remain intact inside the
+// details block; only fixed workflow explanation is removed.
 function buildAbandonComment(args: {
   mode: "conflict" | "gate-red";
   reason: string;
@@ -508,35 +505,27 @@ function buildAbandonComment(args: {
   attempts: readonly ResolveAttemptSummary[];
   conflictPaths: readonly string[];
   target: MergeTarget;
+  branch: string;
+  stuckLabel: string;
 }): string {
   const where = describeMergeTarget(args.target);
   const n = args.attempts.length;
   const plural = n === 1 ? "" : "s";
-  const lede =
+  const stopped =
     args.mode === "conflict"
-      ? [
-          `Sandbar attempted to merge this branch into ${where} and the agentic resolve loop bailed after ${n} attempt${plural}.`,
-          "The merge has been aborted and `ready-for-agent` removed.",
-        ]
-      : [
-          `Sandbar merged this branch into ${where} locally, but the post-merge gate was still red after ${n} agentic fix attempt${plural}.`,
-          "The merge has been reverted and `ready-for-agent` removed.",
-        ];
-  return [
-    ...lede,
-    "",
-    `Agent's reason: ${args.reason}`,
-    ...blockIfAny(formatConflictPaths(args.conflictPaths)),
-    "",
-    "**What each attempt did:**",
+      ? `merge into ${where} stopped on conflicts after ${n} resolve attempt${plural}.`
+      : `the post-merge gate stayed red after ${n} fix attempt${plural}.`;
+  const diagnostics = [
+    formatConflictPaths(args.conflictPaths),
     formatResolveAttempts(args.attempts),
-  ].join("\n");
-}
-
-// A section, or nothing at all — never an empty heading. Used for the
-// conflicted-path list, which a gate-red abandon legitimately has none of.
-function blockIfAny(section: string): string[] {
-  return section ? ["", section] : [];
+  ].filter((part) => part.length > 0).join("\n\n");
+  return (
+    `**Sandbar:** ${stopped}\n\n` +
+    `Agent's reason: ${args.reason}\n\n` +
+    `<details><summary>Resolve diagnostics</summary>\n\n${diagnostics}\n\n</details>\n\n` +
+    `Action: push a fix on \`${args.branch}\`; drop \`${args.stuckLabel}\` and ` +
+    `re-apply \`${READY_FOR_AGENT_LABEL}\`.`
+  );
 }
 
 // Verified merge mode (#22). The forge rejected the cycle's composed merge
@@ -846,6 +835,9 @@ type MergedChunkUnit = FetchedChunkUnit & {
 export type ChunkLanding = {
   readonly issue: IssueRef;
   readonly chunkBranch: string;
+  // Null only when opening/updating the review PR failed after the durable
+  // chunk push. The partial still owes the member its finalization comment.
+  readonly pullRequestNumber: number | null;
 };
 
 // A chunk landed on the SOURCE branch this cycle is a `ChunkWrapup` (#64) —
@@ -1078,6 +1070,8 @@ export type MergerResolveAttemptSink = (
 ) => Promise<string | null>;
 
 export type RunMergerOptions = {
+  // Configured human-handoff label named in the resolve-loop action line.
+  readonly agentStuckLabel: string;
   // Full set of planner-visible ongoing issues in this run.
   // The resolve loop loads the bodies of all *other* entries so the agent has
   // multi-issue context when reasoning about an integration failure.
@@ -1609,6 +1603,8 @@ export async function runMergerWithAdapter(
           attempts: outcome.attempts,
           conflictPaths: outcome.conflictPaths,
           target,
+          branch: issue.branch,
+          stuckLabel: opts.agentStuckLabel,
         }),
       );
       await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
@@ -1733,8 +1729,13 @@ export async function runMergerWithAdapter(
         nothingLanded(),
       );
     }
+    const landingStart = chunkLanded.length;
     for (const { issue, durationMs } of landedMembers) {
-      const landing = { issue, chunkBranch: branch };
+      const landing: ChunkLanding = {
+        issue,
+        chunkBranch: branch,
+        pullRequestNumber: null,
+      };
       chunkLanded.push(landing);
       await opts.observations.onOutcome({ kind: "chunk-landed", landing, durationMs });
     }
@@ -1758,7 +1759,6 @@ export async function runMergerWithAdapter(
         chunkBranch: branch,
         ...chunkPullRequestContent({
           root: group.root,
-          branch,
           members: prMembers,
         }),
       })
@@ -1777,6 +1777,9 @@ export async function runMergerWithAdapter(
             `gh's permissions — the next cycle that lands a member on this chunk retries it)`,
         ),
       );
+    for (let i = landingStart; i < chunkLanded.length; i++) {
+      chunkLanded[i] = { ...chunkLanded[i]!, pullRequestNumber: pr.number };
+    }
     await emit(`chunk ${branch}: draft PR ${pr.url || `#${pr.number}`}`);
   };
 

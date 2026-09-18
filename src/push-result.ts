@@ -39,12 +39,12 @@ export function pushRefusedRecoveryNote(args: {
   readonly recovery: LocalBranchRecovery;
 }): string {
   return (
-    `Git reported:\n\n\`\`\`text\n${args.reasons.join("\n")}\n\`\`\`\n\n` +
+    `<details><summary>Git refusal</summary>\n\n\`\`\`text\n` +
+    `${args.reasons.join("\n")}\n\`\`\`\n\n</details>\n\n` +
     `The commits remain on this box at tip \`${args.recovery.tipSha}\`, cache ` +
-    `ref \`${args.recovery.ref}\`, in \`${args.recovery.repoDir}\`. Publish that ` +
-    `ref with an identity allowed to write this content (for example, an ` +
-    `authorised SSH remote):\n\n\`\`\`sh\ngit -C '${args.recovery.repoDir}' push ` +
-    `<authorised-remote> '${args.recovery.ref}:${args.recovery.ref}'\n\`\`\``
+    `ref \`${args.recovery.ref}\`, in \`${args.recovery.repoDir}\`.\n\n` +
+    `Publish it with an allowed identity: \`git -C '${args.recovery.repoDir}' push ` +
+    `<authorised-remote> '${args.recovery.ref}:${args.recovery.ref}'\`.`
   );
 }
 

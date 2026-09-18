@@ -21,6 +21,9 @@
 // a preserved clone. The reviewer-write handoff is the one caller that asks for
 // the clone to be kept when the rule would reclaim it: the human is told to
 // inspect it, and uncommitted evidence cannot travel through a push.
+// Human-facing parking comments use the same three-part contract throughout:
+// one stop line, the variable payload (with diagnostics collapsed), and one
+// final action line naming the branch and label transition (#170).
 //
 // A SERVER-REFUSED PUSH is the other deliberate local park (#163), for every
 // terminal that publishes an issue branch. The shared classifier reads Git's
@@ -84,7 +87,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { type IssueCloneReclaim, reclaimIssueClone } from "./agent-sandbox.js";
-import { LAND_LABEL, NEEDS_REVIEW_LABEL } from "./chunks.js";
+import { NEEDS_REVIEW_LABEL } from "./chunks.js";
 import { strandedHeadRef } from "./naming.js";
 import type { LabelConfig } from "./config.js";
 import { SandbarError, isExitCode } from "./errors.js";
@@ -124,14 +127,13 @@ export const PUSH_REFUSED_COMMENT_TEMPLATE = (args: {
   readonly readyLabel: string;
   readonly context?: string;
 }): string =>
-  `${BOT_COMMENT_PREFIX} origin refused to publish \`${args.branch}\`. Git's ` +
-  `server-side refusal is a fact about this branch's content or ref, not a ` +
-  `transient push race, so Sandbar parked the issue instead of halting the ` +
-  `rest of the queue. ${pushRefusedRecoveryNote(args)}\n\n` +
-  `${args.context ? "After resolving the additional handoff below" : "Then"}, drop ` +
-  `\`${args.stuckLabel}\` ` +
-  `and re-apply \`${args.readyLabel}\`.` +
-  (args.context ? `\n\n---\n\n${args.context}` : "");
+  `${BOT_COMMENT_PREFIX} origin refused to publish \`${args.branch}\`.\n\n` +
+  `${pushRefusedRecoveryNote(args)}` +
+  (args.context ? `\n\n${args.context}` : "") +
+  `\n\nAction: use \`${args.branch}\`; ` +
+  (args.context ? "resolve the handoff above, then " : "") +
+  `drop \`${args.stuckLabel}\` and re-apply ` +
+  `\`${args.readyLabel}\`.`;
 
 // A note that applies to every template below, and to the ones in
 // `chunk-land.ts` and `chunk-pr.ts`: these bodies are posted into the HOST
@@ -143,50 +145,41 @@ export const PUSH_REFUSED_COMMENT_TEMPLATE = (args: {
 // may carry is one it was HANDED, which is a host issue number by
 // construction.
 //
-// EVERY PARKING TEMPLATE WHOSE TERMINAL PUSHES THE BRANCH NAMES IT (#70).
-// These bodies are the place the human is standing when they act — "push a fix
-// on this branch" was in three of them and none of them said which. The name is
-// re-derivable in principle (`issueBranchName` = number + `kebabSlug(title)`)
-// but lossily: `operator's` kebabs to `operator-s`, and a retitled issue gets
-// a DIFFERENT branch next cycle, so re-deriving a parked branch's name can
-// simply be wrong. It is handed in from `input.issue.branch`, which is the
-// branch that was actually pushed.
-//
-// The qualifier is the whole rule, because two terminals leave no branch to
-// name and correctly say so instead. `NEEDS_UI_PROTOTYPE` normally escalates
-// before a line of code exists and `finalizeOne` deletes the local branch, so
-// it takes a nullable `branchPushed` and names one only on the late
-// escalation that did push. `SILENT_NOOP_EXHAUSTED` never has one: that
-// terminal discards the branch after every attempt, which its body says.
-//
-// What each of them names is the LOCATION, never what the push CARRIES. The
-// two are not the same claim: an off-branch run pushes the branch and moves
-// nothing onto it, and `STRANDED_COMMITS_NOTE` — appended by the needs-info and
-// off-branch arms below — is the one sentence entitled to say where the work
-// actually is. A template that also claimed "whatever it wrote is pushed here"
-// would contradict the paragraph directly beneath it in the same comment body.
-//
-// Nor does naming it predict what the NEXT attempt will do with it. The branch
-// is where the work is now; whether an attempt resumes on it is preflight's
-// business and the operator's — preflight offers deleting a merged issue branch,
-// and a parked branch deleted by hand seeds the next attempt from
-// `origin/<sourceBranch>` instead. #70 asks these bodies to say where the human
-// is standing, which is a fact about the present, and every clause past that is
-// a forecast the template cannot keep.
+// Every parking comment follows one contract: one line naming the fact that
+// stopped work; the variable payload immediately below it (agent text and
+// reviewer reports open, logs/traces collapsed); one final action line naming
+// the branch and label transition. Stable explanations of sandbar's mechanics
+// do not belong in a host-repository handoff. #70's branch rule still applies:
+// the name is handed in, never reconstructed, and says only where the branch
+// is—not what an off-branch attempt may have written. #27's stranded-work note
+// is the only text entitled to locate those commits. It names the durable cache
+// pin after this reclamation established it, or after an earlier sandbox-close
+// reclamation left no clone for finalization; otherwise it points at the exact
+// preserved clone. A terminal with no pushed branch says so instead of
+// inventing one.
 
-const needsInfoExplanation = (questions: string): string =>
-  `The agent paused with NEEDS-INFO and asked:\n\n---\n\n${questions}`;
+const handoffAction = (
+  branch: string | null,
+  currentLabel: string,
+  readyLabel: string,
+  instruction: string,
+): string =>
+  `Action: ${branch === null ? "no issue branch was pushed" : `use \`${branch}\``}; ` +
+  `${instruction}, then drop \`${currentLabel}\` and re-apply \`${readyLabel}\`.`;
 
 export const NEEDS_INFO_COMMENT_TEMPLATE = (
   branch: string,
   questions: string,
   needsInfoLabel: string,
   readyLabel: string,
+  strandedHead: StrandedHead | null,
+  reclaim: IssueCloneReclaim,
 ): string =>
-  `${BOT_COMMENT_PREFIX} The branch is \`${branch}\`. Please answer the ` +
-  `questions, then drop ` +
-  `\`${needsInfoLabel}\` and re-apply \`${readyLabel}\` when the answers are ` +
-  `ready.\n\n${needsInfoExplanation(questions)}`;
+  `${BOT_COMMENT_PREFIX} stopped for requested information.\n\n` +
+  `${questions}` +
+  (strandedHead === null ? "" : STRANDED_COMMITS_NOTE(strandedHead, reclaim)) +
+  `\n\n` +
+  handoffAction(branch, needsInfoLabel, readyLabel, "answer the questions");
 
 // #21 — the implementer stopped before writing code because the issue implies
 // non-trivial user-visible UI and carries no prototype. Same human round-trip
@@ -208,51 +201,40 @@ const needsUiPrototypeExplanation = (
   issueNum: number,
   uiImpact: string,
 ): string =>
-  `This issue implies user-visible UI that no human has seen, and no prototype ` +
-  `was found in the issue body or comments — continuing would mean inventing the ` +
-  `design and merging it unseen. The agent's assessment is below.\n\n` +
-  `To unblock, either:\n\n` +
-  `1. **Give it a prototype it can read.** Suggested route: commit a file to the ` +
-  `repo (e.g. \`docs/prototypes/issue-${issueNum}.html\`) and reference it by path ` +
-  `here — push it to the source branch first, because issue branches are seeded ` +
-  `from origin, not your local checkout. An inline fenced markup block or ASCII ` +
-  `wireframe in a comment works just as well, as does a prose spec precise enough ` +
-  `to pin the decisions listed below. A screenshot on its own does not: the agent ` +
-  `reads this issue as text and cannot see images.\n` +
-  `2. **Reply "${NO_PROTOTYPE_NEEDED_PHRASE}"** — in your own comment, not by ` +
-  `editing this one — if you're happy for the agent to make these design ` +
-  `decisions itself.\n\n---\n\n${uiImpact}`;
+  `${uiImpact}\n\n` +
+  `- In-repo route: commit a file such as \`docs/prototypes/issue-${issueNum}.html\` and push it to the source branch before re-labelling.\n` +
+  `- Comment route: add inline fenced markup, an ASCII wireframe, or a precise prose specification.\n` +
+  `- A screenshot alone does not work; the agent reads this issue as text.\n` +
+  `- Or reply \`${NO_PROTOTYPE_NEEDED_PHRASE}\` in your own comment.`;
 
 export const NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE = (
   issueNum: number,
   uiImpact: string,
   needsInfoLabel: string,
   readyLabel: string,
-  // The escalation normally lands before a line of code exists, but a late one
-  // is accepted (see promise-parser) and then the branch was pushed. Saying
-  // "stopped before writing any code" in that case tells the human the opposite
-  // of what just happened.
+  // Null on the ordinary pre-code escalation; named on a late escalation whose
+  // partial branch was published.
   branchPushed: string | null,
+  strandedHead: StrandedHead | null,
+  reclaim: IssueCloneReclaim,
 ): string =>
-  `${BOT_COMMENT_PREFIX} the agent stopped ${
-    branchPushed === null
-      ? "before writing any code"
-      : `and pushed what it had to \`${branchPushed}\``
-  }. ${needsUiPrototypeExplanation(issueNum, uiImpact)}\n\nThen drop ` +
-  `\`${needsInfoLabel}\` and re-apply \`${readyLabel}\`.`;
+  `${BOT_COMMENT_PREFIX} stopped for a UI prototype.\n\n` +
+  `${needsUiPrototypeExplanation(issueNum, uiImpact)}` +
+  (strandedHead === null ? "" : STRANDED_COMMITS_NOTE(strandedHead, reclaim)) +
+  `\n\n` +
+  handoffAction(
+    branchPushed,
+    needsInfoLabel,
+    readyLabel,
+    "supply a readable prototype or the exact opt-out reply",
+  );
 
 const needsPartitionExplanation = (
-  cause: "classifier" | "measured" | "provider-refused",
-  slot: ContextSlot,
-  size: number,
   budget: number,
   detail: string,
 ): string =>
-  `Stopped with NEEDS-PARTITION (${cause}) in the \`${slot}\` slot. Its working ` +
-  `context was ${size.toLocaleString("en-US")} characters against the configured ` +
-  `${budget.toLocaleString("en-US")}-character budget.\n\n${detail}\n\n` +
-  `Partition this work into a \`## Blocked by\` chain on its chunk, with each ` +
-  `independently landable issue inside the context budget.`;
+  `${detail}\n\nPartition into a \`## Blocked by\` chain of independently landable issues ` +
+  `within the ${budget.toLocaleString("en-US")}-character budget.`;
 
 const quotaExplanation = (
   provider: "claude" | "codex",
@@ -278,49 +260,62 @@ export const NEEDS_PARTITION_COMMENT_TEMPLATE = (
   readyLabel: string,
   branchPushed: string | null,
 ): string =>
-  `${BOT_COMMENT_PREFIX} ${branchPushed === null ? "" : `Work was pushed to \`${branchPushed}\`. `}` +
-  `${needsPartitionExplanation(cause, slot, size, budget, detail)}\n\nThen drop ` +
-  `\`${needsInfoLabel}\` and re-apply \`${readyLabel}\` to the first issue that is ready.`;
+  `${BOT_COMMENT_PREFIX} stopped for partitioning (${cause}, \`${slot}\`: ` +
+  `${size.toLocaleString("en-US")} characters).\n\n` +
+  `${needsPartitionExplanation(budget, detail)}\n\n` +
+  handoffAction(
+    branchPushed,
+    needsInfoLabel,
+    readyLabel,
+    "partition the work and select the first ready issue",
+  );
 
 const needsHumanGateExplanation = (
   failureTrace: string,
   latestReviewerProse: string | null,
 ): string =>
-  `Stopped after repeated red gate-1 results.\n\n` +
-  `<details><summary>Last failure trace</summary>\n\n` +
-  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>` +
   (latestReviewerProse === null
     ? ""
-    : `\n\n---\n\nThe latest quality review from the red round:\n\n${latestReviewerProse}`);
+    : `Latest quality review from the red round:\n\n${latestReviewerProse}\n\n`) +
+  `<details><summary>Gate trace</summary>\n\n` +
+  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
 export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   branch: string,
+  failedStep: string,
+  roundsUsed: number,
   failureTrace: string,
   latestReviewerProse: string | null,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} ${needsHumanGateExplanation(failureTrace, latestReviewerProse)}\n\n` +
-  `Investigate the trace and push a fix on \`${branch}\`, then drop ` +
-  `\`${stuckLabel}\` and re-apply \`${readyLabel}\` when ready.`;
+  `${BOT_COMMENT_PREFIX} ${gateRedStop(failedStep, roundsUsed)}\n\n` +
+  `${needsHumanGateExplanation(failureTrace, latestReviewerProse)}\n\n` +
+  handoffAction(branch, stuckLabel, readyLabel, "push a fix");
+
+const gateRedStop = (failedStep: string, roundsUsed: number): string =>
+  `gate-1 was red for ${roundsUsed} consecutive ` +
+  `round${roundsUsed === 1 ? "" : "s"}; latest failing step: ` +
+  `\`${failedStep}\`.`;
+
+const noSignalStop = (roundsUsed: number): string =>
+  `the quality pass stopped after ${roundsUsed} consecutive ` +
+  `failure${roundsUsed === 1 ? "" : "s"}; the final attempt had no actionable signal.`;
 
 const needsHumanNoSignalExplanation = (failureTrace: string): string =>
-  `Exhausted the consecutive quality-failure budget ` +
-  `because the implementer ` +
-  `did not produce an actionable completion signal on the final attempt.\n\n` +
   `<details><summary>Attempt summary</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
 export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
   branch: string,
+  roundsUsed: number,
   failureTrace: string,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} ${needsHumanNoSignalExplanation(failureTrace)}\n\n` +
-  `Inspect the attempt transcripts, fix the provider or push a fix on ` +
-  `\`${branch}\`, then drop \`${stuckLabel}\` and re-apply \`${readyLabel}\` ` +
-  `when ready.`;
+  `${BOT_COMMENT_PREFIX} ${noSignalStop(roundsUsed)}\n\n` +
+  `${needsHumanNoSignalExplanation(failureTrace)}\n\n` +
+  handoffAction(branch, stuckLabel, readyLabel, "inspect the transcripts and push a fix");
 
 // The worktree could not be brought to a committed state, so no gate ever ran
 // (#24 D1). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE, which says "exhausted
@@ -332,24 +327,24 @@ export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
 const needsHumanUncommittableExplanation = (
   failureTrace: string,
 ): string =>
-  `The worktree could not be brought to a committed state across attempts, so ` +
-  `no gate could run — a gate ` +
-  `verdict is about a commit, and there was never one to judge. The last dirty ` +
-  `set is below. It may be a gate step writing outside a gitignored path or a ` +
-  `container writing into the tree as another uid.\n\n` +
   `<details><summary>Uncommitted paths</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+const uncommittableStop = (qualityRounds: number | null): string =>
+  qualityRounds === null
+    ? "stopped because the worktree stayed uncommitted."
+    : `the quality pass stopped after ${qualityRounds} consecutive failures; the worktree stayed uncommitted.`;
+
 export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
   branch: string,
+  qualityRounds: number | null,
   failureTrace: string,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} stopped on \`${branch}\`: ` +
-  `${needsHumanUncommittableExplanation(failureTrace)}\n\nFix that (or ` +
-  `commit/ignore the paths above), then drop \`${stuckLabel}\` and re-apply ` +
-  `\`${readyLabel}\`.`;
+  `${BOT_COMMENT_PREFIX} ${uncommittableStop(qualityRounds)}\n\n` +
+  `${needsHumanUncommittableExplanation(failureTrace)}\n\n` +
+  handoffAction(branch, stuckLabel, readyLabel, "commit or ignore the paths");
 
 // Appended to any handoff comment whose run left commits off the issue branch
 // (#27). Split out because three arms need it and only one of them is the
@@ -357,28 +352,34 @@ export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
 // the correction, so for them this note is the ONLY place the work is recorded.
 //
 // The prose branches on `headRef`, and that distinction is not cosmetic. A
-// DETACHED head leaves the commits unreachable until reuse publishes a durable
-// pin into the host cache. A scratch BRANCH is pinned there the same way —
-// telling that reader their work is about to be pruned would send them to
-// perform an urgent rescue of something in no danger, and telling them to
-// `git branch <name> <sha>` would have them create a second name for a commit
-// that already has one.
-export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
-  m.headRef === null
-    ? `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on a ` +
-      `detached HEAD at \`${m.headSha}\`, so none of it is on the branch and ` +
-      `nothing above includes it. Sandbar pinned that commit in the host-side ` +
-      `cache as \`${strandedHeadRef(m.headSha)}\` before reclaiming the ` +
-      `issue clone (the clone is kept instead if that pin failed). Recover it ` +
-      `with \`git branch <rescue-name> ${m.headSha}\`, then fold ` +
-      `it into \`${m.branch}\` with \`cherry-pick\`/\`merge\` — not ` +
-      `\`branch -f\`, unless \`${m.branch}\` is an ancestor of ${m.headSha}.`
-    : `\n\n---\n\n**Work was left off \`${m.branch}\`.** This run committed on ` +
-      `\`${m.headRef}\` (at \`${m.headSha}\`) instead, so none of it is on the ` +
-      `branch and nothing above includes it. Sandbar pinned that commit in the ` +
-      `host-side cache as \`${strandedHeadRef(m.headSha)}\` before ` +
-      `reclaiming the issue clone (the clone is kept instead if that pin ` +
-      `failed). Fold it into \`${m.branch}\` with \`cherry-pick\`/\`merge\`.`;
+// DETACHED head needs a new branch name; a scratch BRANCH already has one.
+// Successful reclamation names the cache pin that outlives the clone. `absent`
+// means sandbox.close() already completed that same reclamation before
+// finalization, so it names the pin too. Failed reclamation names the preserved
+// clone instead, because claiming a pin the cache refused to create would send
+// the human to a nonexistent recovery ref.
+export const STRANDED_COMMITS_NOTE = (
+  m: StrandedHead,
+  reclaim: IssueCloneReclaim,
+): string => {
+  if (reclaim.kind === "preserved") {
+    return m.headRef === null
+      ? `\n\nStranded work: \`${m.headSha}\` remains in preserved clone ` +
+        `\`${reclaim.worktreePath}\`; recover it there with ` +
+        `\`git -C '${reclaim.worktreePath}' branch <rescue-name> ${m.headSha}\`, ` +
+        `then cherry-pick or merge it into \`${m.branch}\`.`
+      : `\n\nStranded work: \`${m.headRef}\` at \`${m.headSha}\` remains in ` +
+        `preserved clone \`${reclaim.worktreePath}\`; from that clone, cherry-pick ` +
+        `or merge it into \`${m.branch}\`.`;
+  }
+  const location = ` is pinned as \`${strandedHeadRef(m.headSha)}\``;
+  return m.headRef === null
+    ? `\n\nStranded work: \`${m.headSha}\`${location}; recover it with ` +
+      `\`git branch <rescue-name> ${m.headSha}\`, then cherry-pick or merge it into ` +
+      `\`${m.branch}\`.`
+    : `\n\nStranded work: \`${m.headRef}\` at \`${m.headSha}\`${location}; ` +
+      `cherry-pick or merge it into \`${m.branch}\`.`;
+};
 
 // The implementer committed off the issue branch and stayed off it after being
 // told (#27). Neither the gate-red nor a review-budget comment applies —
@@ -399,79 +400,50 @@ export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
 // What is invariant is the part worth saying: the later work is not on the
 // branch. STRANDED_COMMITS_NOTE says where it is instead.
 const needsHumanOffBranchExplanation = (
-  branch: string,
   failureTrace: string,
 ): string =>
-  `The implementer committed somewhere other ` +
-  `than \`${branch}\` — a detached HEAD, or a branch of its own — and its last ` +
-  `attempt was still off the branch. Whatever had already landed on ` +
-  `\`${branch}\` is untouched and correct; ` +
-  `what the off-branch attempts wrote is not part of it, and no gate verdict on ` +
-  `this issue covers that work.\n\n` +
   `<details><summary>What the implementer was told</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
+const offBranchStop = (branch: string, qualityRounds: number | null): string =>
+  qualityRounds === null
+    ? `stopped because the implementer remained off \`${branch}\`.`
+    : `the quality pass stopped after ${qualityRounds} consecutive failures; the implementer remained off \`${branch}\`.`;
+
 export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   branch: string,
+  qualityRounds: number | null,
   failureTrace: string,
+  strandedHead: StrandedHead,
+  reclaim: IssueCloneReclaim,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} stopped: ${needsHumanOffBranchExplanation(branch, failureTrace)}` +
-  `\n\nFold the stranded commits in (see below), then drop \`${stuckLabel}\` ` +
-  `and re-apply \`${readyLabel}\`.`;
+  `${BOT_COMMENT_PREFIX} ${offBranchStop(branch, qualityRounds)}\n\n` +
+  `${needsHumanOffBranchExplanation(failureTrace)}` +
+  `${STRANDED_COMMITS_NOTE(strandedHead, reclaim)}\n\n` +
+  handoffAction(branch, stuckLabel, readyLabel, "fold in the stranded commits");
 
-// A second consecutive incident with a GREEN
-// gate and NO review at all (#41). Every other template here would misdescribe
-// it, and the review-budget comment would misdescribe it in
-// the most expensive direction: it opens by asserting the reviewer's
-// `CHANGES-REQUESTED` is the blocker and then renders the harness's error text
-// under a "latest reviewer pass" heading, sending the author to resolve a
-// standards complaint nobody made.
-//
-// So this one says the opposite in as many words: this round's reviewer never
-// reviewed the code. The trace is the harness's, and the fix is in the harness
-// or the environment — the branch is green and may well be mergeable as it
-// stands, which is the one thing the reader most needs to know before they start
-// reading their own diff for a defect.
-//
-// **Every claim it makes is scoped to the round that failed**, for the same
-// reason the implementer's note is (see `reviewerHarnessFailedReprompt`): this
-// terminal is reachable with an EARLIER round's genuine `CHANGES-REQUESTED`
-// behind it — round 1 reviews and rejects, attempt 2's reviewer wedges — and the
-// verdict carries that prose. A comment saying no verdict was ever reached and
-// nothing was ever asked for would then be false in the direction that costs
-// most: the author is told to review the branch themselves while the one real
-// report anyone produced about it is dropped on the floor. Nothing else surfaces
-// it — the attempt logs are offline and this arm is not `review-budget-exhausted`
-// — so it is rendered here, under its own heading, and described as an earlier
-// round's and possibly unaddressed rather than as the blocker.
-//
-// With no prose the stronger sentence is the true one and is kept: no reviewer
-// has said anything about this branch at all.
+// A second reviewer-harness failure (#41) is not a review rejection. The stop
+// line names the harness count, the diagnostic stays collapsed, and the action
+// offers review or harness repair. If an EARLIER round produced a genuine
+// report, it remains open and explicitly labelled as earlier; presenting the
+// harness trace as `CHANGES-REQUESTED`, or the earlier report as a verdict on
+// the current commits, would make the handoff false in opposite directions.
 const needsHumanReviewerHarnessExplanation = (
-  branch: string,
   failureTrace: string,
   latestReviewerProse: string | null,
 ): string =>
-  `Stopped after the second code-reviewer harness failure ` +
-  `in this inner loop — every invocation in that round returned nothing, so no ` +
-  `verdict was reached about the current commits. This is a harness or ` +
-  `environment failure, not a \`CHANGES-REQUESTED\`: the reviewer did not ask for ` +
-  `changes this round, because it did not run. The trace below records the ` +
-  `harness failure and any concurrent red gate; neither is a reviewer finding.\n\n` +
-  (latestReviewerProse === null
-    ? `No reviewer has said anything about this branch at all. `
-    : `An earlier round did review this branch, and its report is reproduced at ` +
-      `the bottom. Treat it as still standing: work went on after it, but nothing ` +
-      `reviewed the result, so whether it was addressed is unverified. `) +
-  `Review \`${branch}\` yourself, or fix what stopped the reviewer and re-run.\n\n` +
-  `<details><summary>Latest gate and reviewer-harness trace</summary>\n\n` +
-  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>` +
   (latestReviewerProse === null
     ? ""
-    : `\n\n---\n\nThe last review this branch actually received, from an ` +
-      `earlier round:\n\n${latestReviewerProse}`);
+    : `Earlier-round reviewer report (not a verdict on the current commits):\n\n` +
+      `${latestReviewerProse}\n\n`) +
+  `<details><summary>Reviewer-harness trace</summary>\n\n` +
+  `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
+
+const REVIEWER_HARNESS_STOP =
+  "stopped after 2 reviewer-harness failures; no reviewer verdict was produced " +
+  "in the failing round.";
 
 export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   branch: string,
@@ -480,21 +452,15 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} ${needsHumanReviewerHarnessExplanation(branch, failureTrace, latestReviewerProse)}` +
-  `\n\n\`${branch}\` is pushed. Then drop \`${stuckLabel}\` and re-apply ` +
-  `\`${readyLabel}\` when ready.`;
+  `${BOT_COMMENT_PREFIX} ${REVIEWER_HARNESS_STOP}\n\n` +
+  `${needsHumanReviewerHarnessExplanation(failureTrace, latestReviewerProse)}\n\n` +
+  handoffAction(branch, stuckLabel, readyLabel, "review the branch or repair the harness");
 
 const reviewBudgetExhaustedExplanation = (
   budget: "quality" | "correctness",
-  roundsUsed: number,
   latestReviewerProse: string,
 ): string => {
-  const field = budget === "quality" ? "maxQualityRounds" : "maxReviewRounds";
-  return `Exhausted the \`${field}\` ${budget} budget after ` +
-    `${roundsUsed} consecutive ${budget} failure${roundsUsed === 1 ? "" : "s"} ` +
-    `without that pass reaching an \`APPROVED\` verdict. The latest ${budget} ` +
-    `pass below is the report the human needs to resolve.\n\n---\n\n` +
-    latestReviewerProse;
+  return `Latest ${budget} reviewer report:\n\n${latestReviewerProse}`;
 };
 
 export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
@@ -505,40 +471,29 @@ export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} ${reviewBudgetExhaustedExplanation(budget, roundsUsed, latestReviewerProse)}` +
-  `\n\nPush a fix on \`${branch}\` (or rewrite the governing issue or project ` +
-  `instructions if the reviewer was wrong), then drop \`${stuckLabel}\` and ` +
-  `re-apply \`${readyLabel}\` when ready.`;
+  `${BOT_COMMENT_PREFIX} the ${budget} review pass stopped after ${roundsUsed} ` +
+  `consecutive ${budget === "quality" ? "failure" : "rejection"}` +
+  `${roundsUsed === 1 ? "" : "s"}.\n\n` +
+  `${reviewBudgetExhaustedExplanation(budget, latestReviewerProse)}\n\n` +
+  handoffAction(branch, stuckLabel, readyLabel, "push a fix or correct the governing instructions");
 
-export const SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE = (attempts: number): string =>
-  `${BOT_COMMENT_PREFIX} hit the silent-merge-abort failure mode ${attempts} time${attempts === 1 ? "" : "s"} ` +
-  `this run. Each time, the merger's resolve-loop reported success but no merge commit landed on the source branch ` +
-  `(the agent ran \`git merge --abort\` and exited without producing a merge commit). The branch was ` +
-  `discarded after each attempt so the next cycle could re-implement against current source, but the ` +
-  `integration drift hasn't healed. A human needs to land this — either by resolving the conflict manually ` +
-  `or by re-scoping the issue.`;
+export const SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE = (
+  attempts: number,
+  stuckLabel: string,
+  readyLabel: string,
+): string =>
+  `${BOT_COMMENT_PREFIX} merge resolution aborted without a merge commit ` +
+  `${attempts} time${attempts === 1 ? "" : "s"}.\n\n` +
+  handoffAction(null, stuckLabel, readyLabel, "resolve manually or re-scope the issue");
 
-// #60 — what a chunk member is told when its branch lands on the chunk branch.
-//
-// Three things a human needs and none of them is "done": where the work is (a
-// branch on origin, not the source branch), why the issue is still open (the
-// review that closes it is a review of the whole chunk), and why leaving the
-// agent queue did not lose it. The last one matters even when the optional
-// display label cannot be applied.
-export const CHUNK_LANDED_COMMENT_TEMPLATE = (chunkBranch: string): string =>
-  `${BOT_COMMENT_PREFIX} this issue's work is merged and pushed to ` +
-  `\`${chunkBranch}\`, the branch its review chunk lands on. The gate is green ` +
-  `on the composed branch, and **nothing has reached the source branch** — this ` +
-  `issue is review-gated, so a human reviews \`${chunkBranch}\` as one unit ` +
-  `before any of it lands.\n\n` +
-  `The issue stays OPEN but is out of the agent queue: git records its durable ` +
-  `member ref as contained by the chunk branch. It closes when the ` +
-  `chunk lands, which a human ` +
-  `triggers by putting \`${LAND_LABEL}\` on the chunk's pull request — ` +
-  `sandbar then merges \`${chunkBranch}\` into the source branch and closes every ` +
-  `issue on it. Re-apply \`ready-for-agent\` to ask sandbar to build a change ` +
-  `before the chunk lands. The local issue branch was deleted — \`${chunkBranch}\` carries ` +
-  `its commits.`;
+// #60 — one line for a chunk member: the durable chunk branch and, when the PR
+// write succeeded before finalization, the review surface that will land it.
+export const CHUNK_LANDED_COMMENT_TEMPLATE = (
+  chunkBranch: string,
+  pullRequestNumber: number | null,
+): string =>
+  `${BOT_COMMENT_PREFIX} merged to \`${chunkBranch}\`; lands with chunk PR` +
+  `${pullRequestNumber === null ? "." : ` #${pullRequestNumber}.`}`;
 
 type FinalizeKindInput =
   | { readonly kind: "merged"; readonly issue: IssueRef }
@@ -560,6 +515,7 @@ type FinalizeKindInput =
       readonly kind: "chunk-landed";
       readonly issue: IssueRef;
       readonly chunkBranch: string;
+      readonly pullRequestNumber: number | null;
     }
   | { readonly kind: "merge-conflict"; readonly issue: IssueRef }
   | { readonly kind: "merge-gate-red"; readonly issue: IssueRef }
@@ -622,8 +578,12 @@ type FinalizeKindInput =
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
       readonly budgetExhausted: {
-        readonly budget: "quality" | "gate";
+        readonly budget: "quality";
         readonly roundsUsed: number;
+      } | {
+        readonly budget: "gate";
+        readonly roundsUsed: number;
+        readonly failedStep: string;
       } | null;
       readonly strandedHead: StrandedHead | null;
     }
@@ -835,7 +795,11 @@ function requireFlip(r: LabelEditResult, issueNum: number): void {
 function needsHumanComments(
   input: Extract<FinalizeInput, { readonly kind: "needs-human" }>,
   labels: LabelConfig,
+  reclaim: IssueCloneReclaim,
 ): { readonly published: string; readonly refused: string } {
+  const qualityRounds = input.budgetExhausted?.budget === "quality"
+    ? input.budgetExhausted.roundsUsed
+    : null;
   const pair = (() => {
     switch (input.cause) {
       case "reviewer-harness-failed":
@@ -847,86 +811,101 @@ function needsHumanComments(
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
-          refused: needsHumanReviewerHarnessExplanation(
-            input.issue.branch,
-            input.failureTrace,
-            input.latestReviewerProse,
-          ),
+          refused:
+            `${REVIEWER_HARNESS_STOP}\n\n` +
+            needsHumanReviewerHarnessExplanation(
+              input.failureTrace,
+              input.latestReviewerProse,
+            ),
         };
       case "uncommittable-worktree":
         return {
           published: NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE(
             input.issue.branch,
+            qualityRounds,
             input.failureTrace,
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
-          refused: needsHumanUncommittableExplanation(input.failureTrace),
+          refused:
+            `${uncommittableStop(qualityRounds)}\n\n` +
+            needsHumanUncommittableExplanation(input.failureTrace),
         };
       case "off-branch-head":
+        if (input.strandedHead === null) {
+          throw new Error("off-branch handoff missing stranded head");
+        }
         return {
           published: NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE(
             input.issue.branch,
+            qualityRounds,
             input.failureTrace,
+            input.strandedHead,
+            reclaim,
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
-          refused: needsHumanOffBranchExplanation(
-            input.issue.branch,
-            input.failureTrace,
-          ),
+          refused:
+            `${offBranchStop(input.issue.branch, qualityRounds)}\n\n` +
+            needsHumanOffBranchExplanation(input.failureTrace) +
+            STRANDED_COMMITS_NOTE(input.strandedHead, reclaim),
         };
-      case "gate-red":
+      case "gate-red": {
+        if (input.budgetExhausted?.budget !== "gate") {
+          throw new Error("gate-red handoff missing gate budget");
+        }
+        const { failedStep, roundsUsed } = input.budgetExhausted;
         return {
           published: NEEDS_HUMAN_COMMENT_TEMPLATE(
             input.issue.branch,
+            failedStep,
+            roundsUsed,
             input.failureTrace,
             input.latestReviewerProse,
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
-          refused: needsHumanGateExplanation(
-            input.failureTrace,
-            input.latestReviewerProse,
-          ),
+          refused:
+            `${gateRedStop(failedStep, roundsUsed)}\n\n` +
+            needsHumanGateExplanation(input.failureTrace, input.latestReviewerProse),
         };
-      case "no-signal-exhausted":
+      }
+      case "no-signal-exhausted": {
+        if (qualityRounds === null) {
+          throw new Error("no-signal handoff missing quality budget");
+        }
         return {
           published: NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE(
             input.issue.branch,
+            qualityRounds,
             input.failureTrace,
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
-          refused: needsHumanNoSignalExplanation(input.failureTrace),
+          refused:
+            `${noSignalStop(qualityRounds)}\n\n` +
+            needsHumanNoSignalExplanation(input.failureTrace),
         };
+      }
     }
   })();
-  const stranded = input.strandedHead
-    ? STRANDED_COMMITS_NOTE(input.strandedHead)
-    : "";
-  const budget = input.budgetExhausted === null
-    ? ""
-    : `\n\nThe \`${input.budgetExhausted.budget === "quality" ? "maxQualityRounds" : "maxGateRounds"}\` ` +
-      `budget ran out after ${input.budgetExhausted.roundsUsed} consecutive ` +
-      `${input.budgetExhausted.budget === "quality" ? "quality failures" : "red gates"}.`;
-  return {
-    published: pair.published + stranded + budget,
-    refused: pair.refused + stranded + budget,
-  };
+  return pair;
 }
 
 const readOnlyAgentWroteExplanation = (
   input: Extract<FinalizeInput, { readonly kind: "read-only-agent-wrote" }>,
+  reclaim: Extract<IssueCloneReclaim, { readonly kind: "preserved" }>,
   pushFailure?: string,
 ): string =>
-  `Stopped because the read-only ${input.actor} changed the issue repository. ` +
-  `The write is contained to this issue and its managed clone has been ` +
-  `preserved for human inspection.` +
+  `Preserved clone: \`${reclaim.worktreePath}\`.\n\n` +
+  `Read-only ${input.actor} output:\n\n${input.latestReviewerProse}` +
   (pushFailure === undefined
     ? ""
-    : ` The changed branch could not be pushed (${pushFailure}); inspect the preserved clone for the authoritative state.`) +
-  `\n\n${input.latestReviewerProse}`;
+    : `\n\nPush failed: ${pushFailure}. Inspect the preserved clone.`);
+
+const readOnlyAgentWroteStop = (
+  actor: Extract<FinalizeInput, { readonly kind: "read-only-agent-wrote" }>["actor"],
+): string => `stopped because the read-only ${actor} changed the repository.`;
 
 type PushRefusal = Extract<PushResult, { readonly kind: "refused" }>;
 
@@ -1096,7 +1075,10 @@ export async function finalizeOne(
       await adapter.editLabels(n, [], [NEEDS_REVIEW_LABEL]);
       await adapter.postComment(
         n,
-        CHUNK_LANDED_COMMENT_TEMPLATE(input.chunkBranch),
+        CHUNK_LANDED_COMMENT_TEMPLATE(
+          input.chunkBranch,
+          input.pullRequestNumber,
+        ),
       );
       return deleteBranchForcing(adapter, input.issue.branch);
     }
@@ -1134,17 +1116,21 @@ export async function finalizeOne(
     }
     case "needs-info": {
       const n = issueNumberOf(input.issue);
-      await adapter.reclaimIssueClone(input.issue.branch);
+      const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
       const body = NEEDS_INFO_COMMENT_TEMPLATE(
         input.issue.branch,
         input.questions,
         labels.needsInfo,
         READY_FOR_AGENT_LABEL,
-      ) + (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : "");
+        input.strandedHead,
+        reclaim,
+      );
       const refused = await pushBranchOrPark(input, adapter, labels, {
         context:
-          needsInfoExplanation(input.questions) +
-          (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
+          input.questions +
+          (input.strandedHead
+            ? STRANDED_COMMITS_NOTE(input.strandedHead, reclaim)
+            : ""),
       });
       if (refused) return refused;
       await adapter.postComment(
@@ -1169,7 +1155,9 @@ export async function finalizeOne(
         const refused = await pushBranchOrPark(input, adapter, labels, {
           context:
             needsUiPrototypeExplanation(n, input.uiImpact) +
-            (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
+            (input.strandedHead
+              ? STRANDED_COMMITS_NOTE(input.strandedHead, reclaim)
+              : ""),
         });
         if (refused) return refused;
       }
@@ -1181,8 +1169,9 @@ export async function finalizeOne(
           labels.needsInfo,
           READY_FOR_AGENT_LABEL,
           aheadOfSeed ? input.issue.branch : null,
-        ) +
-          (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
+          input.strandedHead,
+          reclaim,
+        ),
       );
       const r = await adapter.editLabels(
         n,
@@ -1229,13 +1218,7 @@ export async function finalizeOne(
       const aheadOfSeed = await adapter.branchIsAheadOfSeed(input.issue);
       if (aheadOfSeed) {
         const refused = await pushBranchOrPark(input, adapter, labels, {
-          context: needsPartitionExplanation(
-            input.cause,
-            input.slot,
-            input.size,
-            input.budget,
-            input.detail,
-          ),
+          context: needsPartitionExplanation(input.budget, input.detail),
         });
         if (refused) return refused;
       }
@@ -1264,12 +1247,12 @@ export async function finalizeOne(
     }
     case "needs-human": {
       const n = issueNumberOf(input.issue);
-      await adapter.reclaimIssueClone(input.issue.branch);
+      const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
       // #17: one renderer selects the exact blocker explanation, including
       // off-branch recovery and any exhausted budget. Publication and label
       // instructions live only in the published form; a refusal receives the
       // same explanation beside the cache recovery recipe.
-      const comments = needsHumanComments(input, labels);
+      const comments = needsHumanComments(input, labels, reclaim);
       const refused = await pushBranchOrPark(input, adapter, labels, {
         context: comments.refused,
       });
@@ -1333,7 +1316,6 @@ export async function finalizeOne(
       const refused = await pushBranchOrPark(input, adapter, labels, {
         context: reviewBudgetExhaustedExplanation(
           input.budget,
-          input.roundsUsed,
           input.latestReviewerProse,
         ),
       });
@@ -1356,8 +1338,13 @@ export async function finalizeOne(
       // push, and deleting it would destroy the evidence this terminal exists
       // to hand to a human. Reclaiming still publishes the branch first, which
       // is what the push below reads.
-      await reclaimClone(input, adapter);
-      const explanation = readOnlyAgentWroteExplanation(input);
+      const reclaim = await reclaimClone(input, adapter);
+      if (reclaim.kind !== "preserved") {
+        throw new Error("read-only agent handoff missing its preserved clone");
+      }
+      const explanation =
+        `${readOnlyAgentWroteStop(input.actor)}\n\n` +
+        readOnlyAgentWroteExplanation(input, reclaim);
       const push = await adapter.pushBranch(input.issue.branch);
       if (push.kind === "refused") {
         return parkRefusedPush(input, adapter, labels, push, {
@@ -1371,7 +1358,14 @@ export async function finalizeOne(
         : undefined;
       await adapter.postComment(
         n,
-        `${BOT_COMMENT_PREFIX} ${readOnlyAgentWroteExplanation(input, pushFailure)}`,
+        `${BOT_COMMENT_PREFIX} ${readOnlyAgentWroteStop(input.actor)}\n\n` +
+          `${readOnlyAgentWroteExplanation(input, reclaim, pushFailure)}\n\n` +
+          handoffAction(
+            input.issue.branch,
+            labels.agentStuck,
+            READY_FOR_AGENT_LABEL,
+            "inspect the preserved clone",
+          ),
       );
       const r = await adapter.editLabels(
         n,
@@ -1422,7 +1416,11 @@ export async function finalizeOne(
       if (!r.ok) await adapter.forceDeleteBranch(input.issue.branch);
       await adapter.postComment(
         n,
-        SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE(input.attempts),
+        SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE(
+          input.attempts,
+          labels.agentStuck,
+          READY_FOR_AGENT_LABEL,
+        ),
       );
       const r2 = await adapter.editLabels(
         n,

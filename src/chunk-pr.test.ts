@@ -3,8 +3,6 @@
 // something sandbar does not do.
 import { describe, expect, it } from "vitest";
 
-import { LAND_LABEL } from "./chunk-land.js";
-
 import {
   chunkMembersOnBranch,
   chunkPullRequestBody,
@@ -52,47 +50,9 @@ describe("chunkPullRequestTitle", () => {
 
 describe("chunkPullRequestBody", () => {
   const body = (members = [member(42, "First"), member(43, "Second")]): string =>
-    chunkPullRequestBody({ branch: "sandbar/chunk-42-first", members });
+    chunkPullRequestBody({ members });
 
-  it("lists every member by number and title", () => {
-    expect(body()).toContain("- #42 — First");
-    expect(body()).toContain("- #43 — Second");
-  });
-
-  it("names the chunk branch", () => {
-    expect(body()).toContain("sandbar/chunk-42-first");
-  });
-
-  it("says why the merge button is off and that the draft state is deliberate", () => {
-    const b = body();
-    expect(b).toContain("Draft on purpose");
-    expect(b).toMatch(/merge\s+button/);
-    expect(b).toMatch(/ready for review/);
-  });
-
-  it("says nothing has reached the base branch", () => {
-    expect(body()).toMatch(/has reached the\nbase branch|reached the base branch/);
-  });
-
-  it("invites the one label that lands the chunk (#64)", () => {
-    // #62 held this sentence back because no code watched the label. #64 built
-    // the mechanism, so the invitation is written — and it names the LABEL, not
-    // an approval, because approve-now-land-later is the workflow the trigger
-    // was chosen to keep.
-    const b = body();
-    expect(b).toContain(`\`${LAND_LABEL}\` label on this pull request`);
-    expect(b).toMatch(/[Aa]pproving is not the trigger/);
-  });
-
-  it("says what landing actually does, so the label is not a leap of faith", () => {
-    const b = body();
-    expect(b).toContain("closes every issue above");
-    expect(b).toContain("deletes the branch");
-  });
-
-  it("still says a hand-merge is recovered from rather than forbidden", () => {
-    // The draft state makes the accident hard; the reconciler is what makes it
-    // survivable, and a reviewer who did it anyway needs to know that.
-    expect(body()).toMatch(/already contained in/);
+  it("is exactly the member list", () => {
+    expect(body()).toBe("- #42 — First\n- #43 — Second");
   });
 });
