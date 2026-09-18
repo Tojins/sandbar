@@ -202,6 +202,7 @@ import { promisify } from "node:util";
 import type { TestContext } from "vitest";
 
 import { cleanupOrphanContainers } from "./containers.js";
+import { isExitCode } from "./errors.js";
 import { reconcileImages } from "./image-lifecycle.js";
 import { type RunScope, runScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
@@ -239,6 +240,16 @@ export async function removeFixtureContainer(
   ...args: readonly string[]
 ): Promise<void> {
   await exec(RUNTIME, ["rm", "-f", "-v", "-t", "0", ...args]);
+}
+
+async function removeFixtureImage(tag: string): Promise<void> {
+  try {
+    await exec(RUNTIME, ["image", "exists", tag]);
+  } catch (error) {
+    if (isExitCode(error, 1)) return;
+    throw error;
+  }
+  await exec(RUNTIME, ["rmi", "-f", tag]);
 }
 
 function fixtureNames(args: readonly string[]): readonly string[] {
@@ -355,9 +366,8 @@ export type PodmanTestScope = {
   // remove it — no sweep can, because an unscoped tag is not sandbar's to
   // recognise.
   readonly testImageTag: (name: string) => string;
-  // Remove everything this process created. Failures are swallowed: this runs
-  // in an `afterAll`, and a cleanup that throws replaces a leak with a red
-  // suite while leaking anyway.
+  // Remove everything this process created. Every cleanup is attempted and
+  // teardown fails with all errors if any resource could not be removed.
   readonly cleanup: () => Promise<void>;
 };
 
@@ -384,14 +394,36 @@ export function podmanTestScope(label: string): PodmanTestScope {
     // bare-`podman run` fixtures named through `stackContainerNameFor` go too —
     // and the network. `reconcileImages` takes every labelled image, including
     // untagged predecessors and intermediate stages.
-    await cleanupOrphanContainers(scope).catch(() => {});
+    const failures: unknown[] = [];
+    const [containers] = await Promise.allSettled([
+      cleanupOrphanContainers(scope),
+    ]);
+    if (containers?.status === "rejected") {
+      failures.push(containers.reason);
+    } else if (containers !== undefined) {
+      failures.push(...containers.value.failures.map((failure) => new Error(failure)));
+    }
     for (const s of [scope, otherScope]) {
-      await reconcileImages({ scope: s, liveTags: new Set() }).catch(() => {});
+      const [images] = await Promise.allSettled([
+        reconcileImages({ scope: s, liveTags: new Set() }),
+      ]);
+      if (images?.status === "rejected") failures.push(images.reason);
     }
     // Neither sweeper reaches an unscoped fixture tag, so those are removed by
     // name from the record `testImageTag` kept.
     for (const tag of tags) {
-      await exec(RUNTIME, ["rmi", "-f", tag]).catch(() => {});
+      const [image] = await Promise.allSettled([
+        removeFixtureImage(tag),
+      ]);
+      if (image?.status === "rejected") failures.push(image.reason);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(
+        failures,
+        `Podman fixture cleanup failed in ${failures.length} places; ` +
+          "the first error is primary and the remainder are secondary cleanup failures",
+      );
     }
   };
 

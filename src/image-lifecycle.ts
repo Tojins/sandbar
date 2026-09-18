@@ -15,9 +15,9 @@
 //
 // Reconciliation is sequenced only at startup and quiescent scheduler
 // boundaries. Its inventory therefore never races sandbar's own builds or
-// containers and needs no second lock beside the workdir lock. Individual
-// removal failures are reported; a failed inventory propagates, because
-// continuing would claim there is no debris on no evidence.
+// containers and needs no second lock beside the workdir lock. Inventory and
+// removal failures propagate: either one means reconciliation did not
+// establish the lifecycle invariant.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -42,10 +42,31 @@ export type ImageInventoryEntry = {
   readonly labels: Readonly<Record<string, string>>;
 };
 
-function stringArray(value: unknown): readonly string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
+function inventoryError(detail: string, line: string): Error {
+  return new Error(`podman returned an image inventory row ${detail}: ${line}`);
+}
+
+function repoTagsOf(value: unknown, line: string): readonly string[] {
+  if (value === null) return [];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw inventoryError("with malformed RepoTags", line);
+  }
+  return value;
+}
+
+function labelsOf(
+  value: unknown,
+  line: string,
+): Readonly<Record<string, string>> {
+  if (value === null) return {};
+  if (
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.values(value).some((label) => typeof label !== "string")
+  ) {
+    throw inventoryError("with malformed Labels", line);
+  }
+  return value as Readonly<Record<string, string>>;
 }
 
 export function parseImageInventory(stdout: string): readonly ImageInventoryEntry[] {
@@ -66,21 +87,15 @@ export function parseImageInventory(stdout: string): readonly ImageInventoryEntr
     if (typeof id !== "string" || !id) {
       throw new Error(`podman returned an image inventory row without an ID: ${line}`);
     }
-    const rawLabels = row.Labels;
-    const labels = typeof rawLabels === "object" && rawLabels !== null
-      ? Object.fromEntries(
-          Object.entries(rawLabels).filter(
-            (entry): entry is [string, string] => typeof entry[1] === "string",
-          ),
-        )
-      : {};
+    const parentId = row.ParentId;
+    if (parentId !== null && typeof parentId !== "string") {
+      throw inventoryError("with malformed ParentId", line);
+    }
     return {
       id,
-      parentId: typeof row.ParentId === "string" && row.ParentId
-        ? row.ParentId
-        : null,
-      repoTags: stringArray(row.RepoTags),
-      labels,
+      parentId: parentId || null,
+      repoTags: repoTagsOf(row.RepoTags, line),
+      labels: labelsOf(row.Labels, line),
     };
   });
 }
@@ -165,22 +180,10 @@ export async function reconcileImages(args: {
     containerImageIds,
   );
   const removed: string[] = [];
-  const failures: string[] = [];
   for (const id of candidates) {
     const argv = ["rmi", "-f", "--no-prune", id];
-    const failure = await run(argv).then(
-      () => null,
-      (err: unknown) => err,
-    );
-    if (failure === null) {
-      removed.push(id);
-    } else {
-      failures.push(
-        `  ${RUNTIME} ${argv.join(" ")}\n    ${
-          failure instanceof Error ? failure.message : String(failure)
-        }`,
-      );
-    }
+    await run(argv);
+    removed.push(id);
   }
-  return { removed, failures };
+  return { removed, failures: [] };
 }

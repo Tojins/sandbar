@@ -31,7 +31,11 @@ import {
   ensureImages,
   readInputsLabel,
 } from "./ensure-images.js";
-import { reconcileImages } from "./image-lifecycle.js";
+import {
+  IMAGE_SCOPE_LABEL,
+  parseImageInventory,
+  reconcileImages,
+} from "./image-lifecycle.js";
 import { stackContainerNameFor, variantImageTag } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
@@ -54,7 +58,6 @@ const BASE = "docker.io/library/mariadb:10.11";
 // scope fix alone would leave that exactly as broken as it was.
 const {
   scope: SCOPE,
-  otherScope: OTHER_SCOPE,
   testImageTag,
   cleanup,
 } = podmanTestScope("ensure-images");
@@ -146,8 +149,8 @@ async function serveArtifacts(
 
 describe.runIf(available)("ensureImages against real podman", () => {
   // `cleanup` is the two production sweepers plus the tags they cannot see —
-  // which covers both `ours` and `theirs` below, since OTHER_SCOPE is this
-  // process's too. Nothing reaps it if the process is SIGKILLed; the recovery
+  // which covers every scope this file creates. Nothing reaps it if the
+  // process is SIGKILLed; the recovery
   // command is in `podman-test-scope.test-util.ts`.
   afterAll(cleanup, 120_000);
 
@@ -680,32 +683,73 @@ describe.runIf(available)("ensureImages against real podman", () => {
   it.concurrent(
     "reconciles untagged predecessors and stopped tags without touching another scope",
     async ({ expect, task, onTestFinished }) => {
-      const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
+      const isolated = podmanTestScope(`ensure-images-reconcile-${task.id}`);
+      onTestFinished(isolated.cleanup, 120_000);
+      const root = await mkdtemp(join(tmpdir(), "sandbar-ensure-images-reconcile-"));
+      onTestFinished(() => rm(root, { recursive: true, force: true }), 60_000);
+      const TAG = isolated.testImageTag("probe");
+      const image: BuiltImage = {
+        tag: TAG,
+        containerfile: "Containerfile",
+        rebuildOn: ["package-lock.json"],
+      };
+      await writeFile(
+        join(root, "Containerfile"),
+        `FROM ${BASE} AS intermediate\n` +
+          "COPY package-lock.json /lock.json\n" +
+          "RUN cp /lock.json /payload\n" +
+          `FROM ${BASE}\n` +
+          "COPY --from=intermediate /payload /payload\n",
+      );
+      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
+      const ownScope = isolated.scope;
 
       // Reconciliation must reach same-tag predecessors and tags the current
       // config stopped naming while remaining blind to another scope's live
       // images.
       //
-      // OTHER_SCOPE stands in for that other run and is derived from this
+      // `isolated.otherScope` stands in for that other run and is derived from this
       // process's own token (#47), so it is a scope the sweep must be blind to
       // without ever being a scope somebody else is really using.
-      const stopped = variantImageTag(TAG, SCOPE, "deadbeefcafe");
-      const sibling = variantImageTag(TAG, OTHER_SCOPE, "deadbeefcafe");
-      await ensureImages([image], root, { scope: SCOPE });
+      const stopped = variantImageTag(TAG, ownScope, "deadbeefcafe");
+      const sibling = variantImageTag(TAG, isolated.otherScope, "deadbeefcafe");
+      await ensureImages([image], root, { scope: ownScope });
+      const predecessorId = await imageId(TAG);
       await buildImage({ ...image, tag: stopped }, {
-        scope: SCOPE, root, capture: true,
+        scope: ownScope, root, capture: true,
       });
       await buildImage({ ...image, tag: sibling }, {
-        scope: OTHER_SCOPE, root, capture: true,
+        scope: isolated.otherScope, root, capture: true,
       });
       await writeFile(join(root, "package-lock.json"), '{"v":99}\n');
-      await ensureImages([image], root, { scope: SCOPE });
+      await ensureImages([image], root, { scope: ownScope });
+      const currentId = await imageId(TAG);
+      expect(currentId).not.toBe(predecessorId);
+
+      const inventory = parseImageInventory((
+        await exec(RUNTIME, [
+          "images", "-a", "--no-trunc", "--format", "{{json .}}",
+        ])
+      ).stdout);
+      const predecessor = inventory.find(({ id }) => id === predecessorId);
+      expect(predecessor?.repoTags).toEqual([]);
+      const ownedIntermediate = inventory.find((entry) =>
+        entry.id !== currentId &&
+        entry.id !== predecessorId &&
+        entry.labels[IMAGE_SCOPE_LABEL] === ownScope &&
+        entry.repoTags.length === 0
+      );
+      expect(ownedIntermediate).toBeDefined();
 
       const result = await reconcileImages({
-        scope: SCOPE,
+        scope: ownScope,
         liveTags: new Set([TAG]),
       });
       expect(result.failures).toEqual([]);
+      await expect(exec(RUNTIME, ["image", "exists", predecessorId])).rejects.toMatchObject({
+        code: 1,
+      });
+      expect(await imageId(TAG)).toBe(currentId);
 
       const listed = (
         await exec(RUNTIME, ["images", "--format", "{{.Repository}}:{{.Tag}}"])

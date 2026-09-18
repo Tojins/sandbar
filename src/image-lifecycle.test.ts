@@ -86,4 +86,32 @@ describe("image lifecycle", () => {
   it("rejects an unreadable inventory instead of declaring it empty", () => {
     expect(() => parseImageInventory("not-json\n")).toThrow(/invalid image inventory/);
   });
+
+  it.each([
+    ["RepoTags", { RepoTags: "app:gate" }],
+    ["RepoTags", { RepoTags: ["app:gate", 42] }],
+    ["Labels", { Labels: [] }],
+    ["Labels", { Labels: { [IMAGE_SCOPE_LABEL]: 42 } }],
+    ["ParentId", { ParentId: 42 }],
+  ])("rejects malformed %s instead of weakening the deletion boundary", (_field, malformed) => {
+    expect(() => parseImageInventory(row(malformed))).toThrow(/malformed/);
+  });
+
+  it("propagates image removal failures", async () => {
+    const failure = new Error("storage lock failed");
+    await expect(reconcileImages({
+      scope,
+      liveTags: new Set(),
+      run: async (args) => {
+        if (args[0] === "images") {
+          return { stdout: row({
+            Id: "stale",
+            Labels: { [IMAGE_SCOPE_LABEL]: scope },
+          }) };
+        }
+        if (args[0] === "ps") return { stdout: "" };
+        throw failure;
+      },
+    })).rejects.toBe(failure);
+  });
 });

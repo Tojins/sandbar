@@ -76,6 +76,12 @@ describe("removeFixtureContainerOnTestFinished", () => {
         "    *\" rm-fail \"*|*\" collect-rm-fail \"*)\n" +
         "      printf 'fixture removal failed\\n' >&2; exit 125;;\n" +
         "  esac\n" +
+        "fi\n" +
+        "if [ \"$1\" = rmi ]; then\n" +
+        "  case \" $* \" in\n" +
+        "    *cleanup-primary*) printf 'primary image cleanup failed\\n' >&2; exit 125;;\n" +
+        "    *cleanup-secondary*) printf 'secondary image cleanup failed\\n' >&2; exit 125;;\n" +
+        "  esac\n" +
         "fi\n",
     );
     await chmod(podman, 0o755);
@@ -125,6 +131,25 @@ describe("removeFixtureContainerOnTestFinished", () => {
     );
     expect(recorded.slice(1, -1)).toHaveLength(2);
     expect(recorded.at(-1)).toBe("rm -f -v -t 0 --depend dead");
+  });
+
+  it("attempts every scope cleanup and reports all removal failures", async () => {
+    const scope = podmanTestScope("cleanup-errors");
+    scope.testImageTag("cleanup-primary");
+    scope.testImageTag("cleanup-secondary");
+
+    const error = await scope.cleanup().then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toHaveLength(2);
+    expect((error as Error).message).toContain("first error is primary");
+    const recorded = await calls();
+    expect(recorded.filter((call) => call.startsWith("rmi -f"))).toEqual([
+      expect.stringContaining("cleanup-primary"),
+      expect.stringContaining("cleanup-secondary"),
+    ]);
   });
 
   it("removes a passing fixture without reading or emitting diagnostics", async () => {
