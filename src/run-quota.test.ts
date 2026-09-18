@@ -1133,6 +1133,7 @@ describe("run quota orchestration (#109)", () => {
     seams.reclaimIssueClone.mockResolvedValueOnce({
       kind: "preserved",
       reason: "the worktree has uncommitted changes",
+      worktreePath: "/tmp/preserved-issue-139",
     });
     vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);

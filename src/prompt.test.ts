@@ -151,6 +151,7 @@ describe("UI-prototype prompt contracts (#126)", () => {
         "ready-for-agent",
         null,
         null,
+        { kind: "removed" },
       ),
     ).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
   });

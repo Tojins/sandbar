@@ -185,6 +185,7 @@ describe("comment templates", () => {
       NEEDS_INFO,
       READY_FOR_AGENT,
       null,
+      { kind: "removed" },
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/issue-45-t-45"); // #70
@@ -208,6 +209,7 @@ describe("comment templates", () => {
       READY_FOR_AGENT,
       null,
       null,
+      { kind: "removed" },
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("tab order and empty state invented");
@@ -216,6 +218,10 @@ describe("comment templates", () => {
     // next run from escalating again).
     expect(body).toContain(NO_PROTOTYPE_NEEDED_PHRASE);
     expect(body).toContain("A screenshot alone does not work");
+    expect(body).toContain("inline fenced markup");
+    expect(body).toContain("ASCII wireframe");
+    expect(body).toContain("precise prose specification");
+    expect(body).toContain("push it to the source branch before re-labelling");
     expect(body).toContain(NEEDS_INFO);
     expect(body).toContain(READY_FOR_AGENT);
     // The suggested path carries the real issue number, not a literal <n>.
@@ -234,6 +240,7 @@ describe("comment templates", () => {
       READY_FOR_AGENT,
       null,
       null,
+      { kind: "removed" },
     );
     expect(early).toContain("no issue branch was pushed");
 
@@ -244,6 +251,7 @@ describe("comment templates", () => {
       READY_FOR_AGENT,
       "sandbar/issue-45-t-45",
       null,
+      { kind: "removed" },
     );
     expect(late).toContain("sandbar/issue-45-t-45");
   });
@@ -281,6 +289,9 @@ describe("comment templates", () => {
     expect(body).toContain("stack…");
     expect(body).toContain(AGENT_STUCK);
     expect(body).toContain(READY_FOR_AGENT);
+    expect(body).toContain("gate-1 was red for 4 consecutive rounds");
+    expect(body).toContain("latest failing step: `tests`");
+    expect(body).not.toContain("step `tests` was red for 4");
     expect(body.indexOf("Latest quality review")).toBeLessThan(
       body.indexOf("<details>"),
     );
@@ -912,7 +923,7 @@ describe("finalizeOne", () => {
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
-    expect(calls.comments[0]!.body).toContain("gate-1 step `tests`");
+    expect(calls.comments[0]!.body).toContain("latest failing step: `tests`");
     expect(calls.comments[0]!.body).toContain("4 consecutive rounds");
     expect(calls.comments[0]!.body).toContain("quality review from the red round");
     // #70 — "push a fix on this branch" used to never say which.
@@ -1133,6 +1144,7 @@ describe("finalizeOne", () => {
       reclaim: {
         kind: "preserved",
         reason: "could not publish its git state into the cache: cannot lock ref",
+        worktreePath: "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
       },
     });
     const i = issue(45);
@@ -1163,7 +1175,10 @@ describe("finalizeOne", () => {
     const body = calls.comments[0]!.body;
     expect(body).toContain("a new settings screen");
     expect(body).toContain("abc9999");
-    expect(body).toContain("git branch <rescue-name> abc9999");
+    expect(body).toContain(
+      "git -C '/host/.sandbar/worktrees/sandbar-issue-45-t-45' branch <rescue-name> abc9999",
+    );
+    expect(body).not.toContain("refs/sandbar/stranded/abc9999");
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
   });
 
@@ -1804,6 +1819,7 @@ describe("finalizeOne", () => {
       reclaim: {
         kind: "preserved",
         reason: "could not publish its git state into the cache: cannot lock ref",
+        worktreePath: "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
       },
     });
     const i = issue(45);
@@ -1826,7 +1842,11 @@ describe("finalizeOne", () => {
   it("hard-error with commits: still pushes when the clone was preserved, and says the clone may hold more", async () => {
     const { adapter, calls } = makeAdapter({
       aheadOfSeed: true,
-      reclaim: { kind: "preserved", reason: "the worktree has uncommitted changes" },
+      reclaim: {
+        kind: "preserved",
+        reason: "the worktree has uncommitted changes",
+        worktreePath: "/host/.sandbar/worktrees/sandbar-issue-45-t-45",
+      },
     });
     const i = issue(45);
     const action = await finalizeOne(

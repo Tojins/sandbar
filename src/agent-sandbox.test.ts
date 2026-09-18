@@ -1804,6 +1804,7 @@ describe("createSandbox integration (local provider)", () => {
       expect(reclaim).toEqual({
         kind: "preserved",
         reason: expect.stringContaining("uncommitted changes"),
+        worktreePath: path,
       });
       expect(existsSync(join(path, "scratch.txt"))).toBe(true);
       expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(tip);
@@ -1828,6 +1829,7 @@ describe("createSandbox integration (local provider)", () => {
         expect(reclaim).toEqual({
           kind: "preserved",
           reason: expect.stringContaining("could not publish"),
+          worktreePath: path,
         });
         expect(existsSync(path)).toBe(true);
         expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(seeded);
@@ -1846,6 +1848,7 @@ describe("createSandbox integration (local provider)", () => {
       expect(await reclaimIssueClone(dir, path, branch, "kept for a human")).toEqual({
         kind: "preserved",
         reason: "kept for a human",
+        worktreePath: path,
       });
       expect(existsSync(path)).toBe(true);
       await rm(path, { recursive: true, force: true });

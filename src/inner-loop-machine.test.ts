@@ -320,10 +320,10 @@ const needsUiPrototype = (uiImpact: string): ParseSignal => ({
 });
 
 const gate1Ok: Gate1Result = { ok: true, failureTrace: "", failedStep: null };
-const gate1Red = (trace: string): Gate1Result => ({
+const gate1Red = (trace: string, failedStep = "test"): Gate1Result => ({
   ok: false,
   failureTrace: trace,
-  failedStep: "test",
+  failedStep,
 });
 const approved = (prose: string = "lgtm"): ReviewerResult => ({
   kind: "reviewer-result",
@@ -1235,10 +1235,10 @@ describe("inner-loop-machine — quality and gate budget exhaustion", () => {
     });
   });
 
-  it("repeated gate-1 red exhausts the gate budget with the last trace and review", () => {
+  it("repeated gate-1 red exhausts the gate budget with the latest step, trace and review", () => {
     const { verdict } = drive(defaultOpts, [
       impl(complete),
-      judged(gate1Red("trace 1"), approved("approved 1")),
+      judged(gate1Red("trace 1", "compile"), approved("approved 1")),
       impl(complete),
       judged(gate1Red("trace 2"), approved("approved 2")),
       impl(complete),

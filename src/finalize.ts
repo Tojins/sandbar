@@ -147,8 +147,10 @@ export const PUSH_REFUSED_COMMENT_TEMPLATE = (args: {
 // do not belong in a host-repository handoff. #70's branch rule still applies:
 // the name is handed in, never reconstructed, and says only where the branch
 // is—not what an off-branch attempt may have written. #27's stranded-work note
-// is the only text entitled to locate those commits. A terminal with no pushed
-// branch says so instead of inventing one.
+// is the only text entitled to locate those commits. It names the durable cache
+// pin only after reclamation established it; otherwise it points at the exact
+// preserved clone. A terminal with no pushed branch says so instead of
+// inventing one.
 
 const handoffAction = (
   branch: string | null,
@@ -165,10 +167,11 @@ export const NEEDS_INFO_COMMENT_TEMPLATE = (
   needsInfoLabel: string,
   readyLabel: string,
   strandedHead: StrandedHead | null,
+  reclaim: IssueCloneReclaim,
 ): string =>
   `${BOT_COMMENT_PREFIX} stopped for requested information.\n\n` +
   `${questions}` +
-  (strandedHead === null ? "" : STRANDED_COMMITS_NOTE(strandedHead)) +
+  (strandedHead === null ? "" : STRANDED_COMMITS_NOTE(strandedHead, reclaim)) +
   `\n\n` +
   handoffAction(branch, needsInfoLabel, readyLabel, "answer the questions");
 
@@ -207,10 +210,11 @@ export const NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE = (
   // partial branch was published.
   branchPushed: string | null,
   strandedHead: StrandedHead | null,
+  reclaim: IssueCloneReclaim,
 ): string =>
   `${BOT_COMMENT_PREFIX} stopped for a UI prototype.\n\n` +
   `${needsUiPrototypeExplanation(issueNum, uiImpact)}` +
-  (strandedHead === null ? "" : STRANDED_COMMITS_NOTE(strandedHead)) +
+  (strandedHead === null ? "" : STRANDED_COMMITS_NOTE(strandedHead, reclaim)) +
   `\n\n` +
   handoffAction(
     branchPushed,
@@ -279,10 +283,14 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} gate-1 step \`${failedStep}\` was red for ` +
-  `${roundsUsed} consecutive round${roundsUsed === 1 ? "" : "s"}.\n\n` +
+  `${BOT_COMMENT_PREFIX} ${gateRedStop(failedStep, roundsUsed)}\n\n` +
   `${needsHumanGateExplanation(failureTrace, latestReviewerProse)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "push a fix");
+
+const gateRedStop = (failedStep: string, roundsUsed: number): string =>
+  `gate-1 was red for ${roundsUsed} consecutive ` +
+  `round${roundsUsed === 1 ? "" : "s"}; latest failing step: ` +
+  `\`${failedStep}\`.`;
 
 const needsHumanNoSignalExplanation = (failureTrace: string): string =>
   `<details><summary>Attempt summary</summary>\n\n` +
@@ -334,21 +342,34 @@ export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
 // the correction, so for them this note is the ONLY place the work is recorded.
 //
 // The prose branches on `headRef`, and that distinction is not cosmetic. A
-// DETACHED head leaves the commits unreachable until reuse publishes a durable
-// pin into the host cache. A scratch BRANCH is pinned there the same way —
-// telling that reader their work is about to be pruned would send them to
-// perform an urgent rescue of something in no danger, and telling them to
-// `git branch <name> <sha>` would have them create a second name for a commit
-// that already has one.
-export const STRANDED_COMMITS_NOTE = (m: StrandedHead): string =>
-  m.headRef === null
-    ? `\n\nStranded work: \`${m.headSha}\` is pinned as ` +
-      `\`${strandedHeadRef(m.headSha)}\`; recover it with ` +
+// DETACHED head needs a new branch name; a scratch BRANCH already has one.
+// Successful reclamation names the cache pin that outlives the clone. Failed
+// reclamation names the preserved clone instead, because claiming a pin the
+// cache refused to create would send the human to a nonexistent recovery ref.
+export const STRANDED_COMMITS_NOTE = (
+  m: StrandedHead,
+  reclaim: IssueCloneReclaim,
+): string => {
+  if (reclaim.kind === "preserved") {
+    return m.headRef === null
+      ? `\n\nStranded work: \`${m.headSha}\` remains in preserved clone ` +
+        `\`${reclaim.worktreePath}\`; recover it there with ` +
+        `\`git -C '${reclaim.worktreePath}' branch <rescue-name> ${m.headSha}\`, ` +
+        `then cherry-pick or merge it into \`${m.branch}\`.`
+      : `\n\nStranded work: \`${m.headRef}\` at \`${m.headSha}\` remains in ` +
+        `preserved clone \`${reclaim.worktreePath}\`; from that clone, cherry-pick ` +
+        `or merge it into \`${m.branch}\`.`;
+  }
+  const location = reclaim.kind === "removed"
+    ? ` is pinned as \`${strandedHeadRef(m.headSha)}\``
+    : " is off the issue branch";
+  return m.headRef === null
+    ? `\n\nStranded work: \`${m.headSha}\`${location}; recover it with ` +
       `\`git branch <rescue-name> ${m.headSha}\`, then cherry-pick or merge it into ` +
       `\`${m.branch}\`.`
-    : `\n\nStranded work: \`${m.headRef}\` at \`${m.headSha}\` is pinned as ` +
-      `\`${strandedHeadRef(m.headSha)}\`; cherry-pick or merge it into ` +
-      `\`${m.branch}\`.`;
+    : `\n\nStranded work: \`${m.headRef}\` at \`${m.headSha}\`${location}; ` +
+      `cherry-pick or merge it into \`${m.branch}\`.`;
+};
 
 // The implementer committed off the issue branch and stayed off it after being
 // told (#27). Neither the gate-red nor a review-budget comment applies —
@@ -379,6 +400,7 @@ export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   qualityRounds: number | null,
   failureTrace: string,
   strandedHead: StrandedHead,
+  reclaim: IssueCloneReclaim,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
@@ -387,7 +409,7 @@ export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
       ? `stopped because the implementer remained off \`${branch}\`.`
       : `the quality pass stopped after ${qualityRounds} consecutive failures; the implementer remained off \`${branch}\`.`
   }\n\n${needsHumanOffBranchExplanation(failureTrace)}` +
-  `${STRANDED_COMMITS_NOTE(strandedHead)}\n\n` +
+  `${STRANDED_COMMITS_NOTE(strandedHead, reclaim)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "fold in the stranded commits");
 
 // A second reviewer-harness failure (#41) is not a review rejection. The stop
@@ -757,6 +779,7 @@ function requireFlip(r: LabelEditResult, issueNum: number): void {
 function needsHumanComments(
   input: Extract<FinalizeInput, { readonly kind: "needs-human" }>,
   labels: LabelConfig,
+  reclaim: IssueCloneReclaim,
 ): { readonly published: string; readonly refused: string } {
   const qualityRounds = input.budgetExhausted?.budget === "quality"
     ? input.budgetExhausted.roundsUsed
@@ -798,12 +821,13 @@ function needsHumanComments(
             qualityRounds,
             input.failureTrace,
             input.strandedHead,
+            reclaim,
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
           refused:
             needsHumanOffBranchExplanation(input.failureTrace) +
-            STRANDED_COMMITS_NOTE(input.strandedHead),
+            STRANDED_COMMITS_NOTE(input.strandedHead, reclaim),
         };
       case "gate-red": {
         if (input.budgetExhausted?.budget !== "gate") {
@@ -821,8 +845,7 @@ function needsHumanComments(
             READY_FOR_AGENT_LABEL,
           ),
           refused:
-            `Gate-1 step \`${failedStep}\` was red for ${roundsUsed} consecutive ` +
-            `round${roundsUsed === 1 ? "" : "s"}.\n\n` +
+            `${gateRedStop(failedStep, roundsUsed)}\n\n` +
             needsHumanGateExplanation(input.failureTrace, input.latestReviewerProse),
         };
       }
@@ -1064,18 +1087,21 @@ export async function finalizeOne(
     }
     case "needs-info": {
       const n = issueNumberOf(input.issue);
-      await adapter.reclaimIssueClone(input.issue.branch);
+      const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
       const body = NEEDS_INFO_COMMENT_TEMPLATE(
         input.issue.branch,
         input.questions,
         labels.needsInfo,
         READY_FOR_AGENT_LABEL,
         input.strandedHead,
+        reclaim,
       );
       const refused = await pushBranchOrPark(input, adapter, labels, {
         context:
           input.questions +
-          (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
+          (input.strandedHead
+            ? STRANDED_COMMITS_NOTE(input.strandedHead, reclaim)
+            : ""),
       });
       if (refused) return refused;
       await adapter.postComment(
@@ -1100,7 +1126,9 @@ export async function finalizeOne(
         const refused = await pushBranchOrPark(input, adapter, labels, {
           context:
             needsUiPrototypeExplanation(n, input.uiImpact) +
-            (input.strandedHead ? STRANDED_COMMITS_NOTE(input.strandedHead) : ""),
+            (input.strandedHead
+              ? STRANDED_COMMITS_NOTE(input.strandedHead, reclaim)
+              : ""),
         });
         if (refused) return refused;
       }
@@ -1113,6 +1141,7 @@ export async function finalizeOne(
           READY_FOR_AGENT_LABEL,
           aheadOfSeed ? input.issue.branch : null,
           input.strandedHead,
+          reclaim,
         ),
       );
       const r = await adapter.editLabels(
@@ -1189,12 +1218,12 @@ export async function finalizeOne(
     }
     case "needs-human": {
       const n = issueNumberOf(input.issue);
-      await adapter.reclaimIssueClone(input.issue.branch);
+      const reclaim = await adapter.reclaimIssueClone(input.issue.branch);
       // #17: one renderer selects the exact blocker explanation, including
       // off-branch recovery and any exhausted budget. Publication and label
       // instructions live only in the published form; a refusal receives the
       // same explanation beside the cache recovery recipe.
-      const comments = needsHumanComments(input, labels);
+      const comments = needsHumanComments(input, labels, reclaim);
       const refused = await pushBranchOrPark(input, adapter, labels, {
         context: comments.refused,
       });
