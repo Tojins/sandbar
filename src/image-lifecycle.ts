@@ -89,6 +89,22 @@ export function parseContainerImageIds(stdout: string): ReadonlySet<string> {
   return new Set(stdout.split("\n").map((line) => line.trim()).filter(Boolean));
 }
 
+// Buildah records locally-built short names in canonical `localhost/…:tag`
+// form. Config deliberately accepts the same short references Podman accepts,
+// so compare canonical forms or a live `app:gate` would fail to retain the
+// inventory row Podman reports as `localhost/app:gate`.
+function canonicalLocalTag(tag: string): string {
+  const slash = tag.indexOf("/");
+  const first = slash === -1 ? tag : tag.slice(0, slash);
+  const qualified = slash !== -1 &&
+    (first === "localhost" || first.includes(".") || first.includes(":"));
+  const withRegistry = qualified ? tag : `localhost/${tag}`;
+  const lastSlash = withRegistry.lastIndexOf("/");
+  return withRegistry.slice(lastSlash + 1).includes(":")
+    ? withRegistry
+    : `${withRegistry}:latest`;
+}
+
 function depthOf(
   image: ImageInventoryEntry,
   byId: ReadonlyMap<string, ImageInventoryEntry>,
@@ -111,8 +127,11 @@ export function imagesToRemove(
   containerImageIds: ReadonlySet<string>,
 ): readonly string[] {
   const liveIds = new Set(containerImageIds);
+  const canonicalLiveTags = new Set([...liveTags].map(canonicalLocalTag));
   for (const image of inventory) {
-    if (image.repoTags.some((tag) => liveTags.has(tag))) liveIds.add(image.id);
+    if (image.repoTags.some((tag) => canonicalLiveTags.has(canonicalLocalTag(tag)))) {
+      liveIds.add(image.id);
+    }
   }
   const byId = new Map(inventory.map((image) => [image.id, image] as const));
   return inventory

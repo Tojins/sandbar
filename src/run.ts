@@ -115,10 +115,11 @@
 // The origin lease renewal wraps that same wait and therefore precedes either
 // wake's effects. A separate heartbeat uses the same serialized renewal
 // operation so a long gate or forge wait cannot consume the lease between
-// scheduler wakes. Every recompute also measures free space on Podman's
-// graphroot (#169). A low reading closes admission and drains; reconciliation
-// and the deciding remeasurement happen only once the pool is quiescent, so
-// image removal cannot race a live gate or sandbox build.
+// scheduler wakes. Free space on Podman's graphroot is measured after startup
+// reconciliation but before image preparation, then at every recompute (#169).
+// A low reading closes admission and drains; reconciliation and the deciding
+// remeasurement happen only once the pool is quiescent, so image removal cannot
+// race a live gate or sandbox build.
 
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
@@ -475,13 +476,17 @@ function schedulerExit(
       if (state.storage === null) {
         throw new Error("scheduler selected a storage exit without a measurement");
       }
-      return storageExit(
-        `${formatLowGraphRootSpace(state.storage)} after image reconciliation; ` +
-          "admissions were stopped and the pool drained",
-      );
+      return lowStorageExit(state.storage);
     }
     case "stuck": return stuckExit(state.pool.noProgressSinceLanding);
   }
+}
+
+function lowStorageExit(space: GraphRootSpace): TerminalExit {
+  return storageExit(
+    `${formatLowGraphRootSpace(space)} after image reconciliation; ` +
+      "admissions were stopped and the pool drained",
+  );
 }
 
 type RunActivity = {
@@ -987,10 +992,17 @@ export async function run(
   // naming a pid that will be dead, which the next launch's takeover reads as a
   // crashed run and clears. Cheap, and it keeps every exit path in this file
   // uniform rather than one of them relying on a dependency's exit hook.
-  const stopAtStartup = async (
-    cause: string,
-    err: unknown,
+  const exitAtStartup = async (
+    message: string,
+    exit: TerminalExit,
   ): Promise<never> => {
+    await runRecord.emit({ kind: "complaint", severity: "error", message });
+    const announced = await announceExit(exit);
+    await runCleanup();
+    process.exit(announced.exitCode);
+  };
+
+  const stopAtStartup = async (cause: string, err: unknown): Promise<never> => {
     // `faultDetail` already renders a SandbarError as its bare message and
     // anything else as a stack — errors.ts owns that rule. The one case it does
     // not know about is
@@ -998,10 +1010,7 @@ export async function run(
     // message IS the operator-actionable report.
     const detail =
       err instanceof PreflightError ? err.message : faultDetail(err);
-    await runRecord.emit({ kind: "complaint", severity: "error", message: detail });
-    const exit = await announceExit(haltedExit([cause]));
-    await runCleanup();
-    process.exit(exit.exitCode);
+    return await exitAtStartup(detail, haltedExit([cause]));
   };
 
   let codexAuthMount: CodexAuthMount | undefined;
@@ -1057,6 +1066,7 @@ export async function run(
   // acquireLock has already mkdirSync'd the directory, so this cannot ENOENT.
   const scope = runScope(realpathSync(lockPaths.workDir));
   let graphRoot!: string;
+  let startupSpace!: GraphRootSpace;
 
   // THE STARTUP INVENTORY IN ONE `try`, because both reconcilers throw on a
   // failed list and graphroot discovery is part of the same Podman snapshot.
@@ -1093,6 +1103,7 @@ export async function run(
       await runRecord.emit({ kind: "sweep", scope: "startup", removed: staleImages.removed, failures: [] });
     }
     await reportSweepFailures(staleImages, (event) => runRecord.emit(event), "startup");
+    startupSpace = await graphRootSpace(graphRoot);
 
     // Debris no run's scope claims: from a build predating #28, or the
     // sandcastle era. Reported rather than removed, because a bare-prefix match
@@ -1113,6 +1124,14 @@ export async function run(
     }
   } catch (err) {
     return await stopAtStartup("startup-sweep-failed", err);
+  }
+
+  if (graphRootSpaceIsLow(startupSpace)) {
+    return await exitAtStartup(
+      `${formatLowGraphRootSpace(startupSpace)} after startup image reconciliation. ` +
+        "Sandbar will not begin image preparation or admit work.",
+      lowStorageExit(startupSpace),
+    );
   }
 
   // Build the sandbar image in the runtime if missing. No-op when it already

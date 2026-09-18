@@ -1,11 +1,11 @@
 // Podman graphroot free-space preflight (#169).
 //
 // The daemon lives for days, so startup is not a useful boundary. run.ts asks
-// this module at every scheduler recompute and measures the filesystem that
-// actually contains Podman's graphroot, not cwd or `/` by assumption. A low
-// reading closes admission and drains; once quiescent, image reconciliation
-// runs and the same filesystem is measured again before the run decides
-// whether it can continue.
+// this module after startup reconciliation, before image preparation, and at
+// every scheduler recompute. It measures the filesystem that actually contains
+// Podman's graphroot, not cwd or `/` by assumption. A low reading closes
+// admission and drains; once quiescent, image reconciliation runs and the same
+// filesystem is measured again before the run decides whether it can continue.
 //
 // The floor is deliberately a driver constant rather than installation
 // config. It is protection against a host failure mode, not a workload tuning

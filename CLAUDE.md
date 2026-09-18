@@ -218,7 +218,8 @@ commit compare. Remaining exits are `stuck`, `quota`,
 `credential`, `storage`, `restart` and `halted`; plan-empty, relaunch, budget, and the
 recompute ceiling are gone.
 
-Every recompute checks the free bytes on the filesystem containing Podman's
+After startup reconciliation and before image preparation, then at every
+recompute, sandbar checks the free bytes on the filesystem containing Podman's
 graphroot against a fixed 10 GiB floor (#169). A low reading stops admission
 and drains; at quiescence the owned-image reconciler runs and the filesystem is
 measured again. If it remains low, the daemon exits 3 with the graphroot and

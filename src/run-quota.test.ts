@@ -425,7 +425,9 @@ describe("run quota orchestration (#109)", () => {
     await expect(run(config)).rejects.toThrow("EXIT:3");
     expect(exit).toHaveBeenCalledWith(3);
     expect(seams.innerLoop).not.toHaveBeenCalled();
-    expect(reconcileImages).toHaveBeenCalledTimes(2);
+    expect(ensureImages).not.toHaveBeenCalled();
+    expect(createAgentImages).not.toHaveBeenCalled();
+    expect(reconcileImages).toHaveBeenCalledOnce();
     expect(graphRootSpace).toHaveBeenCalledOnce();
     expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
       severity: "error",

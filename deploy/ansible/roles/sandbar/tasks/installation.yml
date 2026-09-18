@@ -103,7 +103,7 @@
 # itself: a restart while an issue is running or landing would abort that work.
 # It leaves the commit it applied in the installation directory instead, and the
 # daemon drains and exits for it at a moment of its own choosing. A stopped
-# daemon is left stopped — exits 1, 2 and 4 are stops a human inspects, and a
+# daemon is left stopped — exits 1, 2, 3 and 4 are stops a human inspects, and a
 # converging play that started them would turn those into a retry loop; the
 # request simply waits, and a start clears it.
 #

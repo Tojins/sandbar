@@ -633,92 +633,79 @@ describe("lastProbeText", () => {
 });
 
 describe("buildArgv", () => {
+  const scope = runScope("/build-argv");
+  const scoped = (...tail: string[]): string[] => [
+    "build", "-t", "t",
+    `--label=${imageScopeLabel(scope)}`,
+    `--layer-label=${imageScopeLabel(scope)}`,
+    ...tail,
+  ];
+
   it("labels final and intermediate images with the owning scope", () => {
-    const scope = runScope("/build-argv");
-    const label = imageScopeLabel(scope);
     expect(buildArgv(
       { tag: "t", containerfile: "Containerfile" },
       { scope, root: "/worktree" },
-    )).toEqual([
-      "build", "-t", "t",
-      `--label=${label}`,
-      `--layer-label=${label}`,
-      "-f", "/worktree/Containerfile", "/worktree",
-    ]);
+    )).toEqual(scoped("-f", "/worktree/Containerfile", "/worktree"));
   });
 
   it("builds with the containerfile's directory as context", () => {
-    expect(buildArgv({ tag: "t", containerfile: "gate/Containerfile.php" })).toEqual([
-      "build",
-      "-t",
-      "t",
-      "-f",
-      "gate/Containerfile.php",
-      "gate",
-    ]);
+    expect(buildArgv(
+      { tag: "t", containerfile: "gate/Containerfile.php" },
+      { scope, root: "" },
+    )).toEqual(scoped("-f", "gate/Containerfile.php", "gate"));
   });
 
   it("builds a nested containerfile from an explicit repo-root context", () => {
     expect(
       buildArgv(
         { tag: "t", containerfile: "docker/Dockerfile", context: "" },
-        { root: "/worktree" },
+        { scope, root: "/worktree" },
       ),
-    ).toEqual(["build", "-t", "t", "-f", "/worktree/docker/Dockerfile", "/worktree"]);
+    ).toEqual(scoped("-f", "/worktree/docker/Dockerfile", "/worktree"));
   });
 
   it("preserves an absolute containerfile's default context", () => {
     expect(
       buildArgv(
         { tag: "t", containerfile: "/etc/deploy/Containerfile" },
-        { root: "/worktree" },
+        { scope, root: "/worktree" },
       ),
-    ).toEqual([
-      "build",
-      "-t",
-      "t",
-      "-f",
-      "/etc/deploy/Containerfile",
-      "/etc/deploy",
-    ]);
+    ).toEqual(scoped("-f", "/etc/deploy/Containerfile", "/etc/deploy"));
   });
 
   it("builds with NO context when stdinContext is set", () => {
     // `-` is the whole point: a Containerfile that only pulls from a registry
     // needs no context, and tarring the repo up for it is pure latency.
-    const args = buildArgv({
-      tag: "t",
-      containerfile: "gate/Containerfile.php",
-      stdinContext: true,
-    });
-    expect(args).toEqual(["build", "-t", "t", "-"]);
+    const args = buildArgv(
+      {
+        tag: "t",
+        containerfile: "gate/Containerfile.php",
+        stdinContext: true,
+      },
+      { scope, root: "" },
+    );
+    expect(args).toEqual(scoped("-"));
     expect(args).not.toContain("-f");
   });
 
   it("hands a generated directory context to the Podman client", () => {
-    const scope = runScope("/generated-context");
     expect(buildArgv(
       { tag: "t", containerfile: "<generated>" },
       { scope, root: "", contextRoot: "/tmp/context" },
-    )).toEqual([
-      "build", "-t", "t",
-      `--label=${imageScopeLabel(scope)}`,
-      `--layer-label=${imageScopeLabel(scope)}`,
-      "-f", "/tmp/context/Containerfile", "/tmp/context",
-    ]);
+    )).toEqual(scoped("-f", "/tmp/context/Containerfile", "/tmp/context"));
   });
 
   it("passes buildArgs through verbatim — sandbar injects no magic ARG name", () => {
     expect(
-      buildArgv({
-        tag: "t",
-        containerfile: "Containerfile",
-        buildArgs: { AGENT_UID: "1000", AGENT_GID: "1000" },
-      }),
-    ).toEqual([
-      "build",
-      "-t",
-      "t",
+      buildArgv(
+        {
+          tag: "t",
+          containerfile: "Containerfile",
+          buildArgs: { AGENT_UID: "1000", AGENT_GID: "1000" },
+        },
+        { scope, root: "" },
+      ),
+    ).toEqual(scoped(
       "--build-arg",
       "AGENT_UID=1000",
       "--build-arg",
@@ -726,15 +713,16 @@ describe("buildArgv", () => {
       "-f",
       "Containerfile",
       ".",
-    ]);
+    ));
   });
 
   it("passes a named multi-stage target", () => {
     expect(
-      buildArgv({ tag: "t", containerfile: "Containerfile", target: "dev" }),
-    ).toEqual([
-      "build", "-t", "t", "--target", "dev", "-f", "Containerfile", ".",
-    ]);
+      buildArgv(
+        { tag: "t", containerfile: "Containerfile", target: "dev" },
+        { scope, root: "" },
+      ),
+    ).toEqual(scoped("--target", "dev", "-f", "Containerfile", "."));
   });
 });
 

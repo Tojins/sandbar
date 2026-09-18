@@ -243,35 +243,33 @@ export type BuildOptions = {
   readonly contextRoot?: string;
 };
 
-function buildUsesStdin(image: BuiltImage, opts?: BuildOptions): boolean {
+function buildUsesStdin(image: BuiltImage): boolean {
   return image.stdinContext === true;
 }
 
 // The `podman build` argv for one entry. Pure so the stdin-context, build-arg
 // and label wiring is table-testable — the real-adapter blind spot.
-export function buildArgv(image: BuiltImage, opts?: BuildOptions): string[] {
+export function buildArgv(image: BuiltImage, opts: BuildOptions): string[] {
   const args = ["build", "-t", image.tag];
-  if (opts?.scope !== undefined) {
-    const label = imageScopeLabel(opts.scope);
-    args.push(`--label=${label}`);
-    args.push(`--layer-label=${label}`);
-  }
+  const label = imageScopeLabel(opts.scope);
+  args.push(`--label=${label}`);
+  args.push(`--layer-label=${label}`);
   if (image.target !== undefined) args.push("--target", image.target);
   for (const [k, v] of Object.entries(image.buildArgs ?? {})) {
     args.push("--build-arg", `${k}=${v}`);
   }
-  if (opts?.fingerprint) {
+  if (opts.fingerprint) {
     args.push("--label", `${IMAGE_INPUTS_LABEL}=${opts.fingerprint}`);
   }
   if (image.stdinContext) {
     // Stdin is the Containerfile alone, with no build context.
     args.push("-");
-  } else if (opts?.contextRoot !== undefined) {
+  } else if (opts.contextRoot !== undefined) {
     args.push("-f", join(opts.contextRoot, "Containerfile"), opts.contextRoot);
   } else {
-    const containerfile = containerfilePath(image, opts?.root ?? "");
+    const containerfile = containerfilePath(image, opts.root);
     const context = effectiveImageBuildContext(image);
-    const root = opts?.root ?? "";
+    const root = opts.root;
     const contextPath = isAbsolute(context) || !root ? context || "." : join(root, context);
     args.push("-f", containerfile, contextPath);
   }
@@ -310,7 +308,7 @@ export async function buildImage(
   await new Promise<void>((resolve, reject) => {
     const child = spawn(RUNTIME, args, {
       stdio: [
-        buildUsesStdin(image, opts) ? "pipe" : "ignore",
+        buildUsesStdin(image) ? "pipe" : "ignore",
         capture ? "pipe" : "inherit",
         capture ? "pipe" : "inherit",
       ],

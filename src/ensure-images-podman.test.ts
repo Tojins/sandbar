@@ -682,10 +682,9 @@ describe.runIf(available)("ensureImages against real podman", () => {
     async ({ expect, task, onTestFinished }) => {
       const { root, tag: TAG, image } = await fixture(task.id, onTestFinished);
 
-      // The run-end removal is an `onCleanup` action, so it does not run on
-      // SIGKILL or a hard crash — and these are the largest things sandbar
-      // creates. This sweep is what makes the scope segment in the tag mean
-      // something, and it must not reach a concurrent run's live images.
+      // Reconciliation must reach same-tag predecessors and tags the current
+      // config stopped naming while remaining blind to another scope's live
+      // images.
       //
       // OTHER_SCOPE stands in for that other run and is derived from this
       // process's own token (#47), so it is a scope the sweep must be blind to

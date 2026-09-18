@@ -21,7 +21,9 @@ const row = (overrides: Record<string, unknown>): string => JSON.stringify({
 describe("image lifecycle", () => {
   it("selects owned predecessors, stopped tags and stages but preserves every live source", () => {
     const inventory = parseImageInventory([
-      row({ Id: "declared", RepoTags: ["app:gate"], Labels: { [IMAGE_SCOPE_LABEL]: scope } }),
+      row({ Id: "declared", RepoTags: ["localhost/app:gate"], Labels: { [IMAGE_SCOPE_LABEL]: scope } }),
+      row({ Id: "latest", RepoTags: ["localhost/helper:latest"], Labels: { [IMAGE_SCOPE_LABEL]: scope } }),
+      row({ Id: "registry", RepoTags: ["registry.example/app:gate"], Labels: { [IMAGE_SCOPE_LABEL]: scope } }),
       row({ Id: "predecessor", Labels: { [IMAGE_SCOPE_LABEL]: scope } }),
       row({ Id: "old-tag", RepoTags: ["app:removed"], Labels: { [IMAGE_SCOPE_LABEL]: scope } }),
       row({ Id: "container-image", Labels: { [IMAGE_SCOPE_LABEL]: scope } }),
@@ -32,7 +34,7 @@ describe("image lifecycle", () => {
     expect(imagesToRemove(
       inventory,
       scope,
-      new Set(["app:gate"]),
+      new Set(["app:gate", "helper", "registry.example/app:gate"]),
       new Set(["container-image"]),
     )).toEqual(["predecessor", "old-tag"]);
   });
