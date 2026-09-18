@@ -1182,6 +1182,45 @@ describe("finalizeOne", () => {
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
   });
 
+  it("needs-ui-prototype: recovers a stranded scratch branch from its preserved clone", async () => {
+    const worktreePath = "/host/.sandbar/worktrees/sandbar-issue-45-t-45";
+    const { adapter, calls } = makeAdapter({
+      reclaim: {
+        kind: "preserved",
+        reason: "could not publish its git state into the cache: cannot lock ref",
+        worktreePath,
+      },
+    });
+    const i = issue(45);
+    const action = await finalizeOne(
+      {
+        kind: "needs-ui-prototype",
+        issue: i,
+        uiImpact: "a new settings screen",
+        strandedHead: {
+          branch: i.branch,
+          headRef: "scratch/settings-screen",
+          headSha: "abc9999",
+          branchSha: "base00",
+          branchIsAncestor: false,
+        },
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({
+      kind: "kept-branch",
+      reason: expect.stringContaining("cannot lock ref"),
+    });
+    const body = calls.comments[0]!.body;
+    expect(body).toContain(`preserved clone \`${worktreePath}\``);
+    expect(body).toContain(
+      "from that clone, cherry-pick or merge it into `sandbar/issue-45-t-45`",
+    );
+    expect(body).not.toContain("refs/sandbar/stranded/abc9999");
+  });
+
   it("needs-info: appends the stranded-commits note when the run went off-branch (#27)", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
