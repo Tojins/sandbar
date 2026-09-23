@@ -659,6 +659,21 @@ describe("run quota orchestration (#109)", () => {
       .toBeLessThan(vi.mocked(runPreflightAfterReachability).mock.invocationCallOrder[0]!);
   });
 
+  it("writes pre-record reachability notices to stderr without losing detail", async () => {
+    const message =
+      "Forge reachability attempt 1/6 failed: github.com: getaddrinfo EAI_AGAIN";
+    vi.mocked(checkForgeReachabilityForPreflight).mockImplementationOnce(async (options) => {
+      await options.onEvent({ kind: "notice", message });
+    });
+    seams.plan.mockResolvedValue(resolution([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(console.error).toHaveBeenCalledWith(message);
+  });
+
   it.each([
     ["origin-lock-acquired", null],
     ["origin-lock-taken-over", {
@@ -1076,6 +1091,33 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.originRelease).toHaveBeenCalledOnce();
   });
 
+  it("records a retained lease as a notice and continues after renewal", async () => {
+    const reason = "GitHub returned 500 while renewing";
+    seams.plan.mockResolvedValue(resolution([issue("172")]));
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    seams.originRenew
+      .mockResolvedValueOnce({ kind: "retained", claim: seams.originClaim, reason })
+      .mockResolvedValue({ kind: "renewed", claim: seams.originClaim });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1 })).rejects.toThrow("EXIT:4");
+    const message =
+      `Origin lease renewal failed while our lease remains valid until ` +
+      `${seams.originClaim.lease.expires}: ${reason}`;
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.originRenew.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(seams.innerLoop).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "172" }),
+      expect.any(Object),
+    );
+    expect(eventsOf("notice")).toContainEqual({ kind: "notice", message });
+    expect(eventsOf("complaint")).not.toContainEqual(expect.objectContaining({ message }));
+  });
+
   it("halts at the admission barrier before admitting an issue", async () => {
     seams.plan.mockResolvedValue(resolution([issue("139")]));
     seams.originRenew
@@ -1221,7 +1263,7 @@ describe("run quota orchestration (#109)", () => {
       );
       await vi.advanceTimersByTimeAsync(pollIntervalMs);
       await flushMicrotasksUntil(
-        () => eventsOf("complaint").some((event) => event.message === failureLine),
+        () => eventsOf("notice").some((event) => event.message === failureLine),
         "the failed poll refresh to be reported",
       );
       expect(fetchOriginRefs).toHaveBeenCalledOnce();
@@ -1246,8 +1288,10 @@ describe("run quota orchestration (#109)", () => {
       expect(eventsOf("recompute").filter((event) => event.trigger === "poll"))
         .toHaveLength(1);
       expect(seams.innerLoop).toHaveBeenCalledOnce();
-      expect(eventsOf("complaint").filter((event) => event.message === failureLine))
+      expect(eventsOf("notice").filter((event) => event.message === failureLine))
         .toHaveLength(1);
+      expect(eventsOf("complaint").some((event) => event.message === failureLine))
+        .toBe(false);
       expect(vi.mocked(console.error).mock.calls.flat().join("\n"))
         .not.toContain("SANDBAR HALTED");
     } finally {

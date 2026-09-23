@@ -1958,6 +1958,31 @@ describe("runInnerLoop context terminals (#158)", () => {
     }));
   });
 
+  it("keeps sandbox teardown failures as full error complaints", async () => {
+    const message =
+      "Issue clone preserved at /worktree: failed to publish branch (packed-refs.lock)";
+    const { sandbox, opts, events } = harness(async (options) =>
+      (options.name ?? "").includes("reviewer-") ? approvedReview : completeRun
+    );
+    innerLoopMocks.createSandbox.mockImplementationOnce(async (options) => {
+      sandbox.close = vi.fn(async () => {
+        await options.onNotice?.("error", message);
+      });
+      return sandbox;
+    });
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+    expect(events).toContainEqual({
+      kind: "complaint",
+      severity: "error",
+      message,
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({
+      kind: "notice",
+      message,
+    }));
+  });
+
   it("records an automatic sandbox-image fallback as a notice", async () => {
     innerLoopMocks.resolveSandboxImage.mockImplementationOnce(async (options) => {
       await options.onFallback?.("branch image did not build; using the declared image");

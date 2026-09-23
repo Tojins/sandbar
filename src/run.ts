@@ -102,7 +102,8 @@
 // At capacity below `maxParallelIssues`, one cancellable wait races the next
 // slot completion against `pollIntervalMs`. A poll refreshes source, issue,
 // chunk and member refs before running the ordinary plan. A failed refresh is
-// reported and waits for the next wake instead of killing the daemon, unless
+// recorded as a feed-only notice and waits for the next wake instead of
+// killing the daemon, unless
 // `decideAfterFailedRefresh` says this daemon is a drained restart whose exit
 // reads no refs at all (#146); startup preflight remains fatal. A no-op poll is silent. A stable label-actor
 // exclusion is recorded on each poll because its required diagnostic
@@ -1788,11 +1789,11 @@ export async function run(
           const next = stalled.kind === "exit"
             ? "the pending restart needs none of it, so exiting"
             : `retrying in ${config.pollIntervalMs}ms`;
-          await runRecord.emit({
-            kind: "complaint",
-            severity: "warning",
-            message: `Poll refresh failed; ${next}: ${refresh.failures.join("; ")}`,
-          });
+          const message =
+            `Poll refresh failed; ${next}: ${refresh.failures.join("; ")}`;
+          await runRecord.emit(stalled.kind === "exit"
+            ? { kind: "complaint", severity: "warning", message }
+            : { kind: "notice", message });
           if (stalled.kind === "exit") {
             terminalExit = await announceExit(
               schedulerExit(stalled.reason, {

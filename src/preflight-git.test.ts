@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentProviderName } from "./agent-providers.js";
 import { makeEnvReader } from "./env.js";
+import type { EventInput } from "./events.js";
 import {
   type DeclaredMount,
   deleteMergedSandbarBranches,
@@ -233,9 +234,9 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
   it("refuses an unreachable forge alone before credentials or branches are judged", async () => {
     let now = 0;
-    const events: unknown[] = [];
+    const events: EventInput[] = [];
     const error = await runPreflight(
-      { ...cfg(layoutAt(target)), onEvent: (event: unknown) => events.push(event) } as Parameters<typeof runPreflight>[0],
+      { ...cfg(layoutAt(target)), onEvent: (event) => events.push(event) },
       {
         lookup: async () => {
           throw new Error("getaddrinfo EAI_AGAIN");
@@ -255,6 +256,16 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     );
     expect(String(error)).not.toContain("gh auth login");
     expect(events).toHaveLength(6);
+    expect(events[0]).toEqual({
+      kind: "notice",
+      message:
+        "Forge reachability attempt 1/6 failed: github.com: getaddrinfo EAI_AGAIN",
+    });
+    expect(events[5]).toEqual({
+      kind: "notice",
+      message:
+        "Forge reachability attempt 6/6 failed: github.com: getaddrinfo EAI_AGAIN",
+    });
   });
 
   // The highest-stakes half, and the one that qualified #32's fix: #32 put this
