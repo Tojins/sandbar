@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -211,7 +211,8 @@ describe("run UI server", () => {
       document: { getElementById: () => app },
       fetch: vi.fn()
         .mockResolvedValueOnce({ ok: true, status: 200, json: async () => base })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => next }),
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => next })
+        .mockRejectedValueOnce(new TypeError("network down")),
       setInterval: (callback: () => Promise<void>) => { interval = callback; return 1; },
       localStorage,
       Date, Intl, Math, String, Error, TypeError,
@@ -240,6 +241,12 @@ describe("run UI server", () => {
     expect(app.innerHTML).not.toContain("dismissComplaint(2)");
     expect(app.innerHTML).toContain("dismissComplaint(4)");
 
+    await interval?.();
+    expect(app.innerHTML).toContain("No run is serving; last state below");
+    context.dismissComplaint?.(3);
+    expect(app.innerHTML).not.toContain("dismissComplaint(3)");
+    expect(app.innerHTML).toContain("No run is serving; last state below");
+
     const reloadedApp = { innerHTML: "" };
     runInNewContext(script!, {
       document: { getElementById: () => reloadedApp },
@@ -251,6 +258,21 @@ describe("run UI server", () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(reloadedApp.innerHTML).not.toContain("dismissComplaint(2)");
     expect(reloadedApp.innerHTML).toContain("dismissComplaint(4)");
+
+    const otherRunApp = { innerHTML: "" };
+    const otherRun = {
+      ...next,
+      run: { ...next.run, directory: "/state/logs/run-other" },
+    };
+    runInNewContext(script!, {
+      document: { getElementById: () => otherRunApp },
+      fetch: async () => ({ ok: true, status: 200, json: async () => otherRun }),
+      setInterval: () => 1,
+      localStorage,
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(otherRunApp.innerHTML).toContain("dismissComplaint(2)");
   });
 
   it("widens timeline tick spacing at the two- and eight-hour thresholds", async () => {
@@ -404,10 +426,17 @@ describe("run UI server", () => {
   it("uses both run.pid and process liveness to classify standalone runs", async () => {
     const live = await runTree(true);
     await mkdir(join(live.logsDir, "run-2026-09-06T10-00-00-000Z"));
-    expect((await readUiState(live.logsDir)).run.status).toBe("live");
+    const relativeLogsDir = relative(process.cwd(), live.logsDir);
+    expect((await readUiState(relativeLogsDir)).run).toMatchObject({
+      directory: live.runDir,
+      status: "live",
+    });
 
     await rm(join(live.runDir, "../../state/run.pid"));
-    expect((await readUiState(live.logsDir)).run.status).toBe("crashed");
+    expect((await readUiState(relativeLogsDir)).run).toMatchObject({
+      directory: live.runDir,
+      status: "crashed",
+    });
   });
 
   it("uses the explicitly hosted run even when another directory sorts newer", async () => {
@@ -419,8 +448,9 @@ describe("run UI server", () => {
       configPath: null, workdir: "/future", maxParallelIssues: 1, pid: 999_999,
       seq: 1, ts: "2099-01-01T00:00:00.000Z",
     })}\n`);
-    expect((await readUiState(live.logsDir, { liveRunDir: live.runDir })).run.driver)
-      .toBe("sandbar test");
+    const relativeRunDir = relative(process.cwd(), live.runDir);
+    expect((await readUiState(live.logsDir, { liveRunDir: relativeRunDir })).run)
+      .toMatchObject({ directory: live.runDir, driver: "sandbar test" });
   });
 
   it("skips an unreadable historical record", async () => {
