@@ -1983,7 +1983,7 @@ describe("runInnerLoop context terminals (#158)", () => {
     }));
   });
 
-  it("records an automatic sandbox-image fallback as a notice", async () => {
+  it("keeps a sandbox-image fallback as a warning complaint", async () => {
     innerLoopMocks.resolveSandboxImage.mockImplementationOnce(async (options) => {
       await options.onFallback?.("branch image did not build; using the declared image");
       return "sandbox-image";
@@ -1994,14 +1994,11 @@ describe("runInnerLoop context terminals (#158)", () => {
 
     await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
     expect(events).toContainEqual({
-      kind: "notice",
+      kind: "complaint",
+      severity: "warning",
       message: "issue=158 sandbox-image fallback — " +
         "branch image did not build; using the declared image",
     });
-    expect(events).not.toContainEqual(expect.objectContaining({
-      kind: "complaint",
-      message: expect.stringContaining("sandbox-image fallback"),
-    }));
   });
 
   it.each([

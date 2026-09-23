@@ -993,7 +993,8 @@ async function runSandboxCycle(
           onFallback: async (detail) => {
             const line = `issue=${issue.id} sandbox-image fallback — ${detail}`;
             await opts.onEvent({
-              kind: "notice",
+              kind: "complaint",
+              severity: "warning",
               message: line,
             });
           },
