@@ -270,6 +270,10 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = `${event.outcome} ${event.branch}${event.target ? ` → ${event.target}` : ""}`;
       tone = event.outcome === "skipped" || event.outcome === "chunk-parked" ? "bad" : "good";
       break;
+    case "notice":
+      text = event.message;
+      tone = "dim";
+      break;
     case "complaint":
       text = event.message;
       tone = event.severity === "error" ? "bad" : "warn";

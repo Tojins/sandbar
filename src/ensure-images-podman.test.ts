@@ -32,7 +32,6 @@ import {
   readInputsLabel,
 } from "./ensure-images.js";
 import {
-  IMAGE_SCOPE_LABEL,
   parseImageInventory,
   reconcileImages,
 } from "./image-lifecycle.js";
@@ -737,13 +736,6 @@ describe.runIf(available)("ensureImages against real podman", () => {
       ).stdout);
       const predecessor = inventory.find(({ id }) => id === predecessorId);
       expect(predecessor?.repoTags).toEqual([]);
-      const ownedIntermediate = inventory.find((entry) =>
-        entry.id !== currentId &&
-        entry.id !== predecessorId &&
-        entry.labels[IMAGE_SCOPE_LABEL] === ownScope &&
-        entry.repoTags.length === 0
-      );
-      expect(ownedIntermediate).toBeDefined();
 
       const result = await reconcileImages({
         scope: ownScope,

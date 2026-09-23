@@ -72,7 +72,8 @@
 // All outbound calls sit behind one credential-free reachability gate
 // (#118): DNS lookup plus a TCP connection to port 443 for the gh host and the
 // origin host (deduplicated). An unreachable host is retried six times, ten
-// seconds apart, and then refuses ALONE: no credential was asked about and no
+// seconds apart. Attempts are routine-retry notices; exhaustion then refuses
+// ALONE: no credential was asked about and no
 // branch classification ran, so neither may appear in the diagnosis. Once the
 // gate answers, the existing auth and tracker probes keep their boolean
 // contracts; an answer from a reachable forge is final and is never retried.
@@ -1359,7 +1360,7 @@ export async function checkForgeReachabilityForPreflight(
   const reachability = await checkForgeReachability(
     originHost === null ? [ghHost] : [ghHost, originHost],
     reachabilityAdapter,
-    (message) => cfg.onEvent({ kind: "complaint", severity: "warning", message }),
+    (message) => cfg.onEvent({ kind: "notice", message }),
   );
   if (!reachability.ok) {
     const seconds = (reachability.elapsedMs / 1_000).toFixed(1);

@@ -83,8 +83,9 @@
 // hosts the file-fed UI; stdout contains its URL only. Land requests record
 // their queued/deferred reason and each merge/gate-2/push transition so that
 // UI status is event evidence rather than reducer inference (#168). After the record exists,
-// operator complaints are events; stderr is reserved for the internal-failure
-// banner.
+// routine recoveries are notice events in the feed, while conditions that may
+// need human action are complaint events in the header too (#172); stderr is
+// reserved for the internal-failure banner.
 // Container-backed events retain cgroup peak-memory and OOMKilled evidence;
 // merger-stack lifecycle records are emitted after teardown (#141).
 //
@@ -101,7 +102,8 @@
 // At capacity below `maxParallelIssues`, one cancellable wait races the next
 // slot completion against `pollIntervalMs`. A poll refreshes source, issue,
 // chunk and member refs before running the ordinary plan. A failed refresh is
-// reported and waits for the next wake instead of killing the daemon, unless
+// recorded as a feed-only notice and waits for the next wake instead of
+// killing the daemon, unless
 // `decideAfterFailedRefresh` says this daemon is a drained restart whose exit
 // reads no refs at all (#146); startup preflight remains fatal. A no-op poll is silent. A stable label-actor
 // exclusion is recorded on each poll because its required diagnostic
@@ -356,7 +358,7 @@ export function selectTerminalExit(args: {
 }
 
 export type OriginLockWakeDecision =
-  | { readonly kind: "continue"; readonly warning: string | null }
+  | { readonly kind: "continue"; readonly notice: string | null }
   | { readonly kind: "halt"; readonly complaint: string; readonly exit: TerminalExit };
 
 // The scheduler-side half of the origin lease contract (#139), pure so both
@@ -365,11 +367,11 @@ export type OriginLockWakeDecision =
 export function decideOriginLockWake(
   renewal: OriginLockRenewal,
 ): OriginLockWakeDecision {
-  if (renewal.kind === "renewed") return { kind: "continue", warning: null };
+  if (renewal.kind === "renewed") return { kind: "continue", notice: null };
   if (renewal.kind === "retained") {
     return {
       kind: "continue",
-      warning: `Origin lease renewal failed while our lease remains valid ` +
+      notice: `Origin lease renewal failed while our lease remains valid ` +
         `until ${renewal.claim.lease.expires}: ${renewal.reason}`,
     };
   }
@@ -674,7 +676,9 @@ export async function run(
     await checkForgeReachabilityForPreflight({
       ...preflightBase,
       onEvent: (event) => {
-        if (event.kind === "complaint") console.error(event.message);
+        if (event.kind === "complaint" || event.kind === "notice") {
+          console.error(event.message);
+        }
       },
     });
   } catch (err) {
@@ -910,11 +914,10 @@ export async function run(
   ): Promise<void> => {
     const decision = decideOriginLockWake(renewal);
     if (decision.kind === "continue") {
-      if (decision.warning === null) return;
+      if (decision.notice === null) return;
       await runRecord.emit({
-        kind: "complaint",
-        severity: "warning",
-        message: decision.warning,
+        kind: "notice",
+        message: decision.notice,
       });
       return;
     }
@@ -1786,11 +1789,11 @@ export async function run(
           const next = stalled.kind === "exit"
             ? "the pending restart needs none of it, so exiting"
             : `retrying in ${config.pollIntervalMs}ms`;
-          await runRecord.emit({
-            kind: "complaint",
-            severity: "warning",
-            message: `Poll refresh failed; ${next}: ${refresh.failures.join("; ")}`,
-          });
+          const message =
+            `Poll refresh failed; ${next}: ${refresh.failures.join("; ")}`;
+          await runRecord.emit(stalled.kind === "exit"
+            ? { kind: "complaint", severity: "warning", message }
+            : { kind: "notice", message });
           if (stalled.kind === "exit") {
             terminalExit = await announceExit(
               schedulerExit(stalled.reason, {

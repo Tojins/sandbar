@@ -602,6 +602,8 @@ outcomes.
   Finalization becomes complete only after its `run-end` append succeeds, so
   concurrent calls share one write and a failed write remains retryable.
   Every outcome or refusal after both daemon locks are held is an event.
+  Routine recovery is a `notice`, visible in the feed but never the header;
+  `complaint` is reserved for a condition a human may need to act on (#172).
   Refused config, missing `GH_TOKEN`, forge unreachability before the origin
   lease, and either startup lock refusal remain stderr-only because no record
   can be owned safely. Every launched inner-loop agent invocation writes one

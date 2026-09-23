@@ -11,6 +11,9 @@
 // their UI status and reason explicitly: the reducer does not reconstruct a
 // queue or guess a merger step from neighbouring events (#168). A `landed`
 // duration is one merge unit; `landing-batch` carries the distinct whole-phase duration.
+// `notice` records routine recovery and other evidence that needs no human
+// action; it appears in the event feed but never in the run header. `complaint`
+// is reserved for a condition a human may need to act on (#172).
 // Container-backed duration boundaries may also carry `peakMemoryBytes`
 // (cgroup-v2 `memory.peak`, or Podman's sampled usage only as a fallback) and
 // `oomKilled` (an increase in cgroup-v2 `memory.events` `oom_kill` over a
@@ -35,7 +38,7 @@ import {
   type TranscriptTree,
 } from "./logs.js";
 
-export const EVENT_SCHEMA_VERSION = 3;
+export const EVENT_SCHEMA_VERSION = 4;
 
 export class EventRecordReadError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -182,6 +185,7 @@ export type EventInput =
     }
   | { readonly kind: "follow-up"; readonly action: "route" | "re-queued" | "lane-override"; readonly detail: string; readonly issue?: number; readonly title?: string }
   | { readonly kind: "reconcile"; readonly action: "trace" | "landed-chunk" | "land-requested"; readonly detail: string }
+  | { readonly kind: "notice"; readonly message: string }
   | { readonly kind: "complaint"; readonly severity: "warning" | "error"; readonly message: string }
   | { readonly kind: "exit"; readonly tag: ExitTag; readonly reason: string; readonly exitCode: number }
   | { readonly kind: "run-end"; readonly reason: string }
