@@ -195,7 +195,10 @@ describe.runIf(available)("gate stack against real podman", () => {
         snapshotReads += 1;
         if (snapshotReads <= 2) {
           const started = performance.now();
-          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          // Leave enough separation for a remote Podman exec under the full
+          // concurrent suite: the assertion below is about which side of the
+          // duration clock this read occupies, not scheduler latency.
+          await new Promise((resolve) => setTimeout(resolve, 5_000));
           firstStepSnapshotReadMs.push(performance.now() - started);
         }
         return {
