@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -162,6 +162,119 @@ describe("run UI server", () => {
     expect(fetch).toHaveBeenNthCalledWith(1, "state.json", { cache: "no-store" });
   });
 
+  it("dismisses each complaint occurrence locally across polls and reloads", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    const directory = "/state/logs/run-2026-09-07T10-00-00-000Z";
+    const base = {
+      now: "2026-09-07T10:00:00Z",
+      run: {
+        directory,
+        startedAt: "2026-09-07T09:00:00Z",
+        status: "live",
+        driver: "sandbar test",
+        slots: { used: 0, max: 2 },
+        lastRecompute: { n: 1, trigger: "launch", at: "2026-09-07T09:01:00Z" },
+        exit: null,
+        restart: null,
+        complaints: [
+          { seq: 2, severity: "warning", text: "repeated warning" },
+          { seq: 3, severity: "error", text: "urgent error" },
+        ],
+      },
+      pool: [], waiting: [], landing: [], finished: [], landedChunks: [],
+      eventCount: 2,
+      events: [
+        { at: "2026-09-07T09:02:00Z", issue: null, text: "repeated warning", tone: "warn" },
+        { at: "2026-09-07T09:03:00Z", issue: null, text: "urgent error", tone: "bad" },
+      ],
+    };
+    const next = {
+      ...base,
+      run: {
+        ...base.run,
+        complaints: [
+          ...base.run.complaints,
+          { seq: 4, severity: "warning", text: "repeated warning" },
+        ],
+      },
+    };
+    const stored = new Map<string, string>();
+    const localStorage = {
+      getItem: vi.fn((key: string) => stored.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => { stored.set(key, value); }),
+    };
+    let interval: (() => Promise<void>) | undefined;
+    const app = { innerHTML: "" };
+    const context = {
+      document: { getElementById: () => app },
+      fetch: vi.fn()
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => base })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => next })
+        .mockRejectedValueOnce(new TypeError("network down")),
+      setInterval: (callback: () => Promise<void>) => { interval = callback; return 1; },
+      localStorage,
+      Date, Intl, Math, String, Error, TypeError,
+    } as Record<string, unknown> & { dismissComplaint?: (seq: number) => void };
+    runInNewContext(script!, context);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(app.innerHTML).toContain(
+      '<div class="complaint warn"><span>⚠ repeated warning</span>',
+    );
+    expect(app.innerHTML).toContain(
+      '<div class="complaint bad"><span>⚠ urgent error</span>',
+    );
+    expect(app.innerHTML).toContain('aria-label="Dismiss" onclick="dismissComplaint(2)"');
+
+    context.dismissComplaint?.(2);
+    expect(localStorage.setItem).toHaveBeenCalledWith(
+      `sandbar:complaint-dismissed:${directory}:2`,
+      "1",
+    );
+    expect(app.innerHTML).not.toContain("dismissComplaint(2)");
+    expect(app.innerHTML).toContain("dismissComplaint(3)");
+    expect(app.innerHTML).toContain('<div class="feed">');
+    expect(app.innerHTML).toContain("repeated warning");
+
+    await interval?.();
+    expect(app.innerHTML).not.toContain("dismissComplaint(2)");
+    expect(app.innerHTML).toContain("dismissComplaint(4)");
+
+    await interval?.();
+    expect(app.innerHTML).toContain("No run is serving; last state below");
+    context.dismissComplaint?.(3);
+    expect(app.innerHTML).not.toContain("dismissComplaint(3)");
+    expect(app.innerHTML).toContain("No run is serving; last state below");
+
+    const reloadedApp = { innerHTML: "" };
+    runInNewContext(script!, {
+      document: { getElementById: () => reloadedApp },
+      fetch: async () => ({ ok: true, status: 200, json: async () => next }),
+      setInterval: () => 1,
+      localStorage,
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(reloadedApp.innerHTML).not.toContain("dismissComplaint(2)");
+    expect(reloadedApp.innerHTML).toContain("dismissComplaint(4)");
+
+    const otherRunApp = { innerHTML: "" };
+    const otherRun = {
+      ...next,
+      run: { ...next.run, directory: "/state/logs/run-other" },
+    };
+    runInNewContext(script!, {
+      document: { getElementById: () => otherRunApp },
+      fetch: async () => ({ ok: true, status: 200, json: async () => otherRun }),
+      setInterval: () => 1,
+      localStorage,
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(otherRunApp.innerHTML).toContain("dismissComplaint(2)");
+  });
+
   it("widens timeline tick spacing at the two- and eight-hour thresholds", async () => {
     const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
     const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
@@ -313,10 +426,17 @@ describe("run UI server", () => {
   it("uses both run.pid and process liveness to classify standalone runs", async () => {
     const live = await runTree(true);
     await mkdir(join(live.logsDir, "run-2026-09-06T10-00-00-000Z"));
-    expect((await readUiState(live.logsDir)).run.status).toBe("live");
+    const relativeLogsDir = relative(process.cwd(), live.logsDir);
+    expect((await readUiState(relativeLogsDir)).run).toMatchObject({
+      directory: live.runDir,
+      status: "live",
+    });
 
     await rm(join(live.runDir, "../../state/run.pid"));
-    expect((await readUiState(live.logsDir)).run.status).toBe("crashed");
+    expect((await readUiState(relativeLogsDir)).run).toMatchObject({
+      directory: live.runDir,
+      status: "crashed",
+    });
   });
 
   it("uses the explicitly hosted run even when another directory sorts newer", async () => {
@@ -328,8 +448,9 @@ describe("run UI server", () => {
       configPath: null, workdir: "/future", maxParallelIssues: 1, pid: 999_999,
       seq: 1, ts: "2099-01-01T00:00:00.000Z",
     })}\n`);
-    expect((await readUiState(live.logsDir, { liveRunDir: live.runDir })).run.driver)
-      .toBe("sandbar test");
+    const relativeRunDir = relative(process.cwd(), live.runDir);
+    expect((await readUiState(live.logsDir, { liveRunDir: relativeRunDir })).run)
+      .toMatchObject({ directory: live.runDir, driver: "sandbar test" });
   });
 
   it("skips an unreadable historical record", async () => {
