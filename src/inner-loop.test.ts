@@ -984,6 +984,14 @@ describe("role prompt-extension wiring (#91)", () => {
       peakMemoryBytes: 1000, oomKilled: true,
     }));
     expect(ctx.opts.onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "notice",
+      message: expect.stringContaining("no-review — retrying"),
+    }));
+    expect(ctx.opts.onEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+      kind: "complaint",
+      message: expect.stringContaining("no-review — retrying"),
+    }));
+    expect(ctx.opts.onEvent).toHaveBeenCalledWith(expect.objectContaining({
       kind: "review-pass", pass: "correctness", result: "completed",
       durationMs: 33,
       peakMemoryBytes: 3000, oomKilled: true,
@@ -1450,7 +1458,11 @@ describe("runAdjudicator (#167)", () => {
       detail: expect.stringMatching(/invocation 1\/2[\s\S]*invocation 2\/2/),
     });
     expect(sandbox.run).toHaveBeenCalledTimes(2);
-    expect(events.filter((event) => event.kind === "complaint")).toHaveLength(1);
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: "notice",
+      message: expect.stringContaining("no-ruling — retrying"),
+    }));
+    expect(events.filter((event) => event.kind === "complaint")).toHaveLength(0);
   });
 
   it("accepts a ruling emitted by a failed adjudicator invocation", async () => {
@@ -1921,6 +1933,50 @@ describe("runInnerLoop context terminals (#158)", () => {
       `refs/heads/${issue.branch}`,
     );
     innerLoopMocks.headMismatch.mockReset().mockResolvedValue(null);
+  });
+
+  it("keeps routine clone-reuse reports out of complaints", async () => {
+    innerLoopMocks.prepareWorktree.mockImplementationOnce(async (options) => {
+      await options.onNotice?.(
+        "warning",
+        "Reusing worktree at /worktree — worktree has uncommitted changes",
+      );
+      return "/worktree";
+    });
+    const { opts, events } = harness(async (options) =>
+      (options.name ?? "").includes("reviewer-") ? approvedReview : completeRun
+    );
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+    expect(events).toContainEqual({
+      kind: "notice",
+      message: "Reusing worktree at /worktree — worktree has uncommitted changes",
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({
+      kind: "complaint",
+      message: expect.stringContaining("Reusing worktree"),
+    }));
+  });
+
+  it("records an automatic sandbox-image fallback as a notice", async () => {
+    innerLoopMocks.resolveSandboxImage.mockImplementationOnce(async (options) => {
+      await options.onFallback?.("branch image did not build; using the declared image");
+      return "sandbox-image";
+    });
+    const { opts, events } = harness(async (options) =>
+      (options.name ?? "").includes("reviewer-") ? approvedReview : completeRun
+    );
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+    expect(events).toContainEqual({
+      kind: "notice",
+      message: "issue=158 sandbox-image fallback — " +
+        "branch image did not build; using the declared image",
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({
+      kind: "complaint",
+      message: expect.stringContaining("sandbox-image fallback"),
+    }));
   });
 
   it.each([

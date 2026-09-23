@@ -83,8 +83,9 @@
 // hosts the file-fed UI; stdout contains its URL only. Land requests record
 // their queued/deferred reason and each merge/gate-2/push transition so that
 // UI status is event evidence rather than reducer inference (#168). After the record exists,
-// operator complaints are events; stderr is reserved for the internal-failure
-// banner.
+// routine recoveries are notice events in the feed, while conditions that may
+// need human action are complaint events in the header too (#172); stderr is
+// reserved for the internal-failure banner.
 // Container-backed events retain cgroup peak-memory and OOMKilled evidence;
 // merger-stack lifecycle records are emitted after teardown (#141).
 //
@@ -356,7 +357,7 @@ export function selectTerminalExit(args: {
 }
 
 export type OriginLockWakeDecision =
-  | { readonly kind: "continue"; readonly warning: string | null }
+  | { readonly kind: "continue"; readonly notice: string | null }
   | { readonly kind: "halt"; readonly complaint: string; readonly exit: TerminalExit };
 
 // The scheduler-side half of the origin lease contract (#139), pure so both
@@ -365,11 +366,11 @@ export type OriginLockWakeDecision =
 export function decideOriginLockWake(
   renewal: OriginLockRenewal,
 ): OriginLockWakeDecision {
-  if (renewal.kind === "renewed") return { kind: "continue", warning: null };
+  if (renewal.kind === "renewed") return { kind: "continue", notice: null };
   if (renewal.kind === "retained") {
     return {
       kind: "continue",
-      warning: `Origin lease renewal failed while our lease remains valid ` +
+      notice: `Origin lease renewal failed while our lease remains valid ` +
         `until ${renewal.claim.lease.expires}: ${renewal.reason}`,
     };
   }
@@ -674,7 +675,9 @@ export async function run(
     await checkForgeReachabilityForPreflight({
       ...preflightBase,
       onEvent: (event) => {
-        if (event.kind === "complaint") console.error(event.message);
+        if (event.kind === "complaint" || event.kind === "notice") {
+          console.error(event.message);
+        }
       },
     });
   } catch (err) {
@@ -910,11 +913,10 @@ export async function run(
   ): Promise<void> => {
     const decision = decideOriginLockWake(renewal);
     if (decision.kind === "continue") {
-      if (decision.warning === null) return;
+      if (decision.notice === null) return;
       await runRecord.emit({
-        kind: "complaint",
-        severity: "warning",
-        message: decision.warning,
+        kind: "notice",
+        message: decision.notice,
       });
       return;
     }

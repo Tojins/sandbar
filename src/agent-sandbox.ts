@@ -99,6 +99,9 @@
 // are reusable, and reuse pins an off-branch HEAD the same way before
 // restoring the issue branch; otherwise a fresh attempt would inherit the
 // prior attempt's detached HEAD or scratch branch.
+// Reuse warnings are routine recovery evidence and the run records them as
+// feed-only notices; preservation errors remain operator-facing complaints
+// through the severity carried by `onNotice` (#172).
 //
 // `copyToWorktree` has two resolved forms (#144 decision 7): legacy strings
 // still join to the operator checkout and mirror the same relative path, while

@@ -56,7 +56,9 @@
 // What a FAILED reviewer run means is reviewer-run.ts's policy (#41); this
 // file only adapts `sandbox.run`'s throw into the shape that policy
 // classifies, which is why the try/catch below returns a value instead of
-// substituting prose. Each role also receives only its configured prompt
+// substituting prose. The allowed first harness failure is a feed-only notice;
+// the second remains the terminal that stops the loop (#172). Each role also
+// receives only its configured prompt
 // extension; prompt.ts probes path extensions in the issue worktree so a
 // branch can introduce the instructions it is expected to follow (#78, #91).
 // Successful review rounds accumulate here beside the commits they judged and
@@ -87,6 +89,8 @@
 // Sandbox close defers clone reclamation silently to run.ts's next origin-lease
 // barrier; this is distinct from the human-inspection preservation channel and
 // therefore cannot overwrite or manufacture an operator-facing reason (#139).
+// Reusing a dirty/off-branch clone and fast-forwarding a clean one are likewise
+// feed-only notices; D1/#27 remain the later authority that can refuse it.
 // Each duration-bearing agent event carries that invocation's peak-memory/OOM
 // evidence, gate events retain it per step, and both stacks emit each sibling's
 // final teardown record after their resources are removed (#141).
@@ -220,6 +224,15 @@ import {
 } from "./prompt.js";
 
 export const FAILURE_TAIL_LINES = 200;
+
+function agentSandboxNotice(
+  severity: "warning" | "error",
+  message: string,
+): EventInput {
+  return severity === "warning"
+    ? { kind: "notice", message }
+    : { kind: "complaint", severity, message };
+}
 
 function requireImplementerAttemptEvidence(
   run: Pick<agentSandbox.SandboxRunResult, "silent" | "commits">,
@@ -916,11 +929,9 @@ async function runSandboxCycle(
       layout: config.layout,
       hooks: opts.hooks,
       copyToWorktree: [...opts.copyToWorktree],
-      onNotice: (severity, message) => opts.onEvent({
-        kind: "complaint",
-        severity,
-        message,
-      }),
+      onNotice: (severity, message) => opts.onEvent(
+        agentSandboxNotice(severity, message),
+      ),
     });
     preparedWorktreePath = worktreePath;
     worktreeMs = worktreeTimer();
@@ -982,8 +993,7 @@ async function runSandboxCycle(
           onFallback: async (detail) => {
             const line = `issue=${issue.id} sandbox-image fallback — ${detail}`;
             await opts.onEvent({
-              kind: "complaint",
-              severity: "warning",
+              kind: "notice",
               message: line,
             });
           },
@@ -1020,9 +1030,9 @@ async function runSandboxCycle(
           literalEnv: config.sandboxGateAttachments.env,
           preparedWorktreePath: worktreePath,
           ...(extraMounts.length === 0 ? {} : { extraMounts }),
-          onNotice: (severity, message) => opts.onEvent({
-            kind: "complaint", severity, message,
-          }),
+          onNotice: (severity, message) => opts.onEvent(
+            agentSandboxNotice(severity, message),
+          ),
           ...(sbxContainers.length > 0
             ? {
                 // The siblings attach to the agent container, so they cannot be
@@ -2504,8 +2514,7 @@ export async function runAdjudicator(
     );
     if (invocation < REVIEWER_MAX_INVOCATIONS) {
       await opts.onEvent({
-        kind: "complaint",
-        severity: "warning",
+        kind: "notice",
         message:
           `issue=${issue.id} attempt=${action.attempt} adjudication ` +
           `pass=${rejection.pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} ` +
@@ -2701,8 +2710,7 @@ export async function runReviewer(
             `pass=${pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — ` +
             `retrying (${detail.split("\n")[0]})`;
           await opts.onEvent({
-            kind: "complaint",
-            severity: "warning",
+            kind: "notice",
             message: line,
           });
         },

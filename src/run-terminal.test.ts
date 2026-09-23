@@ -126,7 +126,7 @@ describe("origin lease loss (#139)", () => {
       reason: "network down",
     })).toEqual({
       kind: "continue",
-      warning: expect.stringContaining("network down"),
+      notice: expect.stringContaining("network down"),
     });
   });
 });

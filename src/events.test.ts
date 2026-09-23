@@ -38,7 +38,7 @@ describe("event record", () => {
       baseDir, now: new Date("2026-05-05T21:15:32.101Z"), start,
     });
     await Promise.all([
-      record.emit({ kind: "complaint", severity: "warning", message: "one" }),
+      record.emit({ kind: "notice", message: "one" }),
       record.emit({ kind: "complaint", severity: "error", message: "two" }),
     ]);
     await Promise.all([
@@ -47,7 +47,7 @@ describe("event record", () => {
     ]);
     const events = await readEventsFile(record.eventsPath);
     expect(events.map((event) => [event.seq, event.kind])).toEqual([
-      [1, "run-start"], [2, "complaint"], [3, "complaint"], [4, "run-end"],
+      [1, "run-start"], [2, "notice"], [3, "complaint"], [4, "run-end"],
     ]);
     expect(await readFile(record.eventsPath, "utf8")).toMatch(/\n$/);
   });
