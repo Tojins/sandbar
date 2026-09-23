@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { EVENT_SCHEMA_VERSION, type RunEvent } from "./events.js";
-import { reduceRunEvents, waitingReasonText } from "./run-state.js";
+import {
+  reduceRunEvents as reduce,
+  type ReduceRunOptions,
+  waitingReasonText,
+} from "./run-state.js";
 
 const at = (seq: number, ts: string, event: object): RunEvent =>
   ({ seq, ts, ...event }) as RunEvent;
+
+const reduceRunEvents = (
+  events: readonly RunEvent[],
+  options: Omit<ReduceRunOptions, "runDirectory">,
+) => reduce(events, { ...options, runDirectory: "/logs/run-test" });
 
 describe("run event reducer", () => {
   it("renders excluded label actors in the waiting list", () => {
@@ -199,7 +208,9 @@ describe("run event reducer", () => {
       .toMatchObject({ peakMemoryBytes: 7000, oomKilled: true });
     expect(state.events.find((event) => event.text === "sandbox container db stopped"))
       .toMatchObject({ peakMemoryBytes: 8000, oomKilled: true });
-    expect(state.run.complaints).toEqual([{ severity: "warning", text: "stale config" }]);
+    expect(state.run.complaints).toEqual([
+      { seq: 10, severity: "warning", text: "stale config" },
+    ]);
   });
 
   it.each([

@@ -2,7 +2,9 @@
 //
 // The event record is complete; this module decides what is visible. It owns
 // the pool timeline, waiting/parked join and compact event prose, while the
-// HTTP server owns only file discovery and delivery. Landing rows consume the
+// HTTP server owns only file discovery and delivery. Header complaints retain
+// their event sequence so the browser can key per-viewer dismissals by run
+// directory and occurrence without changing the event record (#171). Landing rows consume the
 // explicit request status/reason transitions in the record; they never infer a
 // queue position or merger step from event adjacency (#168). Wall-clock `now` and PID
 // liveness are explicit inputs so tests do not depend on either ambient fact.
@@ -94,6 +96,7 @@ export type FeedEvent = ContainerResources & {
 export type UiState = {
   readonly now: string;
   readonly run: {
+    readonly directory: string;
     readonly startedAt: string;
     readonly status: "live" | "ended" | "crashed";
     readonly driver: string;
@@ -108,7 +111,11 @@ export type UiState = {
     // request is observed, so a reader watching a long drain sees WHY nothing
     // new is being admitted instead of an idle-looking pool.
     readonly restart: { readonly detail: string; readonly at: string } | null;
-    readonly complaints: readonly { readonly severity: "warning" | "error"; readonly text: string }[];
+    readonly complaints: readonly {
+      readonly seq: number;
+      readonly severity: "warning" | "error";
+      readonly text: string;
+    }[];
   };
   readonly pool: readonly PoolIssueState[];
   readonly waiting: readonly WaitingIssueState[];
@@ -454,6 +461,7 @@ function finishedChunksFrom(events: readonly RunEvent[]): readonly FinishedChunk
 }
 
 export type ReduceRunOptions = {
+  readonly runDirectory: string;
   readonly now: Date;
   readonly pidAlive: boolean;
   readonly recentFinished?: readonly FinishedIssueState[];
@@ -475,7 +483,11 @@ export function reduceRunEvents(
   let exit: Extract<RunEvent, { kind: "exit" }> | null = null;
   let restart: Extract<RunEvent, { kind: "restart-requested" }> | null = null;
   let ended = false;
-  const complaints: Array<{ severity: "warning" | "error"; text: string }> = [];
+  const complaints: Array<{
+    seq: number;
+    severity: "warning" | "error";
+    text: string;
+  }> = [];
   const feed: FeedEvent[] = [];
   const parkedTerminals = new Map<
     number,
@@ -656,7 +668,7 @@ export function reduceRunEvents(
         restart = event;
         break;
       case "complaint":
-        complaints.push({ severity: event.severity, text: event.message });
+        complaints.push({ seq: event.seq, severity: event.severity, text: event.message });
         break;
       case "exit":
         exit = event;
@@ -744,6 +756,7 @@ export function reduceRunEvents(
   return {
     now: options.now.toISOString(),
     run: {
+      directory: options.runDirectory,
       startedAt: start.ts,
       status,
       driver: start.driver,

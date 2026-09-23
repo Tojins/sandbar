@@ -15,6 +15,9 @@
 // event callback. The same seam takes a server error after listen, which would
 // otherwise be an unhandled 'error' and the internal-failure halt the first
 // sentence rules out. Binding is exclusive and EADDRINUSE is a startup refusal.
+// The response names the resolved run directory and complaint event sequences;
+// the page combines them only in localStorage, keeping #171's dismissal state
+// per viewer and out of both the server and events.jsonl.
 //
 // Both production callers omit `host`: the production bind contract is
 // loopback only, and the page deliberately has no authentication. A server
@@ -123,6 +126,7 @@ export async function readUiState(
     ? resolve(options.liveRunDir) === resolve(newest)
     : await recordedRunIsAlive(start.workdir, start.pid);
   return reduceRunEvents(current, {
+    runDirectory: resolve(newest),
     now: options.now ?? new Date(),
     pidAlive,
     recentFinished: history,
