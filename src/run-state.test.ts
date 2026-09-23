@@ -211,7 +211,7 @@ describe("run event reducer", () => {
     expect(state.events.find((event) => event.text === "sandbox container db stopped"))
       .toMatchObject({ peakMemoryBytes: 8000, oomKilled: true });
     expect(state.run.complaints).toEqual([
-      { seq: 10, severity: "warning", text: "stale config" },
+      { seq: 11, severity: "warning", text: "stale config" },
     ]);
   });
 
