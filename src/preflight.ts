@@ -1318,27 +1318,22 @@ async function originSourceTip(
   return result.ok ? result.stdout.trim() || null : null;
 }
 
-// The daemon's refresh boundary (#133). One fetch updates the source plus all
-// three sandbar namespaces, so a planner never sees a half-refreshed cache and
-// each idle poll spends one network round trip. Measuring the source tip around it
-// makes a human push trigger the same image refresh as a source landing
-// performed by sandbar itself.
-export async function fetchOriginRefs(
+async function fetchOriginRefspecs(
   repoDir: string,
   sourceBranch: string,
+  refspecs: readonly string[],
+  description: string,
 ): Promise<OriginRefresh> {
   const before = await originSourceTip(repoDir, sourceBranch);
   const failure = await captureFailure(repoDir, "git", [
     "fetch", "origin", "--prune",
     `+refs/heads/${sourceBranch}:refs/remotes/origin/${sourceBranch}`,
-    ...ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
-    ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
-    ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+    ...refspecs,
     "--quiet",
   ]);
   const failures = failure === null
     ? []
-    : [`Fetching origin refs (source, issues, chunks, members) failed: ${failure}`];
+    : [`Fetching origin refs (${description}) failed: ${failure}`];
   const after = failures.length === 0
     ? await originSourceTip(repoDir, sourceBranch)
     : before;
@@ -1346,6 +1341,35 @@ export async function fetchOriginRefs(
     sourceChanged: before !== null && after !== null && before !== after,
     failures,
   };
+}
+
+// The daemon's poll refresh (#133). One fetch updates the source plus all three
+// sandbar namespaces, so the next wake never sees a half-refreshed cache.
+// Measuring the source tip around it makes a human push trigger the same image
+// refresh as a source landing performed by sandbar itself.
+export async function fetchOriginRefs(
+  repoDir: string,
+  sourceBranch: string,
+): Promise<OriginRefresh> {
+  return fetchOriginRefspecs(repoDir, sourceBranch, [
+    ...ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
+    ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+    ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+  ], "source, issues, chunks, members");
+}
+
+// Planning's containment decisions need a snapshot obtained by that
+// recompute, not merely the last idle poll's cache (#174). Issue branches do
+// not answer either containment question, so this narrower fetch updates only
+// the source, chunk and membership namespaces the planner is about to read.
+export async function fetchPlanningRefs(
+  repoDir: string,
+  sourceBranch: string,
+): Promise<OriginRefresh> {
+  return fetchOriginRefspecs(repoDir, sourceBranch, [
+    ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
+    ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+  ], "source, chunks, members");
 }
 
 export async function checkForgeReachabilityForPreflight(

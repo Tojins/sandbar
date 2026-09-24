@@ -175,6 +175,7 @@ vi.mock("./preflight.js", async (importOriginal) => ({
   runPreflightAfterReachability: vi.fn(async () => "anyone" as const),
   absoluteMountSources: vi.fn(() => []),
   fetchOriginRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
+  fetchPlanningRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
 }));
 vi.mock("./containers.js", () => ({
   cleanupOrphanContainers: vi.fn(async () => ({ removed: [], failures: [] })),
@@ -261,6 +262,7 @@ vi.mock("./merger.js", async (importOriginal) => ({
 
 import type { RunConfig } from "./config.js";
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
+import { SandbarError } from "./errors.js";
 import type { InnerLoopOptions } from "./inner-loop.js";
 import { MergerError, realAdapter, type RunMergerOptions } from "./merger.js";
 import { realAdapter as realFinalizeAdapter } from "./finalize.js";
@@ -273,6 +275,7 @@ import { UiPortInUseError, startUiServer } from "./ui-server.js";
 import {
   checkForgeReachabilityForPreflight,
   fetchOriginRefs,
+  fetchPlanningRefs,
   runPreflightAfterReachability,
 } from "./preflight.js";
 import { startKeepawake } from "./keepawake.js";
@@ -304,11 +307,12 @@ const issue = (id: string) => ({
 const resolution = (plan: ReturnType<typeof issue>[]) => ({
   plan,
   candidates: plan.map((candidate) => ({ ...candidate, ready: true })),
-  waiting: [], overrides: [], landedChunks: [], chunkNameDrifts: [],
+  waiting: [], overrides: [], landedChunks: [], chunkNameDrifts: [], chunkRefreshes: [],
 });
 const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
   merged, chunkLanded: [], skipped: [], pushed, unclosed: [], mergedChunks: [],
-  deferredChunks: [], skippedChunks: [],
+  deferredChunks: [], skippedChunks: [], refreshedChunks: [],
+  failedChunkRefreshes: [],
 });
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
@@ -369,6 +373,11 @@ describe("run quota orchestration (#109)", () => {
     seams.wakeStatusReports.length = 0;
     vi.mocked(fetchOriginRefs).mockReset();
     vi.mocked(fetchOriginRefs).mockRejectedValue(new Error("stop after idle poll"));
+    vi.mocked(fetchPlanningRefs).mockReset();
+    vi.mocked(fetchPlanningRefs).mockResolvedValue({
+      sourceChanged: false,
+      failures: [],
+    });
     vi.mocked(ensureImages).mockReset();
     vi.mocked(ensureImages).mockResolvedValue(new Map());
     vi.mocked(createBranchImages).mockReset();
@@ -1299,6 +1308,39 @@ describe("run quota orchestration (#109)", () => {
     }
   });
 
+  it("retries a failed plan-time ref refresh before reading containment", async () => {
+    const arrived = issue("136");
+    seams.plan.mockResolvedValue(resolution([arrived]));
+    vi.mocked(fetchOriginRefs).mockResolvedValue({
+      sourceChanged: false,
+      failures: [],
+    });
+    vi.mocked(fetchPlanningRefs)
+      .mockResolvedValueOnce({
+        sourceChanged: false,
+        failures: ["Fetching planning refs failed: network unavailable"],
+      })
+      .mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:4");
+
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(fetchPlanningRefs).toHaveBeenCalledTimes(4);
+    expect(eventsOf("notice")).toContainEqual({
+      kind: "notice",
+      message: "Planning ref refresh failed; retrying in 1ms: " +
+        "Fetching planning refs failed: network unavailable",
+    });
+    expect(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[1])
+      .toBeLessThan(seams.plan.mock.invocationCallOrder[0]!);
+  });
+
   // The drained daemon's only wake is that poll timer, so a fetch that stays
   // broken used to hold the deploy on a process that would never leave —
   // including when the commit waiting to run is the revert for that fetch
@@ -1491,6 +1533,55 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.wakeLocks[0]?.onStatus).toHaveBeenCalledOnce();
     // The only stop is terminal cleanup: idle did not release this holder.
     expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes images when the planning fetch alone discovers a moved source", async () => {
+    const arrived = issue("174");
+    const oldAgentImages = {
+      declaredTag: "agent-old", augment: vi.fn(async () => "agent-old"),
+      builtTags: () => ["agent-old"], liveTags: () => ["agent-old"],
+    };
+    const newAgentImages = {
+      declaredTag: "agent-new", augment: vi.fn(async () => "agent-new"),
+      builtTags: () => ["agent-new"], liveTags: () => ["agent-new"],
+    };
+    const oldBranchImages = {
+      resolve: vi.fn(async () => new Map()), builtTags: () => ["branch-old"],
+    };
+    const newBranchImages = {
+      resolve: vi.fn(async () => new Map()), builtTags: () => ["branch-new"],
+    };
+    vi.mocked(createAgentImages)
+      .mockResolvedValueOnce(oldAgentImages)
+      .mockResolvedValue(newAgentImages);
+    vi.mocked(createBranchImages)
+      .mockReturnValueOnce(oldBranchImages)
+      .mockReturnValue(newBranchImages);
+    vi.mocked(fetchPlanningRefs)
+      .mockResolvedValueOnce({ sourceChanged: true, failures: [] })
+      .mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.plan.mockResolvedValue(resolution([arrived]));
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:4");
+
+    expect(fetchOriginRefs).not.toHaveBeenCalled();
+    expect(ensureImages).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(ensureImages).mock.invocationCallOrder[1])
+      .toBeLessThan(seams.innerLoop.mock.invocationCallOrder[0]!);
+    expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
+      action: "origin-refreshed",
+      detail: "origin/main moved before planning; refreshing source images",
+    }));
+    const admittedOptions = seams.innerLoop.mock.calls[0]?.[1];
+    expect(admittedOptions.config.agentImages).toBe(newAgentImages);
+    expect(admittedOptions.branchImages).toBe(newBranchImages);
   });
 
   it("drives issue quota through run(), exits 4, and lands completed work first", async () => {
@@ -1978,6 +2069,103 @@ describe("run quota orchestration (#109)", () => {
     }));
   });
 
+  it("finalises a source landing before propagating refresh infrastructure failure", async () => {
+    const done = issue("1");
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    // First admit the issue. The refresh appears on the recompute after its
+    // terminal, so both the DONE branch and refresh share one landing pass.
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue({
+        ...resolution([]),
+        chunkRefreshes: [refresh],
+      });
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    seams.merger.mockImplementation(async (
+      batch: ReturnType<typeof issue>[],
+      _adapter,
+      _log,
+      _gateLog,
+      options: RunMergerOptions,
+    ) => {
+      options.onSourceSettled?.(summary(batch));
+      throw new SandbarError("refresh origin unavailable");
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:1");
+
+    expect(seams.finalize).toHaveBeenCalledWith(
+      [expect.objectContaining({ kind: "merged", issue: done })],
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("refresh origin unavailable"),
+    }));
+  });
+
+  it("preserves a refresh failure when draining a sibling also fails", async () => {
+    const done = issue("1");
+    const sibling = issue("2");
+    const slow = deferred<{
+      type: "NEEDS-INFO"; questions: string; strandedHead: null;
+    }>();
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce(resolution([done, sibling]))
+      .mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
+      candidate.id === done.id
+        ? Promise.resolve({ type: "DONE", commits: [{ sha: "abc" }] })
+        : slow.promise);
+    seams.merger.mockImplementation(async (
+      batch: ReturnType<typeof issue>[],
+      _adapter,
+      _log,
+      _gateLog,
+      options: RunMergerOptions,
+    ) => {
+      options.onSourceSettled?.(summary(batch));
+      slow.resolve({
+        type: "NEEDS-INFO",
+        questions: "answer",
+        strandedHead: null,
+      });
+      throw new SandbarError("refresh origin unavailable");
+    });
+    seams.finalize.mockImplementation(async (inputs: { kind: string }[]) => {
+      if (inputs.some((input) => input.kind === "needs-info")) {
+        throw new Error("sibling finalize failed");
+      }
+      return [];
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2 })).rejects.toThrow("EXIT:1");
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("sibling finalize failed"),
+    }));
+    expect(eventsOf("complaint").some((event) =>
+      String(event.message).includes("refresh origin unavailable"))).toBe(true);
+  });
+
   it("records exactly one duration-bearing event for a completed landing batch", async () => {
     const done = issue("1");
     seams.plan
@@ -2417,6 +2605,147 @@ describe("run quota orchestration (#109)", () => {
     ]));
     expect(eventsOf("exit").some((event) => event.tag === "stuck")).toBe(false);
     expect(eventsOf("idle").length).toBeGreaterThan(0);
+  });
+
+  it("starts a landing pass for a planner-requested chunk refresh", async () => {
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce({ ...resolution([]), chunkRefreshes: [refresh] })
+      .mockResolvedValue(resolution([]));
+    vi.mocked(fetchOriginRefs).mockRejectedValueOnce(
+      new Error("stop after refresh pass"),
+    );
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(seams.merger.mock.calls[0]?.[0]).toEqual([]);
+    expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkRefresh)
+      .toEqual({ requests: [refresh], sourceBranch: "main" });
+    expect(fetchPlanningRefs).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[0])
+      .toBeLessThan(seams.plan.mock.invocationCallOrder[0]!);
+    expect(seams.merger.mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[1]!);
+    expect(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[1])
+      .toBeLessThan(seams.plan.mock.invocationCallOrder[1]!);
+  });
+
+  it("does not refresh a future admission while provider closure drains", async () => {
+    const target = issue("1");
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce(resolution([target]))
+      .mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    seams.innerLoop.mockImplementation(async (
+      _candidate: ReturnType<typeof issue>,
+      options: { providerState: { closeQuota(provider: "claude", measurement: object): void } },
+    ) => {
+      options.providerState.closeQuota("claude", {
+        status: "rejected", window: "five_hour", resetsAt: 42,
+      });
+      return {
+        type: "QUOTA" as const,
+        provider: "claude" as const,
+        window: "five_hour" as const,
+        resetsAt: 42,
+      };
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:4");
+
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.merger).not.toHaveBeenCalled();
+  });
+
+  it("does not attach a chunk refresh to committed work during restart drain", async () => {
+    const installation = await mkdtemp(join(tmpdir(), "sandbar-refresh-restart-"));
+    const done = issue("1");
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    seams.innerLoop.mockImplementation(async () => {
+      await writeFile(join(installation, RESTART_REQUEST_FILE), "abc1234\n");
+      return { type: "DONE", commits: [{ sha: "abc" }] };
+    });
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) =>
+      summary(batch));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    try {
+      await expect(run(
+        config,
+        { configPath: join(installation, "sandbar.config.mjs") },
+      )).rejects.toThrow("EXIT:75");
+
+      expect(exit).toHaveBeenCalledWith(75);
+      expect(seams.merger).toHaveBeenCalledOnce();
+      expect(seams.merger.mock.calls[0]?.[0]).toEqual([done]);
+      expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkRefresh)
+        .toBeUndefined();
+    } finally {
+      await rm(installation, { recursive: true, force: true });
+    }
+  });
+
+  it("does not attach a chunk refresh to committed work during a storage drain", async () => {
+    const done = issue("1");
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) =>
+      summary(batch));
+    let measurement = 0;
+    vi.mocked(graphRootSpace).mockImplementation(async () => ({
+      graphRoot: "/podman/store",
+      availableBytes: measurement++ < 2
+        ? 20n * 1024n * 1024n * 1024n
+        : 9n * 1024n * 1024n * 1024n,
+    }));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:3");
+
+    expect(exit).toHaveBeenCalledWith(3);
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(seams.merger.mock.calls[0]?.[0]).toEqual([done]);
+    expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkRefresh)
+      .toBeUndefined();
   });
 
   it("hands a deferred request to a landing pass triggered by its completed member", async () => {

@@ -67,6 +67,15 @@
 //                              (#168), the chunk branch is
 //                              merged in the SAME source pass, its members are
 //                              closed, and the branch is deleted.
+//                              A chained member whose other blocker became
+//                              CLOSED waits until its origin chunk contains
+//                              origin/source (#174). The same landing path
+//                              merges source into that existing chunk after
+//                              source landings, gates it, and pushes directly;
+//                              an unsalvageable composition parks the dependent.
+//                              Since that work exists only for a future
+//                              admission, every admission-closing drain leaves
+//                              it for the next run.
 //   Finalise:                  Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
@@ -101,7 +110,9 @@
 //
 // At capacity below `maxParallelIssues`, one cancellable wait races the next
 // slot completion against `pollIntervalMs`. A poll refreshes source, issue,
-// chunk and member refs before running the ordinary plan. A failed refresh is
+// chunk and member refs; every recompute refreshes those namespaces again at
+// the planning boundary so containment never reads a pre-push cache (#174).
+// A failed refresh at either boundary is
 // recorded as a feed-only notice and waits for the next wake instead of
 // killing the daemon, unless
 // `decideAfterFailedRefresh` says this daemon is a drained restart whose exit
@@ -274,6 +285,7 @@ import {
 } from "./plan-resolver.js";
 import {
   ContinuousPool,
+  chunkRefreshRequestsAreRunnable,
   decideAfterFailedRefresh,
   decideSchedulerAction,
   type SchedulerExit,
@@ -283,6 +295,7 @@ import {
   absoluteMountSources,
   checkForgeReachabilityForPreflight,
   fetchOriginRefs,
+  fetchPlanningRefs,
   PreflightError,
   runPreflightAfterReachability,
 } from "./preflight.js";
@@ -1392,7 +1405,7 @@ export async function run(
   // point it was observed. The next recompute measures storage first; a low
   // reading keeps this latched through the drain so recovery can perform it,
   // while an exit leaves it untouched and starts no unnecessary build.
-  let pendingSourceImageRefresh: "poll" | "landing" | null = null;
+  let pendingSourceImageRefresh: "poll" | "planning" | "landing" | null = null;
   // What the observed request carried, and the whole of the drain's state.
   let restartRequested: string | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
@@ -1588,6 +1601,25 @@ export async function run(
     }
   };
 
+  // Draining is cleanup for a landing failure: report a sibling finalization
+  // failure beside it, but never let that secondary fault replace the original
+  // error at the internal-failure boundary.
+  const drainPreservingLandingFailure = async (
+    landingFailure: unknown,
+  ): Promise<never> => {
+    try {
+      await drainAfterLandingHalt();
+    } catch (drainErr) {
+      const detail = faultDetail(drainErr);
+      await runRecord.emit({
+        kind: "complaint",
+        severity: "error",
+        message: "Draining in-flight work after the landing failure also failed: " + detail,
+      });
+    }
+    throw landingFailure;
+  };
+
   const cleanupLandingResources = async (
     cleanups: readonly (() => Promise<void>)[],
     landingFailure: unknown | null,
@@ -1702,6 +1734,21 @@ export async function run(
           });
           return;
         }
+      case "chunk-refreshed":
+        await runRecord.emit({
+          kind: "reconcile",
+          action: "chunk-refreshed",
+          detail: `${outcome.refresh.branch} now contains origin/${config.sourceBranch}`,
+        });
+        return;
+      case "chunk-refresh-failed":
+        await runRecord.emit({
+          kind: "reconcile",
+          action: "chunk-refresh-failed",
+          detail: `${outcome.failure.refresh.branch} could not be refreshed; parking ` +
+            outcome.failure.dependents.map((issue) => `#${issue.id}`).join(", "),
+        });
+        return;
     }
   };
 
@@ -1756,6 +1803,42 @@ export async function run(
     }
   }
 
+  const recoverFromRefRefreshFailure = async (
+    boundary: "Poll" | "Planning ref",
+    failures: readonly string[],
+  ): Promise<"exit" | "retry"> => {
+    // Planning and landing cannot safely use a partially refreshed namespace.
+    // The drained-restart exception is the same at either fetch boundary: it
+    // reads no refs, while every other state waits for a complete snapshot.
+    const stalled = decideAfterFailedRefresh({
+      restartRequested: restartRequested !== null,
+      active: pool.activeCount,
+      ongoing: pool.ongoingCount,
+      hasPendingTerminals: pool.hasPendingTerminals,
+    });
+    const next = stalled.kind === "exit"
+      ? "the pending restart needs none of it, so exiting"
+      : `retrying in ${config.pollIntervalMs}ms`;
+    const message =
+      `${boundary} refresh failed; ${next}: ${failures.join("; ")}`;
+    await runRecord.emit(stalled.kind === "exit"
+      ? { kind: "complaint", severity: "warning", message }
+      : { kind: "notice", message });
+    if (stalled.kind === "exit") {
+      terminalExit = await announceExit(
+        schedulerExit(stalled.reason, {
+          pool,
+          providerExit: providerExitPending ?? closedProviderExit(config, providerState),
+          restartDetail: restartRequested,
+          storage: storageLow,
+        }),
+      );
+      return "exit";
+    }
+    nextPlanTrigger = await waitForSchedulerWake();
+    return "retry";
+  };
+
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
@@ -1776,36 +1859,9 @@ export async function run(
       if (planTrigger === "poll") {
         const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
         if (refresh.failures.length > 0) {
-          // This iteration cannot plan or land on refs it did not get, and for
-          // an emptied pool it is also the only wake there is, so a fetch that
-          // stays broken would hold a latched restart here forever (#146).
-          // `decideAfterFailedRefresh` owns which of the two that is.
-          const stalled = decideAfterFailedRefresh({
-            restartRequested: restartRequested !== null,
-            active: pool.activeCount,
-            ongoing: pool.ongoingCount,
-            hasPendingTerminals: pool.hasPendingTerminals,
-          });
-          const next = stalled.kind === "exit"
-            ? "the pending restart needs none of it, so exiting"
-            : `retrying in ${config.pollIntervalMs}ms`;
-          const message =
-            `Poll refresh failed; ${next}: ${refresh.failures.join("; ")}`;
-          await runRecord.emit(stalled.kind === "exit"
-            ? { kind: "complaint", severity: "warning", message }
-            : { kind: "notice", message });
-          if (stalled.kind === "exit") {
-            terminalExit = await announceExit(
-              schedulerExit(stalled.reason, {
-                pool,
-                providerExit: providerExitPending ?? closedProviderExit(config, providerState),
-                restartDetail: restartRequested,
-                storage: storageLow,
-              }),
-            );
+          if (await recoverFromRefRefreshFailure("Poll", refresh.failures) === "exit") {
             break;
           }
-          nextPlanTrigger = await waitForSchedulerWake();
           continue;
         }
         // A terminal is eligible again only after the poll has refreshed the
@@ -1889,18 +1945,44 @@ export async function run(
             `${measuredSpace.availableBytes} bytes free after image reconciliation`,
         });
       }
+      // The poll snapshot is not a plan-time containment answer. A landing
+      // pass pushes from an ephemeral merger clone, and a human may move the
+      // source branch between any two wakes, so neither necessarily updates
+      // this cache's remote-tracking chunk/source refs. Refresh them for this
+      // recompute immediately before buildPlan reads containment (#174).
+      const planningRefresh = await fetchPlanningRefs(
+        layout.repoDir,
+        config.sourceBranch,
+      );
+      if (planningRefresh.failures.length > 0) {
+        if (
+          await recoverFromRefRefreshFailure(
+            "Planning ref",
+            planningRefresh.failures,
+          ) === "exit"
+        ) {
+          break;
+        }
+        continue;
+      }
+      if (planningRefresh.sourceChanged && restartRequested === null) {
+        pendingSourceImageRefresh ??= planTrigger === "poll" ? "poll" : "planning";
+      }
       if (
         storageLow === null &&
         restartRequested === null &&
         pendingSourceImageRefresh !== null
       ) {
-        if (pendingSourceImageRefresh === "poll") {
-          const line =
-            `origin/${config.sourceBranch} moved during poll; refreshing source images`;
+        if (
+          pendingSourceImageRefresh === "poll" ||
+          pendingSourceImageRefresh === "planning"
+        ) {
           await runRecord.emit({
             kind: "preflight",
             action: "origin-refreshed",
-            detail: line,
+            detail: pendingSourceImageRefresh === "poll"
+              ? `origin/${config.sourceBranch} moved during poll; refreshing source images`
+              : `origin/${config.sourceBranch} moved before planning; refreshing source images`,
           });
         }
         await refreshSourceImages();
@@ -1919,6 +2001,7 @@ export async function run(
         readyLabelPolicy,
         k: Math.max(0, config.maxParallelIssues - pool.activeCount),
         repoDir: layout.repoDir,
+        sourceBranch: config.sourceBranch,
         ongoing: new Set([...pool.startedIds()].map(Number)),
       };
       let resolution = await buildPlan(repo, planOptions);
@@ -2084,6 +2167,7 @@ export async function run(
         landedChunks: resolution.landedChunks,
         chunkNameDrifts: resolution.chunkNameDrifts,
         selectedLandRequests,
+        chunkRefreshes: resolution.chunkRefreshes,
       });
       const planDiagnosticsChanged = lastPlanDiagnostics !== null &&
         planDiagnostics !== lastPlanDiagnostics;
@@ -2102,7 +2186,7 @@ export async function run(
       // The plan record is the resolver's answer, not the narrower admission
       // this observation may make. Active slots, cooldown and scheduler state
       // can all reduce admission without changing what the planner resolved.
-      const schedulerAction = decideSchedulerAction({
+      const schedulerSnapshot = {
         active: pool.activeCount,
         ongoing: pool.ongoingCount,
         hasCompleted: pool.hasCompleted,
@@ -2110,17 +2194,23 @@ export async function run(
         hasCandidates: pool.hasUnstarted(resolution.plan),
         hasRetries: pool.hasRetries,
         hasLandRequests: landRequests.length > 0,
+        hasChunkRefreshRequests: resolution.chunkRefreshes.length > 0,
         hasCapacity: pool.activeCount < config.maxParallelIssues,
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         providerClosed,
         restartRequested: restartRequested !== null,
         storageLow: storageLow !== null,
-      });
+      };
+      const schedulerAction = decideSchedulerAction(schedulerSnapshot);
+      const chunkRefreshes = chunkRefreshRequestsAreRunnable(schedulerSnapshot)
+        ? resolution.chunkRefreshes
+        : [];
       const pollDidWork =
         sourceChangedOnPoll || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
+        chunkRefreshes.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
       const pollIsReportable = pollDidWork || resolution.waiting.some(
         (entry) => entry.reason.kind === "label-actor",
@@ -2295,12 +2385,14 @@ export async function run(
       // Phase 3: Merge (procedural, in an isolated worktree off origin)
       // ---------------------------------------------------------------------
       let mergerSummary: MergerSummary | null = null;
+      let sourceSettledSummary: MergerSummary | null = null;
       // Tracker state the merger had already applied when it threw (see
       // MergerError.partial). Finalised even though the run is stopping.
       let haltPartial: MergerSummary | undefined;
       let halt = false;
       let mergerProviderError: AgentQuotaError | AgentCredentialError | null = null;
       let unexpectedLandingFailure: { readonly error: unknown } | null = null;
+      let postRefreshFailure: { readonly error: unknown } | null = null;
       // Why the run is stopping, in the short names the run log already uses.
       // Declared up here rather than beside the reports that fill it because
       // the merge phase's own halt is one of them, and the `Exit (halted): …`
@@ -2310,7 +2402,10 @@ export async function run(
       // source branch needs the same worktree, the same gate-2 stack and the
       // same resolve loop a DONE branch does, and a cycle can have one without
       // the other.
-      if (completedIssues.length > 0 || landRequests.length > 0) {
+      if (
+        completedIssues.length > 0 || landRequests.length > 0 ||
+        chunkRefreshes.length > 0
+      ) {
         const landingImages = currentImages;
         // The merger runs in a dedicated worktree detached at
         // origin/<sourceBranch>, NOT a checkout anyone stands in — so the
@@ -2459,7 +2554,11 @@ export async function run(
                   }));
                 },
                 onGate: (key, gate) => {
-                  const issueId = key.startsWith("chunk-") ? key.slice("chunk-".length) : key;
+                  const issueId = key.startsWith("chunk-refresh-")
+                    ? key.slice("chunk-refresh-".length)
+                    : key.startsWith("chunk-")
+                    ? key.slice("chunk-".length)
+                    : key;
                   const planned = completedIssues.find((issue) => issue.id === issueId);
                   return runRecord.emit({
                     kind: "gate",
@@ -2486,6 +2585,17 @@ export async function run(
                     chunkLanding: {
                       requests: selectedLandRequests,
                       sourceBranch: config.sourceBranch,
+                    },
+                  }
+                : {}),
+              ...(chunkRefreshes.length > 0
+                ? {
+                    chunkRefresh: {
+                      requests: chunkRefreshes,
+                      sourceBranch: config.sourceBranch,
+                    },
+                    onSourceSettled: (summary: MergerSummary) => {
+                      sourceSettledSummary = summary;
                     },
                   }
                 : {}),
@@ -2549,10 +2659,21 @@ export async function run(
               );
             }
           } else {
-            // Unknown failures are not merger verdicts. Carry the original
-            // value across the resource cleanup below, drain sibling work,
-            // then let the outer internal-failure handler report it unchanged.
-            unexpectedLandingFailure = { error: err };
+            if (err instanceof OriginLeaseLostDuringCleanupError) throw err;
+            if (sourceSettledSummary !== null) {
+              mergerSummary = sourceSettledSummary;
+              if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
+                mergerProviderError = err;
+                recordProviderClosure(providerState, err);
+              } else {
+                postRefreshFailure = { error: err };
+              }
+            } else {
+              // Unknown failures are not merger verdicts. Carry the original
+              // value across the resource cleanup below, drain sibling work,
+              // then let the outer internal-failure handler report it unchanged.
+              unexpectedLandingFailure = { error: err };
+            }
           }
         } finally {
           // Stack first: its containers bind-mount the worktree. Both teardown
@@ -2567,7 +2688,7 @@ export async function run(
           ].filter((cleanup): cleanup is () => Promise<void> => cleanup !== null);
           await cleanupLandingResources(
             cleanups,
-            unexpectedLandingFailure?.error ?? null,
+            unexpectedLandingFailure?.error ?? postRefreshFailure?.error ?? null,
           );
         }
         if (unexpectedLandingFailure) {
@@ -2577,18 +2698,7 @@ export async function run(
           // hand the internal-failure banner the wrong fault — a finalize
           // hiccup on a sibling instead of the landing that actually broke —
           // and the log would name a cause the operator cannot act on.
-          try {
-            await drainAfterLandingHalt();
-          } catch (drainErr) {
-            const detail = faultDetail(drainErr);
-            await runRecord.emit({
-              kind: "complaint",
-              severity: "error",
-              message: "Draining in-flight work after the landing failure also failed: " + detail,
-            });
-            throw unexpectedLandingFailure.error;
-          }
-          throw unexpectedLandingFailure.error;
+          await drainPreservingLandingFailure(unexpectedLandingFailure.error);
         }
       }
 
@@ -2757,11 +2867,16 @@ export async function run(
         outcomes.length,
         landedNow,
       );
-      nextPlanTrigger = landRequests.length > 0 || landedNow > 0
+      nextPlanTrigger =
+        landRequests.length > 0 || chunkRefreshes.length > 0 ||
+          landedNow > 0
         ? "landing-finished"
         : "terminal-finalized";
       if (sourceLandings > 0) {
         pendingSourceImageRefresh ??= "landing";
+      }
+      if (postRefreshFailure) {
+        await drainPreservingLandingFailure(postRefreshFailure.error);
       }
       if (selectedExit?.tag === "quota" || selectedExit?.tag === "credential") {
         providerExitPending = selectedExit;

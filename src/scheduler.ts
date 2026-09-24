@@ -58,12 +58,15 @@
 //
 // Restart and provider closure share `drainToward` because they are the same
 // stop: stop admitting, land what is already committed, let running work reach
-// its terminal, exit. Stuck deliberately keeps its own two lines — it does not
-// honour an outstanding `land` request on the way out, and folding it in here
-// would quietly change that.
+// its terminal, exit. A planner-requested chunk refresh is not committed work:
+// it prepares a base for a future admission, so every admission-closing arm
+// ignores it (including when another reason legitimately starts a landing
+// pass). Stuck deliberately keeps its own two lines — it does not honour an
+// outstanding `land` request on the way out, and folding it in here would
+// quietly change that.
 //
-// A POLL WHOSE REF REFRESH FAILED never reaches that decision: planning and
-// landing both read refs it did not get, so run.ts reports the failure and
+// A RECOMPUTE WHOSE REF REFRESH FAILED never reaches that decision: planning
+// and landing both read refs it did not get, so run.ts reports the failure and
 // waits for another wake. `decideAfterFailedRefresh` is the one exception, and
 // it is the whole rule (#146) — see its comment.
 //
@@ -115,6 +118,7 @@ export type SchedulerSnapshot = {
   readonly hasCandidates: boolean;
   readonly hasRetries: boolean;
   readonly hasLandRequests: boolean;
+  readonly hasChunkRefreshRequests: boolean;
   readonly hasCapacity: boolean;
   readonly noProgressSinceLanding: number;
   readonly noProgressBackstop: number;
@@ -122,6 +126,29 @@ export type SchedulerSnapshot = {
   readonly restartRequested: boolean;
   readonly storageLow: boolean;
 };
+
+// A chunk refresh exists only to make a future admission safe (#174). Once an
+// admission-closing condition is latched, refreshing that candidate's base is
+// no longer drain work. Keep this decision beside the scheduler precedence so
+// run.ts cannot accidentally attach refreshes to a landing pass that the drain
+// started for already-committed terminals or a human `land` request.
+export function chunkRefreshRequestsAreRunnable(
+  state: Pick<
+    SchedulerSnapshot,
+    | "hasChunkRefreshRequests"
+    | "restartRequested"
+    | "storageLow"
+    | "providerClosed"
+    | "noProgressSinceLanding"
+    | "noProgressBackstop"
+  >,
+): boolean {
+  return state.hasChunkRefreshRequests &&
+    !state.restartRequested &&
+    !state.storageLow &&
+    !state.providerClosed &&
+    state.noProgressSinceLanding < state.noProgressBackstop;
+}
 
 // Stop admitting, land what is committed, drain the rest, then exit — the shape
 // every stop that is not a fault has. Only the tag differs.
@@ -193,10 +220,16 @@ export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction
   ) {
     return {
       kind: "admit",
-      next: state.hasPendingTerminals || state.hasLandRequests ? "land" : "wait",
+      next: state.hasPendingTerminals || state.hasLandRequests ||
+          chunkRefreshRequestsAreRunnable(state)
+        ? "land"
+        : "wait",
     };
   }
-  if (state.hasPendingTerminals || state.hasLandRequests) {
+  if (
+    state.hasPendingTerminals || state.hasLandRequests ||
+    chunkRefreshRequestsAreRunnable(state)
+  ) {
     return { kind: "land" };
   }
   return { kind: "wait" };

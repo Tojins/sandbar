@@ -198,6 +198,17 @@ export type ChunkTarget = {
   readonly landed?: readonly ChunkMember[];
 };
 
+// A chunk that must catch up to the source branch before one or more chained
+// members may be admitted (#174). The planner groups triggering dependents by
+// branch; the merger refreshes that branch once and parks every dependent if
+// the shared refresh cannot be made green.
+export type ChunkRefresh = {
+  readonly root: number;
+  readonly branch: string;
+  readonly title: string;
+  readonly dependents: readonly ChunkMember[];
+};
+
 // The minimum a chunk decision needs. `title` is here and not in `LaneIssue`
 // because a chunk, unlike a lane, has a NAME: the branch is slugged from the
 // root issue's title.

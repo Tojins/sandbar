@@ -43,8 +43,8 @@
 // ---------------------------------------------------------------------------
 //
 // It used to be one clause: a blocker is satisfied when it reads CLOSED, which
-// for an auto-lane blocker means its work is on the source branch. Chunks add
-// the second: a blocker is ALSO satisfied when the exact derived chunk branch
+// means its work is on the source branch. Chunks add the second: a blocker is
+// ALSO satisfied when the exact derived chunk branch
 // contains its durable origin member ref and it sits in the SAME chunk as the
 // issue it blocks.
 //
@@ -59,7 +59,13 @@
 // It is safe for the same reason it is useful: the members of one chunk share a
 // branch. When the dependent is worked, its blocker's commits are already on
 // that branch and therefore under the dependent's feet, which is all "satisfied"
-// has ever meant here.
+// has ever meant here. The CLOSED clause needs one additional structural check
+// for a chained member (#174): its base is the chunk tip, not the source tip.
+// When a different blocker was satisfied only because it CLOSED after that
+// chunk was cut, the dependent waits until origin's chunk branch contains
+// origin's source branch. The resolution queues that existing branch for a
+// source-into-chunk refresh; a later recompute admits the member from git
+// containment, never from the issue state alone.
 //
 // CROSS-CHUNK dependencies stay strict, and nothing about them is relaxed. An
 // blocker present on a DIFFERENT chunk branch has not reached the source
@@ -174,6 +180,7 @@ import { promisify } from "node:util";
 
 import {
   type ChunkIssue,
+  type ChunkRefresh,
   type ChunkTarget,
   type LandedChunk,
   deriveChunks,
@@ -335,6 +342,10 @@ export type PlanResolution = {
     readonly existing: string;
     readonly derived: string | null;
   }[];
+  // Existing chunk branches that must merge the source branch before the
+  // listed chained dependents can be seeded safely (#174). One request per
+  // branch, with every dependent that would otherwise be planned this cycle.
+  readonly chunkRefreshes: readonly ChunkRefresh[];
 };
 
 export function parseBlockedBy(body: string): readonly number[] {
@@ -352,6 +363,7 @@ export type ResolvePlanOptions = {
   readonly k?: number;
   readonly defaultLane?: Lane;
   readonly chunkMembers?: ReadonlyMap<string, ReadonlySet<number>>;
+  readonly chunksContainingSource?: ReadonlySet<string>;
   readonly ongoing?: ReadonlySet<number>;
   readonly trustedReady?: ReadonlySet<number>;
 };
@@ -367,6 +379,7 @@ export function resolvePlan(
   const k = options.k ?? DEFAULT_MAX_PARALLEL_ISSUES;
   const defaultLane = options.defaultLane ?? DEFAULT_LANE;
   const chunkMembers = options.chunkMembers ?? new Map<string, ReadonlySet<number>>();
+  const chunksContainingSource = options.chunksContainingSource ?? new Set<string>();
   const ongoing = options.ongoing ?? new Set<number>();
   const trustedReady = options.trustedReady ?? new Set<number>();
   const queueVerdict = (candidate: IssueSummary): ReadyQueueVerdict =>
@@ -451,17 +464,21 @@ export function resolvePlan(
   // else counts — a blocker on another chunk branch, or a dependent with no
   // chunk at all, leaves `theirs`/`ours` unequal (or undefined) and the issue
   // blocked. Header, "When is a blocker satisfied?" (#59).
-  const blockerSatisfied = (blocker: number, dependent: number): boolean => {
-    if (issueFacts.get(blocker)?.state === "CLOSED") return true;
+  const sameChunkMembership = (blocker: number, dependent: number): boolean => {
     if (!isOnDerivedChunk(blocker)) return false;
     const theirs = chunkOf.get(blocker);
     return theirs !== undefined && theirs === chunkOf.get(dependent);
+  };
+  const blockerSatisfied = (blocker: number, dependent: number): boolean => {
+    if (issueFacts.get(blocker)?.state === "CLOSED") return true;
+    return sameChunkMembership(blocker, dependent);
   };
 
   type CandidateDisposition =
     | { readonly kind: "omitted"; readonly reason: "closed" | "not-ready" | "published" | "waiting" | "excluded" }
     | { readonly kind: "label-actor"; readonly actor: string | null }
     | { readonly kind: "blocked"; readonly by: readonly number[] }
+    | { readonly kind: "chunk-refresh"; readonly branch: string; readonly by: readonly number[] }
     | { readonly kind: "held" }
     | { readonly kind: "ongoing" }
     | { readonly kind: "eligible" };
@@ -494,6 +511,21 @@ export function resolvePlan(
       (blocker) => !blockerSatisfied(blocker, c.number),
     );
     if (unsatisfied.length > 0) return { kind: "blocked", by: unsatisfied };
+    const target = chunkTargetOf(c.number);
+    const blockers = blockedBy.get(c.number) ?? [];
+    const closedOnly = blockers.filter(
+      (blocker) => issueFacts.get(blocker)?.state === "CLOSED" &&
+        !sameChunkMembership(blocker, c.number),
+    );
+    const chained = blockers.some((blocker) =>
+      sameChunkMembership(blocker, c.number)
+    );
+    if (
+      target !== null && chained && closedOnly.length > 0 &&
+      !chunksContainingSource.has(target.branch)
+    ) {
+      return { kind: "chunk-refresh", branch: target.branch, by: closedOnly };
+    }
     // LAST, so the waiting resolution names "held" only for issues that would
     // otherwise have been eligible. A review-gated issue that is also blocked,
     // closed or already merged is not being "held" by its lane; it was already
@@ -523,30 +555,44 @@ export function resolvePlan(
     candidate,
     disposition: classify(candidate),
   }));
-  const eligible = classified
-    .filter((entry) => entry.disposition.kind === "eligible")
-    .map((entry) => entry.candidate);
-  const sorted = [...eligible].sort((a, b) => a.number - b.number);
+  // Refresh-waiting candidates occupy the same K-sized selection they would
+  // have occupied if their chunk already contained source. That keeps #174's
+  // trigger exact: only a member this recompute would otherwise plan queues a
+  // refresh, and lower-ranked candidates remain ordinary no-slot waiters.
+  const selected = classified
+    .filter((entry) =>
+      entry.disposition.kind === "eligible" ||
+      entry.disposition.kind === "chunk-refresh"
+    )
+    .sort((a, b) => a.candidate.number - b.candidate.number)
+    .slice(0, k);
+  const selectedNumbers = new Set(selected.map(({ candidate }) => candidate.number));
   // Human-requested rework follows the planner's eligibility rules except for
   // scheduler exclusion. An ongoing issue is excluded from re-admission but
-  // must still defer its chunk's landing; a CLOSED, waiting or blocked member
-  // cannot be worked and therefore must not hold the request open forever.
+  // must still defer its chunk's landing. A member waiting for its chunk to
+  // refresh is likewise work this run intends to admit once its base is safe;
+  // landing the chunk first would ship the exact code queued for rework. A
+  // CLOSED, waiting or blocked member cannot be worked and therefore must not
+  // hold the request open forever.
   const trackerReadyNumbers = new Set(
     classified
       .filter(({ candidate, disposition }) => {
         const authoritative = issueFacts.get(candidate.number);
-        return (disposition.kind === "eligible" || disposition.kind === "ongoing" ||
+        return (disposition.kind === "eligible" ||
+          disposition.kind === "chunk-refresh" || disposition.kind === "ongoing" ||
           (disposition.kind === "omitted" && disposition.reason === "excluded")) &&
           authoritative?.labels.includes(READY_LABEL);
       })
       .map(({ candidate }) => candidate.number),
   );
-  const plan = sorted.slice(0, k).map((c) => ({
+  const plan = selected
+    .filter(({ disposition }) => disposition.kind === "eligible")
+    .map(({ candidate: c }) => ({
     id: String(c.number),
     title: c.title,
     branch: issueBranchName(c.number, c.title),
     chunk: chunkTargetOf(c.number),
-  }));
+    }));
   const admitted = new Set(plan.map((issue) => Number(issue.id)));
   const resolutionCandidates: PlanCandidate[] = candidates.map((c) => {
     return {
@@ -566,10 +612,36 @@ export function resolvePlan(
     if (admitted.has(c.number) || disposition.kind === "omitted") continue;
     const reason: WaitingReason = disposition.kind === "eligible"
       ? { kind: "no-slot" }
+      : disposition.kind === "chunk-refresh" && !selectedNumbers.has(c.number)
+      ? { kind: "no-slot" }
       : disposition;
     waiting.push({ issue: c.number, title: c.title, reason });
   }
   waiting.sort((a, b) => a.issue - b.issue);
+  const refreshes = new Map<string, ChunkRefresh>();
+  for (const { candidate, disposition } of classified) {
+    if (
+      disposition.kind !== "chunk-refresh" ||
+      !selectedNumbers.has(candidate.number)
+    ) continue;
+    const target = chunkTargetOf(candidate.number);
+    if (target === null) continue;
+    const dependent = { number: candidate.number, title: candidate.title };
+    const existing = refreshes.get(target.branch);
+    if (existing) {
+      refreshes.set(target.branch, {
+        ...existing,
+        dependents: [...existing.dependents, dependent],
+      });
+    } else {
+      refreshes.set(target.branch, {
+        root: target.root,
+        branch: target.branch,
+        title: titleOf.get(target.root) ?? "",
+        dependents: [dependent],
+      });
+    }
+  }
   return {
     plan,
     candidates: resolutionCandidates,
@@ -594,6 +666,7 @@ export function resolvePlan(
         ? [{ existing, derived }]
         : [];
     }),
+    chunkRefreshes: [...refreshes.values()],
   };
 }
 
@@ -706,6 +779,25 @@ export async function readChunkMembers(
     result.set(branch, members);
   }
   return result;
+}
+
+/** Exact origin chunk branches that already contain origin's source tip. */
+export async function readChunksContainingSource(
+  repoDir: string,
+  sourceBranch: string,
+): Promise<ReadonlySet<string>> {
+  const { stdout } = await exec("git", [
+    "for-each-ref",
+    `--contains=refs/remotes/origin/${sourceBranch}`,
+    "--format=%(refname:short)",
+    ...ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  ], { cwd: repoDir });
+  return new Set(
+    stdout.split("\n")
+      .map((ref) => ref.trim())
+      .filter(Boolean)
+      .map(branchNameFromOriginRef),
+  );
 }
 
 async function fetchIssueSummaries(
@@ -847,6 +939,7 @@ export async function fetchIssueStates(
 // pure function, and its tests state every argument anyway.
 export type BuildPlanOptions = {
   readonly repoDir: string;
+  readonly sourceBranch: string;
   readonly excluded?: ReadonlySet<number>;
   readonly ongoing?: ReadonlySet<number>;
   readonly k?: number;
@@ -880,6 +973,10 @@ export async function buildPlan(
   // derived-branch membership and `landedChunksOf`'s component intersection
   // independently keep inherited refs out of another chunk's review and close.
   const chunkMembers = await readChunkMembers(options.repoDir);
+  const chunksContainingSource = await readChunksContainingSource(
+    options.repoDir,
+    options.sourceBranch,
+  );
   const chunkMemberNumbers = [
     ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),
   ];
@@ -914,6 +1011,7 @@ export async function buildPlan(
       k,
       defaultLane: options.defaultLane,
       chunkMembers,
+      chunksContainingSource,
       ongoing: options.ongoing,
       readyLabelPolicy: options.readyLabelPolicy,
       trustedReady: new Set(

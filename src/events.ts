@@ -84,6 +84,11 @@ export type IssuePhase =
 
 export type WaitingReason =
   | { readonly kind: "blocked"; readonly by: readonly number[] }
+  | {
+      readonly kind: "chunk-refresh";
+      readonly branch: string;
+      readonly by: readonly number[];
+    }
   | { readonly kind: "no-slot" }
   | { readonly kind: "held" }
   | { readonly kind: "ongoing" }
@@ -184,7 +189,7 @@ export type EventInput =
       readonly refs: readonly CachedIssueRef[];
     }
   | { readonly kind: "follow-up"; readonly action: "route" | "re-queued" | "lane-override"; readonly detail: string; readonly issue?: number; readonly title?: string }
-  | { readonly kind: "reconcile"; readonly action: "trace" | "landed-chunk" | "land-requested"; readonly detail: string }
+  | { readonly kind: "reconcile"; readonly action: "trace" | "landed-chunk" | "land-requested" | "chunk-refreshed" | "chunk-refresh-failed"; readonly detail: string }
   | { readonly kind: "notice"; readonly message: string }
   | { readonly kind: "complaint"; readonly severity: "warning" | "error"; readonly message: string }
   | { readonly kind: "exit"; readonly tag: ExitTag; readonly reason: string; readonly exitCode: number }

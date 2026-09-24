@@ -164,6 +164,8 @@ const implementerFailure = (event: ImplementerEvent): string | null => {
 export function waitingReasonText(reason: WaitingReason): string {
   switch (reason.kind) {
     case "blocked": return `blocked by ${reason.by.map((n) => `#${n}`).join(", ")}`;
+    case "chunk-refresh":
+      return `waiting on chunk refresh: ${reason.branch}`;
     case "no-slot": return "no free slot";
     case "held": return "held: no chunk to land on";
     case "ongoing": return "ongoing";

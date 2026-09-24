@@ -346,6 +346,40 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
   });
 
+  it("refreshes on top without losing members or widening the chunk diff (#174)", async () => {
+    await commit(wt, "member.txt", "member work\n");
+    await git(wt, "branch", "sandbar/issue-1-member", "HEAD");
+    expect(await adapter().pushChunkBranch("sandbar/chunk-1-c", [{
+      source: "sandbar/issue-1-member",
+      destination: "sandbar/member-1",
+    }])).toEqual({ kind: "ok" });
+
+    await commit(seed, "source.txt", "landed blocker\n");
+    await git(seed, "push", "-q", "origin", "main");
+    await git(wt, "fetch", "origin", "--quiet");
+    const found = await adapter().fetchChunkRef("sandbar/chunk-1-c");
+    expect(found.kind).toBe("present");
+    if (found.kind !== "present") return;
+    const a = adapter();
+    await a.checkoutDetached(found.ref);
+    expect(await a.mergeNoFf({
+      id: "1",
+      title: "refresh",
+      branch: "origin/main",
+      mergeMessage: "Merge origin/main into sandbar/chunk-1-c",
+    })).toEqual({ ok: true });
+    expect(await a.pushChunkBranch("sandbar/chunk-1-c", [])).toEqual({ kind: "ok" });
+
+    const chunk = "refs/heads/sandbar/chunk-1-c";
+    const member = "refs/heads/sandbar/member-1";
+    await expect(git(origin, "merge-base", "--is-ancestor", member, chunk))
+      .resolves.toBe("");
+    await expect(git(origin, "merge-base", "--is-ancestor", "main", chunk))
+      .resolves.toBe("");
+    expect((await git(origin, "diff", "--name-only", `main...${chunk}`)).split("\n"))
+      .toEqual(["member.txt"]);
+  });
+
   it("checks repository ownership before a chunk ref push", async () => {
     await commit(wt, "lease.txt", "guarded\n");
     await git(wt, "branch", "sandbar/issue-139-member", "HEAD");
