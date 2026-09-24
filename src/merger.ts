@@ -1184,7 +1184,7 @@ export type RunMergerOptions = {
 // What `attemptMerge` needs of the cycle it is running in. A parameter rather
 // than a closure so the operation lives at module scope: it reads no
 // accumulator and writes none, which is exactly the property that makes it
-// shareable by all three landing paths in the first place.
+// shareable by all four merge directions in the first place.
 type MergeAttemptDeps = {
   readonly adapter: MergerAdapter;
   readonly emit: (line: string) => Promise<void>;
@@ -1301,10 +1301,10 @@ export async function resolveVersionCollision(
 // those two is identical and the tracker half shares nothing, so the split is
 // exactly where the two stop agreeing.
 //
-// Shared verbatim by all three landing paths — issue→source, issue→chunk
-// (#60), chunk→source (#64). `target` only ever reaches the prose and the
-// log, because conflict resolution, the gate and the revert are the same
-// operations whichever branch is underneath.
+// Shared verbatim by all four merge directions — issue→source, issue→chunk
+// (#60), chunk→source (#64), and source→chunk (#174). `target` only ever
+// reaches the prose and the log, because conflict resolution, the gate and the
+// revert are the same operations whichever branch is underneath.
 async function attemptMerge(
   args: {
     readonly unit: MergeUnit;
