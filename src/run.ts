@@ -1594,6 +1594,25 @@ export async function run(
     }
   };
 
+  // Draining is cleanup for a landing failure: report a sibling finalization
+  // failure beside it, but never let that secondary fault replace the original
+  // error at the internal-failure boundary.
+  const drainPreservingLandingFailure = async (
+    landingFailure: unknown,
+  ): Promise<never> => {
+    try {
+      await drainAfterLandingHalt();
+    } catch (drainErr) {
+      const detail = faultDetail(drainErr);
+      await runRecord.emit({
+        kind: "complaint",
+        severity: "error",
+        message: "Draining in-flight work after the landing failure also failed: " + detail,
+      });
+    }
+    throw landingFailure;
+  };
+
   const cleanupLandingResources = async (
     cleanups: readonly (() => Promise<void>)[],
     landingFailure: unknown | null,
@@ -2633,18 +2652,7 @@ export async function run(
           // hand the internal-failure banner the wrong fault — a finalize
           // hiccup on a sibling instead of the landing that actually broke —
           // and the log would name a cause the operator cannot act on.
-          try {
-            await drainAfterLandingHalt();
-          } catch (drainErr) {
-            const detail = faultDetail(drainErr);
-            await runRecord.emit({
-              kind: "complaint",
-              severity: "error",
-              message: "Draining in-flight work after the landing failure also failed: " + detail,
-            });
-            throw unexpectedLandingFailure.error;
-          }
-          throw unexpectedLandingFailure.error;
+          await drainPreservingLandingFailure(unexpectedLandingFailure.error);
         }
       }
 
@@ -2822,8 +2830,7 @@ export async function run(
         pendingSourceImageRefresh ??= "landing";
       }
       if (postRefreshFailure) {
-        await drainAfterLandingHalt();
-        throw postRefreshFailure.error;
+        await drainPreservingLandingFailure(postRefreshFailure.error);
       }
       if (selectedExit?.tag === "quota" || selectedExit?.tag === "credential") {
         providerExitPending = selectedExit;

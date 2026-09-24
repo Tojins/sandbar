@@ -2023,6 +2023,60 @@ describe("run quota orchestration (#109)", () => {
     }));
   });
 
+  it("preserves a refresh failure when draining a sibling also fails", async () => {
+    const done = issue("1");
+    const sibling = issue("2");
+    const slow = deferred<{
+      type: "NEEDS-INFO"; questions: string; strandedHead: null;
+    }>();
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce(resolution([done, sibling]))
+      .mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
+      candidate.id === done.id
+        ? Promise.resolve({ type: "DONE", commits: [{ sha: "abc" }] })
+        : slow.promise);
+    seams.merger.mockImplementation(async (
+      batch: ReturnType<typeof issue>[],
+      _adapter,
+      _log,
+      _gateLog,
+      options: RunMergerOptions,
+    ) => {
+      options.onSourceSettled?.(summary(batch));
+      slow.resolve({
+        type: "NEEDS-INFO",
+        questions: "answer",
+        strandedHead: null,
+      });
+      throw new SandbarError("refresh origin unavailable");
+    });
+    seams.finalize.mockImplementation(async (inputs: { kind: string }[]) => {
+      if (inputs.some((input) => input.kind === "needs-info")) {
+        throw new Error("sibling finalize failed");
+      }
+      return [];
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 2 })).rejects.toThrow("EXIT:1");
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("sibling finalize failed"),
+    }));
+    expect(eventsOf("complaint").some((event) =>
+      String(event.message).includes("refresh origin unavailable"))).toBe(true);
+  });
+
   it("records exactly one duration-bearing event for a completed landing batch", async () => {
     const done = issue("1");
     seams.plan
