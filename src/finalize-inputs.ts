@@ -9,8 +9,9 @@
 //     merger stack is the live example) then costs only the merge, instead of
 //     discarding NEEDS-INFO questions, NEEDS-HUMAN traces and reviewer prose
 //     that the inner loop already paid for.
-//   - mergeFinalizeInputs — one input per merged/skipped issue. Only exists
-//     once the merger has produced a summary, so it runs after.
+//   - mergeFinalizeInputs — one input per merged/skipped issue and per
+//     dependent parked by a failed chunk refresh. Only exists once the merger
+//     has produced a summary, so it runs after.
 //
 // Both are pure: run.ts owns the side-effects and the run-state writes. The
 // silent-noop retry counter is the one piece of carried state, so it is passed
@@ -202,14 +203,17 @@ export type MergeFinalizeInputs = {
 type FinalizeKindInputShape = { readonly issue: IssueRef };
 
 /**
- * Phase-4 inputs for what the merger did with the cycle's DONE branches.
+ * Phase-4 inputs for what the merger did with the cycle's DONE branches and
+ * with any source-branch refresh requested for a held chained member.
  *
  * `summary` is either the merger's own result or, after a MergerError halt, the
  * partial tracker state it had already applied — the shapes are identical and
  * the halt path's `merged` is empty by construction. `chunkLanded` (#60) is
  * NOT empty on that path and must not be: those commits are on origin's chunk
  * branch whether the cycle went on to halt or not, and the label flip they earn
- * is what stops the next cycle re-planning work that is already landed.
+ * is what stops the next cycle re-planning work that is already landed. A
+ * failed refresh similarly becomes one parking input per dependent; no issue
+ * branch exists because those dependents were held before execution.
  */
 export function mergeFinalizeInputs(
   summary: MergerSummary,
@@ -242,6 +246,16 @@ export function mergeFinalizeInputs(
       continue;
     }
     inputs.push(withGaps({ kind: finalizeKindForSkip(s.reason), issue: s.issue }));
+  }
+  for (const failure of summary.failedChunkRefreshes) {
+    for (const issue of failure.dependents) {
+      inputs.push({
+        kind: "chunk-refresh-failed",
+        issue,
+        comment: failure.comment,
+        specGaps: [],
+      });
+    }
   }
   // #60, and LAST. The display-label edit is best-effort since #93, but the
   // required issue comment can still throw. `finalizeAll` is fail-fast, so a

@@ -21,6 +21,11 @@ const summary = (over: Partial<MergerSummary> = {}): MergerSummary => ({
   skipped: [],
   pushed: false,
   unclosed: [],
+  mergedChunks: [],
+  deferredChunks: [],
+  skippedChunks: [],
+  refreshedChunks: [],
+  failedChunkRefreshes: [],
   ...over,
 });
 
@@ -424,5 +429,34 @@ describe("mergeFinalizeInputs", () => {
       [],
     );
     expect(bumpedSilentNoop.size).toBe(0);
+  });
+
+  it("turns each failed-refresh dependent into a parking input", () => {
+    const dependents = [issue("400"), issue("401")];
+    const { inputs } = mergeFinalizeInputs(
+      summary({
+        failedChunkRefreshes: [{
+          refresh: {
+            root: 245,
+            branch: "sandbar/chunk-245-root",
+            title: "Root",
+            dependents: dependents.map(({ id, title }) => ({
+              number: Number(id), title,
+            })),
+          },
+          dependents,
+          comment: "refresh diagnostics",
+        }],
+      }),
+      new Map(),
+      [],
+    );
+
+    expect(inputs).toEqual(dependents.map((dependent) => ({
+      kind: "chunk-refresh-failed",
+      issue: dependent,
+      comment: "refresh diagnostics",
+      specGaps: [],
+    })));
   });
 });

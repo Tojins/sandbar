@@ -555,10 +555,18 @@ export function resolvePlan(
     candidate,
     disposition: classify(candidate),
   }));
-  const eligible = classified
-    .filter((entry) => entry.disposition.kind === "eligible")
-    .map((entry) => entry.candidate);
-  const sorted = [...eligible].sort((a, b) => a.number - b.number);
+  // Refresh-waiting candidates occupy the same K-sized selection they would
+  // have occupied if their chunk already contained source. That keeps #174's
+  // trigger exact: only a member this recompute would otherwise plan queues a
+  // refresh, and lower-ranked candidates remain ordinary no-slot waiters.
+  const selected = classified
+    .filter((entry) =>
+      entry.disposition.kind === "eligible" ||
+      entry.disposition.kind === "chunk-refresh"
+    )
+    .sort((a, b) => a.candidate.number - b.candidate.number)
+    .slice(0, k);
+  const selectedNumbers = new Set(selected.map(({ candidate }) => candidate.number));
   // Human-requested rework follows the planner's eligibility rules except for
   // scheduler exclusion. An ongoing issue is excluded from re-admission but
   // must still defer its chunk's landing; a CLOSED, waiting or blocked member
@@ -573,12 +581,14 @@ export function resolvePlan(
       })
       .map(({ candidate }) => candidate.number),
   );
-  const plan = sorted.slice(0, k).map((c) => ({
+  const plan = selected
+    .filter(({ disposition }) => disposition.kind === "eligible")
+    .map(({ candidate: c }) => ({
     id: String(c.number),
     title: c.title,
     branch: issueBranchName(c.number, c.title),
     chunk: chunkTargetOf(c.number),
-  }));
+    }));
   const admitted = new Set(plan.map((issue) => Number(issue.id)));
   const resolutionCandidates: PlanCandidate[] = candidates.map((c) => {
     return {
@@ -598,13 +608,18 @@ export function resolvePlan(
     if (admitted.has(c.number) || disposition.kind === "omitted") continue;
     const reason: WaitingReason = disposition.kind === "eligible"
       ? { kind: "no-slot" }
+      : disposition.kind === "chunk-refresh" && !selectedNumbers.has(c.number)
+      ? { kind: "no-slot" }
       : disposition;
     waiting.push({ issue: c.number, title: c.title, reason });
   }
   waiting.sort((a, b) => a.issue - b.issue);
   const refreshes = new Map<string, ChunkRefresh>();
   for (const { candidate, disposition } of classified) {
-    if (disposition.kind !== "chunk-refresh") continue;
+    if (
+      disposition.kind !== "chunk-refresh" ||
+      !selectedNumbers.has(candidate.number)
+    ) continue;
     const target = chunkTargetOf(candidate.number);
     if (target === null) continue;
     const dependent = { number: candidate.number, title: candidate.title };

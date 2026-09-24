@@ -85,6 +85,10 @@ default is unlimited, so existing hosts keep their prior concurrency.
    inert under the default lane, `auto`; the blocker, chunk, follow-up and
    wrap-up criteria are the `plan-resolver.ts`, `chunks.ts`,
    `chunk-follow-up.ts` and `chunk-land.ts` headers to state.
+   A chained chunk member that also relies on a blocker satisfied by CLOSED is
+   admitted only when the exact origin chunk branch contains the exact origin
+   source tip (#174). Otherwise it waits on a chunk refresh queued for the
+   serialized landing path.
 
 2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
    planned issue runs in parallel in its own agent sandbox + per-issue gate
@@ -156,6 +160,13 @@ default is unlimited, so existing hosts keep their prior concurrency.
    takes `land` back off the PR, closes it (or accepts the MERGED mark GitHub
   itself puts on a PR whose head the landing push made reachable) and deletes
   the branch.
+   After source-branch landings, each queued chunk refresh is one ordinary
+   merger unit in the same worktree: source is merged into the fetched chunk
+   tip, the version collision and resolve loop run as usual, gate-2 decides,
+   and the existing chunk ref is pushed directly (#174). A failed conflict or
+   red-gate recovery parks every triggering dependent without touching the
+   chunk PR; origin or infrastructure failures halt with those dependents still
+   queued.
    `src/chunk-land.ts` owns the label, the
    selection, the wrap-up and — as `chunkForgeWrites` — the one spelling of the
    `gh`/`git` writes it makes, which the merge phase and the plan-time
@@ -330,6 +341,10 @@ outcomes.
   origin, never local —
   `origin/<sourceBranch>`, or the chunk tip for a chained chunk member (#61) —
   and both prompt builders receive the same base `ensureIssueBranch` used.
+  A chained member with a CLOSED-only blocker reaches that seeding path only
+  after the planner proves `origin/<sourceBranch>` is contained by its exact
+  `origin/<chunk>`; the merger refreshes the origin-owned chunk rather than
+  manufacturing an issue-only seed merge (#174).
   An issue branch that already exists is measured against ORIGIN'S copy first
   and fast-forwarded to it, a diverged one refuses (that issue at plan time,
   the run at preflight), and one the cache lacks is cut from origin's copy when

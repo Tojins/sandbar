@@ -3,6 +3,14 @@
 // an agentic resolve loop covering conflict, post-merge gate-red, and (in
 // verified mode) a red forge.
 //
+// A chunk refresh (#174) is one more merge unit on this same path, after the
+// pass's source landing: detach at `origin/<chunk>`, merge --no-ff
+// `origin/<sourceBranch>`, mechanically resolve the version collision first,
+// then use the ordinary resolve loop and gate-2 before directly pushing the
+// existing chunk branch. It never rewrites the branch and never moves member
+// refs, so every landed member remains contained. Moving the PR base and head
+// forward together leaves its review surface as the chunk's own work.
+//
 // The merger runs in a dedicated, ephemeral worktree checked out (detached) at
 // `origin/<sourceBranch>` — NOT the operator's primary checkout (issue #10).
 // run.ts creates that worktree and points this adapter's `cwd` at it, so the
@@ -329,7 +337,7 @@ import {
   wrapUpLandedChunk,
 } from "./chunk-land.js";
 import { chunkMembersOnBranch, chunkPullRequestContent } from "./chunk-pr.js";
-import type { ChunkMember, ChunkTarget } from "./chunks.js";
+import type { ChunkMember, ChunkRefresh, ChunkTarget } from "./chunks.js";
 import type { CodexAuthMount } from "./codex-auth.js";
 import { type EnvReader } from "./env.js";
 import {
@@ -353,7 +361,11 @@ import {
   type VerifyAdapter,
   runVerifiedLanding,
 } from "./forge-verify.js";
-import { type GateResult, formatGateFields } from "./gate.js";
+import {
+  type GateResult,
+  formatGateFields,
+  summarizeGateFailure,
+} from "./gate.js";
 import type { AdmittedGate } from "./gate-semaphore.js";
 import { CONTAINER_RM_ARGS, CONTROL_TIMEOUT_MS } from "./gate-stack.js";
 import {
@@ -372,6 +384,7 @@ import {
 import { fetchIssueText } from "./issue-anchor.js";
 import {
   memberBranchName,
+  issueBranchName,
   issueNumberFromBranch,
   type RunScope,
   scopedResourcePrefix,
@@ -655,8 +668,39 @@ type MergeAttempt = (
       // paths were still unmerged when it gave up.
       readonly attempts: readonly ResolveAttemptSummary[];
       readonly conflictPaths: readonly string[];
+      // The initial red gate that caused gate-red mode. Kept out of conflict
+      // outcomes, where conflicted paths are the actionable trace instead.
+      readonly gateTrace?: string;
     }
 ) & { readonly durationMs: number };
+
+export function buildChunkRefreshFailedComment(args: {
+  readonly chunkBranch: string;
+  readonly sourceBranch: string;
+  readonly outcome: Exclude<MergeAttempt, { readonly kind: "merged" }>;
+  readonly stuckLabel: string;
+}): string {
+  const { outcome } = args;
+  const stopped = outcome.kind === "install-failed"
+    ? "`npm install` failed before gate-2 could run."
+    : outcome.mode === "conflict"
+    ? `the merge stopped on conflicts after ${outcome.attempts.length} resolve attempt${outcome.attempts.length === 1 ? "" : "s"}.`
+    : `gate-2 stayed red after ${outcome.attempts.length} fix attempt${outcome.attempts.length === 1 ? "" : "s"}.`;
+  const details = outcome.kind === "install-failed"
+    ? "No resolve attempt ran."
+    : [
+        outcome.mode === "conflict"
+          ? formatConflictPaths(outcome.conflictPaths)
+          : `<details><summary>Gate trace</summary>\n\n\`\`\`\n${outcome.gateTrace ?? "Gate trace unavailable."}\n\`\`\`\n\n</details>`,
+        formatResolveAttempts(outcome.attempts),
+      ].filter((part) => part.length > 0).join("\n\n");
+  return (
+    `**Sandbar:** refresh of chunk branch \`${args.chunkBranch}\` stopped because ${stopped}\n\n` +
+    `${details}\n\n` +
+    `Action: merge \`${args.sourceBranch}\` into \`${args.chunkBranch}\`, then drop ` +
+    `\`${args.stuckLabel}\` and re-apply \`${READY_FOR_AGENT_LABEL}\`.`
+  );
+}
 
 export type { PushResult } from "./push-result.js";
 
@@ -805,6 +849,12 @@ export type ChunkLandingOptions = {
   readonly sourceBranch: string;
 };
 
+export type ChunkRefreshFailure = {
+  readonly refresh: ChunkRefresh;
+  readonly dependents: readonly IssueRef[];
+  readonly comment: string;
+};
+
 // One request with its destination attached — the form the merge loop carries a
 // chunk landing in, so that the two halves of `ChunkLandingOptions` never have
 // to be reunited by a defaulted local. Internal: what leaves this module is
@@ -908,6 +958,11 @@ export type MergerSummary = {
   // `MergerError.partial` for the same reason `skipped` does: the pull request
   // has already been written to.
   readonly skippedChunks: readonly SkippedChunkLand[];
+  // Source-into-chunk refreshes requested by #174's planner admission guard.
+  // Success is durable on origin. Failures have been reverted locally and
+  // carry the exact handoff comment Phase 4 applies to every dependent.
+  readonly refreshedChunks: readonly ChunkRefresh[];
+  readonly failedChunkRefreshes: readonly ChunkRefreshFailure[];
 };
 
 export type MergerOutcome =
@@ -916,7 +971,9 @@ export type MergerOutcome =
   | { readonly kind: "skipped"; readonly issue: IssueRef; readonly reason: SkipReason; readonly durationMs: number }
   | { readonly kind: "chunk-on-source"; readonly target: ChunkLandTarget; readonly durationMs: number }
   | { readonly kind: "chunk-parked"; readonly skipped: SkippedChunkLand; readonly durationMs: number }
-  | { readonly kind: "chunk-deferred"; readonly deferred: DeferredChunkLand; readonly durationMs: number };
+  | { readonly kind: "chunk-deferred"; readonly deferred: DeferredChunkLand; readonly durationMs: number }
+  | { readonly kind: "chunk-refreshed"; readonly refresh: ChunkRefresh; readonly durationMs: number }
+  | { readonly kind: "chunk-refresh-failed"; readonly failure: ChunkRefreshFailure; readonly durationMs: number };
 
 export type MergerObservations = {
   // Current user-facing step for a landing unit. Optional so embedders that
@@ -1089,6 +1146,16 @@ export type RunMergerOptions = {
   // Landing reviewed chunks on the source branch (#64). Absent ⇒ none, which
   // is the whole of the auto lane.
   readonly chunkLanding?: ChunkLandingOptions;
+  // Existing chunk branches the planner proved must contain the source tip
+  // before their chained dependents may be admitted (#174).
+  readonly chunkRefresh?: {
+    readonly requests: readonly ChunkRefresh[];
+    readonly sourceBranch: string;
+  };
+  // Called after every source-side outcome and tracker reconciliation is
+  // settled, immediately before refresh work starts. If refresh infrastructure
+  // throws, run.ts finalises this durable summary before propagating the fault.
+  readonly onSourceSettled?: (summary: MergerSummary) => void;
   // Per-resolve-attempt output capture (#67). Absent ⇒ nothing is written and
   // every comment says so outright instead of naming a file that is not there.
   readonly onResolveAttempt?: MergerResolveAttemptSink;
@@ -1375,6 +1442,9 @@ async function attemptMerge(
         silent: outcome.silent === true,
         attempts: outcome.attempts,
         conflictPaths: outcome.conflictPaths,
+        gateTrace:
+          summarizeGateFailure(`${g.stdout}\n${g.stderr}`, 200) +
+          g.containerLogs,
         durationMs: unitTimer(),
       };
     }
@@ -1409,6 +1479,8 @@ export async function runMergerWithAdapter(
   // partial like `skippedChunks`, and for the same reason — the pull request
   // has already been commented on by the time anything below can throw.
   const deferredChunks: DeferredChunkLand[] = [];
+  const refreshedChunks: ChunkRefresh[] = [];
+  const failedChunkRefreshes: ChunkRefreshFailure[] = [];
   // Kept whole rather than split into a request list and a source-branch
   // string. The two are only meaningful together — the branch names where the
   // requests are going — and pulling them apart means giving the branch a
@@ -1468,6 +1540,8 @@ export async function runMergerWithAdapter(
     mergedChunks: [],
     skippedChunks: [...skippedChunks],
     deferredChunks: [...deferredChunks],
+    refreshedChunks: [...refreshedChunks],
+    failedChunkRefreshes: [...failedChunkRefreshes],
   });
 
   const asHalt =
@@ -2056,6 +2130,8 @@ export async function runMergerWithAdapter(
       mergedChunks,
       skippedChunks,
       deferredChunks,
+      refreshedChunks: [...refreshedChunks],
+      failedChunkRefreshes: [...failedChunkRefreshes],
     };
   };
 
@@ -2076,6 +2152,112 @@ export async function runMergerWithAdapter(
     }
   };
 
+  // Phase C (#174): source into each stale chunk, after this pass has finished
+  // moving and reconciling the source branch. Expected composition failures
+  // become dependent handoffs. Infrastructure/origin failures halt the run,
+  // while `onSourceSettled` lets the orchestrator preserve and finalise any
+  // source landing above before that propagated fault ends the run.
+  const runChunkRefreshes = async (): Promise<void> => {
+    const refreshPlan = opts.chunkRefresh;
+    if (!refreshPlan) return;
+    for (const refresh of refreshPlan.requests) {
+      const dependents: readonly IssueRef[] = refresh.dependents.map((issue) => ({
+        id: String(issue.number),
+        title: issue.title,
+        branch: issueBranchName(issue.number, issue.title),
+      }));
+      const timer = startTimer(opts.clock);
+      const found = await adapter.fetchChunkRef(refresh.branch);
+      if (found.kind === "absent") {
+        // The branch may have landed earlier in this same source pass. The
+        // next recompute re-derives the dependent against current refs; a
+        // missing branch is never fabricated or refreshed from a fallback.
+        await emit(`chunk refresh ${refresh.branch}: branch absent; recompute`);
+        continue;
+      }
+      if (found.kind === "unreadable") {
+        throw new SandbarError(
+          `origin's copy of ${refresh.branch} could not be read: ${found.detail}`,
+        );
+      }
+      await adapter.checkoutDetached(found.ref);
+      const outcome = await attemptMerge(
+        {
+          unit: {
+            id: String(refresh.root),
+            title: refresh.title,
+            branch: `origin/${refreshPlan.sourceBranch}`,
+            mergeMessage:
+              `Merge origin/${refreshPlan.sourceBranch} into ${refresh.branch}`,
+          },
+          target: { kind: "chunk", branch: refresh.branch },
+          related: dependents,
+          label: `chunk refresh #${refresh.root}`,
+          gateKey: `chunk-refresh-${refresh.root}`,
+        },
+        mergeDeps,
+      );
+      if (outcome.kind !== "merged") {
+        const sourceBranch = refreshPlan.sourceBranch;
+        const failure: ChunkRefreshFailure = {
+          refresh,
+          dependents,
+          comment: buildChunkRefreshFailedComment({
+            chunkBranch: refresh.branch,
+            sourceBranch,
+            outcome,
+            stuckLabel: opts.agentStuckLabel,
+          }),
+        };
+        failedChunkRefreshes.push(failure);
+        await opts.observations.onOutcome({
+          kind: "chunk-refresh-failed",
+          failure,
+          durationMs: timer(),
+        });
+        await emit(`chunk refresh ${refresh.branch}: parked dependents`);
+        // Phase 4 must apply this handoff before another refresh can throw.
+        return;
+      }
+      await opts.observations.onProgress?.(
+        `chunk-refresh-${refresh.root}`,
+        "push",
+      );
+      const pushed = await adapter.pushChunkBranch(refresh.branch, []);
+      if (pushed.kind !== "ok") {
+        const detail = pushed.kind === "fatal"
+          ? pushed.reason
+          : pushed.kind === "refused"
+          ? pushed.reasons.join(" | ")
+          : "the branch moved during the refresh push";
+        throw new SandbarError(
+          `Could not push refreshed chunk branch ${refresh.branch}: ${detail}`,
+        );
+      }
+      refreshedChunks.push(refresh);
+      await opts.observations.onOutcome({
+        kind: "chunk-refreshed",
+        refresh,
+        durationMs: timer(),
+      });
+      await emit(
+        `chunk refresh ${refresh.branch}: merged source and pushed`,
+      );
+    }
+  };
+
+  const finishWithChunkRefreshes = async (
+    summary: MergerSummary,
+  ): Promise<MergerSummary> => {
+    opts.onSourceSettled?.(summary);
+    await runChunkRefreshes();
+    return {
+      ...summary,
+      refreshedChunks: [...refreshedChunks],
+      failedChunkRefreshes: [...failedChunkRefreshes],
+    };
+  };
+
   if (merged.length === 0 && chunkMergesOnHead.length === 0) {
     // Both halves of that sentence are about the SOURCE branch, and a cycle
     // that landed chunks says so rather than reading as "nothing happened".
@@ -2084,7 +2266,7 @@ export async function runMergerWithAdapter(
         ? `no merges, no push`
         : `no merges onto the source branch, no push there — ${chunkLanded.length} issue(s) landed on a chunk branch above`,
     );
-    return nothingLanded();
+    return finishWithChunkRefreshes(nothingLanded());
   }
 
   if (verified) {
@@ -2223,7 +2405,7 @@ export async function runMergerWithAdapter(
           haltVerified(err);
         }
       }
-      return nothingLanded();
+      return finishWithChunkRefreshes(nothingLanded());
     }
 
     // Origin has moved. From here `merged: []` would be a lie, so nothing below
@@ -2236,7 +2418,7 @@ export async function runMergerWithAdapter(
           ? ` and wrapping up ${chunkMergesOnHead.length} chunk(s)`
           : ""),
     );
-    return settleLanding();
+    return finishWithChunkRefreshes(await settleLanding());
   }
 
   await emit(`push attempt 1`);
@@ -2286,7 +2468,7 @@ export async function runMergerWithAdapter(
         ? ` and wrapping up ${chunkMergesOnHead.length} chunk(s)`
         : ""),
   );
-  return settleLanding();
+  return finishWithChunkRefreshes(await settleLanding());
 }
 
 // Fault-tolerant close: the landing already happened, so one issue's transient

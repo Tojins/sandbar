@@ -5,7 +5,7 @@ import { SandbarError } from "./errors.js";
 import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
 import type { ChunkRefLookup, MergerGateOutput } from "./merger.js";
 import { LAND_LABEL, type ChunkLandTarget } from "./chunk-land.js";
-import { NEEDS_REVIEW_LABEL } from "./chunks.js";
+import { NEEDS_REVIEW_LABEL, type ChunkRefresh } from "./chunks.js";
 import {
   SOURCE_TARGET,
   buildInstallFailedComment,
@@ -422,6 +422,127 @@ function gateRed(): { ok: false } & MergerGateOutput {
     containerLogs: "",
   };
 }
+
+const refresh = (dependents = [400]): ChunkRefresh => ({
+  root: 245,
+  branch: "sandbar/chunk-245-root",
+  title: "Root",
+  dependents: dependents.map((number) => ({ number, title: `t-${number}` })),
+});
+
+const refreshing = (
+  request: ChunkRefresh = refresh(),
+): Pick<RunMergerOptions, "chunkRefresh"> => ({
+  chunkRefresh: { requests: [request], sourceBranch: "main" },
+});
+
+describe("runMergerWithAdapter — chunk refresh (#174)", () => {
+  it("merges the source into the existing chunk, gates, and pushes directly", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: {
+        "sandbar/chunk-245-root": {
+          kind: "present",
+          ref: "refs/remotes/origin/sandbar/chunk-245-root",
+        },
+      },
+    });
+
+    const summary = await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      refreshing(),
+    );
+
+    expect(calls.checkouts).toEqual([
+      "refs/remotes/origin/sandbar/chunk-245-root",
+    ]);
+    expect(calls.merges).toEqual(["origin/main"]);
+    expect(calls.chunkPushes).toEqual([{
+      branch: "sandbar/chunk-245-root",
+      members: [],
+    }]);
+    expect(summary.refreshedChunks).toEqual([refresh()]);
+    expect(summary.failedChunkRefreshes).toEqual([]);
+  });
+
+  it("parks every triggering dependent when conflict resolution abandons", async () => {
+    const request = refresh([400, 401]);
+    const { adapter } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>ABANDON</promise><reason>manual</reason>" }],
+      chunkRefs: {
+        [request.branch]: {
+          kind: "present",
+          ref: `refs/remotes/origin/${request.branch}`,
+        },
+      },
+    });
+
+    const summary = await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      {
+        ...refreshing(request),
+        onResolveAttempt: async (_key, record) =>
+          `/logs/resolve-${record.attempt}.log`,
+      },
+    );
+
+    const [failure] = summary.failedChunkRefreshes;
+    expect(failure?.dependents.map((issue) => issue.id)).toEqual(["400", "401"]);
+    expect(failure?.comment).toContain("sandbar/chunk-245-root");
+    expect(failure?.comment).toContain("foo");
+    expect(failure?.comment).toContain("/logs/resolve-1.log");
+    expect(failure?.comment).toContain("merge `main` into");
+  });
+
+  it("includes the red gate trace in the dependent handoff", async () => {
+    const request = refresh();
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      gates: [gateRed()],
+      agents: [{ stdout: "<promise>ABANDON</promise><reason>still red</reason>" }],
+      chunkRefs: {
+        [request.branch]: {
+          kind: "present",
+          ref: `refs/remotes/origin/${request.branch}`,
+        },
+      },
+    });
+
+    const summary = await runMergerWithAdapter(
+      [], adapter, undefined, undefined, refreshing(request),
+    );
+
+    expect(summary.failedChunkRefreshes[0]?.comment).toContain("Gate trace");
+    expect(summary.failedChunkRefreshes[0]?.comment).toContain("x\ny");
+  });
+
+  it("reports an origin failure without parking the dependent", async () => {
+    const request = refresh();
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkPushes: [{ kind: "race" }],
+      chunkRefs: {
+        [request.branch]: {
+          kind: "present",
+          ref: `refs/remotes/origin/${request.branch}`,
+        },
+      },
+    });
+
+    await expect(runMergerWithAdapter(
+      [], adapter, undefined, undefined, refreshing(request),
+    )).rejects.toThrow("branch moved");
+  });
+});
 
 describe("issueNumberOf", () => {
   it("parses positive integer ids", () => {

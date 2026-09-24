@@ -67,6 +67,12 @@
 //                              (#168), the chunk branch is
 //                              merged in the SAME source pass, its members are
 //                              closed, and the branch is deleted.
+//                              A chained member whose other blocker became
+//                              CLOSED waits until its origin chunk contains
+//                              origin/source (#174). The same landing path
+//                              merges source into that existing chunk after
+//                              source landings, gates it, and pushes directly;
+//                              an unsalvageable composition parks the dependent.
 //   Finalise:                  Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
@@ -1702,6 +1708,21 @@ export async function run(
           });
           return;
         }
+      case "chunk-refreshed":
+        await runRecord.emit({
+          kind: "reconcile",
+          action: "chunk-refreshed",
+          detail: `${outcome.refresh.branch} now contains origin/${config.sourceBranch}`,
+        });
+        return;
+      case "chunk-refresh-failed":
+        await runRecord.emit({
+          kind: "reconcile",
+          action: "chunk-refresh-failed",
+          detail: `${outcome.failure.refresh.branch} could not be refreshed; parking ` +
+            outcome.failure.dependents.map((issue) => `#${issue.id}`).join(", "),
+        });
+        return;
     }
   };
 
@@ -2085,6 +2106,7 @@ export async function run(
         landedChunks: resolution.landedChunks,
         chunkNameDrifts: resolution.chunkNameDrifts,
         selectedLandRequests,
+        chunkRefreshes: resolution.chunkRefreshes,
       });
       const planDiagnosticsChanged = lastPlanDiagnostics !== null &&
         planDiagnostics !== lastPlanDiagnostics;
@@ -2110,7 +2132,8 @@ export async function run(
         hasPendingTerminals: pool.hasPendingTerminals,
         hasCandidates: pool.hasUnstarted(resolution.plan),
         hasRetries: pool.hasRetries,
-        hasLandRequests: landRequests.length > 0,
+        hasLandRequests:
+          landRequests.length > 0 || resolution.chunkRefreshes.length > 0,
         hasCapacity: pool.activeCount < config.maxParallelIssues,
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
@@ -2122,6 +2145,7 @@ export async function run(
         sourceChangedOnPoll || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
+        resolution.chunkRefreshes.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
       const pollIsReportable = pollDidWork || resolution.waiting.some(
         (entry) => entry.reason.kind === "label-actor",
@@ -2296,12 +2320,14 @@ export async function run(
       // Phase 3: Merge (procedural, in an isolated worktree off origin)
       // ---------------------------------------------------------------------
       let mergerSummary: MergerSummary | null = null;
+      let sourceSettledSummary: MergerSummary | null = null;
       // Tracker state the merger had already applied when it threw (see
       // MergerError.partial). Finalised even though the run is stopping.
       let haltPartial: MergerSummary | undefined;
       let halt = false;
       let mergerProviderError: AgentQuotaError | AgentCredentialError | null = null;
       let unexpectedLandingFailure: { readonly error: unknown } | null = null;
+      let postRefreshFailure: { readonly error: unknown } | null = null;
       // Why the run is stopping, in the short names the run log already uses.
       // Declared up here rather than beside the reports that fill it because
       // the merge phase's own halt is one of them, and the `Exit (halted): …`
@@ -2311,7 +2337,10 @@ export async function run(
       // source branch needs the same worktree, the same gate-2 stack and the
       // same resolve loop a DONE branch does, and a cycle can have one without
       // the other.
-      if (completedIssues.length > 0 || landRequests.length > 0) {
+      if (
+        completedIssues.length > 0 || landRequests.length > 0 ||
+        resolution.chunkRefreshes.length > 0
+      ) {
         const landingImages = currentImages;
         // The merger runs in a dedicated worktree detached at
         // origin/<sourceBranch>, NOT a checkout anyone stands in — so the
@@ -2460,7 +2489,11 @@ export async function run(
                   }));
                 },
                 onGate: (key, gate) => {
-                  const issueId = key.startsWith("chunk-") ? key.slice("chunk-".length) : key;
+                  const issueId = key.startsWith("chunk-refresh-")
+                    ? key.slice("chunk-refresh-".length)
+                    : key.startsWith("chunk-")
+                    ? key.slice("chunk-".length)
+                    : key;
                   const planned = completedIssues.find((issue) => issue.id === issueId);
                   return runRecord.emit({
                     kind: "gate",
@@ -2487,6 +2520,17 @@ export async function run(
                     chunkLanding: {
                       requests: selectedLandRequests,
                       sourceBranch: config.sourceBranch,
+                    },
+                  }
+                : {}),
+              ...(resolution.chunkRefreshes.length > 0
+                ? {
+                    chunkRefresh: {
+                      requests: resolution.chunkRefreshes,
+                      sourceBranch: config.sourceBranch,
+                    },
+                    onSourceSettled: (summary: MergerSummary) => {
+                      sourceSettledSummary = summary;
                     },
                   }
                 : {}),
@@ -2550,10 +2594,21 @@ export async function run(
               );
             }
           } else {
-            // Unknown failures are not merger verdicts. Carry the original
-            // value across the resource cleanup below, drain sibling work,
-            // then let the outer internal-failure handler report it unchanged.
-            unexpectedLandingFailure = { error: err };
+            if (err instanceof OriginLeaseLostDuringCleanupError) throw err;
+            if (sourceSettledSummary !== null) {
+              mergerSummary = sourceSettledSummary;
+              if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
+                mergerProviderError = err;
+                recordProviderClosure(providerState, err);
+              } else {
+                postRefreshFailure = { error: err };
+              }
+            } else {
+              // Unknown failures are not merger verdicts. Carry the original
+              // value across the resource cleanup below, drain sibling work,
+              // then let the outer internal-failure handler report it unchanged.
+              unexpectedLandingFailure = { error: err };
+            }
           }
         } finally {
           // Stack first: its containers bind-mount the worktree. Both teardown
@@ -2568,7 +2623,7 @@ export async function run(
           ].filter((cleanup): cleanup is () => Promise<void> => cleanup !== null);
           await cleanupLandingResources(
             cleanups,
-            unexpectedLandingFailure?.error ?? null,
+            unexpectedLandingFailure?.error ?? postRefreshFailure?.error ?? null,
           );
         }
         if (unexpectedLandingFailure) {
@@ -2758,11 +2813,17 @@ export async function run(
         outcomes.length,
         landedNow,
       );
-      nextPlanTrigger = landRequests.length > 0 || landedNow > 0
+      nextPlanTrigger =
+        landRequests.length > 0 || resolution.chunkRefreshes.length > 0 ||
+          landedNow > 0
         ? "landing-finished"
         : "terminal-finalized";
       if (sourceLandings > 0) {
         pendingSourceImageRefresh ??= "landing";
+      }
+      if (postRefreshFailure) {
+        await drainAfterLandingHalt();
+        throw postRefreshFailure.error;
       }
       if (selectedExit?.tag === "quota" || selectedExit?.tag === "credential") {
         providerExitPending = selectedExit;

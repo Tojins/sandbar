@@ -890,6 +890,28 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     expect(r.chunkRefreshes).toEqual([]);
   });
 
+  it("does not queue a refresh for a member outside the K-sized selection", () => {
+    const branch = "sandbar/chunk-245-issue-245";
+    const r = resolvePlan(
+      [
+        issue(245, "", { title: "Issue 245" }),
+        issue(400, "## Blocked by\n- #245\n- #399\n"),
+      ],
+      facts({ 245: {}, 399: { state: "CLOSED" } }),
+      new Set(),
+      0,
+      "review",
+      new Map([[branch, new Set([245])]]),
+    );
+
+    expect(r.chunkRefreshes).toEqual([]);
+    expect(r.waiting).toEqual([{
+      issue: 400,
+      title: "Issue 400",
+      reason: { kind: "no-slot" },
+    }]);
+  });
+
   it("does not refresh an unchained chunk root for a CLOSED blocker", () => {
     const r = resolvePlan(
       [issue(400, "## Blocked by\n- #399\n")],

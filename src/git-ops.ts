@@ -529,7 +529,12 @@ export class IssueBranchDivergedError extends Error {
 //     a tree missing the very work it declares itself blocked by. Seeded from
 //     the tip, its commits sit on top of every ancestor's, so the chunk-merge
 //     of it cannot conflict with them (#54 round-1 Q4) — an UNRELATED member of
-//     the same chunk still can, and that stays the resolve loop's job.
+//     the same chunk still can, and that stays the resolve loop's job. When a
+//     chained member also names a blocker satisfied only by CLOSED, the planner
+//     admits it only after this exact origin chunk ref contains the exact
+//     origin source ref (#174). The landing path refreshes the chunk first;
+//     seeding stays a plain branch cut from one origin-owned ref, so the issue
+//     diff never inherits a synthetic source catch-up merge.
 //   - A chunk the cache can name no branch for, AND this issue is that chunk's
 //     root → `origin/<sourceBranch>`, which is exactly where the merge phase
 //     creates a chunk branch (#60). The two agreeing is what makes the root's

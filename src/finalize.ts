@@ -63,8 +63,12 @@
 // Handoff labels are configurable (LabelConfig in config.ts) and NOT
 // auto-created — a missing/misconfigured label is a host config error. Every
 // agent-failure terminal (merge-conflict, merge-gate-red, forge-unverified,
-// silent-noop-exhausted, needs-human, review-budget-exhausted) parks the issue
-// under the single `agentStuck` label; the *reason* lives in the bot comment.
+// chunk-refresh-failed, silent-noop-exhausted, needs-human,
+// review-budget-exhausted) parks the issue under the single `agentStuck` label;
+// the *reason* lives in the bot comment. A chunk-refresh failure is the one
+// pre-execution handoff: it posts the merger's branch/conflict-or-gate evidence
+// and flips the dependent directly, without inventing or reclaiming an issue
+// branch.
 //
 // `chunk-landed` (#60) must remove `ready-for-agent`: on a published member that
 // label now requests rework (#94). It also applies the display-only
@@ -532,6 +536,14 @@ type FinalizeKindInput =
   // into a run-wide halt.
   | { readonly kind: "landing-push-refused"; readonly issue: IssueRef }
   | {
+      // #174 — the issue never entered execution, so there is no issue branch
+      // to publish or reclaim. The merger supplies the refresh diagnostics;
+      // finalise owns the comment and ready -> agent-stuck transition.
+      readonly kind: "chunk-refresh-failed";
+      readonly issue: IssueRef;
+      readonly comment: string;
+    }
+  | {
       readonly kind: "needs-info";
       readonly issue: IssueRef;
       readonly questions: string;
@@ -724,6 +736,7 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "merge-gate-red",
   "forge-unverified",
   "landing-push-refused",
+  "chunk-refresh-failed",
   "needs-info",
   "needs-ui-prototype",
   "needs-partition",
@@ -1113,6 +1126,17 @@ export async function finalizeOne(
       const r = await adapter.editLabels(n, [], [labels.agentStuck]);
       requireFlip(r, n);
       return { kind: "parked-local" };
+    }
+    case "chunk-refresh-failed": {
+      const n = issueNumberOf(input.issue);
+      await adapter.postComment(n, input.comment);
+      const r = await adapter.editLabels(
+        n,
+        [READY_FOR_AGENT_LABEL],
+        [labels.agentStuck],
+      );
+      requireFlip(r, n);
+      return { kind: "noop" };
     }
     case "needs-info": {
       const n = issueNumberOf(input.issue);

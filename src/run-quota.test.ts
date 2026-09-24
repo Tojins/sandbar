@@ -261,6 +261,7 @@ vi.mock("./merger.js", async (importOriginal) => ({
 
 import type { RunConfig } from "./config.js";
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
+import { SandbarError } from "./errors.js";
 import type { InnerLoopOptions } from "./inner-loop.js";
 import { MergerError, realAdapter, type RunMergerOptions } from "./merger.js";
 import { realAdapter as realFinalizeAdapter } from "./finalize.js";
@@ -308,7 +309,8 @@ const resolution = (plan: ReturnType<typeof issue>[]) => ({
 });
 const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
   merged, chunkLanded: [], skipped: [], pushed, unclosed: [], mergedChunks: [],
-  deferredChunks: [], skippedChunks: [],
+  deferredChunks: [], skippedChunks: [], refreshedChunks: [],
+  failedChunkRefreshes: [],
 });
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
@@ -1978,6 +1980,49 @@ describe("run quota orchestration (#109)", () => {
     }));
   });
 
+  it("finalises a source landing before propagating refresh infrastructure failure", async () => {
+    const done = issue("1");
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    // First admit the issue. The refresh appears on the recompute after its
+    // terminal, so both the DONE branch and refresh share one landing pass.
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue({
+        ...resolution([]),
+        chunkRefreshes: [refresh],
+      });
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    seams.merger.mockImplementation(async (
+      batch: ReturnType<typeof issue>[],
+      _adapter,
+      _log,
+      _gateLog,
+      options: RunMergerOptions,
+    ) => {
+      options.onSourceSettled?.(summary(batch));
+      throw new SandbarError("refresh origin unavailable");
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:1");
+
+    expect(seams.finalize).toHaveBeenCalledWith(
+      [expect.objectContaining({ kind: "merged", issue: done })],
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("refresh origin unavailable"),
+    }));
+  });
+
   it("records exactly one duration-bearing event for a completed landing batch", async () => {
     const done = issue("1");
     seams.plan
@@ -2417,6 +2462,32 @@ describe("run quota orchestration (#109)", () => {
     ]));
     expect(eventsOf("exit").some((event) => event.tag === "stuck")).toBe(false);
     expect(eventsOf("idle").length).toBeGreaterThan(0);
+  });
+
+  it("starts a landing pass for a planner-requested chunk refresh", async () => {
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce({ ...resolution([]), chunkRefreshes: [refresh] })
+      .mockResolvedValue(resolution([]));
+    vi.mocked(fetchOriginRefs).mockRejectedValueOnce(
+      new Error("stop after refresh pass"),
+    );
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(seams.merger.mock.calls[0]?.[0]).toEqual([]);
+    expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkRefresh)
+      .toEqual({ requests: [refresh], sourceBranch: "main" });
   });
 
   it("hands a deferred request to a landing pass triggered by its completed member", async () => {
