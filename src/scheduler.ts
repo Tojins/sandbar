@@ -65,8 +65,8 @@
 // outstanding `land` request on the way out, and folding it in here would
 // quietly change that.
 //
-// A POLL WHOSE REF REFRESH FAILED never reaches that decision: planning and
-// landing both read refs it did not get, so run.ts reports the failure and
+// A RECOMPUTE WHOSE REF REFRESH FAILED never reaches that decision: planning
+// and landing both read refs it did not get, so run.ts reports the failure and
 // waits for another wake. `decideAfterFailedRefresh` is the one exception, and
 // it is the whole rule (#146) — see its comment.
 //

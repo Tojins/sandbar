@@ -175,6 +175,7 @@ vi.mock("./preflight.js", async (importOriginal) => ({
   runPreflightAfterReachability: vi.fn(async () => "anyone" as const),
   absoluteMountSources: vi.fn(() => []),
   fetchOriginRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
+  fetchPlanningRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
 }));
 vi.mock("./containers.js", () => ({
   cleanupOrphanContainers: vi.fn(async () => ({ removed: [], failures: [] })),
@@ -274,6 +275,7 @@ import { UiPortInUseError, startUiServer } from "./ui-server.js";
 import {
   checkForgeReachabilityForPreflight,
   fetchOriginRefs,
+  fetchPlanningRefs,
   runPreflightAfterReachability,
 } from "./preflight.js";
 import { startKeepawake } from "./keepawake.js";
@@ -371,6 +373,11 @@ describe("run quota orchestration (#109)", () => {
     seams.wakeStatusReports.length = 0;
     vi.mocked(fetchOriginRefs).mockReset();
     vi.mocked(fetchOriginRefs).mockRejectedValue(new Error("stop after idle poll"));
+    vi.mocked(fetchPlanningRefs).mockReset();
+    vi.mocked(fetchPlanningRefs).mockResolvedValue({
+      sourceChanged: false,
+      failures: [],
+    });
     vi.mocked(ensureImages).mockReset();
     vi.mocked(ensureImages).mockResolvedValue(new Map());
     vi.mocked(createBranchImages).mockReset();
@@ -1299,6 +1306,39 @@ describe("run quota orchestration (#109)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("retries a failed plan-time ref refresh before reading containment", async () => {
+    const arrived = issue("136");
+    seams.plan.mockResolvedValue(resolution([arrived]));
+    vi.mocked(fetchOriginRefs).mockResolvedValue({
+      sourceChanged: false,
+      failures: [],
+    });
+    vi.mocked(fetchPlanningRefs)
+      .mockResolvedValueOnce({
+        sourceChanged: false,
+        failures: ["Fetching planning refs failed: network unavailable"],
+      })
+      .mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:4");
+
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(fetchPlanningRefs).toHaveBeenCalledTimes(4);
+    expect(eventsOf("notice")).toContainEqual({
+      kind: "notice",
+      message: "Planning ref refresh failed; retrying in 1ms: " +
+        "Fetching planning refs failed: network unavailable",
+    });
+    expect(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[1])
+      .toBeLessThan(seams.plan.mock.invocationCallOrder[0]!);
   });
 
   // The drained daemon's only wake is that poll timer, so a fetch that stays
@@ -2542,6 +2582,13 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.merger.mock.calls[0]?.[0]).toEqual([]);
     expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkRefresh)
       .toEqual({ requests: [refresh], sourceBranch: "main" });
+    expect(fetchPlanningRefs).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[0])
+      .toBeLessThan(seams.plan.mock.invocationCallOrder[0]!);
+    expect(seams.merger.mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[1]!);
+    expect(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[1])
+      .toBeLessThan(seams.plan.mock.invocationCallOrder[1]!);
   });
 
   it("does not refresh a future admission while provider closure drains", async () => {

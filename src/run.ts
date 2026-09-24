@@ -110,7 +110,9 @@
 //
 // At capacity below `maxParallelIssues`, one cancellable wait races the next
 // slot completion against `pollIntervalMs`. A poll refreshes source, issue,
-// chunk and member refs before running the ordinary plan. A failed refresh is
+// chunk and member refs; every recompute refreshes those namespaces again at
+// the planning boundary so containment never reads a pre-push cache (#174).
+// A failed refresh at either boundary is
 // recorded as a feed-only notice and waits for the next wake instead of
 // killing the daemon, unless
 // `decideAfterFailedRefresh` says this daemon is a drained restart whose exit
@@ -293,6 +295,7 @@ import {
   absoluteMountSources,
   checkForgeReachabilityForPreflight,
   fetchOriginRefs,
+  fetchPlanningRefs,
   PreflightError,
   runPreflightAfterReachability,
 } from "./preflight.js";
@@ -1402,7 +1405,7 @@ export async function run(
   // point it was observed. The next recompute measures storage first; a low
   // reading keeps this latched through the drain so recovery can perform it,
   // while an exit leaves it untouched and starts no unnecessary build.
-  let pendingSourceImageRefresh: "poll" | "landing" | null = null;
+  let pendingSourceImageRefresh: "poll" | "planning" | "landing" | null = null;
   // What the observed request carried, and the whole of the drain's state.
   let restartRequested: string | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
@@ -1800,6 +1803,42 @@ export async function run(
     }
   }
 
+  const recoverFromRefRefreshFailure = async (
+    boundary: "Poll" | "Planning ref",
+    failures: readonly string[],
+  ): Promise<"exit" | "retry"> => {
+    // Planning and landing cannot safely use a partially refreshed namespace.
+    // The drained-restart exception is the same at either fetch boundary: it
+    // reads no refs, while every other state waits for a complete snapshot.
+    const stalled = decideAfterFailedRefresh({
+      restartRequested: restartRequested !== null,
+      active: pool.activeCount,
+      ongoing: pool.ongoingCount,
+      hasPendingTerminals: pool.hasPendingTerminals,
+    });
+    const next = stalled.kind === "exit"
+      ? "the pending restart needs none of it, so exiting"
+      : `retrying in ${config.pollIntervalMs}ms`;
+    const message =
+      `${boundary} refresh failed; ${next}: ${failures.join("; ")}`;
+    await runRecord.emit(stalled.kind === "exit"
+      ? { kind: "complaint", severity: "warning", message }
+      : { kind: "notice", message });
+    if (stalled.kind === "exit") {
+      terminalExit = await announceExit(
+        schedulerExit(stalled.reason, {
+          pool,
+          providerExit: providerExitPending ?? closedProviderExit(config, providerState),
+          restartDetail: restartRequested,
+          storage: storageLow,
+        }),
+      );
+      return "exit";
+    }
+    nextPlanTrigger = await waitForSchedulerWake();
+    return "retry";
+  };
+
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
@@ -1820,36 +1859,9 @@ export async function run(
       if (planTrigger === "poll") {
         const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
         if (refresh.failures.length > 0) {
-          // This iteration cannot plan or land on refs it did not get, and for
-          // an emptied pool it is also the only wake there is, so a fetch that
-          // stays broken would hold a latched restart here forever (#146).
-          // `decideAfterFailedRefresh` owns which of the two that is.
-          const stalled = decideAfterFailedRefresh({
-            restartRequested: restartRequested !== null,
-            active: pool.activeCount,
-            ongoing: pool.ongoingCount,
-            hasPendingTerminals: pool.hasPendingTerminals,
-          });
-          const next = stalled.kind === "exit"
-            ? "the pending restart needs none of it, so exiting"
-            : `retrying in ${config.pollIntervalMs}ms`;
-          const message =
-            `Poll refresh failed; ${next}: ${refresh.failures.join("; ")}`;
-          await runRecord.emit(stalled.kind === "exit"
-            ? { kind: "complaint", severity: "warning", message }
-            : { kind: "notice", message });
-          if (stalled.kind === "exit") {
-            terminalExit = await announceExit(
-              schedulerExit(stalled.reason, {
-                pool,
-                providerExit: providerExitPending ?? closedProviderExit(config, providerState),
-                restartDetail: restartRequested,
-                storage: storageLow,
-              }),
-            );
+          if (await recoverFromRefRefreshFailure("Poll", refresh.failures) === "exit") {
             break;
           }
-          nextPlanTrigger = await waitForSchedulerWake();
           continue;
         }
         // A terminal is eligible again only after the poll has refreshed the
@@ -1933,18 +1945,44 @@ export async function run(
             `${measuredSpace.availableBytes} bytes free after image reconciliation`,
         });
       }
+      // The poll snapshot is not a plan-time containment answer. A landing
+      // pass pushes from an ephemeral merger clone, and a human may move the
+      // source branch between any two wakes, so neither necessarily updates
+      // this cache's remote-tracking chunk/source refs. Refresh them for this
+      // recompute immediately before buildPlan reads containment (#174).
+      const planningRefresh = await fetchPlanningRefs(
+        layout.repoDir,
+        config.sourceBranch,
+      );
+      if (planningRefresh.failures.length > 0) {
+        if (
+          await recoverFromRefRefreshFailure(
+            "Planning ref",
+            planningRefresh.failures,
+          ) === "exit"
+        ) {
+          break;
+        }
+        continue;
+      }
+      if (planningRefresh.sourceChanged && restartRequested === null) {
+        pendingSourceImageRefresh ??= planTrigger === "poll" ? "poll" : "planning";
+      }
       if (
         storageLow === null &&
         restartRequested === null &&
         pendingSourceImageRefresh !== null
       ) {
-        if (pendingSourceImageRefresh === "poll") {
-          const line =
-            `origin/${config.sourceBranch} moved during poll; refreshing source images`;
+        if (
+          pendingSourceImageRefresh === "poll" ||
+          pendingSourceImageRefresh === "planning"
+        ) {
           await runRecord.emit({
             kind: "preflight",
             action: "origin-refreshed",
-            detail: line,
+            detail: pendingSourceImageRefresh === "poll"
+              ? `origin/${config.sourceBranch} moved during poll; refreshing source images`
+              : `origin/${config.sourceBranch} moved before planning; refreshing source images`,
           });
         }
         await refreshSourceImages();

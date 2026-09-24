@@ -198,15 +198,17 @@ default is unlimited, so existing hosts keep their prior concurrency.
 
 An empty plan is idle, not terminal (#133). One cancellable wait races a freed
 slot with `pollIntervalMs` (default 60 seconds); a poll fetches source plus the
-issue, chunk and member namespaces before running the ordinary planner. A moved source tip refreshes
+issue, chunk and member namespaces, and every recompute fetches them again at
+the planning boundary so containment reads refs obtained after the preceding
+landing push (#174). A moved source tip refreshes
 image inputs whether sandbar or a human moved it; each admission captures one
 immutable agent/branch-image bundle, so in-flight work keeps its original pair.
 No-op polls write nothing; a queue-label actor exclusion is a required
 per-recompute diagnostic and therefore makes that poll reportable. A failed
-poll fetch is reported and retried after another interval — unless a latched
-restart has nothing left to drain, the one state whose action needs none of the
-refs the fetch did not get (#146); only the startup fetch remains a preflight
-refusal.
+poll or planning fetch is reported and retried after another interval — unless
+a latched restart has nothing left to drain, the one state whose action needs
+none of the refs the fetch did not get (#146); only the startup fetch remains a
+preflight refusal.
 The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
 
 Provider closure by quota or a permanent credential refusal stops admissions

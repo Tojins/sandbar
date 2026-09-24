@@ -31,6 +31,7 @@ import {
   type DeclaredMount,
   deleteMergedSandbarBranches,
   fetchOriginRefs,
+  fetchPlanningRefs,
   gatherState,
   PreflightError,
   runPreflight,
@@ -188,6 +189,29 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     )).rejects.toBeDefined();
     await expect(git(
       target, "show-ref", "--verify", "refs/remotes/origin/sandbar/member-1",
+    )).rejects.toBeDefined();
+  });
+
+  it("refreshes the containment namespaces without fetching issue branches (#174)", async () => {
+    await git(target, "update-ref", "refs/heads/sandbar/issue-2-test", "HEAD");
+    await git(target, "update-ref", "refs/heads/sandbar/chunk-2-test", "HEAD");
+    await git(target, "update-ref", "refs/heads/sandbar/member-2", "HEAD");
+    await writeFile(join(target, "a.txt"), "planning moved\n");
+    await git(target, "add", "a.txt");
+    await git(target, "commit", "-qm", "move before planning");
+
+    expect(await fetchPlanningRefs(target, "main")).toEqual({
+      sourceChanged: true,
+      failures: [],
+    });
+    await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/chunk-2-test",
+    )).resolves.toBeDefined();
+    await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/member-2",
+    )).resolves.toBeDefined();
+    await expect(git(
+      target, "show-ref", "--verify", "refs/sandbar/poll/origin/sandbar/issue-2-test",
     )).rejects.toBeDefined();
   });
 
