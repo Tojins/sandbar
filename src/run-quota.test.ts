@@ -2544,6 +2544,79 @@ describe("run quota orchestration (#109)", () => {
       .toEqual({ requests: [refresh], sourceBranch: "main" });
   });
 
+  it("does not refresh a future admission while provider closure drains", async () => {
+    const target = issue("1");
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce(resolution([target]))
+      .mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    seams.innerLoop.mockImplementation(async (
+      _candidate: ReturnType<typeof issue>,
+      options: { providerState: { closeQuota(provider: "claude", measurement: object): void } },
+    ) => {
+      options.providerState.closeQuota("claude", {
+        status: "rejected", window: "five_hour", resetsAt: 42,
+      });
+      return {
+        type: "QUOTA" as const,
+        provider: "claude" as const,
+        window: "five_hour" as const,
+        resetsAt: 42,
+      };
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run(config)).rejects.toThrow("EXIT:4");
+
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.merger).not.toHaveBeenCalled();
+  });
+
+  it("does not attach a chunk refresh to committed work during restart drain", async () => {
+    const installation = await mkdtemp(join(tmpdir(), "sandbar-refresh-restart-"));
+    const done = issue("1");
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    seams.innerLoop.mockImplementation(async () => {
+      await writeFile(join(installation, RESTART_REQUEST_FILE), "abc1234\n");
+      return { type: "DONE", commits: [{ sha: "abc" }] };
+    });
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) =>
+      summary(batch));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    try {
+      await expect(run(
+        config,
+        { configPath: join(installation, "sandbar.config.mjs") },
+      )).rejects.toThrow("EXIT:75");
+
+      expect(exit).toHaveBeenCalledWith(75);
+      expect(seams.merger).toHaveBeenCalledOnce();
+      expect(seams.merger.mock.calls[0]?.[0]).toEqual([done]);
+      expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkRefresh)
+        .toBeUndefined();
+    } finally {
+      await rm(installation, { recursive: true, force: true });
+    }
+  });
+
   it("hands a deferred request to a landing pass triggered by its completed member", async () => {
     const target = {
       root: 42,

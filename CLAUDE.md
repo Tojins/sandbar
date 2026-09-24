@@ -166,7 +166,9 @@ default is unlimited, so existing hosts keep their prior concurrency.
    and the existing chunk ref is pushed directly (#174). A failed conflict or
    red-gate recovery parks every triggering dependent without touching the
    chunk PR; origin or infrastructure failures halt with those dependents still
-   queued.
+   queued. Restart, provider, storage and no-progress drains do not run these
+   refreshes: they prepare future admissions rather than preserve committed
+   work, so the next process recomputes them from current refs.
    `src/chunk-land.ts` owns the label, the
    selection, the wrap-up and — as `chunkForgeWrites` — the one spelling of the
    `gh`/`git` writes it makes, which the merge phase and the plan-time

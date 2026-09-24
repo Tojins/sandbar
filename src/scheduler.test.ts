@@ -145,7 +145,8 @@ describe("continuous pool", () => {
 describe("scheduler decisions", () => {
   const snapshot = (overrides: Partial<SchedulerSnapshot> = {}): SchedulerSnapshot => ({
     active: 0, ongoing: 0, hasCompleted: false, hasPendingTerminals: false,
-    hasCandidates: false, hasRetries: false, hasLandRequests: false, hasCapacity: true,
+    hasCandidates: false, hasRetries: false, hasLandRequests: false,
+    hasChunkRefreshRequests: false, hasCapacity: true,
     noProgressSinceLanding: 0,
     noProgressBackstop: 6, providerClosed: false, restartRequested: false,
     storageLow: false, ...overrides,
@@ -164,6 +165,7 @@ describe("scheduler decisions", () => {
     ["provider closure outranks admission", snapshot({ providerClosed: true, hasCandidates: true }), { kind: "exit", reason: "provider-closed" }],
     ["restart lands pending terminals first", snapshot({ restartRequested: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
     ["restart lands an outstanding land request", snapshot({ restartRequested: true, hasLandRequests: true }), { kind: "land" }],
+    ["restart ignores a chunk refresh request", snapshot({ restartRequested: true, hasChunkRefreshRequests: true }), { kind: "exit", reason: "restart" }],
     ["restart drains running work", snapshot({ restartRequested: true, active: 1, ongoing: 1 }), { kind: "drain" }],
     ["restart exits when idle", snapshot({ restartRequested: true }), { kind: "exit", reason: "restart" }],
     ["restart outranks admission", snapshot({ restartRequested: true, hasCandidates: true }), { kind: "exit", reason: "restart" }],
@@ -175,6 +177,7 @@ describe("scheduler decisions", () => {
     ["low storage drains running work", snapshot({ storageLow: true, active: 1, ongoing: 1, hasCandidates: true }), { kind: "drain" }],
     ["low storage exits when drained", snapshot({ storageLow: true }), { kind: "exit", reason: "storage-low" }],
     ["low storage does not start a fresh land request", snapshot({ storageLow: true, hasLandRequests: true }), { kind: "exit", reason: "storage-low" }],
+    ["low storage does not start a chunk refresh", snapshot({ storageLow: true, hasChunkRefreshRequests: true }), { kind: "exit", reason: "storage-low" }],
     ["low storage outranks provider closure", snapshot({ storageLow: true, providerClosed: true }), { kind: "exit", reason: "storage-low" }],
     ["stuck exits", snapshot({ noProgressSinceLanding: 6 }), { kind: "exit", reason: "stuck" }],
     ["stuck outranks admission", snapshot({ noProgressSinceLanding: 6, hasCandidates: true }), { kind: "exit", reason: "stuck" }],
@@ -184,9 +187,11 @@ describe("scheduler decisions", () => {
     ["admits a retry", snapshot({ hasRetries: true, ongoing: 1 }), { kind: "admit", next: "wait" }],
     ["refill before landing", snapshot({ hasPendingTerminals: true, hasCandidates: true, ongoing: 1 }), { kind: "admit", next: "land" }],
     ["refill before a requested landing", snapshot({ hasLandRequests: true, hasCandidates: true, active: 1, ongoing: 1 }), { kind: "admit", next: "land" }],
+    ["refill before a chunk refresh", snapshot({ hasChunkRefreshRequests: true, hasCandidates: true, active: 1, ongoing: 1 }), { kind: "admit", next: "land" }],
     ["no capacity: wait", snapshot({ active: 1, ongoing: 1, hasCapacity: false }), { kind: "wait" }],
     ["full pool with a land request lands", snapshot({ active: 1, ongoing: 1, hasCapacity: false, hasLandRequests: true }), { kind: "land" }],
     ["land request with nothing running lands", snapshot({ hasLandRequests: true }), { kind: "land" }],
+    ["chunk refresh with nothing running lands", snapshot({ hasChunkRefreshRequests: true }), { kind: "land" }],
     ["idle waits for the poll", snapshot(), { kind: "wait" }],
   ] as const)("%s", (_name, state, action) => {
     expect(decideSchedulerAction(state)).toEqual(action);

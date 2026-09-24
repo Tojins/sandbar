@@ -73,6 +73,9 @@
 //                              merges source into that existing chunk after
 //                              source landings, gates it, and pushes directly;
 //                              an unsalvageable composition parks the dependent.
+//                              Since that work exists only for a future
+//                              admission, every admission-closing drain leaves
+//                              it for the next run.
 //   Finalise:                  Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
@@ -280,6 +283,7 @@ import {
 } from "./plan-resolver.js";
 import {
   ContinuousPool,
+  chunkRefreshRequestsAreRunnable,
   decideAfterFailedRefresh,
   decideSchedulerAction,
   type SchedulerExit,
@@ -2144,27 +2148,31 @@ export async function run(
       // The plan record is the resolver's answer, not the narrower admission
       // this observation may make. Active slots, cooldown and scheduler state
       // can all reduce admission without changing what the planner resolved.
-      const schedulerAction = decideSchedulerAction({
+      const schedulerSnapshot = {
         active: pool.activeCount,
         ongoing: pool.ongoingCount,
         hasCompleted: pool.hasCompleted,
         hasPendingTerminals: pool.hasPendingTerminals,
         hasCandidates: pool.hasUnstarted(resolution.plan),
         hasRetries: pool.hasRetries,
-        hasLandRequests:
-          landRequests.length > 0 || resolution.chunkRefreshes.length > 0,
+        hasLandRequests: landRequests.length > 0,
+        hasChunkRefreshRequests: resolution.chunkRefreshes.length > 0,
         hasCapacity: pool.activeCount < config.maxParallelIssues,
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         providerClosed,
         restartRequested: restartRequested !== null,
         storageLow: storageLow !== null,
-      });
+      };
+      const schedulerAction = decideSchedulerAction(schedulerSnapshot);
+      const chunkRefreshes = chunkRefreshRequestsAreRunnable(schedulerSnapshot)
+        ? resolution.chunkRefreshes
+        : [];
       const pollDidWork =
         sourceChangedOnPoll || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
-        resolution.chunkRefreshes.length > 0 ||
+        chunkRefreshes.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
       const pollIsReportable = pollDidWork || resolution.waiting.some(
         (entry) => entry.reason.kind === "label-actor",
@@ -2358,7 +2366,7 @@ export async function run(
       // the other.
       if (
         completedIssues.length > 0 || landRequests.length > 0 ||
-        resolution.chunkRefreshes.length > 0
+        chunkRefreshes.length > 0
       ) {
         const landingImages = currentImages;
         // The merger runs in a dedicated worktree detached at
@@ -2542,10 +2550,10 @@ export async function run(
                     },
                   }
                 : {}),
-              ...(resolution.chunkRefreshes.length > 0
+              ...(chunkRefreshes.length > 0
                 ? {
                     chunkRefresh: {
-                      requests: resolution.chunkRefreshes,
+                      requests: chunkRefreshes,
                       sourceBranch: config.sourceBranch,
                     },
                     onSourceSettled: (summary: MergerSummary) => {
@@ -2822,7 +2830,7 @@ export async function run(
         landedNow,
       );
       nextPlanTrigger =
-        landRequests.length > 0 || resolution.chunkRefreshes.length > 0 ||
+        landRequests.length > 0 || chunkRefreshes.length > 0 ||
           landedNow > 0
         ? "landing-finished"
         : "terminal-finalized";
