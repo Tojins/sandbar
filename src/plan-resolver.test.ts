@@ -868,6 +868,32 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     }]);
   });
 
+  it("aggregates every selected dependent onto one chunk refresh", () => {
+    const branch = "sandbar/chunk-245-issue-245";
+    const r = resolvePlan(
+      [
+        issue(245, "", { title: "Issue 245" }),
+        issue(400, "## Blocked by\n- #245\n- #399\n"),
+        issue(401, "## Blocked by\n- #245\n- #399\n"),
+      ],
+      facts({ 245: {}, 399: { state: "CLOSED" } }),
+      new Set(),
+      3,
+      "review",
+      new Map([[branch, new Set([245])]]),
+    );
+
+    expect(r.chunkRefreshes).toEqual([{
+      root: 245,
+      branch,
+      title: "Issue 245",
+      dependents: [
+        { number: 400, title: "Issue 400" },
+        { number: 401, title: "Issue 401" },
+      ],
+    }]);
+  });
+
   it("admits the chained member once the chunk contains the source tip", () => {
     const branch = "sandbar/chunk-245-issue-245";
     const r = resolvePlan(

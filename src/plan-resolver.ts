@@ -187,7 +187,7 @@ import {
   landedChunksOf,
 } from "./chunks.js";
 import { DEFAULT_MAX_PARALLEL_ISSUES } from "./config.js";
-import { SandbarError, isExitCode } from "./errors.js";
+import { SandbarError } from "./errors.js";
 import {
   DEFAULT_LANE,
   type Lane,
@@ -784,24 +784,16 @@ export async function readChunksContainingSource(
 ): Promise<ReadonlySet<string>> {
   const { stdout } = await exec("git", [
     "for-each-ref",
+    `--contains=refs/remotes/origin/${sourceBranch}`,
     "--format=%(refname:short)",
     ...ORIGIN_CHUNK_BRANCH_REFGLOBS,
   ], { cwd: repoDir });
-  const result = new Set<string>();
-  for (const ref of stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
-    try {
-      await exec("git", [
-        "merge-base",
-        "--is-ancestor",
-        `refs/remotes/origin/${sourceBranch}`,
-        ref,
-      ], { cwd: repoDir });
-      result.add(branchNameFromOriginRef(ref));
-    } catch (err) {
-      if (!isExitCode(err, 1)) throw err;
-    }
-  }
-  return result;
+  return new Set(
+    stdout.split("\n")
+      .map((ref) => ref.trim())
+      .filter(Boolean)
+      .map(branchNameFromOriginRef),
+  );
 }
 
 async function fetchIssueSummaries(

@@ -232,6 +232,10 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
     shimBin = await mkdtemp(join(tmpdir(), "sandbar-extra-"));
     repoDir = await mkdtemp(join(tmpdir(), "sandbar-plan-repo-"));
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repoDir });
+    execFileSync("git", ["config", "user.email", "sandbar@example.test"], { cwd: repoDir });
+    execFileSync("git", ["config", "user.name", "Sandbar Test"], { cwd: repoDir });
+    execFileSync("git", ["commit", "--allow-empty", "-qm", "base"], { cwd: repoDir });
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: repoDir });
     // An EMPTY queue and an empty chunk-member listing — the state a
     // just-filed issue is invisible in — with authoritative facts that know
     // both it and its blocker, which is how the real GraphQL batch answers.
@@ -366,5 +370,101 @@ describe("buildPlan loads git-derived members into the candidate graph (#93, #94
       result.landedChunks,
     );
     expect(landing?.rework).toEqual([{ number: 60, title: "Root" }]);
+  });
+});
+
+describe("buildPlan connects source containment to refresh admission (#174)", () => {
+  let shimBin: string;
+  let repoDir: string;
+  let originalPath: string | undefined;
+
+  const DEPENDENT = {
+    number: 400,
+    title: "Dependent",
+    body: "## Blocked by\n- #245\n- #399\n",
+    labels: ["ready-for-agent"],
+  };
+
+  beforeEach(async () => {
+    shimBin = await mkdtemp(join(tmpdir(), "sandbar-refresh-shim-"));
+    repoDir = await mkdtemp(join(tmpdir(), "sandbar-refresh-repo-"));
+    const git = (...args: string[]): void => {
+      execFileSync("git", args, { cwd: repoDir, stdio: "ignore" });
+    };
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "sandbar@example.test");
+    git("config", "user.name", "Sandbar Test");
+    git("commit", "--allow-empty", "-qm", "base");
+    git("checkout", "-qb", "chunk");
+    git("commit", "--allow-empty", "-qm", "member 245");
+    git("update-ref", "refs/remotes/origin/sandbar/member-245", "HEAD");
+    git("update-ref", "refs/remotes/origin/sandbar/chunk-245-root", "HEAD");
+    git("checkout", "-q", "main");
+    git("commit", "--allow-empty", "-qm", "land blocker 399");
+    git("update-ref", "refs/remotes/origin/main", "HEAD");
+
+    await writeFile(join(shimBin, "gh"), [
+      "#!/bin/sh",
+      'if [ "$1 $2" = "issue list" ]; then printf "[]"; exit 0; fi',
+      'query=""',
+      "while [ $# -gt 0 ]; do",
+      '  case "$1" in',
+      '    -f) case "$2" in query=*) query=${2#query=} ;; esac; shift 2 ;;',
+      "    *) shift ;;",
+      "  esac",
+      "done",
+      'case "$query" in',
+      '  *"number title body labels(first: 100)"*)',
+      '    printf \'{"data":{"repository":{"i245":{"number":245,"title":"Root","body":"","state":"OPEN","labels":{"nodes":[]}}}}}\' ;;',
+      '  *"state labels(first: 100)"*)',
+      '    printf \'{"data":{"repository":{"i245":{"state":"OPEN","labels":{"nodes":[]}},"i399":{"state":"CLOSED","labels":{"nodes":[]}},"i400":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]}}}}}\' ;;',
+      "  *) exit 64 ;;",
+      "esac",
+    ].join("\n") + "\n", { mode: 0o755 });
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = `${shimBin}:${originalPath ?? ""}`;
+  });
+
+  afterEach(async () => {
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
+    await rm(shimBin, { recursive: true, force: true });
+    await rm(repoDir, { recursive: true, force: true });
+  });
+
+  it("waits before the chunk contains source and admits after the refresh", async () => {
+    const options = {
+      repoDir,
+      sourceBranch: "main",
+      defaultLane: "review" as const,
+      extraCandidates: [DEPENDENT],
+      readyLabelPolicy: "anyone" as const,
+    };
+
+    const stale = await buildPlan(CONFIGURED, options);
+    expect(stale.plan).toEqual([]);
+    expect(stale.chunkRefreshes.map((refresh) => refresh.branch)).toEqual([
+      "sandbar/chunk-245-root",
+    ]);
+
+    execFileSync(
+      "git",
+      ["checkout", "-q", "chunk"],
+      { cwd: repoDir },
+    );
+    execFileSync(
+      "git",
+      ["merge", "--no-ff", "origin/main", "-m", "refresh"],
+      { cwd: repoDir },
+    );
+    execFileSync(
+      "git",
+      ["update-ref", "refs/remotes/origin/sandbar/chunk-245-root", "HEAD"],
+      { cwd: repoDir },
+    );
+
+    const refreshed = await buildPlan(CONFIGURED, options);
+    expect(refreshed.plan.map((issue) => issue.id)).toEqual(["400"]);
+    expect(refreshed.chunkRefreshes).toEqual([]);
   });
 });
