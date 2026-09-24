@@ -471,7 +471,14 @@ describe("runMergerWithAdapter — chunk refresh (#174)", () => {
 
   it("parks every triggering dependent when conflict resolution abandons", async () => {
     const request = refresh([400, 401]);
-    const { adapter } = makeAdapter({
+    const later = {
+      ...refresh([402]),
+      root: 246,
+      branch: "sandbar/chunk-246-later",
+      title: "Later",
+    };
+    const outcomes: string[] = [];
+    const { adapter, calls } = makeAdapter({
       merges: ["conflict"],
       agents: [{ stdout: "<promise>ABANDON</promise><reason>manual</reason>" }],
       chunkRefs: {
@@ -488,9 +495,13 @@ describe("runMergerWithAdapter — chunk refresh (#174)", () => {
       undefined,
       undefined,
       {
-        ...refreshing(request),
+        chunkRefresh: { requests: [request, later], sourceBranch: "main" },
         onResolveAttempt: async (_key, record) =>
           `/logs/resolve-${record.attempt}.log`,
+        observations: {
+          onGate: () => undefined,
+          onOutcome: (outcome) => outcomes.push(outcome.kind),
+        },
       },
     );
 
@@ -500,11 +511,16 @@ describe("runMergerWithAdapter — chunk refresh (#174)", () => {
     expect(failure?.comment).toContain("foo");
     expect(failure?.comment).toContain("/logs/resolve-1.log");
     expect(failure?.comment).toContain("merge `main` into");
+    expect(calls.chunkPushes).toEqual([]);
+    expect(calls.chunkRefFetches).toEqual([request.branch]);
+    expect(summary.refreshedChunks).toEqual([]);
+    expect(outcomes).toEqual(["chunk-refresh-failed"]);
   });
 
   it("includes the red gate trace in the dependent handoff", async () => {
     const request = refresh();
-    const { adapter } = makeAdapter({
+    const outcomes: string[] = [];
+    const { adapter, calls } = makeAdapter({
       merges: ["ok"],
       gates: [gateRed()],
       agents: [{ stdout: "<promise>ABANDON</promise><reason>still red</reason>" }],
@@ -517,11 +533,60 @@ describe("runMergerWithAdapter — chunk refresh (#174)", () => {
     });
 
     const summary = await runMergerWithAdapter(
-      [], adapter, undefined, undefined, refreshing(request),
+      [], adapter, undefined, undefined, {
+        ...refreshing(request),
+        observations: {
+          onGate: () => undefined,
+          onOutcome: (outcome) => outcomes.push(outcome.kind),
+        },
+      },
     );
 
     expect(summary.failedChunkRefreshes[0]?.comment).toContain("Gate trace");
     expect(summary.failedChunkRefreshes[0]?.comment).toContain("x\ny");
+    expect(calls.chunkPushes).toEqual([]);
+    expect(summary.refreshedChunks).toEqual([]);
+    expect(outcomes).toEqual(["chunk-refresh-failed"]);
+  });
+
+  it("hands off a durable source landing before a refresh failure escapes", async () => {
+    const request = refresh();
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      chunkPushes: [{ kind: "fatal", reason: "origin unavailable" }],
+      chunkRefs: {
+        [request.branch]: {
+          kind: "present",
+          ref: `refs/remotes/origin/${request.branch}`,
+        },
+      },
+    });
+    let settled: Parameters<NonNullable<RunMergerOptions["onSourceSettled"]>>[0] | undefined;
+    const checkingAdapter: MergerAdapter = {
+      ...adapter,
+      async fetchChunkRef(branch) {
+        expect(settled?.merged.map((landed) => landed.id)).toEqual(["42"]);
+        expect(settled?.pushed).toBe(true);
+        return adapter.fetchChunkRef(branch);
+      },
+    };
+
+    await expect(runMergerWithAdapter(
+      [issue(42)],
+      checkingAdapter,
+      undefined,
+      undefined,
+      {
+        ...refreshing(request),
+        onSourceSettled: (summary) => {
+          settled = summary;
+        },
+      },
+    )).rejects.toThrow("origin unavailable");
+
+    expect(settled?.merged.map((landed) => landed.id)).toEqual(["42"]);
+    expect(calls.chunkPushes).toHaveLength(1);
   });
 
   it("reports an origin failure without parking the dependent", async () => {

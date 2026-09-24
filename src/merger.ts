@@ -650,28 +650,32 @@ export type MergeUnit = {
 
 // What one `attemptMerge` did to the worktree, with the tracker deliberately
 // untouched. `install-failed` and `abandon` have both already been reverted.
+type AbandonedMergeAttempt = {
+  readonly kind: "abandon";
+  readonly reason: string;
+  // The resolve loop's HEAD-advance invariant tripped: the agent claimed
+  // success and produced no commit. Only an issue branch does anything
+  // different with it (a fresh attempt next cycle); a chunk has no
+  // implementer to re-run, so it parks like any other abandon.
+  readonly silent: boolean;
+  // What the resolve loop actually spent, for the prose the caller writes
+  // (#67). Carried through `MergeAttempt` rather than re-derived, because only
+  // the loop knows how a container exited and only it can say which paths were
+  // still unmerged when it gave up.
+  readonly attempts: readonly ResolveAttemptSummary[];
+  readonly conflictPaths: readonly string[];
+};
+
 type MergeAttempt = (
   | { readonly kind: "merged" }
   | { readonly kind: "install-failed" }
-  | {
-      readonly kind: "abandon";
-      readonly mode: "conflict" | "gate-red";
-      readonly reason: string;
-      // The resolve loop's HEAD-advance invariant tripped: the agent claimed
-      // success and produced no commit. Only an issue branch does anything
-      // different with it (a fresh attempt next cycle); a chunk has no
-      // implementer to re-run, so it parks like any other abandon.
-      readonly silent: boolean;
-      // What the resolve loop actually spent, for the prose the caller writes
-      // (#67). Carried through `MergeAttempt` rather than re-derived, because
-      // only the loop knows how a container exited and only it can say which
-      // paths were still unmerged when it gave up.
-      readonly attempts: readonly ResolveAttemptSummary[];
-      readonly conflictPaths: readonly string[];
-      // The initial red gate that caused gate-red mode. Kept out of conflict
-      // outcomes, where conflicted paths are the actionable trace instead.
-      readonly gateTrace?: string;
-    }
+  | (AbandonedMergeAttempt & { readonly mode: "conflict" })
+  | (AbandonedMergeAttempt & {
+      readonly mode: "gate-red";
+      // Every gate-red abandonment carries the initial gate trace; conflicts
+      // deliberately do not, because their paths are the actionable evidence.
+      readonly gateTrace: string;
+    })
 ) & { readonly durationMs: number };
 
 export function buildChunkRefreshFailedComment(args: {
@@ -691,7 +695,7 @@ export function buildChunkRefreshFailedComment(args: {
     : [
         outcome.mode === "conflict"
           ? formatConflictPaths(outcome.conflictPaths)
-          : `<details><summary>Gate trace</summary>\n\n\`\`\`\n${outcome.gateTrace ?? "Gate trace unavailable."}\n\`\`\`\n\n</details>`,
+          : `<details><summary>Gate trace</summary>\n\n\`\`\`\n${outcome.gateTrace}\n\`\`\`\n\n</details>`,
         formatResolveAttempts(outcome.attempts),
       ].filter((part) => part.length > 0).join("\n\n");
   return (
