@@ -1919,6 +1919,7 @@ export async function run(
         readyLabelPolicy,
         k: Math.max(0, config.maxParallelIssues - pool.activeCount),
         repoDir: layout.repoDir,
+        sourceBranch: config.sourceBranch,
         ongoing: new Set([...pool.startedIds()].map(Number)),
       };
       let resolution = await buildPlan(repo, planOptions);

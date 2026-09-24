@@ -9,7 +9,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readChunkMembers, readIssueBranchRefs } from "./plan-resolver.js";
+import {
+  readChunkMembers,
+  readChunksContainingSource,
+  readIssueBranchRefs,
+} from "./plan-resolver.js";
 
 const repos: string[] = [];
 const git = (cwd: string, ...args: string[]): string =>
@@ -81,6 +85,27 @@ describe("chunk membership from branch containment (#93)", () => {
       ["sandbar/chunk-10-alpha", new Set([10])],
       ["sandbar/chunk-20-beta", new Set([10, 20])],
     ]));
+  });
+});
+
+describe("source containment on chunk branches (#174)", () => {
+  it("reports only chunks that contain the exact origin source tip", async () => {
+    const repo = await newRepo("sandbar-chunk-source-");
+    const oldSource = git(repo, "rev-parse", "HEAD");
+    git(repo, "update-ref", "refs/remotes/origin/main", oldSource);
+    git(repo, "checkout", "-qb", "chunk-old");
+    git(repo, "commit", "--allow-empty", "-qm", "old chunk work");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-10-old", "HEAD");
+    git(repo, "checkout", "-q", "main");
+    git(repo, "commit", "--allow-empty", "-qm", "source moved");
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
+    git(repo, "checkout", "-qb", "chunk-fresh", "chunk-old");
+    git(repo, "merge", "--no-ff", "origin/main", "-m", "refresh");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-20-fresh", "HEAD");
+
+    expect(await readChunksContainingSource(repo, "main")).toEqual(
+      new Set(["sandbar/chunk-20-fresh"]),
+    );
   });
 });
 

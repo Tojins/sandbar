@@ -262,6 +262,7 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
   it("plans a labelled issue the listing has not caught up with", async () => {
     const r = await buildPlan(CONFIGURED, {
       repoDir,
+      sourceBranch: "main",
       extraCandidates: [FILED],
       readyLabelPolicy: "anyone",
     });
@@ -271,6 +272,7 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
   it("trusts a same-cycle sandbar requeue without timeline evidence", async () => {
     const r = await buildPlan(CONFIGURED, {
       repoDir,
+      sourceBranch: "main",
       extraCandidates: [FILED],
       readyLabelPolicy: { developers: ["alice"], viewerLogin: "token-bot" },
     });
@@ -284,6 +286,7 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
     const closed = { ...FILED, number: 10, body: "" };
     const r = await buildPlan(CONFIGURED, {
       repoDir,
+      sourceBranch: "main",
       extraCandidates: [closed],
       readyLabelPolicy: "anyone",
     });
@@ -293,6 +296,7 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
   it("plans nothing when nothing is handed in", async () => {
     expect((await buildPlan(CONFIGURED, {
       repoDir,
+      sourceBranch: "main",
       readyLabelPolicy: "anyone",
     })).plan).toEqual([]);
   });
@@ -349,6 +353,7 @@ describe("buildPlan loads git-derived members into the candidate graph (#93, #94
   it("requeues a git-derived member from authoritative labels onto its chunk", async () => {
     const result = await buildPlan(CONFIGURED, {
       repoDir,
+      sourceBranch: "main",
       defaultLane: "review",
       readyLabelPolicy: "anyone",
     });

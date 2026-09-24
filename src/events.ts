@@ -84,6 +84,11 @@ export type IssuePhase =
 
 export type WaitingReason =
   | { readonly kind: "blocked"; readonly by: readonly number[] }
+  | {
+      readonly kind: "chunk-refresh";
+      readonly branch: string;
+      readonly by: readonly number[];
+    }
   | { readonly kind: "no-slot" }
   | { readonly kind: "held" }
   | { readonly kind: "ongoing" }

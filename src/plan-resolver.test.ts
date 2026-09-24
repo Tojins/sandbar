@@ -45,12 +45,14 @@ function resolvePlan(
   ongoing: ReadonlySet<number> = new Set(),
   readyLabelPolicy: ReadyLabelPolicy = "anyone",
   trustedReady: ReadonlySet<number> = new Set(),
+  chunksContainingSource: ReadonlySet<string> = new Set(),
 ): PlanResolution {
   return resolvePlanDecision(candidates, issueFacts, {
     excluded,
     k,
     defaultLane,
     chunkMembers,
+    chunksContainingSource,
     ongoing,
     readyLabelPolicy,
     trustedReady,
@@ -836,6 +838,69 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
         },
       ],
     ]);
+  });
+
+  it("queues a refresh when a chained member also relies on a CLOSED blocker", () => {
+    const branch = "sandbar/chunk-245-issue-245";
+    const r = resolvePlan(
+      [
+        issue(245, "", { title: "Issue 245" }),
+        issue(400, "## Blocked by\n- #245\n- #399\n"),
+      ],
+      facts({ 245: {}, 399: { state: "CLOSED" } }),
+      new Set(),
+      3,
+      "review",
+      new Map([[branch, new Set([245])]]),
+    );
+
+    expect(r.plan).toEqual([]);
+    expect(r.waiting).toEqual([{
+      issue: 400,
+      title: "Issue 400",
+      reason: { kind: "chunk-refresh", branch, by: [399] },
+    }]);
+    expect(r.chunkRefreshes).toEqual([{
+      root: 245,
+      branch,
+      title: "Issue 245",
+      dependents: [{ number: 400, title: "Issue 400" }],
+    }]);
+  });
+
+  it("admits the chained member once the chunk contains the source tip", () => {
+    const branch = "sandbar/chunk-245-issue-245";
+    const r = resolvePlan(
+      [
+        issue(245, "", { title: "Issue 245" }),
+        issue(400, "## Blocked by\n- #245\n- #399\n"),
+      ],
+      facts({ 245: {}, 399: { state: "CLOSED" } }),
+      new Set(),
+      3,
+      "review",
+      new Map([[branch, new Set([245])]]),
+      new Set(),
+      "anyone",
+      new Set(),
+      new Set([branch]),
+    );
+
+    expect(r.plan.map((issue) => issue.id)).toEqual(["400"]);
+    expect(r.chunkRefreshes).toEqual([]);
+  });
+
+  it("does not refresh an unchained chunk root for a CLOSED blocker", () => {
+    const r = resolvePlan(
+      [issue(400, "## Blocked by\n- #399\n")],
+      facts({ 399: { state: "CLOSED" } }),
+      new Set(),
+      3,
+      "review",
+    );
+
+    expect(r.plan.map((issue) => issue.id)).toEqual(["400"]);
+    expect(r.chunkRefreshes).toEqual([]);
   });
 
   it("does not let a display label de-queue an auto-lane candidate", () => {

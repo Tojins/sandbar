@@ -304,7 +304,7 @@ const issue = (id: string) => ({
 const resolution = (plan: ReturnType<typeof issue>[]) => ({
   plan,
   candidates: plan.map((candidate) => ({ ...candidate, ready: true })),
-  waiting: [], overrides: [], landedChunks: [], chunkNameDrifts: [],
+  waiting: [], overrides: [], landedChunks: [], chunkNameDrifts: [], chunkRefreshes: [],
 });
 const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
   merged, chunkLanded: [], skipped: [], pushed, unclosed: [], mergedChunks: [],
