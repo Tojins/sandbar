@@ -1120,6 +1120,31 @@ describe("resolvePlan git membership safety (#93)", () => {
     ]);
   });
 
+  it("retains rework while its chained member waits for a chunk refresh", () => {
+    const branch = "sandbar/chunk-245-issue-245";
+    const result = resolvePlan(
+      [
+        issue(245, "", { title: "Issue 245" }),
+        issue(400, "## Blocked by\n- #245\n- #399\n"),
+      ],
+      facts({
+        245: {},
+        399: { state: "CLOSED" },
+        400: { labels: ["ready-for-agent"] },
+      }),
+      new Set(),
+      3,
+      "review",
+      new Map([[branch, new Set([245, 400])]]),
+    );
+
+    expect(result.plan).toEqual([]);
+    expect(result.chunkRefreshes).toHaveLength(1);
+    expect(result.landedChunks[0]?.rework).toEqual([
+      { number: 400, title: "Issue 400" },
+    ]);
+  });
+
   it.each([
     {
       name: "closed",

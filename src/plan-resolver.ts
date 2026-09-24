@@ -569,13 +569,17 @@ export function resolvePlan(
   const selectedNumbers = new Set(selected.map(({ candidate }) => candidate.number));
   // Human-requested rework follows the planner's eligibility rules except for
   // scheduler exclusion. An ongoing issue is excluded from re-admission but
-  // must still defer its chunk's landing; a CLOSED, waiting or blocked member
-  // cannot be worked and therefore must not hold the request open forever.
+  // must still defer its chunk's landing. A member waiting for its chunk to
+  // refresh is likewise work this run intends to admit once its base is safe;
+  // landing the chunk first would ship the exact code queued for rework. A
+  // CLOSED, waiting or blocked member cannot be worked and therefore must not
+  // hold the request open forever.
   const trackerReadyNumbers = new Set(
     classified
       .filter(({ candidate, disposition }) => {
         const authoritative = issueFacts.get(candidate.number);
-        return (disposition.kind === "eligible" || disposition.kind === "ongoing" ||
+        return (disposition.kind === "eligible" ||
+          disposition.kind === "chunk-refresh" || disposition.kind === "ongoing" ||
           (disposition.kind === "omitted" && disposition.reason === "excluded")) &&
           authoritative?.labels.includes(READY_LABEL);
       })
