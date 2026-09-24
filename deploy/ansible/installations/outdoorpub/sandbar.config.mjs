@@ -34,8 +34,8 @@ export default {
   botEmail: "sandbar@sda.be",
   uiPort: 7335,
 
-  // The box also hosts outdoor (two slots) and sandbar (two slots); one slot
-  // here keeps a busy day at five agent sandboxes on a four-core machine, and
+  // The box also hosts outdoor (three slots) and sandbar (two slots); one slot
+  // here keeps a busy day at six agent sandboxes on a four-core machine, and
   // this queue is the smallest of the three.
   maxParallelIssues: 1,
   maxConcurrentGates: 1,

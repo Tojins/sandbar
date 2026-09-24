@@ -31,9 +31,9 @@ export default {
   },
   uiPort: 7334,
 
-  // The box hosts outdoor (two slots) and outdoorpub (one) beside this
+  // The box hosts outdoor (three slots) and outdoorpub (one) beside this
   // installation (group_vars/all.yml); the driver default of three here would
-  // put six agent sandboxes on one machine when every queue is busy.
+  // put seven agent sandboxes on one machine when every queue is busy.
   maxParallelIssues: 2,
   sandboxImage: image,
   sandboxHooks: {

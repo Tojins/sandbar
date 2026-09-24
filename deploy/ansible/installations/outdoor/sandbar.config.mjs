@@ -41,9 +41,9 @@ export default {
   botEmail: "sandbar@sda.be",
   uiPort: 7331,
 
-  // Sized for the Hetzner box (Tojins/outdoor#229): two issues in flight, one
-  // gate stack at a time, so the two gate pods never overlap in memory.
-  maxParallelIssues: 2,
+  // Sized for the Hetzner box (Tojins/outdoor#229): three issues in flight, one
+  // gate stack at a time, so the gate pods never overlap in memory.
+  maxParallelIssues: 3,
   maxConcurrentGates: 1,
 
   sandboxImage,
