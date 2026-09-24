@@ -369,6 +369,54 @@ describe("finalizeOne", () => {
     expect(calls.reclaims).toEqual([]);
   });
 
+  it("fails loud when a refresh park label flip is refused", async () => {
+    const { adapter, calls } = makeAdapter({
+      labelEditOk: false,
+      labelEditError: "'agent-stuck' not found",
+    });
+
+    await expect(finalizeOne({
+      kind: "chunk-refresh-failed",
+      issue: issue(400),
+      comment: "refresh diagnostics",
+    }, adapter, LABELS)).rejects.toThrow(/#400.*agent-stuck.*config/s);
+
+    expect(calls.comments).toEqual([{ n: 400, body: "refresh diagnostics" }]);
+    expect(calls.labelEdits).toEqual([{
+      n: 400,
+      remove: [READY_FOR_AGENT],
+      add: [AGENT_STUCK],
+    }]);
+  });
+
+  it("suppresses a refresh park when the dependent has already closed", async () => {
+    const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
+
+    const action = await finalizeOne({
+      kind: "chunk-refresh-failed",
+      issue: issue(400),
+      comment: "refresh diagnostics",
+    }, adapter, LABELS);
+
+    expect(action).toEqual({ kind: "skipped-closed" });
+    expect(calls.stateChecks).toEqual([400]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([]);
+    expect(calls.reclaims).toEqual([]);
+  });
+
+  it("requires queue-label readback after a successful refresh park", () => {
+    expect(finalizationIntendsNotReady({
+      input: {
+        kind: "chunk-refresh-failed",
+        issue: issue(400),
+        comment: "refresh diagnostics",
+        specGaps: [],
+      },
+      action: { kind: "noop" },
+    })).toBe(true);
+  });
+
   it("requires queue-label readback for a refusal park from a normally queued terminal", () => {
     expect(finalizationIntendsNotReady({
       input: {

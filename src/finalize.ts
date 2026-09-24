@@ -1028,7 +1028,12 @@ export async function finalizeOne(
   if (HANDOFF_KINDS.has(input.kind)) {
     const n = issueNumberOf(input.issue);
     if ((await adapter.issueState(n)) === "CLOSED") {
-      await reclaimClone(input, adapter);
+      // A refresh failure happens before this dependent is admitted, so it has
+      // no issue clone to reclaim. Every other handoff follows execution and
+      // still owns the ordinary clone cleanup contract.
+      if (input.kind !== "chunk-refresh-failed") {
+        await reclaimClone(input, adapter);
+      }
       return { kind: "skipped-closed" };
     }
   }
