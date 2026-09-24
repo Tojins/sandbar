@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  chunkRefreshRequestsAreRunnable,
   ContinuousPool,
   decideAfterFailedRefresh,
   decideSchedulerAction,
@@ -195,6 +196,14 @@ describe("scheduler decisions", () => {
     ["idle waits for the poll", snapshot(), { kind: "wait" }],
   ] as const)("%s", (_name, state, action) => {
     expect(decideSchedulerAction(state)).toEqual(action);
+  });
+
+  it.each([
+    ["ordinary planning", snapshot({ hasChunkRefreshRequests: true }), true],
+    ["low-storage drain", snapshot({ hasChunkRefreshRequests: true, storageLow: true }), false],
+    ["no-progress drain", snapshot({ hasChunkRefreshRequests: true, noProgressSinceLanding: 6 }), false],
+  ] as const)("chunk refresh runnable during %s: %s", (_name, state, runnable) => {
+    expect(chunkRefreshRequestsAreRunnable(state)).toBe(runnable);
   });
 
   // A failed refresh ordinarily retries, and the deploy is the one thing that

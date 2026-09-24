@@ -1535,6 +1535,55 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.wakeLocks[0]?.stop).toHaveBeenCalledOnce();
   });
 
+  it("refreshes images when the planning fetch alone discovers a moved source", async () => {
+    const arrived = issue("174");
+    const oldAgentImages = {
+      declaredTag: "agent-old", augment: vi.fn(async () => "agent-old"),
+      builtTags: () => ["agent-old"], liveTags: () => ["agent-old"],
+    };
+    const newAgentImages = {
+      declaredTag: "agent-new", augment: vi.fn(async () => "agent-new"),
+      builtTags: () => ["agent-new"], liveTags: () => ["agent-new"],
+    };
+    const oldBranchImages = {
+      resolve: vi.fn(async () => new Map()), builtTags: () => ["branch-old"],
+    };
+    const newBranchImages = {
+      resolve: vi.fn(async () => new Map()), builtTags: () => ["branch-new"],
+    };
+    vi.mocked(createAgentImages)
+      .mockResolvedValueOnce(oldAgentImages)
+      .mockResolvedValue(newAgentImages);
+    vi.mocked(createBranchImages)
+      .mockReturnValueOnce(oldBranchImages)
+      .mockReturnValue(newBranchImages);
+    vi.mocked(fetchPlanningRefs)
+      .mockResolvedValueOnce({ sourceChanged: true, failures: [] })
+      .mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.plan.mockResolvedValue(resolution([arrived]));
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:4");
+
+    expect(fetchOriginRefs).not.toHaveBeenCalled();
+    expect(ensureImages).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(ensureImages).mock.invocationCallOrder[1])
+      .toBeLessThan(seams.innerLoop.mock.invocationCallOrder[0]!);
+    expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
+      action: "origin-refreshed",
+      detail: "origin/main moved before planning; refreshing source images",
+    }));
+    const admittedOptions = seams.innerLoop.mock.calls[0]?.[1];
+    expect(admittedOptions.config.agentImages).toBe(newAgentImages);
+    expect(admittedOptions.branchImages).toBe(newBranchImages);
+  });
+
   it("drives issue quota through run(), exits 4, and lands completed work first", async () => {
     const done = issue("1");
     const quota = issue("109");
@@ -2662,6 +2711,41 @@ describe("run quota orchestration (#109)", () => {
     } finally {
       await rm(installation, { recursive: true, force: true });
     }
+  });
+
+  it("does not attach a chunk refresh to committed work during a storage drain", async () => {
+    const done = issue("1");
+    const refresh = {
+      root: 245,
+      branch: "sandbar/chunk-245-root",
+      title: "Root",
+      dependents: [{ number: 400, title: "Dependent" }],
+    };
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) =>
+      summary(batch));
+    let measurement = 0;
+    vi.mocked(graphRootSpace).mockImplementation(async () => ({
+      graphRoot: "/podman/store",
+      availableBytes: measurement++ < 2
+        ? 20n * 1024n * 1024n * 1024n
+        : 9n * 1024n * 1024n * 1024n,
+    }));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:3");
+
+    expect(exit).toHaveBeenCalledWith(3);
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(seams.merger.mock.calls[0]?.[0]).toEqual([done]);
+    expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkRefresh)
+      .toBeUndefined();
   });
 
   it("hands a deferred request to a landing pass triggered by its completed member", async () => {
