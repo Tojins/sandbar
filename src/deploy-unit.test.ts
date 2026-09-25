@@ -201,6 +201,25 @@ type VpnBox = {
 };
 
 const vpnBoxes: string[] = [];
+const pullBoxes: string[] = [];
+
+type PullStatus = {
+  readonly converged: string;
+  readonly attempted: string;
+  readonly result: string;
+  readonly at: string;
+};
+
+type PullBox = {
+  readonly script: string;
+  readonly state: string;
+  readonly status: string;
+  readonly log: string;
+  readonly remote: string;
+  readonly lsExit: string;
+  readonly ansibleExit: string;
+  readonly checkoutHead: string;
+};
 
 function writeStub(path: string, body: string): void {
   writeFileSync(
@@ -248,8 +267,105 @@ function runVpn(box: VpnBox, argv: readonly string[], uid = "0") {
   });
 }
 
+function pullBox(): PullBox {
+  const root = mkdtempSync(join(tmpdir(), "sandbar-pull-"));
+  pullBoxes.push(root);
+  const state = join(root, "state");
+  const ui = join(root, "ui");
+  const bin = join(root, "bin");
+  const box: PullBox = {
+    script: join(root, "sandbar-pull"),
+    state,
+    status: join(ui, DEPLOY_STATUS),
+    log: join(root, "stub.log"),
+    remote: join(root, "remote"),
+    lsExit: join(root, "ls-exit"),
+    ansibleExit: join(root, "ansible-exit"),
+    checkoutHead: join(root, "checkout-head"),
+  };
+  for (const dir of [state, join(state, "deploy"), ui, bin]) mkdirSync(dir);
+  writeFileSync(box.remote, "new-tip\n");
+  writeFileSync(box.lsExit, "0\n");
+  writeFileSync(box.ansibleExit, "0\n");
+  writeFileSync(box.checkoutHead, "new-tip\n");
+  writeFileSync(join(bin, "git"), `#!/bin/sh
+set -eu
+echo "git $*" >>"$SANDBAR_PULL_STUB_LOG"
+if [ "$1" = ls-remote ]; then
+  result=$(cat "$SANDBAR_PULL_LS_EXIT")
+  [ "$result" -eq 0 ] || exit "$result"
+  printf '%s\\trefs/heads/main\\n' "$(cat "$SANDBAR_PULL_REMOTE")"
+elif [ "$1" = -C ]; then
+  cat "$SANDBAR_PULL_CHECKOUT_HEAD"
+else
+  exit 90
+fi
+`, { mode: 0o755 });
+  writeFileSync(join(bin, "ansible-pull"), `#!/bin/sh
+set -eu
+echo "ansible-pull $*" >>"$SANDBAR_PULL_STUB_LOG"
+exit "$(cat "$SANDBAR_PULL_ANSIBLE_EXIT")"
+`, { mode: 0o755 });
+  const script = render(pullScriptTemplate, {
+    sandbar_ui_root: ui,
+    sandbar_deploy_status_file: DEPLOY_STATUS,
+    sandbar_driver_repo: DRIVER_REPO,
+    sandbar_driver_branch: DRIVER_BRANCH,
+    sandbar_pull_dir: join(state, "deploy"),
+  }).replaceAll("/usr/bin/git", join(bin, "git"))
+    .replaceAll("/usr/bin/ansible-pull", join(bin, "ansible-pull"));
+  writeFileSync(box.script, script, { mode: 0o755 });
+  return box;
+}
+
+function runPull(box: PullBox) {
+  return spawnSync("/bin/sh", [box.script], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+      SANDBAR_PULL_STUB_LOG: box.log,
+      SANDBAR_PULL_REMOTE: box.remote,
+      SANDBAR_PULL_LS_EXIT: box.lsExit,
+      SANDBAR_PULL_ANSIBLE_EXIT: box.ansibleExit,
+      SANDBAR_PULL_CHECKOUT_HEAD: box.checkoutHead,
+    },
+  });
+}
+
+function pullStatus(box: PullBox): PullStatus {
+  return JSON.parse(readFileSync(box.status, "utf8")) as PullStatus;
+}
+
+function pullInvocations(box: PullBox): readonly string[] {
+  return readFileSync(box.log, "utf8").trim().split("\n");
+}
+
+async function renderedDeployText(status: PullStatus): Promise<string> {
+  const page = renderPerInstallation(indexTemplate, installations, {
+    sandbar_deploy_status_file: DEPLOY_STATUS,
+  });
+  const script = page.match(/<script>\n([\s\S]*?)<\/script>/)?.[1];
+  if (script === undefined) throw new Error("rendered index lacks its script");
+  const element = { textContent: "" };
+  const fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => status,
+  });
+  const document = {
+    getElementById(id: string) {
+      if (id !== "deploy") throw new Error(`unexpected element id ${id}`);
+      return element;
+    },
+  };
+  Function("fetch", "document", script)(fetch, document);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return element.textContent;
+}
+
 afterAll(() => {
   for (const root of vpnBoxes) rmSync(root, { recursive: true, force: true });
+  for (const root of pullBoxes) rmSync(root, { recursive: true, force: true });
 });
 
 const installations = installationsFrom(groupVarsSource);
@@ -452,6 +568,94 @@ describe("continuous deployment (#146)", () => {
     );
     expect(script).toContain('mv "$status.new" "$status"');
     expect(script).toContain('exit "$result"');
+  });
+
+  it("executes a missing-marker attempt, retries its failure, then skips after success", () => {
+    const box = pullBox();
+    writeFileSync(box.ansibleExit, "17\n");
+
+    const failed = runPull(box);
+    expect(failed.status).toBe(17);
+    expect(existsSync(join(box.state, "converged"))).toBe(false);
+    expect(readFileSync(join(box.state, "last-attempt"), "utf8"))
+      .toBe("new-tip\nfailed (exit 17)\n");
+    expect(pullStatus(box)).toEqual({
+      converged: "unknown",
+      attempted: "new-tip",
+      result: "failed (exit 17)",
+      at: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/),
+    });
+
+    writeFileSync(box.ansibleExit, "0\n");
+    const retried = runPull(box);
+    expect(retried.status).toBe(0);
+    expect(readFileSync(join(box.state, "converged"), "utf8")).toBe("new-tip\n");
+    expect(pullStatus(box)).toEqual({
+      converged: "new-tip",
+      attempted: "new-tip",
+      result: "ok",
+      at: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/),
+    });
+
+    const skipped = runPull(box);
+    expect(skipped.status).toBe(0);
+    const invocations = pullInvocations(box);
+    expect(invocations.filter((line) => line.startsWith("git ls-remote"))).toHaveLength(3);
+    expect(invocations.filter((line) => line.startsWith("ansible-pull "))).toHaveLength(2);
+    expect(invocations.filter((line) => line.startsWith("git -C"))).toHaveLength(2);
+    expect(pullStatus(box)).toEqual({
+      converged: "new-tip",
+      attempted: "new-tip",
+      result: "ok",
+      at: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/),
+    });
+  });
+
+  it("records an unreachable remote without moving the converged marker", () => {
+    const box = pullBox();
+    writeFileSync(join(box.state, "converged"), "old-tip\n");
+    writeFileSync(box.lsExit, "23\n");
+
+    const result = runPull(box);
+
+    expect(result.status).toBe(23);
+    expect(readFileSync(join(box.state, "converged"), "utf8")).toBe("old-tip\n");
+    expect(pullInvocations(box).filter((line) => line.startsWith("ansible-pull ")))
+      .toHaveLength(0);
+    expect(readFileSync(join(box.state, "last-attempt"), "utf8"))
+      .toBe("unknown\nfailed (ls-remote)\n");
+    expect(pullStatus(box)).toEqual({
+      converged: "old-tip",
+      attempted: "unknown",
+      result: "failed (ls-remote)",
+      at: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/),
+    });
+  });
+
+  it("preserves a saved failure when an already-converged tick skips", () => {
+    const box = pullBox();
+    writeFileSync(join(box.state, "converged"), "new-tip\n");
+    writeFileSync(join(box.state, "last-attempt"), "failed-tip\nfailed (exit 9)\n");
+    writeFileSync(box.status, JSON.stringify({
+      converged: "stale",
+      attempted: "stale",
+      result: "ok",
+      at: "2000-01-01T00:00:00Z",
+    }));
+
+    const result = runPull(box);
+
+    expect(result.status).toBe(0);
+    expect(pullInvocations(box).filter((line) => line.startsWith("ansible-pull ")))
+      .toHaveLength(0);
+    expect(readFileSync(join(box.state, "last-attempt"), "utf8"))
+      .toBe("failed-tip\nfailed (exit 9)\n");
+    expect(pullStatus(box)).toEqual({
+      converged: "new-tip",
+      attempted: "failed-tip",
+      result: "failed (exit 9)",
+      at: expect.not.stringMatching(/^2000-/),
+    });
   });
 
   it("activates that script from a timer and never from the unit itself", () => {
@@ -725,6 +929,34 @@ describe("multi-installation role orchestration", () => {
     expect(renderTask).toContain('dest: "{{ sandbar_ui_root }}/index.html"');
     expect(caddyTasks.indexOf("- name: Render the installation index"))
       .toBeLessThan(caddyTasks.indexOf("- name: Configure Caddy installation routes and index"));
+  });
+
+  it.each([
+    {
+      name: "successful convergence",
+      status: {
+        converged: "abc123", attempted: "abc123", result: "ok", at: "2026-09-25T10:00:00Z",
+      },
+      text: "box on abc123 · ok · checked 2026-09-25T10:00:00Z",
+    },
+    {
+      name: "failed convergence",
+      status: {
+        converged: "old123", attempted: "new456", result: "failed (exit 7)",
+        at: "2026-09-25T10:05:00Z",
+      },
+      text: "box on old123 · new456 failed (exit 7) · checked 2026-09-25T10:05:00Z",
+    },
+    {
+      name: "failed remote lookup",
+      status: {
+        converged: "old123", attempted: "unknown", result: "failed (ls-remote)",
+        at: "2026-09-25T10:10:00Z",
+      },
+      text: "box on old123 · unknown failed (ls-remote) · checked 2026-09-25T10:10:00Z",
+    },
+  ])("executes the index script for $name", async ({ status, text }) => {
+    await expect(renderedDeployText(status)).resolves.toBe(text);
   });
 });
 
