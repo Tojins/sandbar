@@ -142,11 +142,12 @@
 // Since #61 a whole layer of a chunk plans per cycle, so a member can reach
 // the chunk branch minutes after the label was read — and the label was a
 // human's yes to the pull request as it stood. Landing then would put commits
-// on the source branch that no review covered, and close only the members the
-// plan knew about while deleting the branch the rest live on. So the request is
-// DEFERRED: nothing merges, `land` stays, the PR says what arrived, and the
-// next cycle that adds nothing new lands the chunk. `deferredChunks` reports
-// it; it is neither a landing nor a park.
+// on the source branch that no review covered. So the request is DEFERRED:
+// nothing merges, `land` stays, the PR says what arrived, and the next cycle
+// that adds nothing new lands the chunk. At that boundary the exact fetched
+// chunk tip, not the plan-time list, determines contained members and their
+// close order (#175). `deferredChunks` reports the wait; it is neither a
+// landing nor a park.
 //
 // The WRAP-UP runs only after the source branch has moved: close every member
 // ON THE BRANCH explicitly (the git-derived ones — a component member that was
@@ -337,7 +338,12 @@ import {
   wrapUpLandedChunk,
 } from "./chunk-land.js";
 import { chunkMembersOnBranch, chunkPullRequestContent } from "./chunk-pr.js";
-import type { ChunkMember, ChunkRefresh, ChunkTarget } from "./chunks.js";
+import {
+  type ChunkMember,
+  type ChunkRefresh,
+  type ChunkTarget,
+  closeOrderOfChunkMembers,
+} from "./chunks.js";
 import type { CodexAuthMount } from "./codex-auth.js";
 import { type EnvReader } from "./env.js";
 import {
@@ -382,7 +388,12 @@ import {
   withRuntimeEnv,
 } from "./runtime.js";
 import { fetchIssueText } from "./issue-anchor.js";
+import { parseBlockedBy } from "./plan-resolver.js";
 import {
+  ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+  ORIGIN_MEMBER_BRANCH_REFGLOBS,
+  branchNameFromOriginRef,
+  issueNumberFromMemberBranch,
   memberBranchName,
   issueBranchName,
   issueNumberFromBranch,
@@ -733,6 +744,18 @@ export type ChunkRefLookup =
   | { readonly kind: "absent" }
   | { readonly kind: "unreadable"; readonly detail: string };
 
+// The membership snapshot taken from the exact fetched chunk ref immediately
+// before it is merged. The members are ascending for display; the merger
+// fetches their current tracker edges and re-derives dependency order from
+// this set, without consulting the planner's older membership snapshot.
+export type ChunkMemberRefSnapshot = {
+  readonly members: readonly number[];
+};
+
+type ChunkPushResult =
+  | PushResult
+  | { readonly kind: "pushed-cache-unreadable"; readonly reason: string };
+
 // Adapter shape. Split into the merger's own primitives and the resolve-loop
 // primitives (which the merger forwards). The real adapter implements both.
 export type MergerAdapter = ResolveAdapter & {
@@ -781,7 +804,7 @@ export type MergerAdapter = ResolveAdapter & {
   pushChunkBranch(
     chunkBranch: string,
     members: readonly { readonly source: string; readonly destination: string }[],
-  ): Promise<PushResult>;
+  ): Promise<ChunkPushResult>;
   // The issue branch's durable host-cache location after its managed clone was
   // reclaimed. Asked only when origin refuses a Phase-A push, so the handoff
   // can name the exact commits a human must publish.
@@ -804,6 +827,13 @@ export type MergerAdapter = ResolveAdapter & {
   // would be a no-op that closed every member of a chunk whose work is
   // nowhere.
   fetchChunkRef(chunkBranch: string): Promise<ChunkRefLookup>;
+  // Fetch every origin member ref after `fetchChunkRef`, then derive the
+  // members contained by that exact ref. A failed fetch throws: without a
+  // fresh membership namespace the landing must not merge. The caller obtains
+  // current dependency edges for this returned set and derives close order.
+  fetchChunkMemberRefs(
+    chunkRef: string,
+  ): Promise<ChunkMemberRefSnapshot>;
   // Delete the chunk branch on origin, once its commits are on the source
   // branch. The last step of the wrap-up and the one that stops the reconciler
   // seeing this chunk again.
@@ -1793,7 +1823,7 @@ export async function runMergerWithAdapter(
       );
       return;
     }
-    if (push.kind !== "ok") {
+    if (push.kind === "race" || push.kind === "fatal") {
       // Not force-pushed and not retried. A race means the chunk branch moved
       // under this cycle, so the composition here was built on a base that is
       // no longer the branch — landing it would silently drop whatever moved
@@ -1816,6 +1846,14 @@ export async function runMergerWithAdapter(
       };
       chunkLanded.push(landing);
       await opts.observations.onOutcome({ kind: "chunk-landed", landing, durationMs });
+    }
+    if (push.kind === "pushed-cache-unreadable") {
+      // Origin already accepted the atomic push. The durable outcomes above
+      // must reach finalisation before the run halts; otherwise these issues
+      // would be queued again against a chunk that already contains them.
+      asHalt(`Chunk ${branch} was pushed but its host cache could not be refreshed`)(
+        new SandbarError(push.reason),
+      );
     }
     await emit(
       `chunk ${branch}: landed ${landedMembers.map(({ issue }) => `#${issueNumberOf(issue)}`).join(", ")} and pushed`,
@@ -1909,6 +1947,49 @@ export async function runMergerWithAdapter(
       title: m.title,
       branch: unit.ref,
     }));
+
+  // Replace the planner's membership snapshot with the one read from origin
+  // at the landing boundary. Titles are display-only and may be absent for a
+  // member the older plan did not know; issue number, membership and ordering
+  // all come exclusively from the fetched refs.
+  const retargetFetchedChunk = async (
+    target: ChunkLandTarget,
+    snapshot: ChunkMemberRefSnapshot,
+  ): Promise<ChunkLandTarget> => {
+    const titles = new Map(target.members.map((m) => [m.number, m.title] as const));
+    const blockers = new Map<number, readonly number[]>();
+    await Promise.all(snapshot.members.map(async (number) => {
+      const issueText = await adapter.getIssueBody(String(number));
+      const firstLine = issueText.split("\n", 1)[0] ?? "";
+      const renderedPrefix = `Issue #${number}: `;
+      if (!titles.has(number) && firstLine.startsWith(renderedPrefix)) {
+        titles.set(number, firstLine.slice(renderedPrefix.length));
+      }
+      // `fetchIssueText` appends comments after this heading. Dependency
+      // declarations belong to the issue body; a quoted heading in a later
+      // comment must not become a graph edge during landing.
+      blockers.set(
+        number,
+        parseBlockedBy(issueText.split("\n## Comments", 1)[0] ?? issueText)
+          .filter((blocker) => snapshot.members.includes(blocker)),
+      );
+    }));
+    const member = (number: number): ChunkMember => ({
+      number,
+      title: titles.get(number) ?? "",
+    });
+    const contained = new Set(snapshot.members);
+    return {
+      ...target,
+      members: snapshot.members.map(member),
+      closeOrder: closeOrderOfChunkMembers(
+        snapshot.members,
+        blockers,
+        target.root,
+      ).map(member),
+      rework: target.rework.filter((m) => contained.has(m.number)),
+    };
+  };
 
   // Take `land` back off and say why on the pull request. The chunk itself is
   // untouched — branch, members and labels all as they were — so what this
@@ -2039,7 +2120,18 @@ export async function runMergerWithAdapter(
           );
           continue;
         }
-        const unit: FetchedChunkUnit = { ...pending, ref: found.ref };
+        // The plan predates this origin read. A member may have joined after
+        // that snapshot (including in the immediately preceding Phase A), so
+        // close and deletion membership must be derived from the exact ref we
+        // are about to merge, never from `request.members`/`closeOrder`.
+        const memberSnapshot = await adapter.fetchChunkMemberRefs(
+          found.ref,
+        );
+        const unit: FetchedChunkUnit = {
+          ...pending,
+          target: await retargetFetchedChunk(request, memberSnapshot),
+          ref: found.ref,
+        };
         const outcome = await attemptMerge(
           {
             unit: {
@@ -2523,7 +2615,8 @@ async function closeMergedIssues(
 
 export type RealAdapterDeps = {
   readonly cwd: string;
-  // Host-only cache used solely as the source for issue refs (#98).
+  // Host cache used as the source for issue refs (#98) and refreshed after a
+  // chunk push so planning never trails sandbar's own origin write (#175).
   readonly cacheDir: string;
   // The run's podman namespace (#28), for the one container this module starts
   // — the resolve agent's. It was ANONYMOUS until #67, which meant a container
@@ -2970,6 +3063,41 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       };
     }
   };
+
+  const fetchChunkMemberRefs = async (
+    chunkRef: string,
+  ): Promise<ChunkMemberRefSnapshot> => {
+    await exec(
+      "git",
+      [
+        "fetch",
+        "origin",
+        "--prune",
+        ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+        "--quiet",
+      ],
+      { cwd },
+    );
+
+    const { stdout } = await exec(
+      "git",
+      [
+        "for-each-ref",
+        `--merged=${chunkRef}`,
+        "--format=%(refname:short)",
+        ...ORIGIN_MEMBER_BRANCH_REFGLOBS,
+      ],
+      { cwd },
+    );
+    const members = [...new Set(stdout.split("\n").flatMap((line) => {
+      const number = issueNumberFromMemberBranch(
+        branchNameFromOriginRef(line.trim()),
+      );
+      return number === null ? [] : [number];
+    }))].sort((a, b) => a - b);
+
+    return { members };
+  };
   return {
     worktreeFileExists(path) {
       return existsSync(resolve(cwd, path));
@@ -3364,6 +3492,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       }
     },
     fetchChunkRef,
+    fetchChunkMemberRefs,
     async chunkBase(chunkBranch) {
       // Ask ORIGIN, every time — `fetchOriginChunkBranch` owns that argument
       // and the refspec it rests on. Shared with the issue-branch seeding in
@@ -3426,10 +3555,30 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
               `${source}:refs/heads/${destination}`,
           ),
         ], { cwd });
-        return { kind: "ok" };
       } catch (err) {
         return classifyPushError(err);
       }
+      const cacheFailure: unknown = await exec(
+        "git",
+        [
+          "fetch",
+          "origin",
+          "--prune",
+          `+refs/heads/${chunkBranch}:refs/remotes/origin/${chunkBranch}`,
+          ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+          "--quiet",
+        ],
+        { cwd: deps.cacheDir },
+      ).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      return cacheFailure === null
+        ? { kind: "ok" }
+        : {
+            kind: "pushed-cache-unreadable",
+            reason: gitFailureDetail(cacheFailure),
+          };
     },
     async localBranchRecovery(branch) {
       const ref = `refs/heads/${branch}`;

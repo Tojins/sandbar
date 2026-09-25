@@ -156,7 +156,9 @@ default is unlimited, so existing hosts keep their prior concurrency.
    **`land` label on that PR** (#64) makes the next landing merge
    `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
    so one gate-2 and one landing cover both; the wrap-up then closes the
-   members whose landing-only member refs it contains, drops `needs-review`,
+   members whose freshly fetched landing-only member refs the exact merged tip
+   contains (re-deriving dependents-first/root-last order at the landing
+   boundary, #175), drops `needs-review`,
    takes `land` back off the PR, closes it (or accepts the MERGED mark GitHub
   itself puts on a PR whose head the landing push made reachable) and deletes
   the branch.

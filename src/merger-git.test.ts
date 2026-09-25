@@ -292,6 +292,30 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     ).toBeTruthy();
   });
 
+  it("fetches the exact contained member refs and excludes unrelated refs (#175)", async () => {
+    await git(seed, "checkout", "-qb", "root-member", "main");
+    await commit(seed, "root.txt", "root work\n");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-391");
+    await git(seed, "checkout", "-qb", "chunk", "main");
+    await git(seed, "merge", "--no-ff", "root-member", "-m", "root onto chunk");
+    await git(seed, "checkout", "-qb", "late-member");
+    await commit(seed, "late.txt", "late dependent work\n");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-392");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/chunk-391-c");
+    await git(seed, "checkout", "-qb", "unrelated", "main");
+    await commit(seed, "unrelated.txt", "not in chunk\n");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-999");
+
+    const a = adapter();
+    const found = await a.fetchChunkRef("sandbar/chunk-391-c");
+    expect(found.kind).toBe("present");
+    if (found.kind !== "present") return;
+
+    expect(await a.fetchChunkMemberRefs(found.ref)).toEqual({
+      members: [391, 392],
+    });
+  });
+
   it("says UNREADABLE — not absent — when origin cannot be reached at all", async () => {
     // The branch is on origin; only the transport is broken, which is what an
     // expired key or a proxy looks like from here. Reading this as "the branch
@@ -340,10 +364,30 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(r).toEqual({ kind: "ok" });
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(head);
     expect(await originHas("refs/heads/sandbar/member-1")).toBe(head);
+    expect(await git(cache, "rev-parse", "refs/remotes/origin/sandbar/chunk-1-c"))
+      .toBe(head);
+    expect(await git(cache, "rev-parse", "refs/remotes/origin/sandbar/member-1"))
+      .toBe(head);
     await git(wt, "push", "-q", "origin", "HEAD:main");
     await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1]);
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
     expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
+  });
+
+  it("reports a cache refresh failure separately after origin accepted the chunk (#175)", async () => {
+    await commit(wt, "durable.txt", "member work\n");
+    await git(wt, "branch", "sandbar/issue-7-member", "HEAD");
+    const head = await git(wt, "rev-parse", "HEAD");
+    await git(cache, "remote", "set-url", "origin", join(root, "gone.git"));
+
+    const result = await adapter().pushChunkBranch("sandbar/chunk-7-c", [{
+      source: "sandbar/issue-7-member",
+      destination: "sandbar/member-7",
+    }]);
+
+    expect(result.kind).toBe("pushed-cache-unreadable");
+    expect(await originHas("refs/heads/sandbar/chunk-7-c")).toBe(head);
+    expect(await originHas("refs/heads/sandbar/member-7")).toBe(head);
   });
 
   it("refreshes on top without losing members or widening the chunk diff (#174)", async () => {

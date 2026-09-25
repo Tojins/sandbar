@@ -114,7 +114,9 @@ type Script = {
   // #60: what origin has for a chunk branch, by branch name. A missing entry
   // means origin has no such branch and the base is the source branch.
   chunkBases?: Record<string, string>;
-  chunkPushes?: PushResult[];
+  chunkPushes?: Array<
+    PushResult | { readonly kind: "pushed-cache-unreadable"; readonly reason: string }
+  >;
   // #62: how the forge answers `ensureChunkPullRequest`. An Error is thrown.
   chunkPrs?: ({ number: number; url: string } | Error)[];
   // #64: what origin answers about a chunk branch being LANDED, by branch
@@ -122,6 +124,12 @@ type Script = {
   // branch — which is a different script from an `unreadable` entry, and the
   // whole point of the three states.
   chunkRefs?: Record<string, ChunkRefLookup>;
+  chunkMemberRefs?: Record<
+    string,
+    { readonly members: readonly number[] }
+  >;
+  chunkMemberRefError?: Error;
+  issueBodies?: Record<string, string>;
   // #64: gh/git calls that throw, by operation name.
   wrapupFails?: Partial<
     Record<
@@ -261,7 +269,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     },
     async getIssueBody(id) {
       calls.bodies.push(id);
-      return `body-${id}`;
+      return script.issueBodies?.[id] ?? `body-${id}`;
     },
     async getHeadSha() {
       calls.headReads++;
@@ -357,6 +365,13 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     async fetchChunkRef(branch) {
       calls.chunkRefFetches.push(branch);
       return script.chunkRefs?.[branch] ?? { kind: "absent" };
+    },
+    async fetchChunkMemberRefs(ref) {
+      if (script.chunkMemberRefError) throw script.chunkMemberRefError;
+      const root = Number(ref.match(/\/chunk-(\d+)-/)?.[1]);
+      return script.chunkMemberRefs?.[ref] ?? {
+        members: [root],
+      };
     },
     async deleteChunkBranch(branch, memberIssues) {
       calls.chunkBranchDeletes.push({ branch, memberIssues });
@@ -2348,6 +2363,26 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
     expect(calls.removedLabels).toEqual([]);
   });
 
+  it("carries members in the partial when origin accepted the push but cache refresh failed (#175)", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkPushes: [{
+        kind: "pushed-cache-unreadable",
+        reason: "cache origin unavailable",
+      }],
+    });
+
+    const err = await runMergerWithAdapter([chunkIssue(42)], adapter)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MergerError);
+    expect((err as MergerError).partial?.chunkLanded.map((c) => c.issue.id))
+      .toEqual(["42"]);
+    expect(calls.chunkPrs).toEqual([]);
+    expect((err as MergerError).message).toContain("host cache could not be refreshed");
+  });
+
   it("parks every member of a refused chunk push and continues with later chunks", async () => {
     const refusal =
       "! [remote rejected] HEAD -> sandbar/chunk-42-c (workflow scope required)";
@@ -2607,6 +2642,15 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       ]),
     );
 
+  const membersOn = (
+    root: number,
+    members: readonly number[],
+  ): NonNullable<Script["chunkMemberRefs"]> => ({
+    [`refs/remotes/origin/sandbar/chunk-${root}-c`]: {
+      members,
+    },
+  });
+
   it("emits every durable outcome shape and both initial and resolve gate observations", async () => {
     const outcomes: unknown[] = [];
     const gates: Array<{ key: string; gate: unknown }> = [];
@@ -2783,6 +2827,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       merges: ["ok"],
       gates: [{ ok: true }],
       chunkRefs: originHas(42),
+      chunkMemberRefs: membersOn(42, [42, 43]),
     });
     const summary = await runMergerWithAdapter(
       [],
@@ -2830,6 +2875,69 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(summary.mergedChunks.map((c) => c.closed)).toEqual([[42, 43]]);
     expect(summary.mergedChunks[0]?.residue).toEqual([]);
     expect(summary.skippedChunks).toEqual([]);
+  });
+
+  it("closes a member discovered only by the landing-time ref snapshot (#175)", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: originHas(391),
+      chunkMemberRefs: membersOn(391, [391, 392]),
+    });
+
+    const summary = await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(391)),
+    );
+
+    expect(calls.closes.map(({ n }) => n)).toEqual([392, 391]);
+    expect(calls.chunkBranchDeletes).toEqual([{
+      branch: "sandbar/chunk-391-c",
+      memberIssues: [391, 392],
+    }]);
+    expect(summary.mergedChunks[0]?.target.members.map((m) => m.number))
+      .toEqual([391, 392]);
+  });
+
+  it("re-derives dependency order across the freshly fetched member set (#175)", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: originHas(391),
+      chunkMemberRefs: membersOn(391, [390, 391, 392]),
+      issueBodies: {
+        "390": "Issue #390: tip\n\n## Blocked by\n\n- #392",
+        "391": "Issue #391: root\n\n## Blocked by\n\nNone",
+        "392": "Issue #392: middle\n\n## Blocked by\n\n- #391",
+      },
+    });
+
+    await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(391)),
+    );
+
+    expect(calls.closes.map(({ n }) => n)).toEqual([390, 392, 391]);
+  });
+
+  it("does not merge when the landing-time member-ref fetch fails (#175)", async () => {
+    const { adapter, calls } = makeAdapter({
+      chunkRefs: originHas(42),
+      chunkMemberRefError: new SandbarError("origin unavailable"),
+    });
+
+    await expect(
+      runMergerWithAdapter([], adapter, undefined, undefined, landing(request(42))),
+    ).rejects.toThrow(/origin unavailable/);
+    expect(calls.merges).toEqual([]);
+    expect(calls.pushes).toBe(0);
+    expect(calls.prLabelRemovals).toEqual([]);
   });
 
   it("reports gate-2 while a conflicting chunk merge is resolved", async () => {
@@ -3006,6 +3114,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       merges: ["ok"],
       gates: [{ ok: true }],
       chunkRefs: originHas(42),
+      chunkMemberRefs: membersOn(42, [42, 43]),
       closeFailsBeforeSuccess: { 43: 99 },
     });
     const summary = await runMergerWithAdapter(
@@ -3068,6 +3177,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       agents: [{ stdout: "<promise>COMMITTED</promise>" }],
       gates: [{ ok: true }],
       chunkRefs: originHas(42),
+      chunkMemberRefs: membersOn(42, [42, 43]),
     });
     await runMergerWithAdapter(
       [],
@@ -3093,6 +3203,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       merges: ["ok", "ok"],
       gates: [{ ok: true }, { ok: true }],
       chunkRefs: originHas(42),
+      chunkMemberRefs: membersOn(42, [42, 43]),
       heads: ["cycle-base", "p1", "p2", "verified"],
     });
     const { verify, vCalls } = makeVerifyFake();
