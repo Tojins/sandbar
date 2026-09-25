@@ -2916,14 +2916,14 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       merges: ["ok"],
       gates: [{ ok: true }],
       chunkRefs: originHas(391),
-      chunkMemberRefs: membersOn(391, [391, 392, 393]),
+      chunkMemberRefs: membersOn(391, [390, 391, 392]),
       issueData: {
+        "390": { title: "tip", body: "## Blocked by\n\n- #392" },
         "391": { title: "root", body: "## Blocked by\n\nNone" },
         "392": {
           title: "middle",
           body: "## Blocked by\n\n- #391\n- #999",
         },
-        "393": { title: "tip", body: "## Blocked by\n\n- #392" },
       },
     });
 
@@ -2935,9 +2935,9 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       landing(request(391)),
     );
 
-    // If #999 leaked into the landing graph, #392 and therefore #393 would
-    // remain unreachable and fall back to numeric order: #392 before #393.
-    expect(calls.closes.map(({ n }) => n)).toEqual([393, 392, 391]);
+    // The dependency chain overrides numeric ordering, while #999 must not
+    // leak into the landing graph and make #392 unreachable.
+    expect(calls.closes.map(({ n }) => n)).toEqual([390, 392, 391]);
   });
 
   it("does not merge when the landing-time member-ref fetch fails (#175)", async () => {

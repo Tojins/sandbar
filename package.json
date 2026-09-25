@@ -1,6 +1,6 @@
 {
   "name": "sandbar",
-  "version": "0.48.45",
+  "version": "0.48.46",
   "description": "Self-hosted issue-tracker-driven coding agent orchestrator.",
   "type": "module",
   "main": "dist/index.js",
