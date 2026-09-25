@@ -102,12 +102,16 @@ and it would couple the installations' queues.
 
 `tasks/pull.yml` installs `/usr/local/bin/sandbar-pull` plus a
 `sandbar-pull.timer` that runs it every five minutes as root. The script runs
-`ansible-pull --only-if-changed` against `main` into `/var/lib/sandbar/deploy`
-and applies `deploy/ansible/site.yml` to `localhost`. No credential is needed:
-the repository is public. A push channel was rejected because root-level changes
-are in scope and a push would need a root key in Actions secrets; the reconciler
-is deliberately not sandbar, so a landed regression that bricks a daemon cannot
-also disable the thing that applies the revert.
+`git ls-remote` against `main`, compares that tip with
+`/var/lib/sandbar/converged`, and runs `ansible-pull` into
+`/var/lib/sandbar/deploy` only when they differ. The marker advances to the pull
+checkout's `HEAD` only after `deploy/ansible/site.yml` succeeds, so a failed play
+is retried at every tick even though the checkout already moved. A missing marker
+means one play. No credential is needed: the repository is public. A push channel
+was rejected because root-level changes are in scope and a push would need a root
+key in Actions secrets; the reconciler is deliberately not sandbar, so a landed
+regression that bricks a daemon cannot also disable the thing that applies the
+revert.
 
 **Recorded exposure:** whoever lands on main is root on the box, including the
 daemon's own bot identity. The control is that a `deploy/` change is a reviewed
@@ -115,20 +119,25 @@ landing here — the gate suite, the reviewer, the operator's triage of every
 issue, and `src/deploy-unit.test.ts`, which pins the unit strings, the timer,
 the restart contract and the installation data shape in every gate.
 
-Every attempt, successful or not, rewrites `/var/www/sandbar/deploy.json` with
-the commit, the time and the result, and the Caddy index page at `/` renders it
-beside the installation links. A box stuck on an old commit therefore says so;
-a stale timestamp means the timer itself stopped.
+Every real attempt writes its commit and result to
+`/var/lib/sandbar/last-attempt`. Every tick rewrites
+`/var/www/sandbar/deploy.json` with the converged commit, that last attempt, its
+result and the checked time; a no-op tick refreshes only the time. The Caddy
+index page at `/` renders those fields beside the installation links, so a box
+stuck on an old commit names both that commit and the failed attempt. A remote
+lookup failure records `unknown failed (ls-remote)` without moving the converged
+marker, and a stale checked time means the timer itself stopped.
 
 Every play also pulls the images each installation's gate stack runs but its
 config does not build — the images a run refuses to start without and never
 pulls itself (#24 D7). The list is the driver's `sandbar pulled-images` over the
 installation config, because the config is a program that may read its gate
 stack from the consumer clone; only images podman lacks are pulled. The pull
-channel is `--only-if-changed` on THIS repository, so an image a consumer commit
-adds is pulled at the next sandbar landing, or by running the play by hand;
-until then the daemon's next start refuses at preflight and names the
-`podman pull` line.
+channel follows landings on THIS repository, so an image a consumer commit adds
+is pulled at the next sandbar landing. A failed play retries every tick until it
+succeeds; running the play by hand is not recorded and therefore costs one extra
+idempotent play at the next tick. Until that convergence succeeds, the daemon's
+next start refuses at preflight and names the `podman pull` line.
 
 The UI unit runs the same driver's `ui` command on the entry's `reader_port`,
 and it is the one thing the play does restart: a reader aborts no work by being

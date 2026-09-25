@@ -416,7 +416,7 @@ describe("continuous deployment (#146)", () => {
     expect(remember).toContain("combine({sandbar_user: sandbar_installation_copy is changed})");
   });
 
-  it("runs one ansible-pull against main and records every attempt", () => {
+  it("retries failed plays until the remote tip is recorded as converged", () => {
     const script = render(pullScriptTemplate, {
       sandbar_ui_root: UI_ROOT,
       sandbar_deploy_status_file: DEPLOY_STATUS,
@@ -425,15 +425,31 @@ describe("continuous deployment (#146)", () => {
       sandbar_pull_dir: PULL_DIR,
     });
     expect(script).not.toMatch(/\{\{|\}\}/);
-    expect(script).toContain("--only-if-changed");
+    expect(script).not.toContain("--only-if-changed");
+    expect(script).toContain("/usr/bin/git ls-remote --exit-code");
+    expect(script).toContain(`refs/heads/${DRIVER_BRANCH}`);
+    expect(script).toContain("converged_file=$state_dir/converged");
+    expect(script).toContain("last_attempt_file=$state_dir/last-attempt");
+    expect(script).toContain('if [ "$remote_tip" = "$converged" ]; then');
     expect(script).toContain(`--url ${DRIVER_REPO}`);
     expect(script).toContain(`--checkout ${DRIVER_BRANCH}`);
-    expect(script).toContain(`--directory ${PULL_DIR}`);
+    expect(script).toContain(`pull_dir=${PULL_DIR}`);
+    expect(script).toContain('--directory "$pull_dir"');
     expect(script).toContain("--inventory localhost,");
     expect(script).toContain("deploy/ansible/site.yml");
-    // Written on failure too, and atomically, so a half-written status can
-    // never be what the index page reads.
+    // A successful real attempt is persisted before its convergence marker;
+    // failures persist the attempt without reaching the marker write.
+    expect(script).toMatch(
+      /if \[ "\$result" -eq 0 \] && \[ "\$head_result" -eq 0 \]; then\n  outcome=ok\n  record_attempt[^\n]*\n  printf[^]*?mv "\$converged_file\.new" "\$converged_file"/,
+    );
+    expect(script).toContain('outcome="failed (exit $result)"\n  record_attempt');
+    expect(script).toContain('outcome="failed (ls-remote)"');
+    // Every tick publishes all four fields atomically. A skip reaches this
+    // without changing last-attempt, so it cannot turn a failure into ok.
     expect(script).toContain(`status=${UI_ROOT}/${DEPLOY_STATUS}`);
+    expect(script).toContain(
+      '{"converged":"$converged","attempted":"$attempted","result":"$outcome","at":',
+    );
     expect(script).toContain('mv "$status.new" "$status"');
     expect(script).toContain('exit "$result"');
   });
@@ -700,6 +716,9 @@ describe("multi-installation role orchestration", () => {
     expect(page.indexOf('href="/outdoorpub/"')).toBeLessThan(page.indexOf('href="/sandbar/"'));
     expect(page).toContain(`fetch("${DEPLOY_STATUS}", { cache: "no-store" })`);
     expect(page).toContain('document.getElementById("deploy")');
+    expect(page).toContain('status.result === "ok"');
+    expect(page).toContain('`${status.attempted} ${status.result}`');
+    expect(page).toContain('`box on ${status.converged} · ${attempt} · checked ${status.at}`');
     expect(page).toContain("No convergence recorded yet");
     const renderTask = taskNamed(caddyTasks, "Render the installation index");
     expect(renderTask).toContain("src: index.html.j2");
