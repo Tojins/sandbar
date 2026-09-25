@@ -1,9 +1,11 @@
-// Issue text for agent prompts, fetched via `gh issue view --json`.
+// Structured issue data and issue text for agent prompts, fetched via
+// `gh issue view --json`.
 //
 // Rejected: `gh issue view --comments` — that flag is TTY-sensitive: piped, gh
 // prints ONLY the comment thread, so a comment-less issue yields an EMPTY
-// anchor. The --json form is TTY-independent; rendering is a pure function
-// (`renderIssueText`) so the prompt shape is table-testable.
+// anchor. The --json form is TTY-independent; one fetch boundary serves both
+// structured orchestration decisions and the pure prompt renderer
+// (`renderIssueText`), whose shape remains table-testable.
 //
 // Sandbar comments are attributed from BOT_COMMENT_PREFIX at position zero of
 // the trimmed body. They cannot be attributed from the author login: sandbar
@@ -32,6 +34,11 @@ export type IssueJson = {
   readonly title?: string;
   readonly body?: string;
   readonly comments?: readonly IssueComment[];
+};
+
+export type IssueData = {
+  readonly title: string;
+  readonly body: string;
 };
 
 // Pure renderer: title line, body, then the comment thread (when present) with
@@ -68,10 +75,10 @@ export function renderIssueText(issueId: string, issue: IssueJson): string {
 // (the prompt-layer call site omitted the optional `cwd` #34 added), then the
 // cache's `origin`. `config.ghOwner`/`config.ghRepo` are required fields, so
 // naming them is one answer that no directory can contradict.
-export async function fetchIssueText(
+async function fetchIssueJson(
   issueId: string,
   repo: RepoRef,
-): Promise<string> {
+): Promise<IssueJson> {
   let stdout: string;
   try {
     ({ stdout } = await exec("gh", [
@@ -101,5 +108,26 @@ export async function fetchIssueText(
       { cause: err },
     );
   }
-  return renderIssueText(issueId, parsed);
+  return parsed;
+}
+
+// Structured issue fields for decisions that must not depend on the prompt
+// renderer's prose shape. Comments are deliberately absent: dependency edges
+// are declarations in the issue body, not discussion appended later.
+export async function fetchIssueData(
+  issueId: string,
+  repo: RepoRef,
+): Promise<IssueData> {
+  const issue = await fetchIssueJson(issueId, repo);
+  return {
+    title: issue.title ?? "(no title)",
+    body: issue.body ?? "",
+  };
+}
+
+export async function fetchIssueText(
+  issueId: string,
+  repo: RepoRef,
+): Promise<string> {
+  return renderIssueText(issueId, await fetchIssueJson(issueId, repo));
 }

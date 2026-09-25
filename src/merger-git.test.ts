@@ -292,7 +292,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     ).toBeTruthy();
   });
 
-  it("fetches the exact contained member refs and excludes unrelated refs (#175)", async () => {
+  it("fetches exact contained member refs, excluding unrelated and pruned refs (#175)", async () => {
     await git(seed, "checkout", "-qb", "root-member", "main");
     await commit(seed, "root.txt", "root work\n");
     await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-391");
@@ -313,6 +313,13 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
 
     expect(await a.fetchChunkMemberRefs(found.ref)).toEqual({
       members: [391, 392],
+    });
+
+    // The first read cached member-392 in the merger clone. Once origin
+    // deletes it, a landing snapshot must prune that stale containment fact.
+    await git(seed, "push", "-q", "origin", ":refs/heads/sandbar/member-392");
+    expect(await a.fetchChunkMemberRefs(found.ref)).toEqual({
+      members: [391],
     });
   });
 

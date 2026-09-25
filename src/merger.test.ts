@@ -129,7 +129,7 @@ type Script = {
     { readonly members: readonly number[] }
   >;
   chunkMemberRefError?: Error;
-  issueBodies?: Record<string, string>;
+  issueData?: Record<string, { readonly title: string; readonly body: string }>;
   // #64: gh/git calls that throw, by operation name.
   wrapupFails?: Partial<
     Record<
@@ -269,7 +269,14 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     },
     async getIssueBody(id) {
       calls.bodies.push(id);
-      return script.issueBodies?.[id] ?? `body-${id}`;
+      return `body-${id}`;
+    },
+    async getIssueData(id) {
+      calls.bodies.push(id);
+      return script.issueData?.[id] ?? {
+        title: `t-${id}`,
+        body: `body-${id}`,
+      };
     },
     async getHeadSha() {
       calls.headReads++;
@@ -2898,20 +2905,25 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       branch: "sandbar/chunk-391-c",
       memberIssues: [391, 392],
     }]);
-    expect(summary.mergedChunks[0]?.target.members.map((m) => m.number))
-      .toEqual([391, 392]);
+    expect(summary.mergedChunks[0]?.target.members).toEqual([
+      { number: 391, title: "t-391" },
+      { number: 392, title: "t-392" },
+    ]);
   });
 
-  it("re-derives dependency order across the freshly fetched member set (#175)", async () => {
+  it("orders internal dependencies while ignoring blockers outside the fetched set (#175)", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
       gates: [{ ok: true }],
       chunkRefs: originHas(391),
-      chunkMemberRefs: membersOn(391, [390, 391, 392]),
-      issueBodies: {
-        "390": "Issue #390: tip\n\n## Blocked by\n\n- #392",
-        "391": "Issue #391: root\n\n## Blocked by\n\nNone",
-        "392": "Issue #392: middle\n\n## Blocked by\n\n- #391",
+      chunkMemberRefs: membersOn(391, [391, 392, 393]),
+      issueData: {
+        "391": { title: "root", body: "## Blocked by\n\nNone" },
+        "392": {
+          title: "middle",
+          body: "## Blocked by\n\n- #391\n- #999",
+        },
+        "393": { title: "tip", body: "## Blocked by\n\n- #392" },
       },
     });
 
@@ -2923,7 +2935,9 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       landing(request(391)),
     );
 
-    expect(calls.closes.map(({ n }) => n)).toEqual([390, 392, 391]);
+    // If #999 leaked into the landing graph, #392 and therefore #393 would
+    // remain unreachable and fall back to numeric order: #392 before #393.
+    expect(calls.closes.map(({ n }) => n)).toEqual([393, 392, 391]);
   });
 
   it("does not merge when the landing-time member-ref fetch fails (#175)", async () => {

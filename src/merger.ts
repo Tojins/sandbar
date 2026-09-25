@@ -387,13 +387,14 @@ import {
   type RuntimeInvocation,
   withRuntimeEnv,
 } from "./runtime.js";
-import { fetchIssueText } from "./issue-anchor.js";
-import { parseBlockedBy } from "./plan-resolver.js";
+import {
+  fetchIssueData,
+  fetchIssueText,
+  type IssueData,
+} from "./issue-anchor.js";
+import { parseBlockedBy, readChunkMemberRefs } from "./plan-resolver.js";
 import {
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
-  ORIGIN_MEMBER_BRANCH_REFGLOBS,
-  branchNameFromOriginRef,
-  issueNumberFromMemberBranch,
   memberBranchName,
   issueBranchName,
   issueNumberFromBranch,
@@ -759,6 +760,9 @@ type ChunkPushResult =
 // Adapter shape. Split into the merger's own primitives and the resolve-loop
 // primitives (which the merger forwards). The real adapter implements both.
 export type MergerAdapter = ResolveAdapter & {
+  // Structured tracker fields for orchestration decisions. Resolve prompts use
+  // `getIssueBody` instead because they intentionally include comments.
+  getIssueData(issueId: string): Promise<IssueData>;
   mergeNoFf(unit: MergeUnit): Promise<{ readonly ok: boolean }>;
   abortMerge(): Promise<void>;
   getHeadSha(): Promise<string>;
@@ -1959,18 +1963,11 @@ export async function runMergerWithAdapter(
     const titles = new Map(target.members.map((m) => [m.number, m.title] as const));
     const blockers = new Map<number, readonly number[]>();
     await Promise.all(snapshot.members.map(async (number) => {
-      const issueText = await adapter.getIssueBody(String(number));
-      const firstLine = issueText.split("\n", 1)[0] ?? "";
-      const renderedPrefix = `Issue #${number}: `;
-      if (!titles.has(number) && firstLine.startsWith(renderedPrefix)) {
-        titles.set(number, firstLine.slice(renderedPrefix.length));
-      }
-      // `fetchIssueText` appends comments after this heading. Dependency
-      // declarations belong to the issue body; a quoted heading in a later
-      // comment must not become a graph edge during landing.
+      const issue = await adapter.getIssueData(String(number));
+      if (!titles.has(number)) titles.set(number, issue.title);
       blockers.set(
         number,
-        parseBlockedBy(issueText.split("\n## Comments", 1)[0] ?? issueText)
+        parseBlockedBy(issue.body)
           .filter((blocker) => snapshot.members.includes(blocker)),
       );
     }));
@@ -3079,22 +3076,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       { cwd },
     );
 
-    const { stdout } = await exec(
-      "git",
-      [
-        "for-each-ref",
-        `--merged=${chunkRef}`,
-        "--format=%(refname:short)",
-        ...ORIGIN_MEMBER_BRANCH_REFGLOBS,
-      ],
-      { cwd },
-    );
-    const members = [...new Set(stdout.split("\n").flatMap((line) => {
-      const number = issueNumberFromMemberBranch(
-        branchNameFromOriginRef(line.trim()),
-      );
-      return number === null ? [] : [number];
-    }))].sort((a, b) => a - b);
+    const members = [...await readChunkMemberRefs(cwd, chunkRef)]
+      .sort((a, b) => a - b);
 
     return { members };
   };
@@ -3358,6 +3341,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // about cross-branch intent without the issue specs is worse than a
       // halted merge phase.
       return fetchIssueText(issueId, deps.repo);
+    },
+    async getIssueData(issueId) {
+      return fetchIssueData(issueId, deps.repo);
     },
     async getHeadSha() {
       const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd });
