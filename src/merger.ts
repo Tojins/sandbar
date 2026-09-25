@@ -9,7 +9,10 @@
 // then use the ordinary resolve loop and gate-2 before directly pushing the
 // existing chunk branch. It never rewrites the branch and never moves member
 // refs, so every landed member remains contained. Moving the PR base and head
-// forward together leaves its review surface as the chunk's own work.
+// forward together leaves its review surface as the chunk's own work. Once
+// origin accepts that push the refresh is durable and is recorded as such;
+// failure of the following host-cache refresh still halts, but is never
+// misreported as a rejected origin push.
 //
 // The merger runs in a dedicated, ephemeral worktree checked out (detached) at
 // `origin/<sourceBranch>` — NOT the operator's primary checkout (issue #10).
@@ -2327,7 +2330,23 @@ export async function runMergerWithAdapter(
         "push",
       );
       const pushed = await adapter.pushChunkBranch(refresh.branch, []);
-      if (pushed.kind !== "ok") {
+      if (
+        pushed.kind === "ok" ||
+        pushed.kind === "pushed-cache-unreadable"
+      ) {
+        // Both results mean origin accepted the refreshed chunk. Record that
+        // durable fact before a cache failure halts this run, so the event
+        // stream agrees with origin and the next process can recompute from it.
+        refreshedChunks.push(refresh);
+        await opts.observations.onOutcome({
+          kind: "chunk-refreshed",
+          refresh,
+          durationMs: timer(),
+        });
+        await emit(
+          `chunk refresh ${refresh.branch}: merged source and pushed`,
+        );
+      } else {
         const detail = pushed.kind === "fatal"
           ? pushed.reason
           : pushed.kind === "refused"
@@ -2337,15 +2356,12 @@ export async function runMergerWithAdapter(
           `Could not push refreshed chunk branch ${refresh.branch}: ${detail}`,
         );
       }
-      refreshedChunks.push(refresh);
-      await opts.observations.onOutcome({
-        kind: "chunk-refreshed",
-        refresh,
-        durationMs: timer(),
-      });
-      await emit(
-        `chunk refresh ${refresh.branch}: merged source and pushed`,
-      );
+      if (pushed.kind === "pushed-cache-unreadable") {
+        throw new SandbarError(
+          `Refreshed chunk branch ${refresh.branch} was pushed to origin, ` +
+            `but its host cache could not be refreshed: ${pushed.reason}`,
+        );
+      }
     }
   };
 

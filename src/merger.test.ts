@@ -629,6 +629,40 @@ describe("runMergerWithAdapter — chunk refresh (#174)", () => {
       [], adapter, undefined, undefined, refreshing(request),
     )).rejects.toThrow("branch moved");
   });
+
+  it("records an accepted refresh before halting on its cache failure", async () => {
+    const request = refresh();
+    const outcomes: string[] = [];
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkPushes: [{
+        kind: "pushed-cache-unreadable",
+        reason: "cache origin unavailable",
+      }],
+      chunkRefs: {
+        [request.branch]: {
+          kind: "present",
+          ref: `refs/remotes/origin/${request.branch}`,
+        },
+      },
+    });
+
+    await expect(runMergerWithAdapter(
+      [], adapter, undefined, undefined, {
+        ...refreshing(request),
+        observations: {
+          onGate: () => undefined,
+          onOutcome: (outcome) => outcomes.push(outcome.kind),
+        },
+      },
+    )).rejects.toThrow(
+      "was pushed to origin, but its host cache could not be refreshed: " +
+        "cache origin unavailable",
+    );
+
+    expect(outcomes).toEqual(["chunk-refreshed"]);
+  });
 });
 
 describe("issueNumberOf", () => {
