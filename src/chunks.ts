@@ -502,7 +502,11 @@ export function landedChunksOf(
       branch: chunk.branch,
       title: byNumber.get(chunk.root)?.title ?? "",
       members: members.map(asMember),
-      closeOrder: closeOrderOf(members, blockersOf).map(asMember),
+      closeOrder: closeOrderOfChunkMembers(
+        members,
+        blockersOf,
+        chunk.root,
+      ).map(asMember),
       rework: members.filter((m) => rework.has(m)).map(asMember),
       tips: (tips.length > 0 ? tips : members).map(asMember),
     });
@@ -527,16 +531,29 @@ export function landedChunksOf(
  * cycle, which `deriveChunks` never puts in a chunk in the first place (a
  * cyclic issue comes out `blocked`), so this is a fallback with no caller.
  */
-function closeOrderOf(
+export function closeOrderOfChunkMembers(
   members: readonly number[],
   blockersOf: ReadonlyMap<number, readonly number[]>,
+  root: number,
 ): readonly number[] {
+  // A landing-time membership refresh can discover a member that was absent
+  // from the plan which built this graph. The branch name still identifies its
+  // one root, so make that invariant explicit rather than relying on every
+  // fetched issue body to reproduce the complete path back to it.
+  const completeBlockers = new Map<number, readonly number[]>(
+    members.map((member) => [
+      member,
+      member === root || !members.includes(root)
+        ? (blockersOf.get(member) ?? [])
+        : [...new Set([...(blockersOf.get(member) ?? []), root])],
+    ]),
+  );
   const indegree = new Map<number, number>(
-    members.map((m) => [m, (blockersOf.get(m) ?? []).length] as const),
+    members.map((m) => [m, (completeBlockers.get(m) ?? []).length] as const),
   );
   const dependents = new Map<number, number[]>();
   for (const m of members) {
-    for (const blocker of blockersOf.get(m) ?? []) {
+    for (const blocker of completeBlockers.get(m) ?? []) {
       const existing = dependents.get(blocker);
       if (existing) existing.push(m);
       else dependents.set(blocker, [m]);

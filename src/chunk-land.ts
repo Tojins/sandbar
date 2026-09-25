@@ -81,12 +81,14 @@
 //                     grows while a request is outstanding). Landing then
 //                     would put commits on the source branch that the pull
 //                     request did not carry when a human labelled it — the
-//                     one thing the review lane exists to prevent — and would
-//                     close nothing for them, since the plan's member list was
-//                     read before the layer landed and the branch delete would
-//                     take their recovery point with it. So `land` STAYS, the
-//                     PR says what arrived, and the cycle that adds nothing
-//                     new lands the chunk as reviewed.
+//                     one thing the review lane exists to prevent. So `land`
+//                     STAYS, the PR says what arrived, and the cycle that adds
+//                     nothing new lands the chunk as reviewed. At that later
+//                     landing the plan's member list is only a hint: after
+//                     fetching the exact chunk tip, the merger freshly fetches
+//                     every origin member ref and re-derives both the close
+//                     set and dependency-safe close order from the refs that
+//                     tip brings beyond its source merge base (#175).
 //                     The same bucket covers #94 rework: a member carrying an
 //                     authoritative `ready-for-agent` is still in flight, so
 //                     landing waits, keeps `land`, and names that member on
@@ -123,13 +125,16 @@
 // pull request, close it, delete the chunk branch on origin.
 //
 // "EVERY MEMBER" MEANS EVERY MEMBER ON THE BRANCH, and that is narrower than
-// every member of the chunk. The list arrives already filtered —
-// `LandedChunk.members` is the git-derived branch members and nothing else — because a
-// chunk grows one LAYER per cycle (#61), so a chunk of three sitting under
-// review with one layer landed and the rest still queued is its ordinary
-// shape, and closing the queued issues would destroy them while telling a
-// human their commits had landed. Whatever this is handed, it closes; the
-// filtering argument lives with the list, in `chunks.ts`.
+// every member of the chunk. Both callers hand this wrap-up an already filtered
+// list. Reconciliation gets `LandedChunk.members`, derived from the fetched
+// cache at planning. A live landing replaces that older list after fetching the
+// exact chunk tip and the complete member namespace, then selects the member
+// refs contained by that tip but not by its merge base with the source branch
+// (#175). That subtraction preserves older chunks' retained recovery refs. A
+// chunk grows one LAYER per cycle (#61),
+// so a chunk of three sitting under review with one layer landed and the rest
+// still queued is its ordinary shape; closing queued issues would destroy them
+// while claiming their commits landed. Whatever this is handed, it closes.
 //
 // AN EMPTY LIST IS NOT THE SAME CLAIM as a list that all closed, and the branch
 // delete below cannot tell them apart — "every member closed" is vacuously true
@@ -162,9 +167,11 @@
 // Closing dependents first and stopping leaves a set that cannot degrade that
 // way: everything still open is the failed member plus every member it is
 // built on top of, the root included, so the chunk re-derives under the same
-// root, on the same branch, carrying exactly those members. `closeOrder` is
-// computed by the derivation (`chunks.ts`), which is the only thing that has
-// the edges, and its comment carries the argument in full.
+// root, on the same branch, carrying exactly those members. Reconciliation's
+// `closeOrder` is computed by the derivation in `chunks.ts`. A live landing
+// fetches current issue bodies for its boundary snapshot and calls the same
+// ordering helper there; that helper's comment carries the graph argument in
+// full.
 //
 // EXPLICITLY is the load-bearing word on the first one. GitHub closes an issue
 // from a `Closes #N` trailer only when GitHub itself merges the pull request

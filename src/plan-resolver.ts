@@ -758,27 +758,34 @@ export async function readChunkMembers(
   const result = new Map<string, ReadonlySet<number>>();
   for (const ref of refsOut.split("\n").map((s) => s.trim()).filter(Boolean)) {
     const branch = branchNameFromOriginRef(ref);
-    const { stdout } = await exec(
-      "git",
-      [
-        "for-each-ref",
-        `--merged=${ref}`,
-        "--format=%(refname:short)",
-        ...ORIGIN_MEMBER_BRANCH_REFGLOBS,
-      ],
-      { cwd: repoDir },
-    );
-    const members = new Set(
-      stdout.split("\n").flatMap((memberRef) => {
-        const number = issueNumberFromMemberBranch(
-          branchNameFromOriginRef(memberRef.trim()),
-        );
-        return number === null ? [] : [number];
-      }),
-    );
-    result.set(branch, members);
+    result.set(branch, await readChunkMemberRefs(repoDir, ref));
   }
   return result;
+}
+
+/** Landing-only member refs contained by one exact chunk ref. */
+export async function readChunkMemberRefs(
+  repoDir: string,
+  chunkRef: string,
+): Promise<ReadonlySet<number>> {
+  const { stdout } = await exec(
+    "git",
+    [
+      "for-each-ref",
+      `--merged=${chunkRef}`,
+      "--format=%(refname:short)",
+      ...ORIGIN_MEMBER_BRANCH_REFGLOBS,
+    ],
+    { cwd: repoDir },
+  );
+  return new Set(
+    stdout.split("\n").flatMap((memberRef) => {
+      const number = issueNumberFromMemberBranch(
+        branchNameFromOriginRef(memberRef.trim()),
+      );
+      return number === null ? [] : [number];
+    }),
+  );
 }
 
 /** Exact origin chunk branches that already contain origin's source tip. */
