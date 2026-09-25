@@ -2911,7 +2911,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     ]);
   });
 
-  it("orders internal dependencies while ignoring blockers outside the fetched set (#175)", async () => {
+  it("re-derives dependency order across the freshly fetched member set (#175)", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
       gates: [{ ok: true }],
@@ -2922,7 +2922,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
         "391": { title: "root", body: "## Blocked by\n\nNone" },
         "392": {
           title: "middle",
-          body: "## Blocked by\n\n- #391\n- #999",
+          body: "## Blocked by\n\n- #391",
         },
       },
     });
@@ -2935,9 +2935,36 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       landing(request(391)),
     );
 
-    // The dependency chain overrides numeric ordering, while #999 must not
-    // leak into the landing graph and make #392 unreachable.
     expect(calls.closes.map(({ n }) => n)).toEqual([390, 392, 391]);
+  });
+
+  it("ignores blockers outside the fetched member set (#175)", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: originHas(391),
+      chunkMemberRefs: membersOn(391, [391, 392, 393]),
+      issueData: {
+        "391": { title: "root", body: "## Blocked by\n\nNone" },
+        "392": {
+          title: "middle",
+          body: "## Blocked by\n\n- #391\n- #999",
+        },
+        "393": { title: "tip", body: "## Blocked by\n\n- #392" },
+      },
+    });
+
+    await runMergerWithAdapter(
+      [],
+      adapter,
+      undefined,
+      undefined,
+      landing(request(391)),
+    );
+
+    // If #999 leaked into the landing graph, #392 and therefore #393 would
+    // remain unreachable and fall back to numeric order: #392 before #393.
+    expect(calls.closes.map(({ n }) => n)).toEqual([393, 392, 391]);
   });
 
   it("does not merge when the landing-time member-ref fetch fails (#175)", async () => {
