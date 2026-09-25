@@ -1,29 +1,89 @@
 #!/bin/sh
-# One convergence attempt, and the record of it the installation index renders
-# (#146). A failed pull has to be visible as "the box is stuck on an old
-# commit" rather than as a journal line nobody reads.
-#
-# `--only-if-changed` keeps an unchanged main from re-running the play; the
-# status file is written either way, so a stale timestamp means the timer itself
-# stopped rather than that main stopped moving.
+# The convergence state machine and the record the installation index renders
+# (#146, #173). The pull checkout is only work space: ansible-pull advances it
+# before a play can fail, so only a successful play advances `converged`.
+# Failed plays remain the last real attempt and retry on every timer tick; a
+# tick whose remote tip is already converged only refreshes the checked time.
 set -u
 
+pull_dir={{ sandbar_pull_dir }}
+state_dir=${pull_dir%/*}
+converged_file=$state_dir/converged
+last_attempt_file=$state_dir/last-attempt
+remote_file=$state_dir/remote-tip
 status={{ sandbar_ui_root }}/{{ sandbar_deploy_status_file }}
 
+record_attempt() {
+  printf '%s\n%s\n' "$attempted" "$outcome" > "$last_attempt_file.new" &&
+    mv "$last_attempt_file.new" "$last_attempt_file"
+}
+
+write_status() {
+  if [ -r "$converged_file" ]; then
+    converged=$(sed -n '1p' "$converged_file")
+  else
+    converged=unknown
+  fi
+  if [ -r "$last_attempt_file" ]; then
+    attempted=$(sed -n '1p' "$last_attempt_file")
+    outcome=$(sed -n '2p' "$last_attempt_file")
+  else
+    attempted=unknown
+    outcome="failed (no attempt)"
+  fi
+  cat > "$status.new" <<JSON
+{"converged":"$converged","attempted":"$attempted","result":"$outcome","at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+JSON
+  test $? -eq 0 && mv "$status.new" "$status"
+}
+
+/usr/bin/git ls-remote --exit-code \
+  {{ sandbar_driver_repo }} \
+  refs/heads/{{ sandbar_driver_branch }} > "$remote_file"
+result=$?
+if [ "$result" -ne 0 ]; then
+  attempted=unknown
+  outcome="failed (ls-remote)"
+  record_attempt || exit $?
+  write_status || exit $?
+  exit "$result"
+fi
+read -r remote_tip _ < "$remote_file"
+rm -f "$remote_file"
+
+if [ -r "$converged_file" ]; then
+  converged=$(sed -n '1p' "$converged_file")
+  if [ "$remote_tip" = "$converged" ]; then
+    write_status || exit $?
+    exit 0
+  fi
+fi
+
 /usr/bin/ansible-pull \
-  --only-if-changed \
   --url {{ sandbar_driver_repo }} \
   --checkout {{ sandbar_driver_branch }} \
-  --directory {{ sandbar_pull_dir }} \
+  --directory "$pull_dir" \
   --inventory localhost, \
   deploy/ansible/site.yml
 result=$?
 
-commit=$(git -C {{ sandbar_pull_dir }} rev-parse HEAD 2>/dev/null || echo unknown)
-if [ "$result" -eq 0 ]; then outcome=ok; else outcome="failed (exit $result)"; fi
-cat > "$status.new" <<JSON
-{"commit":"$commit","at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","result":"$outcome"}
-JSON
-mv "$status.new" "$status"
+attempted=$(/usr/bin/git -C "$pull_dir" rev-parse HEAD 2>/dev/null)
+head_result=$?
+if [ "$head_result" -ne 0 ]; then attempted=unknown; fi
+
+if [ "$result" -eq 0 ] && [ "$head_result" -eq 0 ]; then
+  outcome=ok
+  record_attempt || exit $?
+  printf '%s\n' "$attempted" > "$converged_file.new" &&
+    mv "$converged_file.new" "$converged_file" || exit $?
+elif [ "$result" -ne 0 ]; then
+  outcome="failed (exit $result)"
+  record_attempt || exit $?
+else
+  result=$head_result
+  outcome="failed (checkout HEAD)"
+  record_attempt || exit $?
+fi
+write_status || exit $?
 
 exit "$result"

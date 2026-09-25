@@ -13,14 +13,17 @@
 </ul>
 <p id="deploy">Reading the box's last convergence…</p>
 <script>
-// The convergence script rewrites this file on every attempt, success or
-// failure (#146), so a box stuck on an old commit says so here instead of only
-// in the journal. A stale timestamp means the timer itself stopped.
+// The convergence script rewrites this file on every tick (#146, #173). A
+// skipped tick keeps the last real attempt's result, and a stale timestamp
+// means the timer itself stopped.
 fetch("{{ sandbar_deploy_status_file }}", { cache: "no-store" })
   .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
   .then(status => {
+    const attempt = status.result === "ok"
+      ? "ok"
+      : `${status.attempted} ${status.result}`;
     document.getElementById("deploy").textContent =
-      `box on ${status.commit} · ${status.result} · checked ${status.at}`;
+      `box on ${status.converged} · ${attempt} · checked ${status.at}`;
   })
   .catch(error => {
     document.getElementById("deploy").textContent =
