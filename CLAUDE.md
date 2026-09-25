@@ -157,8 +157,9 @@ default is unlimited, so existing hosts keep their prior concurrency.
    `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
    so one gate-2 and one landing cover both; the wrap-up then closes the
    members whose freshly fetched landing-only member refs the exact merged tip
-   contains (re-deriving dependents-first/root-last order at the landing
-   boundary, #175), drops `needs-review`,
+   brings beyond its merge base with the source branch (re-deriving
+   dependents-first/root-last order at the landing boundary, #175), drops
+   `needs-review`,
    takes `land` back off the PR, closes it (or accepts the MERGED mark GitHub
   itself puts on a PR whose head the landing push made reachable) and deletes
   the branch.
@@ -371,10 +372,9 @@ outcomes.
   the branch is deleted THERE when the chunk lands. Each member gets a dedicated
   `sandbar/member-<n>` ref pushed atomically beside the chunk ref, and
   containment is the membership record; commit subjects are cosmetic. What a chunk branch
-  carries is `PlanResolution.landedChunks`, the only answer the whole
+  carries at planning time is `PlanResolution.landedChunks`, the answer the whole
   candidate graph can give: member refs contained by the exact chunk branch,
-  which is the set a landing
-  closes (#64) and whose members and tips route review rework (#95) — never the whole
+  whose members and tips route review rework and reconciliation (#95) — never the whole
   component, since a member that has never been worked has no commits
   anywhere. De-queueing alone is broader and fail-safe: a member ref contained
   by any fetched chunk branch is never reimplemented after title drift or re-rooting,
@@ -383,8 +383,9 @@ outcomes.
   rework (#94). That member is planned back onto
   the same chunk, and an outstanding `land` request is deferred until the
   rework leaves the queue.
-  It also carries the ORDER those closes must go in, for the reason
-  the `land` bullet below states.
+  It also carries reconciliation's close order. A live landing takes its close
+  set and order from a fresh landing-boundary snapshot, as the `land` bullet
+  below states.
 - **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
   created or updated after every landing push; sandbar never re-drafts a PR a
   human made ready. Its body is only the complete member list;
@@ -413,8 +414,11 @@ outcomes.
   rework independently defers the same request until the member leaves
   `ready-for-agent`. Members are closed EXPLICITLY (a `Closes #N` trailer only
   fires on GitHub's own merge of that PR, and sandbar composes the merge
-  locally), in `LandedChunk.closeOrder` — dependents first, ROOT LAST — and the
-  loop stops at the first failure. Git-derived members are fetched by number
+  locally). Reconciliation uses `LandedChunk.closeOrder`; a live landing
+  freshly fetches the member namespace and closes only refs the exact chunk tip
+  brings beyond its merge base with the source branch, re-deriving the order
+  from current tracker edges. Both paths close dependents first, ROOT LAST, and
+  stop at the first failure. Git-derived members are fetched by number
   without a state filter, so closing the root does not remove it from the graph
   or change the derived branch name; dependents-first still leaves the safest
   retry set if refs are repaired or changed by hand. The chunk branch

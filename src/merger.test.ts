@@ -373,7 +373,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.chunkRefFetches.push(branch);
       return script.chunkRefs?.[branch] ?? { kind: "absent" };
     },
-    async fetchChunkMemberRefs(ref) {
+    async fetchChunkMemberRefs(ref, _sourceBranch) {
       if (script.chunkMemberRefError) throw script.chunkMemberRefError;
       const root = Number(ref.match(/\/chunk-(\d+)-/)?.[1]);
       return script.chunkMemberRefs?.[ref] ?? {
@@ -2386,7 +2386,10 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
     expect(err).toBeInstanceOf(MergerError);
     expect((err as MergerError).partial?.chunkLanded.map((c) => c.issue.id))
       .toEqual(["42"]);
-    expect(calls.chunkPrs).toEqual([]);
+    expect((err as MergerError).partial?.chunkLanded[0]?.pullRequestNumber)
+      .toBe(7);
+    expect(calls.chunkPrs).toHaveLength(1);
+    expect(calls.chunkPrs[0]?.chunkBranch).toBe("sandbar/chunk-42-c");
     expect((err as MergerError).message).toContain("host cache could not be refreshed");
   });
 

@@ -88,7 +88,7 @@
 //                     fetching the exact chunk tip, the merger freshly fetches
 //                     every origin member ref and re-derives both the close
 //                     set and dependency-safe close order from the refs that
-//                     tip actually contains (#175).
+//                     tip brings beyond its source merge base (#175).
 //                     The same bucket covers #94 rework: a member carrying an
 //                     authoritative `ready-for-agent` is still in flight, so
 //                     landing waits, keeps `land`, and names that member on
@@ -129,7 +129,9 @@
 // list. Reconciliation gets `LandedChunk.members`, derived from the fetched
 // cache at planning. A live landing replaces that older list after fetching the
 // exact chunk tip and the complete member namespace, then selects the member
-// refs contained by that tip (#175). A chunk grows one LAYER per cycle (#61),
+// refs contained by that tip but not by its merge base with the source branch
+// (#175). That subtraction preserves older chunks' retained recovery refs. A
+// chunk grows one LAYER per cycle (#61),
 // so a chunk of three sitting under review with one layer landed and the rest
 // still queued is its ordinary shape; closing queued issues would destroy them
 // while claiming their commits landed. Whatever this is handed, it closes.
@@ -165,9 +167,11 @@
 // Closing dependents first and stopping leaves a set that cannot degrade that
 // way: everything still open is the failed member plus every member it is
 // built on top of, the root included, so the chunk re-derives under the same
-// root, on the same branch, carrying exactly those members. `closeOrder` is
-// computed by the derivation (`chunks.ts`), which is the only thing that has
-// the edges, and its comment carries the argument in full.
+// root, on the same branch, carrying exactly those members. Reconciliation's
+// `closeOrder` is computed by the derivation in `chunks.ts`. A live landing
+// fetches current issue bodies for its boundary snapshot and calls the same
+// ordering helper there; that helper's comment carries the graph argument in
+// full.
 //
 // EXPLICITLY is the load-bearing word on the first one. GitHub closes an issue
 // from a `Closes #N` trailer only when GitHub itself merges the pull request

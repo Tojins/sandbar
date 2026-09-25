@@ -293,6 +293,10 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
   });
 
   it("fetches exact contained member refs, excluding unrelated and pruned refs (#175)", async () => {
+    // A previous chunk's failed close can leave its member ref behind after
+    // that work reached main. A newer chunk inherits the commit, but must not
+    // claim or delete the older chunk's recovery record when it lands.
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/member-10");
     await git(seed, "checkout", "-qb", "root-member", "main");
     await commit(seed, "root.txt", "root work\n");
     await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-391");
@@ -311,14 +315,14 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(found.kind).toBe("present");
     if (found.kind !== "present") return;
 
-    expect(await a.fetchChunkMemberRefs(found.ref)).toEqual({
+    expect(await a.fetchChunkMemberRefs(found.ref, "main")).toEqual({
       members: [391, 392],
     });
 
     // The first read cached member-392 in the merger clone. Once origin
     // deletes it, a landing snapshot must prune that stale containment fact.
     await git(seed, "push", "-q", "origin", ":refs/heads/sandbar/member-392");
-    expect(await a.fetchChunkMemberRefs(found.ref)).toEqual({
+    expect(await a.fetchChunkMemberRefs(found.ref, "main")).toEqual({
       members: [391],
     });
   });

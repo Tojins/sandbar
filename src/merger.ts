@@ -89,6 +89,12 @@
 // mechanism disabling GitHub's merge button while leaving review intact, and
 // sandbar never un-drafts one a human made ready.
 //
+// The accepted push also refreshes the host cache's chunk and member refs so
+// the next planning boundary sees sandbar's own write (#175). A failed refresh
+// is a halt, but only AFTER the pull request is opened or updated: origin
+// already has the branch, and losing its review surface would leave no handle
+// on which a human could apply `land`.
+//
 // A failure to open it HALTS, like every other tracker write in this loop. The
 // landing survives in the partial (those issues are on origin and still owe
 // `needs-review`), so what the halt costs is the cycle, and what carrying on would
@@ -145,9 +151,9 @@
 // on the source branch that no review covered. So the request is DEFERRED:
 // nothing merges, `land` stays, the PR says what arrived, and the next cycle
 // that adds nothing new lands the chunk. At that boundary the exact fetched
-// chunk tip, not the plan-time list, determines contained members and their
-// close order (#175). `deferredChunks` reports the wait; it is neither a
-// landing nor a park.
+// chunk tip, not the plan-time list, determines the members it brings beyond
+// the source merge base and their close order (#175). `deferredChunks` reports
+// the wait; it is neither a landing nor a park.
 //
 // The WRAP-UP runs only after the source branch has moved: close every member
 // ON THE BRANCH explicitly (the git-derived ones — a component member that was
@@ -832,11 +838,14 @@ export type MergerAdapter = ResolveAdapter & {
   // nowhere.
   fetchChunkRef(chunkBranch: string): Promise<ChunkRefLookup>;
   // Fetch every origin member ref after `fetchChunkRef`, then derive the
-  // members contained by that exact ref. A failed fetch throws: without a
-  // fresh membership namespace the landing must not merge. The caller obtains
-  // current dependency edges for this returned set and derives close order.
+  // members brought to the source branch by that exact ref: contained by the
+  // chunk, but not by its merge base with origin's source branch. A failed
+  // fetch throws: without a fresh membership namespace the landing must not
+  // merge. The caller obtains current dependency edges for this returned set
+  // and derives close order.
   fetchChunkMemberRefs(
     chunkRef: string,
+    sourceBranch: string,
   ): Promise<ChunkMemberRefSnapshot>;
   // Delete the chunk branch on origin, once its commits are on the source
   // branch. The last step of the wrap-up and the one that stops the reconciler
@@ -1851,14 +1860,6 @@ export async function runMergerWithAdapter(
       chunkLanded.push(landing);
       await opts.observations.onOutcome({ kind: "chunk-landed", landing, durationMs });
     }
-    if (push.kind === "pushed-cache-unreadable") {
-      // Origin already accepted the atomic push. The durable outcomes above
-      // must reach finalisation before the run halts; otherwise these issues
-      // would be queued again against a chunk that already contains them.
-      asHalt(`Chunk ${branch} was pushed but its host cache could not be refreshed`)(
-        new SandbarError(push.reason),
-      );
-    }
     await emit(
       `chunk ${branch}: landed ${landedMembers.map(({ issue }) => `#${issueNumberOf(issue)}`).join(", ")} and pushed`,
     );
@@ -1901,6 +1902,14 @@ export async function runMergerWithAdapter(
       chunkLanded[i] = { ...chunkLanded[i]!, pullRequestNumber: pr.number };
     }
     await emit(`chunk ${branch}: draft PR ${pr.url || `#${pr.number}`}`);
+    if (push.kind === "pushed-cache-unreadable") {
+      // Origin already accepted the atomic push. Open the review surface
+      // before halting, and carry the durable outcomes to finalisation;
+      // otherwise a first member could leave a chunk nobody can label `land`.
+      asHalt(`Chunk ${branch} was pushed but its host cache could not be refreshed`)(
+        new SandbarError(push.reason),
+      );
+    }
   };
 
   // Every group, and HEAD put back where the cycle started once they are done
@@ -2123,6 +2132,7 @@ export async function runMergerWithAdapter(
         // are about to merge, never from `request.members`/`closeOrder`.
         const memberSnapshot = await adapter.fetchChunkMemberRefs(
           found.ref,
+          pending.sourceBranch,
         );
         const unit: FetchedChunkUnit = {
           ...pending,
@@ -3063,6 +3073,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
 
   const fetchChunkMemberRefs = async (
     chunkRef: string,
+    sourceBranch: string,
   ): Promise<ChunkMemberRefSnapshot> => {
     await exec(
       "git",
@@ -3076,7 +3087,18 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       { cwd },
     );
 
-    const members = [...await readChunkMemberRefs(cwd, chunkRef)]
+    const { stdout } = await exec(
+      "git",
+      ["merge-base", chunkRef, `origin/${sourceBranch}`],
+      { cwd },
+    );
+    const mergeBase = stdout.trim();
+    const [onChunk, onSourceBase] = await Promise.all([
+      readChunkMemberRefs(cwd, chunkRef),
+      readChunkMemberRefs(cwd, mergeBase),
+    ]);
+    const members = [...onChunk]
+      .filter((number) => !onSourceBase.has(number))
       .sort((a, b) => a - b);
 
     return { members };
