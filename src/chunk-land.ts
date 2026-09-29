@@ -93,6 +93,13 @@
 //                     authoritative `ready-for-agent` is still in flight, so
 //                     landing waits, keeps `land`, and names that member on
 //                     the PR rather than closing it with feedback unbuilt.
+//   * drifted       — the tracker graph no longer assigns this origin branch
+//                     to its encoded root, or origin carries competing
+//                     branches for that root. Nothing is merged or closed;
+//                     the PR names the branch's member refs and the repair,
+//                     and `land` comes OFF. A graph edit cannot retroactively
+//                     make commits include its new blocker, and choosing a
+//                     duplicate branch would be arbitrary (#176).
 //
 // ---------------------------------------------------------------------------
 // Reconciliation — the same wrap-up, without the merge
@@ -157,12 +164,12 @@
 // promise made to a human on the strength of that (below, and in
 // `CHUNK_LANDED_PR_COMMENT`) is that the next cycle's reconciler finds the
 // branch and retries exactly the closes that failed. The reconciler matches a
-// branch to a chunk BY NAME, and the name is `sandbar/chunk-<root>-<slug>` —
-// derived every cycle from the queue plus the issues named by fetched chunk
-// history. Closing the root therefore no longer removes it immediately, but
-// dependents-first remains the recovery-safe order: if history is repaired,
-// lost, or the root is closed manually before a later run, every member left
-// open still includes the root and re-derives the same branch name.
+// branch to a chunk by the root number encoded in its name. One origin branch
+// for that root keeps its name across title edits (#176); closing the root
+// still removes the identity entirely. Dependents-first therefore remains the
+// recovery-safe order: if history is repaired, lost, or the root is closed
+// manually before a later run, every member left open still includes the root
+// and selects the same origin branch.
 //
 // Closing dependents first and stopping leaves a set that cannot degrade that
 // way: everything still open is the failed member plus every member it is
@@ -218,6 +225,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
+  type ChunkBranchDrift,
   type ChunkMember,
   NEEDS_REVIEW_LABEL,
   LAND_LABEL,
@@ -309,6 +317,15 @@ export type PullRequestSummary = {
   readonly title: string;
 };
 
+export type ChunkLandRefusal = ChunkBranchDrift & {
+  readonly pullRequest: number;
+};
+
+export type ChunkLandSelection = {
+  readonly requests: readonly ChunkLandTarget[];
+  readonly refusals: readonly ChunkLandRefusal[];
+};
+
 const byRoot = (a: ChunkLandTarget, b: ChunkLandTarget): number =>
   a.root - b.root;
 
@@ -363,11 +380,12 @@ const isTarget = (t: ChunkLandTarget | null): t is ChunkLandTarget => t !== null
  *
  * `chunks` is the plan's derivation, and it is how a request learns its
  * members — the PR names a branch and nothing else, and only the graph knows
- * which issues are on it, and which of those have actually landed on it. A
- * request whose branch matches no derived chunk is still returned, with NO
- * members: the branch exists on origin and a human has asked for it, so
- * refusing would leave them holding a label nothing reads. It lands and its PR
- * closes; what it cannot do is close issues nobody named.
+ * which issues are on it, and which of those have actually landed on it.
+ * `drifts` is the planner's explicit refusal set: a request for one of those
+ * branches that CARRIES MEMBERS is returned separately and never enters the
+ * merger. Zero member refs preserve the member-less path #64 kept even when
+ * the graph cannot name the branch: it lands and closes no issue rather than
+ * leaving a label nothing reads.
  *
  * A `land` label on a pull request whose head is not a chunk branch is not
  * sandbar's business at all, and is dropped without comment.
@@ -375,12 +393,29 @@ const isTarget = (t: ChunkLandTarget | null): t is ChunkLandTarget => t !== null
 export function selectLandRequests(
   prs: readonly PullRequestSummary[],
   chunks: readonly LandedChunk[],
-): readonly ChunkLandTarget[] {
+  drifts: readonly ChunkBranchDrift[] = [],
+): ChunkLandSelection {
   const chunkByBranch = new Map(chunks.map((c) => [c.branch, c] as const));
-  return [...pullRequestsByHead(prs).values()]
-    .map((pr) => targetFor(pr.headRefName, chunkByBranch.get(pr.headRefName), pr))
-    .filter(isTarget)
-    .sort(byRoot);
+  const driftByBranch = new Map(drifts.map((d) => [d.existing, d] as const));
+  const requests: ChunkLandTarget[] = [];
+  const refusals: ChunkLandRefusal[] = [];
+  for (const pr of pullRequestsByHead(prs).values()) {
+    const drift = driftByBranch.get(pr.headRefName);
+    if (drift && drift.members.length > 0) {
+      refusals.push({ ...drift, pullRequest: pr.number });
+      continue;
+    }
+    const target = targetFor(
+      pr.headRefName,
+      chunkByBranch.get(pr.headRefName),
+      pr,
+    );
+    if (target) requests.push(target);
+  }
+  return {
+    requests: requests.sort(byRoot),
+    refusals: refusals.sort((a, b) => a.root - b.root),
+  };
 }
 
 /**
@@ -615,6 +650,56 @@ export const CHUNK_BRANCH_MISSING_PR_COMMENT = (args: {
   `${BOT_COMMENT_PREFIX} origin has no \`${args.chunkBranch}\` to land.\n\n` +
   `Action: restore \`${args.chunkBranch}\` from a surviving clone and re-apply ` +
   `\`${LAND_LABEL}\`, or close the pull request and issues by hand.`;
+
+export function describeChunkBranchDrift(drift: ChunkBranchDrift): string {
+  switch (drift.cause.kind) {
+    case "rerooted":
+      return `root issue #${drift.root} now derives to ` +
+        `\`${drift.cause.derived}\` after its \`## Blocked by\` graph changed`;
+    case "orphaned":
+      return `root issue #${drift.root} no longer belongs to any derivable chunk`;
+    case "ambiguous":
+      return `origin carries multiple chunk branches for root issue #${drift.root}: ` +
+        drift.cause.competing.map((branch) => `\`${branch}\``).join(", ");
+    default: {
+      const exhaustive: never = drift.cause;
+      return exhaustive;
+    }
+  }
+}
+
+export const CHUNK_LAND_REFUSED_PR_COMMENT = (
+  refusal: ChunkLandRefusal,
+): string => {
+  const cause = describeChunkBranchDrift(refusal);
+  const members = refusal.members.length > 0
+    ? refusal.members.map((member) => `- #${member.number} — ${member.title}`).join("\n")
+    : "- none found";
+  const repair = refusal.cause.kind === "ambiguous"
+    ? "Delete the surplus chunk branch, then re-apply `land` to the one that remains."
+    : "Revert the `## Blocked by` edit that changed this chunk, then re-apply `land`.";
+  return `${BOT_COMMENT_PREFIX} refused to land \`${refusal.existing}\`: ${cause}.\n\n` +
+    "The branch carries these members according to its `sandbar/member-<n>` refs:\n\n" +
+    `${members}\n\n${repair} Or merge/fold the branch by hand and close the named ` +
+    "members yourself. Nothing was merged, closed or deleted. Sandbar is taking " +
+    "the `land` label off this pull request.";
+};
+
+export type ChunkLandRefusalAdapter = Pick<
+  ChunkWrapupAdapter,
+  "commentOnPullRequest" | "removePullRequestLabel"
+>;
+
+export async function refuseLandRequest(
+  refusal: ChunkLandRefusal,
+  adapter: ChunkLandRefusalAdapter,
+): Promise<void> {
+  await adapter.commentOnPullRequest(
+    refusal.pullRequest,
+    CHUNK_LAND_REFUSED_PR_COMMENT(refusal),
+  );
+  await adapter.removePullRequestLabel(refusal.pullRequest, LAND_LABEL);
+}
 
 // ---------------------------------------------------------------------------
 // The wrap-up

@@ -85,6 +85,9 @@ default is unlimited, so existing hosts keep their prior concurrency.
    inert under the default lane, `auto`; the blocker, chunk, follow-up and
    wrap-up criteria are the `plan-resolver.ts`, `chunks.ts`,
    `chunk-follow-up.ts` and `chunk-land.ts` headers to state.
+   A chunk's root issue number is its durable identity: one origin branch for
+   that root keeps its name across title edits; competing branches are
+   ambiguous and no new work is assigned to either (#176).
    A chained chunk member that also relies on a blocker satisfied by CLOSED is
    admitted only when the exact origin chunk branch contains the exact origin
    source tip (#174). Otherwise it waits on a chunk refresh queued for the
@@ -163,6 +166,10 @@ default is unlimited, so existing hosts keep their prior concurrency.
    takes `land` back off the PR, closes it (or accepts the MERGED mark GitHub
   itself puts on a PR whose head the landing push made reachable) and deletes
   the branch.
+   A `land` request on a branch drifted by a graph edit, or made ambiguous by
+   another branch for the same root, is instead refused before the merger: the
+   PR is told which member refs it carries and how to repair it, and `land` is
+   removed (#176).
    After source-branch landings, each queued chunk refresh is one ordinary
    merger unit in the same worktree: source is merged into the fetched chunk
    tip, the version collision and resolve loop run as usual, gate-2 decides,

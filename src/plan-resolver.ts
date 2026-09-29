@@ -180,9 +180,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
+  type ChunkBranchDrift,
   type ChunkIssue,
   type ChunkRefresh,
   type ChunkTarget,
+  chunkBranchesByRoot,
   type LandedChunk,
   deriveChunks,
   landedChunksOf,
@@ -337,13 +339,10 @@ export type PlanResolution = {
   // Fetched chunks that no current derivation produces, plus every competing
   // branch when origin carries more than one for a root. The broad union
   // de-queues their members while exact-branch safety refuses to work or land
-  // them, so this is the plan-time repair signal. `derived` names the current
-  // chunk containing the old root (including after re-rooting), or is null when
-  // that root is absent from the graph and no replacement name can be derived.
-  readonly chunkNameDrifts: readonly {
-    readonly existing: string;
-    readonly derived: string | null;
-  }[];
+  // them, so this is the plan-time repair signal. Its discriminated cause
+  // names the current chunk after re-rooting, absence from the graph, or all
+  // competing origin branches for an ambiguous root.
+  readonly chunkNameDrifts: readonly ChunkBranchDrift[];
   // Existing chunk branches that must merge the source branch before the
   // listed chained dependents can be seeded safely (#174). One request per
   // branch, with every dependent that would otherwise be planned this cycle.
@@ -415,21 +414,14 @@ export function resolvePlan(
     title: c.title,
     blockedBy: blockedBy.get(c.number) ?? [],
   }));
-  const originChunkBranches = [...chunkMembers.keys()];
+  const originChunkBranches = [...chunkMembers.keys()].sort();
   const { chunks, chunkOf } = deriveChunks(
     chunkIssues,
     lanes,
     originChunkBranches,
   );
   const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
-  const originBranchesByRoot = new Map<number, string[]>();
-  for (const branch of originChunkBranches) {
-    const root = rootIssueFromChunkBranch(branch);
-    if (root === null) continue;
-    const existing = originBranchesByRoot.get(root);
-    if (existing) existing.push(branch);
-    else originBranchesByRoot.set(root, [branch]);
-  }
+  const originBranchesByRoot = chunkBranchesByRoot(originChunkBranches);
   const ambiguousChunkRoots = new Set(
     [...originBranchesByRoot]
       .filter(([, branches]) => branches.length > 1)
@@ -677,18 +669,38 @@ export function resolvePlan(
       new Set(candidates.map((c) => c.number).filter(isOnDerivedChunk)),
       trackerReadyNumbers,
     ),
-    chunkNameDrifts: [...chunkMembers.keys()].flatMap((existing) => {
+    chunkNameDrifts: originChunkBranches.flatMap((existing): readonly ChunkBranchDrift[] => {
       const root = rootIssueFromChunkBranch(existing);
       if (root === null) return [];
-      if ((originBranchesByRoot.get(root)?.length ?? 0) > 1) {
-        return [{ existing, derived: null }];
+      const members = [...(chunkMembers.get(existing) ?? [])]
+        .sort((a, b) => a - b)
+        .map((number) => ({ number, title: titleOf.get(number) ?? "" }));
+      const competing = originBranchesByRoot.get(root) ?? [];
+      if (competing.length > 1) {
+        return [{
+          existing,
+          root,
+          members,
+          cause: { kind: "ambiguous", competing },
+        }];
       }
       const currentRoot = chunkOf.get(root);
-      const derived = currentRoot === undefined
-        ? null
-        : (chunkByRoot.get(currentRoot)?.branch ?? null);
-      return derived !== existing
-        ? [{ existing, derived }]
+      if (currentRoot === undefined) {
+        return [{
+          existing,
+          root,
+          members,
+          cause: { kind: "orphaned" },
+        }];
+      }
+      const derived = chunkByRoot.get(currentRoot)?.branch;
+      return derived !== undefined && derived !== existing
+        ? [{
+            existing,
+            root,
+            members,
+            cause: { kind: "rerooted", derived },
+          }]
         : [];
     }),
     chunkRefreshes: [...refreshes.values()],

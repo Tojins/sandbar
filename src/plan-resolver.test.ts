@@ -1203,7 +1203,9 @@ describe("resolvePlan git membership safety (#93)", () => {
     expect(result.landedChunks).toEqual([]);
     expect(result.chunkNameDrifts).toEqual([{
       existing: "sandbar/chunk-99-other",
-      derived: null,
+      root: 99,
+      members: [{ number: 47, title: "Root" }],
+      cause: { kind: "orphaned" },
     }]);
   });
 
@@ -1221,6 +1223,25 @@ describe("resolvePlan git membership safety (#93)", () => {
     expect(result.landedChunks[0]?.members).toEqual([
       { number: 47, title: "New title" },
     ]);
+    expect(result.chunkNameDrifts).toEqual([]);
+  });
+
+  it("seeds new work onto the sole origin branch even before it has member refs", () => {
+    const result = resolvePlan(
+      [issue(47, "", { title: "New title" })],
+      facts({ 47: { labels: ["ready-for-agent"] } }),
+      new Set(),
+      3,
+      "review",
+      new Map([["sandbar/chunk-47-old-title", new Set<number>()]]),
+    );
+    expect(result.plan).toEqual([expect.objectContaining({
+      id: "47",
+      chunk: expect.objectContaining({
+        root: 47,
+        branch: "sandbar/chunk-47-old-title",
+      }),
+    })]);
     expect(result.chunkNameDrifts).toEqual([]);
   });
 
@@ -1242,8 +1263,30 @@ describe("resolvePlan git membership safety (#93)", () => {
     expect(result.plan).toEqual([]);
     expect(result.landedChunks).toEqual([]);
     expect(result.chunkNameDrifts).toEqual([
-      { existing: "sandbar/chunk-47-old-title", derived: null },
-      { existing: "sandbar/chunk-47-current-title", derived: null },
+      {
+        existing: "sandbar/chunk-47-current-title",
+        root: 47,
+        members: [],
+        cause: {
+          kind: "ambiguous",
+          competing: [
+            "sandbar/chunk-47-current-title",
+            "sandbar/chunk-47-old-title",
+          ],
+        },
+      },
+      {
+        existing: "sandbar/chunk-47-old-title",
+        root: 47,
+        members: [{ number: 47, title: "Current title" }],
+        cause: {
+          kind: "ambiguous",
+          competing: [
+            "sandbar/chunk-47-current-title",
+            "sandbar/chunk-47-old-title",
+          ],
+        },
+      },
     ]);
   });
 
@@ -1262,7 +1305,12 @@ describe("resolvePlan git membership safety (#93)", () => {
     );
     expect(result.chunkNameDrifts).toEqual([{
       existing: "sandbar/chunk-47-root",
-      derived: "sandbar/chunk-40-new-prerequisite",
+      root: 47,
+      members: [{ number: 47, title: "Root" }],
+      cause: {
+        kind: "rerooted",
+        derived: "sandbar/chunk-40-new-prerequisite",
+      },
     }]);
   });
 
@@ -1277,7 +1325,9 @@ describe("resolvePlan git membership safety (#93)", () => {
     );
     expect(result.chunkNameDrifts).toEqual([{
       existing: "sandbar/chunk-47-root",
-      derived: null,
+      root: 47,
+      members: [{ number: 47, title: "" }],
+      cause: { kind: "orphaned" },
     }]);
   });
 });
