@@ -922,7 +922,9 @@ describe("multi-installation role orchestration", () => {
     expect(page).toContain('document.getElementById("deploy")');
     expect(page).toContain('status.result === "ok"');
     expect(page).toContain('`${status.attempted} ${status.result}`');
-    expect(page).toContain('`box on ${status.converged} · ${attempt} · checked ${status.at}`');
+    expect(page).toContain('new Intl.DateTimeFormat("nl-BE"');
+    expect(page).toContain('timeZone: "Europe/Brussels"');
+    expect(page).toContain('`box on ${status.converged} · ${attempt} · checked ${brusselsTime.format(new Date(status.at))}`');
     expect(page).toContain("No convergence recorded yet");
     const renderTask = taskNamed(caddyTasks, "Render the installation index");
     expect(renderTask).toContain("src: index.html.j2");
@@ -937,15 +939,15 @@ describe("multi-installation role orchestration", () => {
       status: {
         converged: "abc123", attempted: "abc123", result: "ok", at: "2026-09-25T10:00:00Z",
       },
-      text: "box on abc123 · ok · checked 2026-09-25T10:00:00Z",
+      text: "box on abc123 · ok · checked 25 sep, 12:00:00",
     },
     {
       name: "failed convergence",
       status: {
         converged: "old123", attempted: "new456", result: "failed (exit 7)",
-        at: "2026-09-25T10:05:00Z",
+        at: "2026-01-25T10:05:00Z",
       },
-      text: "box on old123 · new456 failed (exit 7) · checked 2026-09-25T10:05:00Z",
+      text: "box on old123 · new456 failed (exit 7) · checked 25 jan, 11:05:00",
     },
     {
       name: "failed remote lookup",
@@ -953,7 +955,7 @@ describe("multi-installation role orchestration", () => {
         converged: "old123", attempted: "unknown", result: "failed (ls-remote)",
         at: "2026-09-25T10:10:00Z",
       },
-      text: "box on old123 · unknown failed (ls-remote) · checked 2026-09-25T10:10:00Z",
+      text: "box on old123 · unknown failed (ls-remote) · checked 25 sep, 12:10:00",
     },
   ])("executes the index script for $name", async ({ status, text }) => {
     await expect(renderedDeployText(status)).resolves.toBe(text);

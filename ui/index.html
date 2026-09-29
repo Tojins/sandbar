@@ -29,13 +29,23 @@
 <body><main id="app" class="page" aria-live="polite"></main>
 <script>
 let lastState = null, lastServerNotice = null;
-const esc = value => String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+const brusselsClock = new Intl.DateTimeFormat("nl-BE",{timeZone:"Europe/Brussels",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"});
+function clockParts(value) { return Object.fromEntries(brusselsClock.formatToParts(new Date(value)).filter(part=>part.type!=="literal").map(part=>[part.type,part.value])) }
+const clockTime = value => { const p=clockParts(value); return `${p.hour}:${p.minute}` };
+const datedTime = (value,withSeconds=false) => { const p=clockParts(value); return `${p.day} ${p.month}, ${p.hour}:${p.minute}${withSeconds?`:${p.second}`:""}` };
+const isoInstant = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{3})?)?Z\b/g;
+const displayText = value => String(value).replace(isoInstant, iso => Number.isNaN(Date.parse(iso))?iso:datedTime(iso,true));
+// Every record string reaches markup through this boundary. Rewrite instants
+// while the text is raw, then escape the rewritten result as usual.
+const esc = value => displayText(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const parse = value => Date.parse(value);
 function dur(ms) { const m=Math.max(0,Math.round(ms/60000)); return m<60?`${m}m`:`${Math.floor(m/60)}h${String(m%60).padStart(2,"0")}` }
 const since = (iso,now) => dur(parse(now)-parse(iso));
-const hhmm = iso => new Date(iso).toISOString().slice(11,16);
-const shortDate = iso => new Intl.DateTimeFormat(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(iso));
 const firstLine = text => String(text||"").split(/\r?\n/,1)[0];
+function firstTick(start,tickMs) {
+  const minuteMs=60000, stride=tickMs/minuteMs;
+  for(let tick=Math.ceil(start/minuteMs)*minuteMs;;tick+=minuteMs){const p=clockParts(tick);if((Number(p.hour)*60+Number(p.minute))%stride===0)return tick}
+}
 // The identity line names a version, two trees and two paths (#69). The
 // header states which driver this is; the whole line stays one hover away on
 // the same element.
@@ -56,14 +66,14 @@ function render(state, serverNotice=null) {
   const tickMs=width<7200000?600000:width<28800000?1800000:7200000;
   const x=iso => Math.max(0,Math.min(100,(parse(iso)-t0)/width*100)).toFixed(2)+"%";
   const w=(from,to) => Math.max(.2,((to?parse(to):now)-parse(from))/width*100).toFixed(2)+"%";
-  const ticks=[]; for(let t=Math.ceil(t0/tickMs)*tickMs;t<t1;t+=tickMs) ticks.push(`<span style="left:${((t-t0)/width*100).toFixed(2)}%">${hhmm(new Date(t).toISOString())}</span>`);
+  const ticks=[]; for(let t=firstTick(t0,tickMs);t<t1;t+=tickMs) ticks.push(`<span style="left:${((t-t0)/width*100).toFixed(2)}%">${clockTime(t)}</span>`);
   const pill=r.status==="live"?`<span class="pill live"><span class="dot"></span>live · ${since(r.startedAt,state.now)}</span>`:`<span class="pill ${r.status}">${r.status}${r.exit?` · ${esc(r.exit.tag)}`:""}</span>`;
   // A restart request stops admission while landing continues, so a reader
   // looking at a shrinking pool is told why it is shrinking (#146).
   const restart=r.restart&&!r.exit?`<span class="pill restart">restart pending · draining · ${esc(r.restart.detail)}</span>`:"";
   const visibleComplaints=r.complaints.filter(c=>localStorage.getItem(complaintKey(r.directory,c.seq))===null);
   const complaints=visibleComplaints.length?`<div class="complaints">${visibleComplaints.map(c=>`<div class="complaint ${c.severity==="error"?"bad":"warn"}"><span>⚠ ${esc(c.text)}</span><button type="button" aria-label="Dismiss" onclick="dismissComplaint(${c.seq})">×</button></div>`).join("")}</div>`:"";
-  const top=`<header class="top"><span class="name" title="${esc(r.driver)}">${esc(driverName(r.driver))}</span>${pill}${restart}${r.lastRecompute?`<span class="dim mono">recompute ${r.lastRecompute.n} · ${esc(r.lastRecompute.trigger)} · ${hhmm(r.lastRecompute.at)}</span>`:""}${serverNotice?notice(serverNotice):""}${complaints}</header>`;
+  const top=`<header class="top"><span class="name" title="${esc(r.driver)}">${esc(driverName(r.driver))}</span>${pill}${restart}${r.lastRecompute?`<span class="dim mono">recompute ${r.lastRecompute.n} · ${esc(r.lastRecompute.trigger)} · ${clockTime(r.lastRecompute.at)}</span>`:""}${serverNotice?notice(serverNotice):""}${complaints}</header>`;
   // Startup is deliberately one row. Preflight/image detail is still in the
   // event record, but the ledger appears only once the first pool observation
   // exists and there is scheduler state worth rendering.
@@ -73,12 +83,12 @@ function render(state, serverNotice=null) {
   const waiting=`<section><h2>Waiting</h2>${state.waiting.length?state.waiting.map(v=>`<div class="waitrow"><span class="id">#${v.issue}</span><span class="ellip">${esc(v.title)}</span><span class="why clamp ${v.parked?"bad":""}" title="${esc(v.why)}">${esc(v.why)}</span></div>`).join(""):`<div class="empty">Nothing waiting.</div>`}</section>`;
   const landRequests=state.landing||[];
   const landing=`<section><h2>Landing · ${landRequests.length} requested</h2>${landRequests.length?landRequests.map(q=>{const word=q.status==="landing"?q.step:q.status, detail=q.status==="landing"?[q.reason,`requested ${since(q.requestedAt,state.now)} ago`].filter(Boolean).join(" · "):q.reason, tone=q.status==="landing"?"":"dim", members=q.members.map(n=>`#${n}`).join(" ");return `<div class="waitrow"><span class="id">PR #${q.pullRequest}</span><span class="ellip" title="${esc(q.title)}">${esc(q.title)}${members?` <span class="mono">${esc(members)}</span>`:""}</span><span class="why clamp" title="${esc(detail)}"><b class="${tone}"${q.status==="landing"?` style="color:var(--run)"`:""}>${esc(word)} ${since(q.statusSince,state.now)}</b>${detail?` · ${esc(detail)}`:""}</span></div>`}).join(""):`<div class="empty">No land requests.</div>`}</section>`;
-  const finishedRows=[...state.finished.map(f=>({at:f.at,html:`<div><span class="id">#${f.issue}</span><span class="ellip" title="${esc(f.title)}">${esc(f.title)}</span><span class="o clamp ${outcomeClass(f.outcome)}"${f.reason?` title="${esc(f.reason)}"`:""}>${esc(f.outcome)}${f.outcome==="DONE"&&f.landed?` → ${esc(f.landed)}`:""}${f.reason?` · ${esc(firstLine(f.reason))}`:""}</span><span class="r">${f.attempts} att · ${f.rounds} rev · ${dur(f.ms)} · ${shortDate(f.at)}</span></div>`})),...(state.landedChunks||[]).map(c=>({at:c.at,html:`<div><span class="id">PR #${c.pullRequest}</span><span class="ellip" title="${esc(c.title)}">${esc(c.title)}</span><span class="o good">LANDED → ${esc(c.target)} · ${c.members.map(n=>`#${n}`).join(" ")}</span><span class="r">landing ${dur(c.ms)} · ${shortDate(c.at)}</span></div>`}))].sort((a,b)=>parse(b.at)-parse(a.at));
+  const finishedRows=[...state.finished.map(f=>({at:f.at,html:`<div><span class="id">#${f.issue}</span><span class="ellip" title="${esc(f.title)}">${esc(f.title)}</span><span class="o clamp ${outcomeClass(f.outcome)}"${f.reason?` title="${esc(f.reason)}"`:""}>${esc(f.outcome)}${f.outcome==="DONE"&&f.landed?` → ${esc(f.landed)}`:""}${f.reason?` · ${esc(firstLine(f.reason))}`:""}</span><span class="r">${f.attempts} att · ${f.rounds} rev · ${dur(f.ms)} · ${datedTime(f.at)}</span></div>`})),...(state.landedChunks||[]).map(c=>({at:c.at,html:`<div><span class="id">PR #${c.pullRequest}</span><span class="ellip" title="${esc(c.title)}">${esc(c.title)}</span><span class="o good">LANDED → ${esc(c.target)} · ${c.members.map(n=>`#${n}`).join(" ")}</span><span class="r">landing ${dur(c.ms)} · ${datedTime(c.at)}</span></div>`}))].sort((a,b)=>parse(b.at)-parse(a.at));
   const finished=`<section><h2>Finished recently</h2><div class="fin">${finishedRows.map(row=>row.html).join("")}</div></section>`;
   // The page is rebuilt on every poll, so a <details> the reader opened would
   // snap shut two seconds later unless its state is carried across renders.
   const eventsOpen=document.getElementById("events")?.open?" open":"";
-  const events=`<details id="events"${eventsOpen}><summary>Events · ${state.eventCount}</summary><div class="feed">${state.events.map(e=>`<div class="${e.tone}"><span class="dim">${hhmm(e.at)}</span><span class="${e.tone?"":"dim"}">${e.issue?`#${e.issue}`:"run"}</span><span>${esc(e.text)}</span></div>`).join("")}</div></details>`;
+  const events=`<details id="events"${eventsOpen}><summary>Events · ${state.eventCount}</summary><div class="feed">${state.events.map(e=>`<div class="${e.tone}"><span class="dim">${clockTime(e.at)}</span><span class="${e.tone?"":"dim"}">${e.issue?`#${e.issue}`:"run"}</span><span>${esc(e.text)}</span></div>`).join("")}</div></details>`;
   document.getElementById("app").innerHTML=top+pool+waiting+landing+finished+events;
 }
 // A failed poll never leaves the page blank or stale without saying so: a

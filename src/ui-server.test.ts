@@ -122,8 +122,8 @@ describe("run UI server", () => {
     // span occupies useful width instead of being crushed against `now`.
     const axis = app.innerHTML.match(/<div class="axis">([\s\S]*?)<\/div>/)?.[1];
     expect(axis?.match(/<span/g)).toHaveLength(7);
-    expect(axis).toContain(">09:40</span>");
-    expect(axis).toContain(">10:30</span>");
+    expect(axis).toContain(">11:40</span>");
+    expect(axis).toContain(">12:30</span>");
     expect(app.innerHTML).toContain(
       'class="bar impl  running" style="left:79.37%;width:12.70%" title="a2"',
     );
@@ -149,6 +149,10 @@ describe("run UI server", () => {
     );
     expect(app.innerHTML).toContain("In the pool · 1/2 slots");
     expect(app.innerHTML.match(/slots/g)).toHaveLength(1);
+    expect(app.innerHTML).toContain("recompute 2 · slot freed · 11:30");
+    expect(app.innerHTML).toContain("1 att · 1 rev · 1m · 7 sep, 11:40");
+    expect(app.innerHTML).toContain("landing 1m · 7 sep, 11:45");
+    expect(app.innerHTML).toContain('<span class="dim">11:50</span>');
     expect(app.innerHTML).toContain("attempt started");
     // A feed the reader opened stays open across the next poll's re-render.
     (app as { open?: boolean }).open = true;
@@ -160,6 +164,66 @@ describe("run UI server", () => {
     expect(app.innerHTML).toContain("sandbar updated");
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(fetch).toHaveBeenNthCalledWith(1, "state.json", { cache: "no-store" });
+  });
+
+  it("renders CET and CEST instants in Brussels and rewrites ISO instants in text", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    const app = { innerHTML: "" };
+    const summer = "2026-09-29T12:05:00.123Z";
+    const winter = "2026-01-29T13:05Z";
+    const state = {
+      now: "2026-09-29T12:29:00Z",
+      run: {
+        directory: "/state/logs/run-times",
+        startedAt: "2026-09-29T11:00:00Z",
+        status: "live",
+        driver: "sandbar test",
+        slots: { used: 0, max: 2 },
+        lastRecompute: { n: 1, trigger: "launch", at: winter },
+        exit: null,
+        restart: null,
+        complaints: [{ seq: 2, severity: "warning", text: `quota resets at ${summer} <later>` }],
+      },
+      pool: [],
+      waiting: [{ issue: 2, title: "Parked", why: `trace [${winter}]`, parked: true }],
+      landing: [],
+      finished: [{ issue: 1, title: "Finished", outcome: "QUOTA",
+        reason: `available after ${summer} <unsafe>\ntrace [${winter}]`,
+        attempts: 1, rounds: 1, ms: 60_000, landed: null, at: summer }],
+      landedChunks: [{ pullRequest: 3, title: "Winter chunk", members: [2],
+        target: "main", ms: 60_000, at: winter }],
+      eventCount: 1,
+      events: [{ at: summer, issue: 1,
+        text: `trace [${winter}] then ${summer}; leave 2026-09-29 12:07:00Z <raw>`, tone: "" }],
+    };
+    runInNewContext(script!, {
+      document: { getElementById: () => app },
+      fetch: async () => ({ ok: true, status: 200, json: async () => state }),
+      setInterval: () => 1,
+      localStorage: { getItem: () => null, setItem: () => undefined },
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(app.innerHTML).toContain("recompute 1 · launch · 14:05");
+    expect(app.innerHTML).toContain("1 att · 1 rev · 1m · 29 sep, 14:05");
+    expect(app.innerHTML).toContain("landing 1m · 29 jan, 14:05");
+    expect(app.innerHTML).toContain('<span class="dim">14:05</span>');
+    expect(app.innerHTML).toContain("quota resets at 29 sep, 14:05:00 &lt;later&gt;");
+    expect(app.innerHTML).toContain(
+      'title="trace [29 jan, 14:05:00]">trace [29 jan, 14:05:00]</span>',
+    );
+    expect(app.innerHTML).toContain(
+      'title="available after 29 sep, 14:05:00 &lt;unsafe&gt;\ntrace [29 jan, 14:05:00]"',
+    );
+    expect(app.innerHTML).toContain(
+      "trace [29 jan, 14:05:00] then 29 sep, 14:05:00; leave 2026-09-29 12:07:00Z &lt;raw&gt;",
+    );
+    expect(app.innerHTML).not.toContain(summer);
+    expect(app.innerHTML).not.toContain(winter);
+    expect(app.innerHTML).not.toMatch(/Brussels|CET|CEST/);
   });
 
   it("dismisses each complaint occurrence locally across polls and reloads", async () => {
@@ -290,18 +354,18 @@ describe("run UI server", () => {
     };
     const cases = [
       { now: "2026-09-07T01:54:00Z", labels: [
-        "00:00", "00:10", "00:20", "00:30", "00:40", "00:50",
-        "01:00", "01:10", "01:20", "01:30", "01:40", "01:50",
+        "02:00", "02:10", "02:20", "02:30", "02:40", "02:50",
+        "03:00", "03:10", "03:20", "03:30", "03:40", "03:50",
       ] },
       { now: "2026-09-07T01:55:00Z", labels: [
-        "00:00", "00:30", "01:00", "01:30",
+        "02:00", "02:30", "03:00", "03:30",
       ] },
       { now: "2026-09-07T07:54:00Z", labels: [
-        "00:00", "00:30", "01:00", "01:30", "02:00", "02:30", "03:00", "03:30",
-        "04:00", "04:30", "05:00", "05:30", "06:00", "06:30", "07:00", "07:30",
+        "02:00", "02:30", "03:00", "03:30", "04:00", "04:30", "05:00", "05:30",
+        "06:00", "06:30", "07:00", "07:30", "08:00", "08:30", "09:00", "09:30",
       ] },
       { now: "2026-09-07T07:55:00Z", labels: [
-        "00:00", "02:00", "04:00", "06:00",
+        "02:00", "04:00", "06:00", "08:00",
       ] },
     ];
 
@@ -320,6 +384,34 @@ describe("run UI server", () => {
         .map((match) => match[1]);
       expect(labels, testCase.now).toEqual(testCase.labels);
     }
+  });
+
+  it("aligns two-hour timeline ticks to even Brussels hours in winter", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    const app = { innerHTML: "" };
+    const state = {
+      now: "2026-01-07T08:26:00Z",
+      run: { startedAt: "2026-01-07T00:00:00Z", status: "live", driver: "sandbar test",
+        slots: { used: 1, max: 1 }, lastRecompute: { n: 1, trigger: "startup", at: "2026-01-07T00:00:00Z" },
+        exit: null, complaints: [] },
+      pool: [{ issue: 1, title: "Pool title", phase: "implementer",
+        phaseSince: "2026-01-07T00:31:00Z", attempt: 1,
+        spans: [{ kind: "impl", from: "2026-01-07T00:31:00Z", to: null, label: "a1" }] }],
+      waiting: [], finished: [], eventCount: 0, events: [],
+    };
+    runInNewContext(script!, {
+      document: { getElementById: () => app },
+      fetch: async () => ({ ok: true, status: 200, json: async () => state }),
+      setInterval: () => 1,
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const axis = app.innerHTML.match(/<div class="axis">([\s\S]*?)<\/div>/)?.[1] ?? "";
+    const labels = [...axis.matchAll(/<span style="left:[^"]+">([^<]+)<\/span>/g)]
+      .map((match) => match[1]);
+    expect(labels).toEqual(["02:00", "04:00", "06:00", "08:00"]);
   });
 
   it("keeps the timeline finite before an admitted issue has a span", async () => {
