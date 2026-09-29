@@ -46,6 +46,7 @@ function fakeAdapter(
       },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
+        return { deletedIssueBranches: [], keptIssueBranches: [] };
       },
     },
   };

@@ -304,10 +304,13 @@ export const ORIGIN_CHUNK_BRANCH_REFGLOBS: readonly string[] =
 // from "a human deleted this parked branch". Admission's exact fetch promotes
 // the selected branch into that canonical namespace; the poll warms its objects
 // without erasing the evidence for branches origin has just lost.
+export const ORIGIN_ISSUE_BRANCH_POLL_REF_PREFIX =
+  "refs/sandbar/poll/origin/";
+
 export const ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS: readonly string[] =
   ALL_BRANCH_PREFIXES.map(
     (prefix) =>
-      `+refs/heads/${prefix}${ISSUE_BRANCH_INFIX}*:refs/sandbar/poll/origin/${prefix}${ISSUE_BRANCH_INFIX}*`,
+      `+refs/heads/${prefix}${ISSUE_BRANCH_INFIX}*:${ORIGIN_ISSUE_BRANCH_POLL_REF_PREFIX}${prefix}${ISSUE_BRANCH_INFIX}*`,
   );
 
 export const ORIGIN_ISSUE_BRANCH_POLL_REFGLOBS: readonly string[] =

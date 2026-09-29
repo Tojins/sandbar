@@ -312,6 +312,39 @@ describe("run event reducer", () => {
     ]);
   });
 
+  it("does not resurrect a landed chunk member from its retained issue ref", () => {
+    const events: RunEvent[] = [
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
+        configPath: null, workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "landed", outcome: "chunk-on-source",
+        branch: "sandbar/chunk-383-c", target: "main", pullRequest: 389,
+        title: "Chunk 383", members: [383], reason: null, durationMs: 0,
+      }),
+      at(3, "2026-09-07T09:02:00Z", {
+        kind: "recompute", n: 2, trigger: "poll", admitted: [], active: [],
+        waiting: [], landRequests: [], deferredChunks: [], candidates: [],
+        refs: [{
+          issue: 383,
+          branch: "sandbar/issue-383-parked",
+          tip: "merge-only-tip",
+        }],
+      }),
+    ];
+
+    const state = reduceRunEvents(events, {
+      now: new Date("2026-09-07T09:03:00Z"),
+      pidAlive: true,
+    });
+
+    expect(state.waiting).toEqual([]);
+    expect(state.landedChunks).toEqual([
+      expect.objectContaining({ pullRequest: 389, members: [383] }),
+    ]);
+  });
+
   it("projects explicit landing status and moves a landed request into history", () => {
     const base = [
       at(1, "2026-09-17T13:00:00Z", {

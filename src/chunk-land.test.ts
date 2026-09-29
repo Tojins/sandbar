@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   CHUNK_LANDED_PR_COMMENT,
   CHUNK_LANDED_UNNAMED_BANNER,
+  CHUNK_ISSUE_BRANCHES_KEPT_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
   CHUNK_RESIDUE_RETIRED_BANNER,
   type ChunkWrapup,
@@ -265,6 +266,7 @@ function makeWrapupAdapter(
       },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
+        return { deletedIssueBranches: [], keptIssueBranches: [] };
       },
     },
   };
@@ -478,6 +480,31 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(r.closed).toEqual([]);
     expect(r.branchDeleted).toBe(true);
     expect(r.residue).toEqual([]);
+  });
+
+  it("reports issue branches deleted or kept by the safety check", async () => {
+    const { adapter } = makeWrapupAdapter();
+    adapter.deleteChunkBranch = async () => ({
+      deletedIssueBranches: ["sandbar/issue-42-alpha"],
+      keptIssueBranches: ["sandbar/issue-43-beta"],
+    });
+    const lines: string[] = [];
+
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+      log: (line) => { lines.push(line); },
+    });
+
+    expect(r.branchDeleted).toBe(true);
+    expect(lines).toContain(
+      "chunk sandbar/chunk-42-alpha: deleted landed issue branch(es) " +
+        "sandbar/issue-42-alpha",
+    );
+    expect(lines).toContain(
+      "chunk sandbar/chunk-42-alpha: kept sandbar/issue-43-beta; it has " +
+        "non-merge commits outside origin/main",
+    );
   });
 });
 
@@ -696,6 +723,7 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
     closed: [],
     branchDeleted,
     residue,
+    keptIssueBranches: [],
   });
 
   it("splits on the branch, which is the question 'will anything retry this?'", () => {
@@ -727,6 +755,21 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
     expect(banner).toContain("sandbar/chunk-4-unnamed");
     expect(banner).toContain("sandbar/member-*");
     expect(banner).toContain("no later run will find it");
+  });
+
+  it("reports unsafe issue branches as retained work rather than residue", () => {
+    const kept = {
+      ...wrapup("sandbar/chunk-1-c", true, []),
+      keptIssueBranches: ["sandbar/issue-1-parked"],
+    };
+    const banner = CHUNK_ISSUE_BRANCHES_KEPT_BANNER({
+      chunks: [kept],
+      sourceBranch: "main",
+    });
+
+    expect(banner).toContain("sandbar/issue-1-parked");
+    expect(banner).toContain("non-merge commit outside `origin/main`");
+    expect(chunkResidue([kept]).untidy).toEqual([]);
   });
 
   it("says the reconciler FOUND such a chunk rather than landing it", () => {

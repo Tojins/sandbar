@@ -122,7 +122,10 @@
 // ---------------------------------------------------------------------------
 //
 // Close every member explicitly, drop `needs-review`, take `land` back off the
-// pull request, close it, delete the chunk branch on origin.
+// pull request, close it, then atomically delete the chunk branch, its member
+// refs, and each published issue branch that has no non-merge commit outside
+// the landed source tip. An issue branch with unlanded work is kept and named
+// in the durable log and run complaint.
 //
 // "EVERY MEMBER" MEANS EVERY MEMBER ON THE BRANCH, and that is narrower than
 // every member of the chunk. Both callers hand this wrap-up an already filtered
@@ -189,6 +192,14 @@
 // is why there is no retry loop here — the retry is the next cycle, which is a
 // better one than three `gh` attempts a second apart.
 //
+// The issue-branch half is deliberately weaker than tip ancestry. Parking can
+// merge a newer source tip into an issue branch after its work reached the
+// chunk, leaving a merge commit that the source branch does not contain. The
+// ref is safe to retire when `rev-list --no-merges` finds no commit outside the
+// landed source tip. A freshly fetched ref and `--force-with-lease` make that
+// fact apply to the exact remote value deleted; a concurrent push rejects the
+// whole atomic deletion rather than losing work.
+//
 // Forge-write failures are collected as RESIDUE rather than thrown. A failure
 // from the separate durable-log callback propagates: continuing would hide the
 // later writes from the run record. Residue is not one kind of thing, though,
@@ -203,8 +214,9 @@
 // cycle: the merge phase passes itself (`MergerAdapter` is a superset of
 // `ChunkWrapupAdapter`), and the plan-time reconciler has no merger to pass.
 // What they need done is nevertheless the same five `gh` calls and one
-// `git push --delete`, so `chunkForgeWrites` below is the one place that argv
-// is spelled — the same argument `forge-pr.ts` makes one level up (#62).
+// guarded atomic `git push --delete`, so `chunkForgeWrites` below is the one
+// place that argv is spelled — the same argument `forge-pr.ts` makes one level
+// up (#62).
 // Duplicated argv is argv that drifts, and this argv CLOSES ISSUES.
 //
 // Exactly one thing differs between the two, and it is therefore the one
@@ -227,7 +239,11 @@ import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
+  issueNumberFromBranch,
   memberBranchName,
+  ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
+  ORIGIN_ISSUE_BRANCH_POLL_REFGLOBS,
+  ORIGIN_ISSUE_BRANCH_POLL_REF_PREFIX,
   rootIssueFromChunkBranch,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
@@ -622,6 +638,11 @@ export const CHUNK_BRANCH_MISSING_PR_COMMENT = (args: {
 
 export type PullRequestCloseOutcome = "closed" | "merged";
 
+export type ChunkBranchRetirement = {
+  readonly deletedIssueBranches: readonly string[];
+  readonly keptIssueBranches: readonly string[];
+};
+
 // The tracker and forge writes the wrap-up needs. A structural subset of
 // `MergerAdapter`, so the merge phase passes itself; the reconciler builds its
 // own against the same shape.
@@ -641,7 +662,8 @@ export type ChunkWrapupAdapter = {
   deleteChunkBranch(
     chunkBranch: string,
     memberIssues: readonly number[],
-  ): Promise<void>;
+    sourceBranch: string,
+  ): Promise<ChunkBranchRetirement>;
 };
 
 /**
@@ -758,31 +780,111 @@ export function chunkForgeWrites(deps: {
       if (state === "MERGED") return "merged";
       throw refused;
     },
-    async deleteChunkBranch(chunkBranch, memberIssues) {
-      // Fully qualified, and not `--force`-anything: `git push --delete` has no
-      // force to give. It is safe on the one precondition every caller
-      // establishes first — the branch's commits are contained in
-      // `origin/<sourceBranch>`, so nothing is lost with the ref.
-      await deps.beforeOriginWrite();
+    async deleteChunkBranch(chunkBranch, memberIssues, sourceBranch) {
+      // Fully qualified, with leases rather than an unconditional force. The
+      // chunk is safe on the precondition every caller establishes first — its
+      // commits are contained in `origin/<sourceBranch>`. Issue refs receive
+      // the stricter per-ref proof and lease below.
       try {
+        // Issue branches are a different claim. A parked branch may have moved
+        // after its member landed, and its tip may be a merge commit that is
+        // absent from the landed source even though all of its real work is
+        // present there. Refresh the complete namespace, then keep exactly the
+        // refs with a non-merge commit outside the landed source tip.
+        await exec(
+          "git",
+          [
+            "fetch",
+            "origin",
+            "--prune",
+            ...ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
+            "--quiet",
+          ],
+          { cwd: deps.gitCwd },
+        );
+        const { stdout } = await exec(
+          "git",
+          [
+            "for-each-ref",
+            "--format=%(refname)%09%(objectname)",
+            ...ORIGIN_ISSUE_BRANCH_POLL_REFGLOBS,
+          ],
+          { cwd: deps.gitCwd },
+        );
+        const memberSet = new Set(memberIssues);
+        const issueRefs = stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .flatMap((line) => {
+            const [ref = "", sha = ""] = line.split("\t");
+            if (!ref.startsWith(ORIGIN_ISSUE_BRANCH_POLL_REF_PREFIX) || !sha) {
+              return [];
+            }
+            const branch = ref.slice(ORIGIN_ISSUE_BRANCH_POLL_REF_PREFIX.length);
+            const issue = issueNumberFromBranch(branch);
+            return issue !== null && memberSet.has(issue)
+              ? [{ ref, sha, branch }]
+              : [];
+          });
+        const deletedIssueRefs: typeof issueRefs = [];
+        const keptIssueBranches: string[] = [];
+        for (const issueRef of issueRefs) {
+          const { stdout: unlanded } = await exec(
+            "git",
+            [
+              "rev-list",
+              "--no-merges",
+              issueRef.ref,
+              `^refs/remotes/origin/${sourceBranch}`,
+            ],
+            { cwd: deps.gitCwd },
+          );
+          if (unlanded.trim()) keptIssueBranches.push(issueRef.branch);
+          else deletedIssueRefs.push(issueRef);
+        }
+
+        // Remove the disposable cache refs before the remote write. This makes
+        // the plan rebuilt immediately after reconciliation stop advertising a
+        // successfully retired branch. If the atomic push fails, the next
+        // reconciliation fetch restores them from origin before retrying.
+        if (deletedIssueRefs.length > 0) {
+          await Promise.all(deletedIssueRefs.map(({ ref, sha }) =>
+            exec("git", ["update-ref", "-d", ref, sha], { cwd: deps.gitCwd })
+          ));
+        }
+
+        await deps.beforeOriginWrite();
         // Delete only the strict membership set this wrap-up closed. Older
         // chunks kept for a failed close may be ancestors of this branch; their
         // member refs remain their recovery record and must survive.
         const memberRefs = memberIssues.map(
           (number) => `refs/heads/${memberBranchName(number)}`,
         );
+        const issueBranchRefs = deletedIssueRefs.map(
+          ({ branch }) => `refs/heads/${branch}`,
+        );
         await exec(
           "git",
           [
             "push",
             "--atomic",
+            ...deletedIssueRefs.map(
+              ({ branch, sha }) =>
+                `--force-with-lease=refs/heads/${branch}:${sha}`,
+            ),
             "origin",
             "--delete",
             `refs/heads/${chunkBranch}`,
             ...memberRefs,
+            ...issueBranchRefs,
           ],
           { cwd: deps.gitCwd },
         );
+        return {
+          deletedIssueBranches: deletedIssueRefs.map(({ branch }) => branch),
+          keptIssueBranches,
+        };
       } catch (err) {
         throw wrap(
           `failed to delete the landed chunk branch ${chunkBranch} on origin`,
@@ -799,9 +901,13 @@ export type ChunkWrapupResult = {
   // True iff the chunk branch was deleted on origin — which is also "this
   // chunk is fully reconciled and will not be seen again".
   readonly branchDeleted: boolean;
-  // Everything that failed, one operator-readable line each. Non-empty means
-  // the branch was KEPT and the next run reconciles the remainder.
+  // Everything that failed, one operator-readable line each. Whether a later
+  // run retries it is determined by `branchDeleted`; see `chunkResidue`.
   readonly residue: readonly string[];
+  // Published issue branches whose non-merge commits are not all on the
+  // landed source tip. They are intentionally outside the chunk retirement
+  // transaction and require a human to decide what the surviving work means.
+  readonly keptIssueBranches: readonly string[];
 };
 
 // One chunk that has been through the wrap-up, named. The result alone says
@@ -837,6 +943,7 @@ export async function wrapUpLandedChunk(
   const log = async (line: string): Promise<void> => opts.log?.(line);
   const residue: string[] = [];
   const closed: number[] = [];
+  let keptIssueBranches: readonly string[] = [];
 
   // `closeOrder`, never `members`: dependents first and the root last, and the
   // loop STOPS at the first failure rather than carrying on. That pair is what
@@ -951,11 +1058,25 @@ export async function wrapUpLandedChunk(
   let branchDeleted = false;
   if (closesComplete) {
     try {
-      await adapter.deleteChunkBranch(
+      const issueBranches = await adapter.deleteChunkBranch(
         target.branch,
         target.members.map((member) => member.number),
+        opts.sourceBranch,
       );
       branchDeleted = true;
+      keptIssueBranches = issueBranches.keptIssueBranches;
+      if (issueBranches.deletedIssueBranches.length > 0) {
+        await log(
+          `chunk ${target.branch}: deleted landed issue branch(es) ` +
+            issueBranches.deletedIssueBranches.join(", "),
+        );
+      }
+      for (const branch of issueBranches.keptIssueBranches) {
+        await log(
+          `chunk ${target.branch}: kept ${branch}; it has non-merge commits ` +
+            `outside origin/${opts.sourceBranch}`,
+        );
+      }
     } catch (err) {
       residue.push(
         `the chunk branch ${target.branch} is landed but could not be deleted on origin: ${detail(err)}`,
@@ -970,7 +1091,12 @@ export async function wrapUpLandedChunk(
     );
   }
 
-  return { closed: [...closed].sort((a, b) => a - b), branchDeleted, residue };
+  return {
+    closed: [...closed].sort((a, b) => a - b),
+    branchDeleted,
+    residue,
+    keptIssueBranches,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,6 +1156,23 @@ export function chunkResidue(
     ),
   };
 }
+
+export const CHUNK_ISSUE_BRANCHES_KEPT_BANNER = (args: {
+  readonly chunks: readonly ChunkWrapup[];
+  readonly sourceBranch: string;
+}): string => {
+  const rows = args.chunks.flatMap((chunk) =>
+    chunk.keptIssueBranches.map(
+      (branch) => `- \`${branch}\` (landed through \`${chunk.target.branch}\`)`,
+    )
+  );
+  return (
+    `Sandbar kept ${rows.length} issue branch${rows.length === 1 ? "" : "es"} ` +
+    `after chunk landing. Each has at least one non-merge commit outside ` +
+    `\`origin/${args.sourceBranch}\`, so deleting it could lose work:` +
+    `\n\n${rows.join("\n")}\n\nInspect and retire or re-queue each branch by hand.`
+  );
+};
 
 // One banner: a headline, the lines it is about, and the one sentence that
 // says whether anything will come back for them. What is worth spelling once

@@ -707,6 +707,14 @@ export function reduceRunEvents(
     }
   }
   if (lastRecompute) {
+    // A published issue ref is normally a parked-work signal. Once a
+    // structured chunk landing names that issue, the chunk row is its Finished
+    // representation instead; a retained unsafe ref is reported by the
+    // landing complaint and must not resurrect the closed issue under Waiting.
+    const landedChunkMembers = new Set([
+      ...finishedChunksFrom(events),
+      ...(options.recentLandedChunks ?? []),
+    ].flatMap((chunk) => chunk.members));
     const previousOutcomes = new Map(
       (options.recentFinished ?? []).map((item) => [item.issue, item] as const),
     );
@@ -720,7 +728,10 @@ export function reduceRunEvents(
     ]);
     const activeIssues = new Set(lastRecompute.active.map((active) => active.issue));
     for (const ref of lastRecompute.refs) {
-      if (readyIssues.has(ref.issue) || activeIssues.has(ref.issue)) continue;
+      if (
+        readyIssues.has(ref.issue) || activeIssues.has(ref.issue) ||
+        landedChunkMembers.has(ref.issue)
+      ) continue;
       const parked = parkedTerminals.get(ref.issue);
       const previous = previousOutcomes.get(ref.issue);
       waitingRows.push({

@@ -161,8 +161,13 @@ default is unlimited, so existing hosts keep their prior concurrency.
    dependents-first/root-last order at the landing boundary, #175), drops
    `needs-review`,
    takes `land` back off the PR, closes it (or accepts the MERGED mark GitHub
-  itself puts on a PR whose head the landing push made reachable) and deletes
-  the branch.
+   itself puts on a PR whose head the landing push made reachable) and deletes
+   the chunk and member refs. It also retires each published member issue
+   branch whose non-merge commits are all contained in the landed source tip;
+   an issue branch with unlanded work is kept and reported. Reconciliation
+   emits the same structured chunk-on-source landing event as the live merger,
+   so the existing Finished chunk row represents either landing path and its
+   closed members do not reappear as parked Waiting rows.
    After source-branch landings, each queued chunk refresh is one ordinary
    merger unit in the same worktree: source is merged into the fetched chunk
    tip, the version collision and resolve loop run as usual, gate-2 decides,

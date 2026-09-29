@@ -164,7 +164,7 @@ export async function findLandedChunkBranches(
 }
 
 /**
- * The open pull requests for the given branches, at most one each.
+ * The open or merged pull requests for the given branches, at most one each.
  *
  * Per branch rather than one listing of the repository: the caller's list is
  * normally empty and never long, and `--head` is a filter the forge applies
@@ -184,12 +184,12 @@ export async function fetchPullRequestsForBranches(
       "--head",
       branch,
       "--state",
-      "open",
+      "all",
       "--json",
-      "number,headRefName,title",
+      "number,headRefName,title,state",
     ]);
     if (!r.ok) continue;
-    found.push(...parsePullRequests(r.stdout));
+    found.push(...parsePullRequests(r.stdout, new Set(["OPEN", "MERGED"])));
   }
   return found;
 }
@@ -216,19 +216,22 @@ export async function fetchLandRequestPullRequests(
     "--state",
     "open",
     "--json",
-    "number,headRefName,title",
+    "number,headRefName,title,state",
     "--limit",
     "200",
   ]);
   if (!r.ok) return [];
-  return parsePullRequests(r.stdout);
+  return parsePullRequests(r.stdout, new Set(["OPEN"]));
 }
 
 // `gh pr list --json` output, defensively. A field the forge answered in a
 // shape this cannot read drops the pull request rather than the whole list: an
 // unreadable entry is one chunk not landed this cycle, and a throw here is a
 // run that will not start.
-function parsePullRequests(stdout: string): readonly PullRequestSummary[] {
+function parsePullRequests(
+  stdout: string,
+  acceptedStates: ReadonlySet<string>,
+): readonly PullRequestSummary[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout.trim() || "[]");
@@ -242,7 +245,11 @@ function parsePullRequests(stdout: string): readonly PullRequestSummary[] {
     const o = raw as Record<string, unknown>;
     const number = o["number"];
     const headRefName = o["headRefName"];
-    if (typeof number !== "number" || typeof headRefName !== "string") continue;
+    const state = o["state"];
+    if (
+      typeof number !== "number" || typeof headRefName !== "string" ||
+      typeof state !== "string" || !acceptedStates.has(state)
+    ) continue;
     out.push({
       number,
       headRefName,
