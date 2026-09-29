@@ -696,6 +696,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         containerfile: "Containerfile",
         rebuildOn: ["package-lock.json"],
       };
+      const ownScope = isolated.scope;
       await writeFile(
         join(root, "Containerfile"),
         `FROM ${BASE} AS intermediate\n` +
@@ -704,8 +705,15 @@ describe.runIf(available)("ensureImages against real podman", () => {
           `FROM ${BASE}\n` +
           "COPY --from=intermediate /payload /payload\n",
       );
-      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
-      const ownScope = isolated.scope;
+      // Gate runners share one remote Buildah cache. Give this destructive
+      // fixture process-private layer bytes so another runner's cleanup cannot
+      // remove a cache image after this build selected it but before it read
+      // the top layer ("layer not known"). The builds within this test still
+      // share their own cache, which is the lifecycle behavior under test.
+      await writeFile(
+        join(root, "package-lock.json"),
+        `${JSON.stringify({ scope: ownScope, v: 1 })}\n`,
+      );
 
       // Reconciliation must reach same-tag predecessors and tags the current
       // config stopped naming while remaining blind to another scope's live
@@ -724,7 +732,10 @@ describe.runIf(available)("ensureImages against real podman", () => {
       await buildImage({ ...image, tag: sibling }, {
         scope: isolated.otherScope, root, capture: true,
       });
-      await writeFile(join(root, "package-lock.json"), '{"v":99}\n');
+      await writeFile(
+        join(root, "package-lock.json"),
+        `${JSON.stringify({ scope: ownScope, v: 99 })}\n`,
+      );
       await ensureImages([image], root, { scope: ownScope });
       const currentId = await imageId(TAG);
       expect(currentId).not.toBe(predecessorId);
