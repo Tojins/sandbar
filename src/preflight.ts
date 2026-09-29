@@ -185,7 +185,7 @@
 // nothing. `discarded` is unaffected and stays a hard error either way: it is
 // derived from `%(upstream:track)`, a git fact no tracker outage can blur.
 // `sandbar/chunk-*` branches (#58) are listed by the same globs — one shape
-// each of `SANDBAR_BRANCH_REFGLOBS` — but take none of those four: see
+// each of `SANDBAR_BRANCH_REFGLOBS` — but take none of those five: see
 // `classifySandbarBranches`. They are still DELETED once merged, which is the
 // one thing that is true of a chunk branch whatever else its lifecycle does.
 //
@@ -206,7 +206,7 @@
 //     cache of it and is treated as one.
 //   - ORIGIN `refs/remotes/origin/sandbar/member-*` — fetched and pruned beside
 //     chunk refs; containment is the membership fact used for safe local reap.
-// The member's own issue branch is the third piece and is neither of the three
+// The member's own issue branch is the third piece and is none of the five
 // classifications either — see `classifySandbarBranches`.
 
 import { execFile, execFileSync } from "node:child_process";
