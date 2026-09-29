@@ -16,6 +16,11 @@
 // The convergence script rewrites this file on every tick (#146, #173). A
 // skipped tick keeps the last real attempt's result, and a stale timestamp
 // means the timer itself stopped.
+const brusselsTime = new Intl.DateTimeFormat("nl-BE", {
+  timeZone: "Europe/Brussels",
+  day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  hourCycle: "h23",
+});
 fetch("{{ sandbar_deploy_status_file }}", { cache: "no-store" })
   .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
   .then(status => {
@@ -23,7 +28,7 @@ fetch("{{ sandbar_deploy_status_file }}", { cache: "no-store" })
       ? "ok"
       : `${status.attempted} ${status.result}`;
     document.getElementById("deploy").textContent =
-      `box on ${status.converged} · ${attempt} · checked ${status.at}`;
+      `box on ${status.converged} · ${attempt} · checked ${brusselsTime.format(new Date(status.at))}`;
   })
   .catch(error => {
     document.getElementById("deploy").textContent =
