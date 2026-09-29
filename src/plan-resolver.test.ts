@@ -1290,6 +1290,42 @@ describe("resolvePlan git membership safety (#93)", () => {
     ]);
   });
 
+  it("holds eligible work when the current-title branch has an ambiguous twin", () => {
+    const current = "sandbar/chunk-47-current-title";
+    const result = resolvePlan(
+      [
+        issue(47, "", { title: "Current title" }),
+        issue(48, "## Blocked by\n- #47\n", { title: "Child" }),
+      ],
+      facts({
+        47: { labels: ["ready-for-agent"] },
+        48: { labels: ["ready-for-agent"] },
+      }),
+      new Set(),
+      3,
+      "review",
+      new Map([
+        [current, new Set([47])],
+        ["sandbar/chunk-47-old-title", new Set<number>()],
+      ]),
+    );
+
+    expect(result.plan).toEqual([]);
+    expect(result.waiting).toEqual([
+      {
+        issue: 47,
+        title: "Current title",
+        reason: { kind: "held" },
+      },
+      {
+        issue: 48,
+        title: "Child",
+        reason: { kind: "blocked", by: [47] },
+      },
+    ]);
+    expect(result.landedChunks).toEqual([]);
+  });
+
   it("reports the new branch name when the old root becomes a member", () => {
     const result = resolvePlan(
       [

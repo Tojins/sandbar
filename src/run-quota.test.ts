@@ -15,6 +15,8 @@ const seams = vi.hoisted(() => ({
   mergerStackStop: vi.fn(async () => undefined),
   mergerWorktreeRemove: vi.fn(async () => undefined),
   landRequestPullRequests: vi.fn(async () => [] as PullRequestSummary[]),
+  commentOnChunkPullRequest: vi.fn(async () => undefined),
+  removeChunkPullRequestLabel: vi.fn(async () => undefined),
   emit: vi.fn(),
   events: [] as Array<Record<string, unknown>>,
   wakeStatusReports: [] as Array<{
@@ -219,6 +221,13 @@ vi.mock("./chunk-reconcile.js", () => ({
   fetchLandRequestPullRequests: seams.landRequestPullRequests,
   reconcileLandedChunks: vi.fn(async () => ({ reconciled: [], failures: [] })),
 }));
+vi.mock("./chunk-land.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./chunk-land.js")>(),
+  chunkForgeWrites: vi.fn(() => ({
+    commentOnPullRequest: seams.commentOnChunkPullRequest,
+    removePullRequestLabel: seams.removeChunkPullRequestLabel,
+  })),
+}));
 vi.mock("./lanes.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./lanes.js")>(),
   postLaneOverrideNotices: vi.fn(async () => []),
@@ -346,6 +355,10 @@ describe("run quota orchestration (#109)", () => {
     seams.mergerWorktreeRemove.mockResolvedValue(undefined);
     seams.landRequestPullRequests.mockReset();
     seams.landRequestPullRequests.mockResolvedValue([]);
+    seams.commentOnChunkPullRequest.mockReset();
+    seams.commentOnChunkPullRequest.mockResolvedValue(undefined);
+    seams.removeChunkPullRequestLabel.mockReset();
+    seams.removeChunkPullRequestLabel.mockResolvedValue(undefined);
     seams.emit.mockReset();
     seams.emit.mockImplementation(async (event: Record<string, unknown>) => {
       seams.events.push(event);
@@ -2792,6 +2805,57 @@ describe("run quota orchestration (#109)", () => {
       requests: [target],
       sourceBranch: "main",
     });
+  });
+
+  it("refuses a drifted member-carrying request before the merger", async () => {
+    const branch = "sandbar/chunk-42-old-root";
+    const drift = {
+      existing: branch,
+      root: 42,
+      members: [
+        { number: 42, title: "Old root" },
+        { number: 43, title: "Child" },
+      ],
+      cause: {
+        kind: "rerooted" as const,
+        derived: "sandbar/chunk-40-new-root",
+      },
+    };
+    seams.plan.mockResolvedValue({
+      ...resolution([]),
+      chunkNameDrifts: [drift],
+    });
+    seams.landRequestPullRequests
+      .mockResolvedValueOnce([{
+        number: 305,
+        headRefName: branch,
+        title: "Old root",
+      }])
+      .mockResolvedValue([]);
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+
+    expect(seams.merger).not.toHaveBeenCalled();
+    expect(seams.commentOnChunkPullRequest).toHaveBeenCalledOnce();
+    expect(seams.commentOnChunkPullRequest).toHaveBeenCalledWith(
+      305,
+      expect.stringMatching(
+        /sandbar\/chunk-40-new-root[\s\S]*#42 — Old root[\s\S]*#43 — Child[\s\S]*Revert the `## Blocked by` edit/,
+      ),
+    );
+    expect(seams.removeChunkPullRequestLabel).toHaveBeenCalledOnce();
+    expect(seams.removeChunkPullRequestLabel).toHaveBeenCalledWith(305, "land");
+    const chunkComplaints = eventsOf("complaint").filter((event) => {
+      const message = String(event.message);
+      return message.includes(branch) || message.includes("PR #305");
+    });
+    expect(chunkComplaints).toEqual([expect.objectContaining({
+      severity: "warning",
+      message: expect.stringMatching(/PR #305[\s\S]*sandbar\/chunk-42-old-root/),
+    })]);
   });
 
   it("records request queueing and merger progress while unrelated work runs", async () => {
