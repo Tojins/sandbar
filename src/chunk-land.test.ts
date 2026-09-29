@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CHUNK_LAND_REFUSED_PR_COMMENT,
   CHUNK_LANDED_PR_COMMENT,
   CHUNK_LANDED_UNNAMED_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
@@ -18,6 +19,7 @@ import {
   type ChunkWrapupAdapter,
   LAND_LABEL,
   type PullRequestSummary,
+  refuseLandRequest,
   selectLandRequests,
   selectReconciliations,
   wrapUpLandedChunk,
@@ -79,7 +81,7 @@ describe("selectLandRequests (#64)", () => {
       ], "alpha"),
     ];
     expect(
-      selectLandRequests([pr(9, "sandbar/chunk-42-alpha")], chunks),
+      selectLandRequests([pr(9, "sandbar/chunk-42-alpha")], chunks).requests,
     ).toEqual([
       {
         root: 42,
@@ -105,7 +107,7 @@ describe("selectLandRequests (#64)", () => {
     const [target] = selectLandRequests(
       [pr(9, "sandbar/chunk-42-alpha", "Sandbar chunk #42: alpha")],
       [],
-    );
+    ).requests;
     expect(target).toEqual({
       root: 42,
       branch: "sandbar/chunk-42-alpha",
@@ -122,7 +124,7 @@ describe("selectLandRequests (#64)", () => {
       selectLandRequests(
         [pr(9, "feature/some-human-branch"), pr(10, "sandbar/issue-7-x")],
         [],
-      ),
+      ).requests,
     ).toEqual([]);
   });
 
@@ -134,11 +136,122 @@ describe("selectLandRequests (#64)", () => {
         pr(11, "sandbar/chunk-42-a"),
       ],
       [],
-    );
+    ).requests;
     expect(targets.map((t) => [t.root, t.pullRequest])).toEqual([
       [9, 30],
       [42, 11],
     ]);
+  });
+
+  it("refuses a drifted branch with its git-derived members", () => {
+    const selection = selectLandRequests(
+      [
+        pr(9, "sandbar/chunk-42-old-root"),
+        pr(10, "sandbar/chunk-50-memberless"),
+      ],
+      [],
+      [
+        {
+          existing: "sandbar/chunk-42-old-root",
+          root: 42,
+          members: [
+            { number: 42, title: "Old root" },
+            { number: 43, title: "Child" },
+          ],
+          cause: {
+            kind: "rerooted",
+            derived: "sandbar/chunk-40-new-root",
+          },
+        },
+        {
+          existing: "sandbar/chunk-50-memberless",
+          root: 50,
+          members: [],
+          cause: { kind: "orphaned" },
+        },
+      ],
+    );
+    expect(selection.requests.map((request) => request.branch)).toEqual([
+      "sandbar/chunk-50-memberless",
+    ]);
+    expect(selection.refusals).toEqual([{
+      existing: "sandbar/chunk-42-old-root",
+      root: 42,
+      members: [
+        { number: 42, title: "Old root" },
+        { number: 43, title: "Child" },
+      ],
+      cause: {
+        kind: "rerooted",
+        derived: "sandbar/chunk-40-new-root",
+      },
+      pullRequest: 9,
+    }]);
+  });
+});
+
+describe("refuseLandRequest (#176)", () => {
+  const refusal = {
+    existing: "sandbar/chunk-42-old-root",
+    root: 42,
+    members: [
+      { number: 42, title: "Old root" },
+      { number: 43, title: "Child" },
+    ],
+    cause: {
+      kind: "rerooted" as const,
+      derived: "sandbar/chunk-40-new-root",
+    },
+    pullRequest: 9,
+  };
+
+  it("comments before removing land and performs no other write", async () => {
+    const calls: string[] = [];
+    await refuseLandRequest(refusal, {
+      async commentOnPullRequest(number, body) {
+        calls.push(`comment ${number}: ${body}`);
+      },
+      async removePullRequestLabel(number, label) {
+        calls.push(`remove ${number}: ${label}`);
+      },
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toContain("comment 9:");
+    expect(calls[0]).toContain("sandbar/chunk-40-new-root");
+    expect(calls[0]).toContain("#42 — Old root");
+    expect(calls[0]).toContain("#43 — Child");
+    expect(calls[0]).toContain("Revert the `## Blocked by` edit");
+    expect(calls[0]).toContain("merge/fold the branch by hand");
+    expect(calls[1]).toBe(`remove 9: ${LAND_LABEL}`);
+  });
+
+  it("names an orphaned root and an empty member-ref set", () => {
+    expect(CHUNK_LAND_REFUSED_PR_COMMENT({
+      ...refusal,
+      members: [],
+      cause: { kind: "orphaned" },
+    })).toContain("no longer belongs to any derivable chunk");
+    expect(CHUNK_LAND_REFUSED_PR_COMMENT({
+      ...refusal,
+      members: [],
+      cause: { kind: "orphaned" },
+    })).toContain("- none found");
+  });
+
+  it("names every competing branch and the surplus-branch repair", () => {
+    const comment = CHUNK_LAND_REFUSED_PR_COMMENT({
+      ...refusal,
+      cause: {
+        kind: "ambiguous",
+        competing: [
+          "sandbar/chunk-42-first",
+          "sandbar/chunk-42-second",
+        ],
+      },
+    });
+    expect(comment).toContain("sandbar/chunk-42-first");
+    expect(comment).toContain("sandbar/chunk-42-second");
+    expect(comment).toContain("Delete the surplus chunk branch");
   });
 });
 
@@ -146,7 +259,7 @@ describe("chunkLandDeferral (#168)", () => {
   const target = selectLandRequests(
     [pr(9, "sandbar/chunk-42-alpha")],
     [chunk(42, "sandbar/chunk-42-alpha", [[42, "alpha"]])],
-  )[0]!;
+  ).requests[0]!;
 
   it("defers only work that targets this chunk", () => {
     expect(chunkLandDeferral(target, [

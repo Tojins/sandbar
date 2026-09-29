@@ -25,8 +25,9 @@
 // All ranking logic lives in pure functions (parseBlockedBy, resolvePlan) so it
 // can be table-driven tested. The I/O wrappers (fetchCandidates,
 // fetchIssueStates, resolveReadyLabelPolicy) are thin adapters over `gh`. The
-// branch name a plan carries is built by `naming.ts`, which owns both of
-// sandbar's branch shapes (#58) —
+// branch name a plan carries is built by `chunks.ts` from the root number and
+// origin's branch inventory. One branch for that root keeps its durable name
+// across title edits; with none, `naming.ts` derives the initial name (#58) —
 // the planner used to spell `sandbar/issue-<n>-<slug>` inline, which made the
 // one thing preflight's globs key on a string in two modules.
 //
@@ -97,7 +98,7 @@
 // chunk target so its new work cannot escape onto the source branch.
 // That de-queue reading is deliberately broader than blocker satisfaction:
 // title drift or re-rooting must not make durable work eligible to implement
-// again, while only membership on the exact derived branch can prove a
+// again, while only membership on the exact selected branch can prove a
 // blocker's commits are under a dependent or may be reviewed and closed with
 // that branch. This is the fail-safe asymmetry #94 depends on.
 //
@@ -179,9 +180,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
+  type ChunkBranchDrift,
   type ChunkIssue,
   type ChunkRefresh,
   type ChunkTarget,
+  chunkBranchesByRoot,
   type LandedChunk,
   deriveChunks,
   landedChunksOf,
@@ -333,15 +336,13 @@ export type PlanResolution = {
   // branches and nothing else — and which ones a reconciled chunk owes a
   // close to.
   readonly landedChunks: readonly LandedChunk[];
-  // Fetched chunks that no current derivation produces. The broad union
+  // Fetched chunks that no current derivation produces, plus every competing
+  // branch when origin carries more than one for a root. The broad union
   // de-queues their members while exact-branch safety refuses to work or land
-  // them, so this is the plan-time repair signal. `derived` names the current
-  // chunk containing the old root (including after re-rooting), or is null when
-  // that root is absent from the graph and no replacement name can be derived.
-  readonly chunkNameDrifts: readonly {
-    readonly existing: string;
-    readonly derived: string | null;
-  }[];
+  // them, so this is the plan-time repair signal. Its discriminated cause
+  // names the current chunk after re-rooting, absence from the graph, or all
+  // competing origin branches for an ambiguous root.
+  readonly chunkNameDrifts: readonly ChunkBranchDrift[];
   // Existing chunk branches that must merge the source branch before the
   // listed chained dependents can be seeded safely (#174). One request per
   // branch, with every dependent that would otherwise be planned this cycle.
@@ -413,15 +414,26 @@ export function resolvePlan(
     title: c.title,
     blockedBy: blockedBy.get(c.number) ?? [],
   }));
-  const { chunks, chunkOf } = deriveChunks(chunkIssues, lanes);
+  const originChunkBranches = [...chunkMembers.keys()].sort();
+  const { chunks, chunkOf } = deriveChunks(
+    chunkIssues,
+    lanes,
+    originChunkBranches,
+  );
   const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
+  const originBranchesByRoot = chunkBranchesByRoot(originChunkBranches);
+  const ambiguousChunkRoots = new Set(
+    [...originBranchesByRoot]
+      .filter(([, branches]) => branches.length > 1)
+      .map(([root]) => root),
+  );
 
   // There are deliberately TWO git readings (#93). De-queueing is the
   // conservative one: once any origin chunk branch names an issue, published
   // work must never be implemented again merely because a title edit or graph
   // change made today's derivation name a different branch. Every placement
   // and safety decision stays strict: a blocker is satisfied, a PR names a
-  // member, and a landing closes it only when the EXACT derived branch names
+  // member, and a landing closes it only when the EXACT selected branch names
   // it. Membership never consults labels, and git has no listing lag.
   const publishedChunkMembers = new Set(
     [...chunkMembers.values()].flatMap((members) => [...members]),
@@ -429,6 +441,7 @@ export function resolvePlan(
   const isOnDerivedChunk = (n: number): boolean => {
     const root = chunkOf.get(n);
     if (root === undefined) return false;
+    if (ambiguousChunkRoots.has(root)) return false;
     const branch = chunkByRoot.get(root)?.branch;
     return branch !== undefined && (chunkMembers.get(branch)?.has(n) ?? false);
   };
@@ -451,6 +464,7 @@ export function resolvePlan(
   const chunkTargetOf = (n: number): ChunkTarget | null => {
     const root = chunkOf.get(n);
     if (root === undefined) return null;
+    if (ambiguousChunkRoots.has(root)) return null;
     const chunk = chunkByRoot.get(root);
     if (!chunk) return null;
     const landed = chunk.members
@@ -647,7 +661,7 @@ export function resolvePlan(
     candidates: resolutionCandidates,
     waiting,
     overrides: laneOverrides(lanes),
-    // Strict to the derived branch: unlike de-queueing, neither review nor
+    // Strict to the selected branch: unlike de-queueing, neither review nor
     // closure may claim work that is durable somewhere else.
     landedChunks: landedChunksOf(
       chunks,
@@ -655,15 +669,38 @@ export function resolvePlan(
       new Set(candidates.map((c) => c.number).filter(isOnDerivedChunk)),
       trackerReadyNumbers,
     ),
-    chunkNameDrifts: [...chunkMembers.keys()].flatMap((existing) => {
+    chunkNameDrifts: originChunkBranches.flatMap((existing): readonly ChunkBranchDrift[] => {
       const root = rootIssueFromChunkBranch(existing);
       if (root === null) return [];
+      const members = [...(chunkMembers.get(existing) ?? [])]
+        .sort((a, b) => a - b)
+        .map((number) => ({ number, title: titleOf.get(number) ?? "" }));
+      const competing = originBranchesByRoot.get(root) ?? [];
+      if (competing.length > 1) {
+        return [{
+          existing,
+          root,
+          members,
+          cause: { kind: "ambiguous", competing },
+        }];
+      }
       const currentRoot = chunkOf.get(root);
-      const derived = currentRoot === undefined
-        ? null
-        : (chunkByRoot.get(currentRoot)?.branch ?? null);
-      return derived !== existing
-        ? [{ existing, derived }]
+      if (currentRoot === undefined) {
+        return [{
+          existing,
+          root,
+          members,
+          cause: { kind: "orphaned" },
+        }];
+      }
+      const derived = chunkByRoot.get(currentRoot)?.branch;
+      return derived !== undefined && derived !== existing
+        ? [{
+            existing,
+            root,
+            members,
+            cause: { kind: "rerooted", derived },
+          }]
         : [];
     }),
     chunkRefreshes: [...refreshes.values()],

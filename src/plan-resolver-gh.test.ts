@@ -368,7 +368,7 @@ describe("buildPlan loads git-derived members into the candidate graph (#93, #94
     const [landing] = selectLandRequests(
       [{ number: 7, headRefName: "sandbar/chunk-60-root", title: "Root" }],
       result.landedChunks,
-    );
+    ).requests;
     expect(landing?.rework).toEqual([{ number: 60, title: "Root" }]);
   });
 });

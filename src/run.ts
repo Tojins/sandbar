@@ -268,7 +268,10 @@ import {
   type ChunkLandTarget,
   type ChunkLandDeferral,
   chunkLandDeferral,
+  chunkForgeWrites,
   chunkResidue,
+  describeChunkBranchDrift,
+  refuseLandRequest,
   selectLandRequests,
 } from "./chunk-land.js";
 import {
@@ -1352,6 +1355,12 @@ export async function run(
     sourceBranch: config.sourceBranch,
     beforeOriginWrite: renewOriginLease,
   });
+  const chunkRequestWrites = chunkForgeWrites({
+    repo,
+    gitCwd: layout.repoDir,
+    errPrefix: "chunk land request",
+    beforeOriginWrite: renewOriginLease,
+  });
 
   // One admission queue for every gate pod in this run (#142), independent of
   // issue execution slots and shared with the serialized landing path below.
@@ -2130,10 +2139,21 @@ export async function run(
       // chunk it just finished off is not also merged again by the merge phase
       // (its branch is gone by then, which the merger would park on, but
       // asking in this order means it never gets there).
-      const selectedLandRequests = selectLandRequests(
+      const landRequestSelection = selectLandRequests(
         await fetchLandRequestPullRequests(repo, LAND_LABEL),
         resolution.landedChunks,
+        resolution.chunkNameDrifts,
       );
+      for (const refusal of landRequestSelection.refusals) {
+        await runRecord.emit({
+          kind: "complaint",
+          severity: "warning",
+          message: `Refused land request on PR #${refusal.pullRequest} for ` +
+            `${refusal.existing}: ${describeChunkBranchDrift(refusal)}.`,
+        });
+        await refuseLandRequest(refusal, chunkRequestWrites);
+      }
+      const selectedLandRequests = landRequestSelection.requests;
       const ongoingForChunkLanding = pool.ongoingIssues().map((issue) => ({
         number: Number(issue.id),
         title: issue.title,
@@ -2145,8 +2165,9 @@ export async function run(
           return deferral === null ? [] : [[request.branch, deferral] as const];
         }),
       );
-      const landRequests: ReturnType<typeof selectLandRequests> =
-        selectedLandRequests.filter((request) => !landDeferrals.has(request.branch));
+      const landRequests = selectedLandRequests.filter(
+        (request) => !landDeferrals.has(request.branch),
+      );
       if (landRequests.length > 0) {
         const named = landRequests
           .map((r) => `${r.branch} (PR #${r.pullRequest})`)
@@ -2172,13 +2193,18 @@ export async function run(
       const planDiagnosticsChanged = lastPlanDiagnostics !== null &&
         planDiagnostics !== lastPlanDiagnostics;
       lastPlanDiagnostics = planDiagnostics;
-      const chunkDriftLines = resolution.chunkNameDrifts.map((drift) => {
-        const derived = drift.derived ?? "no chunk branch can be derived";
-        return (
-          `Origin chunk branch ${drift.existing} no longer matches the name ` +
-          `derived for its root: ${derived}`
+      const refusedBranches = new Set(
+        landRequestSelection.refusals.map((refusal) => refusal.existing),
+      );
+      // A refused request already emitted the issue's required complaint,
+      // naming both its PR and branch. Keep the general drift diagnostic for
+      // unlabelled branches without duplicating that complaint.
+      const chunkDriftLines = resolution.chunkNameDrifts
+        .filter((drift) => !refusedBranches.has(drift.existing))
+        .map((drift) =>
+          `Origin chunk branch ${drift.existing} is drifted: ` +
+          describeChunkBranchDrift(drift)
         );
-      });
 
       const providerClosed = providerExitPending !== null || agentProviders.some(
         (provider) => providerState.get(provider) !== undefined,
@@ -2210,6 +2236,7 @@ export async function run(
         sourceChangedOnPoll || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
+        landRequestSelection.refusals.length > 0 ||
         chunkRefreshes.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
       const pollIsReportable = pollDidWork || resolution.waiting.some(

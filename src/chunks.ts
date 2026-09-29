@@ -55,7 +55,7 @@
 // attempts to replace `ready-for-agent` with `needs-review` for humans.
 //
 // The swap is not authoritative. Containment by any fetched chunk branch is
-// the fail-safe de-queue fact; membership on the exact derived branch is the
+// the fail-safe de-queue fact; membership on the exact selected branch is the
 // stricter blocker-satisfaction fact. Membership is never read from a label.
 // The planner reads those members from git and fetches their issues back into
 // the candidate graph so the chunk cannot re-root around whatever remains queued.
@@ -139,7 +139,7 @@
 // every self-referencing issue an in-degree Kahn's could never retire.
 
 import type { Lane } from "./lanes.js";
-import { chunkBranchName } from "./naming.js";
+import { chunkBranchName, rootIssueFromChunkBranch } from "./naming.js";
 
 // The display label a review-gated issue carries once its work is on its chunk
 // branch: OPEN and still to be reviewed. Sandbar writes and later removes it,
@@ -166,6 +166,24 @@ export const LAND_LABEL = "land";
 export type ChunkMember = {
   readonly number: number;
   readonly title: string;
+};
+
+// An origin branch that cannot safely stand for today's derived chunk. Kept
+// as a domain fact rather than landing prose: the planner discovers it from
+// the graph and origin inventory, while the landing selector decides whether
+// a labelled pull request must be refused (#176).
+export type ChunkBranchDrift = {
+  readonly existing: string;
+  readonly root: number;
+  // What this exact branch carries according to its member refs, ascending.
+  readonly members: readonly ChunkMember[];
+  readonly cause:
+    | { readonly kind: "rerooted"; readonly derived: string }
+    | { readonly kind: "orphaned" }
+    | {
+        readonly kind: "ambiguous";
+        readonly competing: readonly string[];
+      };
 };
 
 // Where a review-gated issue lands. Carried on a planned issue so the merge
@@ -224,8 +242,10 @@ export type Chunk = {
   readonly root: number;
   // Every issue that lands on this chunk's branch, ascending, root included.
   readonly members: readonly number[];
-  // `sandbar/chunk-<root>-<slug>`. Derived, not created — no branch of this
-  // name exists yet.
+  // `sandbar/chunk-<root>-<slug>`. One origin branch for `root` keeps its
+  // existing name across title edits; otherwise the name is derived from the
+  // current title. This function remains pure because origin's branch names
+  // are an explicit input.
   readonly branch: string;
 };
 
@@ -237,10 +257,10 @@ export type Chunk = {
 export type LandedChunk = {
   readonly root: number;
   readonly branch: string;
-  // The ROOT issue's title — the same string `chunkBranchName` slugged. Names
-  // the chunk in the merge commit a landing writes and in the prose it posts
-  // (#64), and it comes from the root whether or not the root is among
-  // `members`, because the branch is named after it either way.
+  // The ROOT issue's current title. Names the chunk in the merge commit a
+  // landing writes and in the prose it posts (#64), whether or not the root is
+  // among `members`. Its slug may differ from an existing branch after a title
+  // edit; the root number, not this display string, is the durable identity.
   readonly title: string;
   // Every LANDED member, ascending: the issues whose commits are on the branch.
   //
@@ -263,9 +283,9 @@ export type LandedChunk = {
   // only the derivation can compute. It is here for one reason, and the reason
   // is what happens when a close FAILS. The wrap-up stops there and keeps the
   // branch so the next cycle's reconciler retries it, and that retry finds the
-  // chunk again only if the chunk still derives to the same BRANCH NAME — that
-  // is, only if its root is still open, since a closed root leaves the graph
-  // and re-roots the chunk under a survivor and a different name.
+  // chunk again only if it still has the same root identity — that is, only if
+  // its root is still open, since a closed root leaves the graph and re-roots
+  // the chunk under a survivor.
   //
   // Closing in this order and stopping at the first failure is what makes that
   // true, and nothing weaker does. The members left open are then every
@@ -327,12 +347,27 @@ export type ChunkDerivation = {
 
 const ascending = (a: number, b: number): number => a - b;
 
+export function chunkBranchesByRoot(
+  branches: readonly string[],
+): ReadonlyMap<number, readonly string[]> {
+  const byRoot = new Map<number, string[]>();
+  for (const branch of branches) {
+    const root = rootIssueFromChunkBranch(branch);
+    if (root === null) continue;
+    const existing = byRoot.get(root);
+    if (existing) existing.push(branch);
+    else byRoot.set(root, [branch]);
+  }
+  return byRoot;
+}
+
 // `lanes` is typed to the one field it reads rather than to `LaneDecision`, so
 // the table tests can state a lane instead of building a decision around it.
 // A `computeLanes` result is assignable as-is.
 export function deriveChunks(
   issues: readonly ChunkIssue[],
   lanes: ReadonlyMap<number, { readonly lane: Lane }>,
+  originChunkBranches: readonly string[] = [],
 ): ChunkDerivation {
   const gated = new Map<number, ChunkIssue>();
   for (const issue of issues) {
@@ -409,6 +444,7 @@ export function deriveChunks(
 
   const chunks: Chunk[] = [];
   const chunkOf = new Map<number, number>();
+  const originBranchesByRoot = chunkBranchesByRoot(originChunkBranches);
   for (const rawMembers of componentMembers.values()) {
     const members = [...rawMembers].sort(ascending);
     const inChunk = new Set(members);
@@ -423,7 +459,15 @@ export function deriveChunks(
     // `Map.get` are typed `T | undefined`.
     const root = parentless[0] ?? members[0] ?? 0;
     const title = gated.get(root)?.title ?? "";
-    chunks.push({ root, members, branch: chunkBranchName(root, title) });
+    const originBranches = originBranchesByRoot.get(root) ?? [];
+    // The issue number is the durable identity. A title edit changes only the
+    // human-readable slug, so one existing origin branch for this root wins
+    // over today's spelling. More than one is deliberately not selected: the
+    // planner reports every competing branch as drifted and holds new work.
+    const branch = originBranches.length === 1
+      ? originBranches[0]!
+      : chunkBranchName(root, title);
+    chunks.push({ root, members, branch });
     for (const member of members) chunkOf.set(member, root);
   }
   chunks.sort((a, b) => a.root - b.root);
