@@ -128,7 +128,7 @@
 // so `gateStack.containers[].mounts[]` is the whole class of consumer-supplied
 // host paths and this check is complete at that scope.
 //
-// Leftover `sandbar/issue-*` branches are classified four ways (#13):
+// Leftover `sandbar/issue-*` branches are classified five ways (#13, #179):
 //   - resumable — the branch maps to a still-open `ready-for-agent` issue whose
 //                 latest label actor passes #136's queue policy, i.e.
 //                 stranded work from an interrupted run (killed after the issue
@@ -154,9 +154,14 @@
 // at every plan for the label re-applied mid-run, which no preflight sees.
 //   - discarded — the branch's upstream is `[gone]` (PR merged+deleted upstream
 //                 while local is behind). Local commits would be orphaned.
-//   - unmerged  — everything else: the issue reads CLOSED, or the branch
-//                 carries no issue number at all. Nothing will ever re-queue
-//                 it, so it stays a hard error.
+//   - closed    — the tracker confirmed the issue CLOSED. Preflight first
+//                 applies #112's origin-owns rule. If that does not abandon
+//                 the cache copy, the branch is reaped when every non-merge
+//                 commit is on origin/<sourceBranch>. Anything left is kept
+//                 with a complaint, never a startup refusal (#179).
+//   - unmerged  — an unparseable issue branch, or a branch whose issue state
+//                 could not be established. The latter retains the existing
+//                 tracker-outage refusal; neither case is safe to call closed.
 // The open/closed fact and the latest queue-label actor come from
 // `fetchIssueStates`, the same strongly consistent GraphQL batch the planner
 // uses for its CLOSED and admission guards (#16, #136).
@@ -232,7 +237,9 @@ import {
 } from "./naming.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import {
+  deleteCachedIssueBranch,
   describeIssueBranchOriginSync,
+  hasNonMergeCommitOutside,
   issueBranchDeletedOnOriginMessage,
   issueBranchDivergedMessage,
   syncIssueBranchWithOrigin,
@@ -375,12 +382,15 @@ export type RepoState = {
   readonly sourceBranch: string;
   readonly hasOriginBranch: boolean;
   readonly unmergedIssueBranches: readonly string[];
-  // Whether the tracker actually answered the two issue lookups the four-way
-  // split is built from. False turns the `unmerged` list from "these issues are
-  // closed" into "these could not be classified" — same refusal, different
-  // message, and no `git branch -D` advice about branches nothing has judged.
+  // Whether the tracker actually answered the two issue lookups the five-way
+  // split is built from. False keeps otherwise-closed-looking branches in
+  // `unmerged` as "could not be classified" — the existing refusal, with no
+  // `git branch -D` advice about branches nothing has judged.
   readonly issueStatesKnown: boolean;
   readonly discardedIssueBranches: readonly string[];
+  // Tracker-confirmed CLOSED branches. They are reconciled and reported by
+  // runPreflight before invariant evaluation; they never refuse startup.
+  readonly closedIssueBranches: readonly string[];
   // Stranded branches that map to a still-open `ready-for-agent` issue — not a
   // failure (resumed, not refused). Carried on the state purely so runPreflight
   // can announce them; checkInvariants emits no Invariant for them.
@@ -740,12 +750,14 @@ export async function gatherState(
   const openLookup = hasGh && ghAuthOk
     ? await fetchOpenIssueNumbers(cfg.repo, undecided)
     : { ok: false } as const;
-  const { unmerged, discarded, resumable, parked } = classifySandbarBranches({
+  const issueStatesKnown = readyLookup.ok && openLookup.ok;
+  const { unmerged, discarded, resumable, parked, closed } = classifySandbarBranches({
     branches,
     upstreamTracks,
     openReadyIssues,
     chunkMemberIssues,
     openIssues: lookedUp(openLookup),
+    issueStatesKnown,
   });
 
   return {
@@ -762,8 +774,9 @@ export async function gatherState(
     unmergedIssueBranches: unmerged,
     // Both halves, because either one failing empties a set the classification
     // reads and sends its branches to `unmerged` (see the header).
-    issueStatesKnown: readyLookup.ok && openLookup.ok,
+    issueStatesKnown,
     discardedIssueBranches: discarded,
+    closedIssueBranches: closed,
     resumableIssueBranches: resumable,
     parkedIssueBranches: parked,
     configuredRepo: cfg.repo,
@@ -898,10 +911,9 @@ async function fetchOpenIssueNumbers(
 // and the difference from its two neighbours is what it reads rather than a
 // change of mind: origin's chunk and member refs in the CACHE, which preflight
 // has just fetched, so a failure here is git's and not a tracker outage. It
-// does not blind the four-way split either — a leftover member branch whose
-// issue is open classifies as `parked` off the lookups above, and one whose
-// issue is closed is still the hard `unmerged` error it was before chunks
-// existed. Only the safe local reap is skipped.
+// does not blind the five-way split either — a leftover member branch is
+// excluded before tracker state matters because its published membership ref
+// is the stronger lifecycle fact. Only the safe local reap is skipped.
 async function fetchChunkMemberIssueNumbers(
   repoDir: string,
 ): Promise<ReadonlySet<number>> {
@@ -1019,7 +1031,7 @@ async function branchUpstreamTracks(
   return out;
 }
 
-// Pure: every git and tracker fact is handed in, so the four-way split is
+// Pure: every git and tracker fact is handed in, so the five-way split is
 // table-tested directly rather than through a fixture repo and a live `gh`.
 export type BranchClassificationInputs = {
   readonly branches: readonly string[];
@@ -1030,6 +1042,7 @@ export type BranchClassificationInputs = {
   // Issues the tracker confirmed OPEN. Need only cover the numbers the two
   // sets above do not already decide; a number absent here reads as closed.
   readonly openIssues: ReadonlySet<number>;
+  readonly issueStatesKnown: boolean;
 };
 
 export type BranchClassification = {
@@ -1037,6 +1050,7 @@ export type BranchClassification = {
   readonly discarded: readonly string[];
   readonly resumable: readonly string[];
   readonly parked: readonly string[];
+  readonly closed: readonly string[];
 };
 
 export function classifySandbarBranches(
@@ -1052,8 +1066,9 @@ export function classifySandbarBranches(
   const discarded: string[] = [];
   const resumable: string[] = [];
   const parked: string[] = [];
+  const closed: string[] = [];
   for (const branch of branches) {
-    // A CHUNK branch (#58) is none of the three. It is unmerged for as long as
+    // A CHUNK branch (#58) is none of the five. It is unmerged for as long as
     // the human reviewing it takes, which is the entire point of the review
     // lane — classifying it `unmerged` would turn every open review into a
     // hard refusal to start, i.e. the loop stopping precisely because it is
@@ -1079,7 +1094,7 @@ export function classifySandbarBranches(
     }
     const issueNum = issueNumberFromBranch(branch);
     // The issue branch of a LANDED chunk member (#60), and it is none of the
-    // three either. A contained member ref says the chunk branch carries these
+    // five either. A contained member ref says the chunk branch carries these
     // commits, so this branch is a duplicate of published
     // work: calling it `unmerged` would refuse the run over a branch that has
     // nothing left to lose, and it is the opposite of `resumable` — the planner
@@ -1104,9 +1119,10 @@ export function classifySandbarBranches(
       parked.push(branch);
       continue;
     }
-    unmerged.push(branch);
+    if (issueNum !== null && inputs.issueStatesKnown) closed.push(branch);
+    else unmerged.push(branch);
   }
-  return { unmerged, discarded, resumable, parked };
+  return { unmerged, discarded, resumable, parked, closed };
 }
 
 // The destructive step, and the reason every other call site in this module
@@ -1301,6 +1317,83 @@ export async function syncKeptIssueBranches(
   return { lines, refusals, abandoned };
 }
 
+export type ClosedIssueBranchReconciliation = {
+  readonly lines: readonly string[];
+  readonly reaped: readonly string[];
+  readonly complaints: readonly {
+    readonly issue: number;
+    readonly branch: string;
+    readonly message: string;
+  }[];
+};
+
+// CLOSED branches cannot be resumed, so origin sync outcomes are evidence and
+// cleanup inputs rather than refusals. The containment fallback is deliberately
+// local: it remains available when origin cannot be asked or never carried the
+// branch, and shares its exact git predicate with chunk wrap-up.
+export async function reconcileClosedIssueBranches(
+  repoDir: string,
+  sourceBranch: string,
+  branches: readonly string[],
+): Promise<ClosedIssueBranchReconciliation> {
+  const lines: string[] = [];
+  const reaped: string[] = [];
+  const complaints: Array<{
+    issue: number;
+    branch: string;
+    message: string;
+  }> = [];
+  const sourceRef = `refs/remotes/origin/${sourceBranch}`;
+  for (const branch of branches) {
+    const issue = issueNumberFromBranch(branch);
+    if (issue === null) {
+      throw new Error(`closed issue branch has no issue number: ${branch}`);
+    }
+    const sync = await syncIssueBranchWithOrigin(repoDir, branch);
+    const line = describeIssueBranchOriginSync(branch, sync);
+    if (line !== null) lines.push(line);
+    if (sync.kind === "abandoned") {
+      reaped.push(branch);
+      continue;
+    }
+    if (!await hasNonMergeCommitOutside(
+      repoDir,
+      `refs/heads/${branch}`,
+      sourceRef,
+    )) {
+      const deletion = await deleteCachedIssueBranch(repoDir, branch);
+      if (deletion.kind === "deleted") {
+        reaped.push(branch);
+        continue;
+      }
+      complaints.push({
+        issue,
+        branch,
+        message: `Closed issue #${issue}'s cached branch ${branch} was kept because ` +
+          `it is checked out in ${deletion.worktree}. Remove that stale worktree, ` +
+          `then restart sandbar; the branch has no non-merge commits outside ${sourceRef}.`,
+      });
+      continue;
+    }
+    const reason = sync.kind === "origin-unreadable"
+      ? `origin could not be asked for its copy (${sync.detail.split("\n")[0] ?? sync.detail})`
+      : sync.kind === "origin-deleted" && sync.worktree !== null
+        ? `origin deleted its copy while the branch remains checked out in ${sync.worktree}`
+        : sync.kind === "local-ahead" || sync.kind === "diverged" ||
+            sync.kind === "origin-deleted"
+          ? "the local tip differs from origin's last-seen tip"
+          : `it has non-merge commits that are not on ${sourceRef}`;
+    complaints.push({
+      issue,
+      branch,
+      message: `Closed issue #${issue}'s cached branch ${branch} was kept because ${reason}. ` +
+        `Preflight will not delete it or refuse the run; inspect the branch and ` +
+        `either recover its work or delete it from the cache.`,
+    });
+  }
+  return { lines, reaped, complaints };
+}
+
 export type OriginRefresh = {
   readonly sourceChanged: boolean;
   readonly failures: readonly string[];
@@ -1418,7 +1511,7 @@ export async function runPreflightAfterReachability(
   // here rather than lingering as a cached yes.
   // One query, two readers (#60): the delete pass uses it to decide which
   // leftover branches are duplicates of published work, and `gatherState` uses
-  // it to decide which are none of its three classifications. Asking twice
+  // it to decide which are none of its five classifications. Asking twice
   // would also let the two disagree if a label moved in between.
   const chunkMemberIssues = await fetchChunkMemberIssueNumbers(
     cfg.layout.repoDir,
@@ -1453,6 +1546,33 @@ export async function runPreflightAfterReachability(
     readyLabelPolicy,
     chunkMemberIssues,
   );
+  const closed = await reconcileClosedIssueBranches(
+    cfg.layout.repoDir,
+    cfg.sourceBranch,
+    state.closedIssueBranches,
+  );
+  for (const line of closed.lines) {
+    await cfg.onEvent({ kind: "preflight", action: "synced", detail: line });
+  }
+  if (closed.reaped.length > 0) {
+    await cfg.onEvent({
+      kind: "preflight",
+      action: "cleaned",
+      detail: `Cleaned up closed issue branches: ${closed.reaped.join(", ")}`,
+    });
+  }
+  for (const complaint of closed.complaints) {
+    await cfg.onEvent({
+      kind: "complaint",
+      severity: "warning",
+      message: complaint.message,
+      subject: {
+        kind: "closed-issue-branch",
+        issue: complaint.issue,
+        branch: complaint.branch,
+      },
+    });
+  }
   // The branches this run keeps are brought level with origin's copy first
   // (#112), so the two announcements below describe the tips the run will
   // actually resume from, and a diverged one is refused alongside the

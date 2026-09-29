@@ -34,6 +34,7 @@ import {
   fetchPlanningRefs,
   gatherState,
   PreflightError,
+  reconcileClosedIssueBranches,
   runPreflight,
   syncKeptIssueBranches,
   which,
@@ -702,7 +703,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
       const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
-      expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
+      expect(state.closedIssueBranches).toEqual(["sandbar/issue-7-target"]);
     });
 
     // The other half of the same fact, through a `gh` that answers: both
@@ -727,7 +728,8 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
 
       expect(state.issueStatesKnown).toBe(true);
-      expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
+      expect(state.unmergedIssueBranches).toEqual([]);
+      expect(state.closedIssueBranches).toEqual(["sandbar/issue-7-target"]);
     });
 
     // The case neither of the two above can fail on: ONE lookup down. A working
@@ -752,6 +754,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
 
       expect(state.issueStatesKnown).toBe(false);
       expect(state.unmergedIssueBranches).toEqual(["sandbar/issue-7-target"]);
+      expect(state.closedIssueBranches).toEqual([]);
     });
 
     // A chunk branch (#58) is unmerged for exactly as long as the human
@@ -1103,5 +1106,120 @@ describe("syncKeptIssueBranches — kept branches follow origin's copy (#112)", 
     const result = await syncKeptIssueBranches(cache, ["sandbar/issue-4-level"]);
 
     expect(result).toEqual({ lines: [], refusals: [], abandoned: [] });
+  });
+
+  const mergeOnlyBranch = async (branch: string): Promise<string> => {
+    await git(work, "checkout", "-q", "main");
+    await git(work, "commit", "-q", "--allow-empty", "-m", "main parent one");
+    await git(work, "commit", "-q", "--allow-empty", "-m", "main parent two");
+    await git(work, "push", "-q", "origin", "main");
+    await git(work, "checkout", "-q", "-B", branch, "main~1");
+    await git(work, "merge", "-q", "--no-ff", "-m", "merge origin main", "main");
+    return tip(work, "HEAD");
+  };
+
+  it("abandons #383's merge-only shape when origin deleted its last-seen tip", async () => {
+    const branch = "sandbar/issue-383-merge-only";
+    const branchTip = await mergeOnlyBranch(branch);
+    await git(work, "push", "-q", "origin", branch);
+    await git(cache, "fetch", "-q", "origin");
+    await cacheBranchAt(branch, branchTip);
+    const [merge, ...parents] = (
+      await git(work, "rev-list", "--parents", "-n", "1", branchTip)
+    ).stdout.trim().split(" ");
+    expect(merge).toBe(branchTip);
+    expect(parents).toHaveLength(2);
+    for (const parent of parents) {
+      await expect(
+        git(work, "merge-base", "--is-ancestor", parent, "main"),
+      ).resolves.toBeDefined();
+    }
+    expect(await tip(cache, `refs/remotes/origin/${branch}`)).toBe(branchTip);
+    await git(work, "push", "-q", "origin", "--delete", branch);
+
+    const result = await reconcileClosedIssueBranches(cache, "main", [branch]);
+
+    expect(result.reaped).toEqual([branch]);
+    expect(result.complaints).toEqual([]);
+    expect(result.lines).toEqual([expect.stringContaining(`${branch} abandoned`)]);
+    await expect(git(cache, "rev-parse", "--verify", branch)).rejects.toBeDefined();
+    await expect(
+      git(cache, "rev-parse", "--verify", `refs/remotes/origin/${branch}`),
+    ).rejects.toBeDefined();
+  });
+
+  it("reaps a closed merge-only branch even without last-seen origin evidence", async () => {
+    const branch = "sandbar/issue-384-merge-only";
+    const branchTip = await mergeOnlyBranch(branch);
+    await git(work, "push", "-q", "origin", branch);
+    await git(cache, "fetch", "-q", "origin");
+    await cacheBranchAt(branch, branchTip);
+    await git(work, "push", "-q", "origin", "--delete", branch);
+    await git(cache, "update-ref", "-d", `refs/remotes/origin/${branch}`);
+
+    const result = await reconcileClosedIssueBranches(cache, "main", [branch]);
+
+    expect(result).toEqual({ lines: [], reaped: [branch], complaints: [] });
+    await expect(git(cache, "rev-parse", "--verify", branch)).rejects.toBeDefined();
+  });
+
+  it("keeps and complains about a closed branch with non-merge work off main", async () => {
+    const branch = "sandbar/issue-385-unlanded";
+    const branchTip = await pushOn(branch, "unlanded work");
+    await git(cache, "fetch", "-q", "origin");
+    await cacheBranchAt(branch, branchTip);
+
+    const result = await reconcileClosedIssueBranches(cache, "main", [branch]);
+
+    expect(result.reaped).toEqual([]);
+    expect(result.complaints).toEqual([expect.objectContaining({
+      issue: 385,
+      branch,
+      message: expect.stringContaining("non-merge commits that are not on"),
+    })]);
+    expect(await tip(cache, branch)).toBe(branchTip);
+  });
+
+  it("keeps and names cache work beyond origin's deleted last-seen tip", async () => {
+    const branch = "sandbar/issue-387-local-ahead";
+    const originTip = await pushOn(branch, "published work");
+    await git(cache, "fetch", "-q", "origin");
+    await cacheBranchAt(branch, originTip);
+    const wt = join(root, "local-ahead-wt");
+    await git(cache, "worktree", "add", "-q", wt, branch);
+    await git(wt, "config", "user.email", "t@t");
+    await git(wt, "config", "user.name", "t");
+    await git(wt, "commit", "-q", "--allow-empty", "-m", "cache-only work");
+    const localTip = await tip(wt, "HEAD");
+    await git(cache, "worktree", "remove", "--force", wt);
+    await git(work, "push", "-q", "origin", "--delete", branch);
+
+    const result = await reconcileClosedIssueBranches(cache, "main", [branch]);
+
+    expect(result.reaped).toEqual([]);
+    expect(result.complaints[0]).toMatchObject({
+      issue: 387,
+      branch,
+      message: expect.stringContaining("local tip differs from origin's last-seen tip"),
+    });
+    expect(await tip(cache, branch)).toBe(localTip);
+  });
+
+  it("keeps unsafe work and complains when origin cannot be asked", async () => {
+    const branch = "sandbar/issue-386-unreadable";
+    const branchTip = await pushOn(branch, "unlanded work");
+    await git(cache, "fetch", "-q", "origin");
+    await cacheBranchAt(branch, branchTip);
+    await git(cache, "remote", "set-url", "origin", join(root, "missing-origin.git"));
+
+    const result = await reconcileClosedIssueBranches(cache, "main", [branch]);
+
+    expect(result.reaped).toEqual([]);
+    expect(result.complaints[0]).toMatchObject({
+      issue: 386,
+      branch,
+      message: expect.stringContaining("origin could not be asked"),
+    });
+    expect(await tip(cache, branch)).toBe(branchTip);
   });
 });

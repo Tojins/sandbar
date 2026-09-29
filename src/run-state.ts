@@ -13,6 +13,8 @@
 // unavailable measurements nor turns them into zeroes. A failed, quota-closed
 // or credential-closed implementer invocation is failure evidence rather than
 // a completed attempt; an OOM kill names that failure in the feed.
+// A retained CLOSED issue branch is represented only by its typed preflight
+// complaint, never inferred back into a parked Waiting row (#179).
 
 import type {
   GateStepEvent,
@@ -500,6 +502,7 @@ export function reduceRunEvents(
     Extract<RunEvent, { kind: "terminal" }>
   >();
   const landingRequests = new Map<number, LandingRequestState>();
+  const closedBranchIssues = new Set<number>();
 
   for (const event of events) {
     const feedEvent = feedText(event);
@@ -675,6 +678,9 @@ export function reduceRunEvents(
         break;
       case "complaint":
         complaints.push({ seq: event.seq, severity: event.severity, text: event.message });
+        if (event.subject?.kind === "closed-issue-branch") {
+          closedBranchIssues.add(event.subject.issue);
+        }
         break;
       case "exit":
         exit = event;
@@ -730,7 +736,7 @@ export function reduceRunEvents(
     for (const ref of lastRecompute.refs) {
       if (
         readyIssues.has(ref.issue) || activeIssues.has(ref.issue) ||
-        landedChunkMembers.has(ref.issue)
+        landedChunkMembers.has(ref.issue) || closedBranchIssues.has(ref.issue)
       ) continue;
       const parked = parkedTerminals.get(ref.issue);
       const previous = previousOutcomes.get(ref.issue);

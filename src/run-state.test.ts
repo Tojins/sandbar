@@ -380,6 +380,45 @@ describe("run event reducer", () => {
     expect(state.landedChunks).toEqual([priorChunk]);
   });
 
+  it("surfaces a retained closed branch only as its preflight complaint", () => {
+    const message = "Closed issue #385's cached branch was kept: unlanded work";
+    const events: RunEvent[] = [
+      at(1, "2026-09-29T13:03:46Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
+        configPath: null, workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-29T13:03:47Z", {
+        kind: "complaint", severity: "warning", message,
+        subject: {
+          kind: "closed-issue-branch",
+          issue: 385,
+          branch: "sandbar/issue-385-unlanded",
+        },
+      }),
+      at(3, "2026-09-29T13:03:48Z", {
+        kind: "recompute", n: 1, trigger: "launch", admitted: [], active: [],
+        waiting: [], landRequests: [], deferredChunks: [], candidates: [],
+        refs: [{
+          issue: 385,
+          branch: "sandbar/issue-385-unlanded",
+          tip: "unlanded-tip",
+        }],
+      }),
+    ];
+
+    const state = reduceRunEvents(events, {
+      now: new Date("2026-09-29T13:04:00Z"),
+      pidAlive: true,
+    });
+
+    expect(state.waiting).toEqual([]);
+    expect(state.run.complaints).toEqual([{
+      seq: 2,
+      severity: "warning",
+      text: message,
+    }]);
+  });
+
   it("projects explicit landing status and moves a landed request into history", () => {
     const base = [
       at(1, "2026-09-17T13:00:00Z", {

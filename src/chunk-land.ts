@@ -202,10 +202,12 @@
 // The issue-branch half is deliberately weaker than tip ancestry. Parking can
 // merge a newer source tip into an issue branch after its work reached the
 // chunk, leaving a merge commit that the source branch does not contain. The
-// ref is safe to retire when `rev-list --no-merges` finds no commit outside the
-// landed source tip. A freshly fetched ref and `--force-with-lease` make that
-// fact apply to the exact remote value deleted; a concurrent push rejects the
-// whole atomic deletion rather than losing work.
+// ref is safe to retire when `hasNonMergeCommitOutside` finds no commit outside
+// the landed source tip. The helper is shared with preflight's CLOSED-branch
+// reap (#179), so both paths give "nothing to lose" exactly one meaning. A
+// freshly fetched ref and `--force-with-lease` make that fact apply to the exact
+// remote value deleted; a concurrent push rejects the whole atomic deletion
+// rather than losing work.
 //
 // Forge-write failures are collected as RESIDUE rather than thrown. A failure
 // from the separate durable-log callback propagates: continuing would hide the
@@ -245,6 +247,7 @@ import {
 } from "./chunks.js";
 import { SandbarError } from "./errors.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
+import { hasNonMergeCommitOutside } from "./git-ops.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
   issueNumberFromBranch,
@@ -921,17 +924,11 @@ export function chunkForgeWrites(deps: {
         const deletedIssueRefs: typeof issueRefs = [];
         const keptIssueBranches: string[] = [];
         for (const issueRef of issueRefs) {
-          const { stdout: unlanded } = await exec(
-            "git",
-            [
-              "rev-list",
-              "--no-merges",
-              issueRef.ref,
-              `^refs/remotes/origin/${sourceBranch}`,
-            ],
-            { cwd: deps.gitCwd },
-          );
-          if (unlanded.trim()) keptIssueBranches.push(issueRef.branch);
+          if (await hasNonMergeCommitOutside(
+            deps.gitCwd,
+            issueRef.ref,
+            `refs/remotes/origin/${sourceBranch}`,
+          )) keptIssueBranches.push(issueRef.branch);
           else deletedIssueRefs.push(issueRef);
         }
 
