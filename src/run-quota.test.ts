@@ -2,7 +2,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { PullRequestSummary } from "./chunk-land.js";
+import type { ChunkWrapup, PullRequestSummary } from "./chunk-land.js";
+import type { ReconciledChunk } from "./chunk-reconcile.js";
 import type { WakeLockStatus } from "./keepawake.js";
 
 const seams = vi.hoisted(() => ({
@@ -17,6 +18,7 @@ const seams = vi.hoisted(() => ({
   landRequestPullRequests: vi.fn(async () => [] as PullRequestSummary[]),
   commentOnChunkPullRequest: vi.fn(async () => undefined),
   removeChunkPullRequestLabel: vi.fn(async () => undefined),
+  reconcile: vi.fn(),
   emit: vi.fn(),
   events: [] as Array<Record<string, unknown>>,
   wakeStatusReports: [] as Array<{
@@ -219,7 +221,7 @@ vi.mock("./chunk-follow-up.js", async (importOriginal) => ({
 }));
 vi.mock("./chunk-reconcile.js", () => ({
   fetchLandRequestPullRequests: seams.landRequestPullRequests,
-  reconcileLandedChunks: vi.fn(async () => ({ reconciled: [], failures: [] })),
+  reconcileLandedChunks: seams.reconcile,
 }));
 vi.mock("./chunk-land.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./chunk-land.js")>(),
@@ -323,6 +325,23 @@ const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
   deferredChunks: [], skippedChunks: [], refreshedChunks: [],
   failedChunkRefreshes: [],
 });
+const chunkWrapup = (
+  keptIssueBranches: readonly string[] = [],
+): ChunkWrapup => ({
+  target: {
+    root: 383,
+    branch: "sandbar/chunk-383-c",
+    title: "Chunk 383",
+    members: [{ number: 383, title: "Issue 383" }],
+    closeOrder: [{ number: 383, title: "Issue 383" }],
+    rework: [],
+    pullRequest: 389,
+  },
+  closed: [383],
+  branchDeleted: true,
+  residue: [],
+  keptIssueBranches,
+});
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -359,6 +378,8 @@ describe("run quota orchestration (#109)", () => {
     seams.commentOnChunkPullRequest.mockResolvedValue(undefined);
     seams.removeChunkPullRequestLabel.mockReset();
     seams.removeChunkPullRequestLabel.mockResolvedValue(undefined);
+    seams.reconcile.mockReset();
+    seams.reconcile.mockResolvedValue({ reconciled: [], closedIssues: [] });
     seams.emit.mockReset();
     seams.emit.mockImplementation(async (event: Record<string, unknown>) => {
       seams.events.push(event);
@@ -461,6 +482,60 @@ describe("run quota orchestration (#109)", () => {
       tag: "storage",
       exitCode: 3,
       reason: expect.stringContaining("after image reconciliation"),
+    }));
+  });
+
+  it("records a reconciled chunk immediately and warns about its retained issue branch", async () => {
+    const wrapup = chunkWrapup(["sandbar/issue-383-parked"]);
+    seams.plan.mockResolvedValue(resolution([]));
+    seams.reconcile.mockImplementationOnce(async (options: {
+      onReconciled?: (chunk: ReconciledChunk) => void | Promise<void>;
+    }) => {
+      const reconciled = { ...wrapup, durationMs: 37 };
+      await options.onReconciled?.(reconciled);
+      return { reconciled: [reconciled], closedIssues: [383] };
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+
+    expect(eventsOf("landed")).toContainEqual(expect.objectContaining({
+      outcome: "chunk-on-source",
+      branch: "sandbar/chunk-383-c",
+      pullRequest: 389,
+      members: [383],
+      durationMs: 37,
+    }));
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      severity: "warning",
+      message: expect.stringContaining("sandbar/issue-383-parked"),
+    }));
+  });
+
+  it("warns about retained issue branches from the live merge path", async () => {
+    const done = issue("383");
+    const wrapup = chunkWrapup(["sandbar/issue-383-parked"]);
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({
+      type: "DONE", commits: [{ sha: "abc" }], specGaps: [],
+    });
+    seams.merger.mockResolvedValue({
+      ...summary([]),
+      mergedChunks: [wrapup],
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+
+    expect(eventsOf("complaint")).toContainEqual(expect.objectContaining({
+      severity: "warning",
+      message: expect.stringContaining("sandbar/issue-383-parked"),
     }));
   });
 

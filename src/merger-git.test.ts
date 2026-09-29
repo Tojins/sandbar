@@ -380,7 +380,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(await git(cache, "rev-parse", "refs/remotes/origin/sandbar/member-1"))
       .toBe(head);
     await git(wt, "push", "-q", "origin", "HEAD:main");
-    await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1]);
+    await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1], "main");
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
     expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
   });
@@ -552,11 +552,137 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     await git(wt, "update-ref", "refs/remotes/origin/sandbar/chunk-4-old-title", head);
     await git(wt, "update-ref", "refs/remotes/origin/sandbar/member-4", head);
 
-    await adapter().deleteChunkBranch("sandbar/chunk-4-old-title", [4]);
+    await adapter().deleteChunkBranch("sandbar/chunk-4-old-title", [4], "main");
 
     expect(await originHas("refs/heads/sandbar/chunk-4-old-title")).toBeNull();
     expect(await originHas("refs/heads/sandbar/member-4")).toBeNull();
     expect(await originHas("refs/heads/sandbar/member-3")).toBe(head);
+  });
+
+  it("retires merge-only parked issue branches and keeps unlanded work", async () => {
+    await git(seed, "checkout", "-qb", "member-work");
+    await commit(seed, "member.txt", "landed member work\n");
+    const memberTip = await git(seed, "rev-parse", "HEAD");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/chunk-1-c");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-1");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-2");
+
+    await git(seed, "checkout", "-q", "main");
+    await git(seed, "merge", "--no-ff", "-m", "land chunk", "member-work");
+    await commit(seed, "source.txt", "source moved after the member\n");
+    await git(seed, "push", "-q", "origin", "main");
+
+    // The safe branch differs from main only by its merge commit. Its ordinary
+    // tip is not an ancestor of main, but every non-merge commit is.
+    await git(seed, "checkout", "-qb", "sandbar/issue-1-parked", memberTip);
+    await git(seed, "merge", "--no-ff", "-m", "merge origin main", "main");
+    await git(seed, "push", "-q", "origin", "HEAD");
+
+    await git(seed, "checkout", "-qb", "sandbar/issue-2-unlanded", "main");
+    await commit(seed, "unlanded.txt", "must survive\n");
+    const unlandedTip = await git(seed, "rev-parse", "HEAD");
+    await git(seed, "push", "-q", "origin", "HEAD");
+
+    // Production's source push updates this ref in the merger checkout. This
+    // fixture moved source through its seed clone, so refresh the same fact.
+    await git(wt, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
+    const result = await adapter().deleteChunkBranch(
+      "sandbar/chunk-1-c",
+      [1, 2],
+      "main",
+    );
+
+    expect(result).toEqual({
+      deletedIssueBranches: ["sandbar/issue-1-parked"],
+      keptIssueBranches: ["sandbar/issue-2-unlanded"],
+      cache: "updated",
+    });
+    expect(await originHas("refs/heads/sandbar/issue-1-parked")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/issue-2-unlanded")).toBe(unlandedTip);
+    expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
+    expect(await originHas("refs/heads/sandbar/member-2")).toBeNull();
+    await expect(
+      git(wt, "rev-parse", "refs/sandbar/poll/origin/sandbar/issue-1-parked"),
+    ).rejects.toThrow();
+    expect(
+      await git(wt, "rev-parse", "refs/sandbar/poll/origin/sandbar/issue-2-unlanded"),
+    ).toBe(unlandedTip);
+  });
+
+  it("reports a stale cache when atomic cache retirement cannot lock one ref", async () => {
+    const sourceTip = await git(seed, "rev-parse", "main");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/member-1");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/member-2");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/issue-1-safe");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/issue-2-safe");
+
+    const lockedRef = join(
+      wt,
+      ".git",
+      "refs/sandbar/poll/origin/sandbar/issue-2-safe.lock",
+    );
+    const result = await adapter(async () => {
+      // deleteChunkBranch has fetched both poll refs before this barrier. Hold
+      // one lock so the later real update-ref transaction fails at prepare;
+      // origin is a separate bare repository and can still retire every ref.
+      await writeFile(lockedRef, "held by test\n");
+    }).deleteChunkBranch("sandbar/chunk-1-c", [1, 2], "main");
+
+    expect(result).toEqual({
+      deletedIssueBranches: ["sandbar/issue-1-safe", "sandbar/issue-2-safe"],
+      keptIssueBranches: [],
+      cache: "stale",
+      cacheError: expect.stringContaining("cannot lock ref"),
+    });
+    for (const ref of [
+      "refs/heads/sandbar/chunk-1-c",
+      "refs/heads/sandbar/member-1",
+      "refs/heads/sandbar/member-2",
+      "refs/heads/sandbar/issue-1-safe",
+      "refs/heads/sandbar/issue-2-safe",
+    ]) {
+      expect(await originHas(ref)).toBeNull();
+    }
+    expect(
+      await git(wt, "rev-parse", "refs/sandbar/poll/origin/sandbar/issue-1-safe"),
+    ).toBe(sourceTip);
+    expect(
+      await git(wt, "rev-parse", "refs/sandbar/poll/origin/sandbar/issue-2-safe"),
+    ).toBe(sourceTip);
+  });
+
+  it("keeps every ref when a safe issue branch moves before atomic deletion", async () => {
+    const sourceTip = await git(seed, "rev-parse", "main");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/member-1");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/issue-1-safe");
+
+    let racedTip = "";
+    const raced = adapter(async () => {
+      await git(seed, "checkout", "-qB", "race", sourceTip);
+      await commit(seed, "raced.txt", "new remote work\n");
+      racedTip = await git(seed, "rev-parse", "HEAD");
+      await git(
+        seed,
+        "push",
+        "-q",
+        "origin",
+        "HEAD:refs/heads/sandbar/issue-1-safe",
+      );
+    });
+
+    await expect(
+      raced.deleteChunkBranch("sandbar/chunk-1-c", [1], "main"),
+    ).rejects.toThrow("failed to delete the landed chunk branch");
+
+    expect(await originHas("refs/heads/sandbar/issue-1-safe")).toBe(racedTip);
+    expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(sourceTip);
+    expect(await originHas("refs/heads/sandbar/member-1")).toBe(sourceTip);
+    expect(
+      await git(wt, "rev-parse", "refs/sandbar/poll/origin/sandbar/issue-1-safe"),
+    ).toBe(sourceTip);
   });
 
   it("atomically deletes real refs when a snapshotted member ref is already absent", async () => {
@@ -567,7 +693,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/chunk-1-c");
     await git(wt, "push", "-q", "origin", "HEAD:refs/heads/sandbar/member-1");
 
-    await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1, 9]);
+    await adapter().deleteChunkBranch("sandbar/chunk-1-c", [1, 9], "main");
 
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBeNull();
     expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();

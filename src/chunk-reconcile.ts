@@ -78,6 +78,7 @@ import {
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
+import { type Clock, startTimer } from "./timing.js";
 
 const exec = promisify(execFile);
 
@@ -164,7 +165,7 @@ export async function findLandedChunkBranches(
 }
 
 /**
- * The open pull requests for the given branches, at most one each.
+ * The open or merged pull requests for the given branches, at most one each.
  *
  * Per branch rather than one listing of the repository: the caller's list is
  * normally empty and never long, and `--head` is a filter the forge applies
@@ -184,12 +185,12 @@ export async function fetchPullRequestsForBranches(
       "--head",
       branch,
       "--state",
-      "open",
+      "all",
       "--json",
-      "number,headRefName,title",
+      "number,headRefName,title,state",
     ]);
     if (!r.ok) continue;
-    found.push(...parsePullRequests(r.stdout));
+    found.push(...parsePullRequests(r.stdout, new Set(["OPEN", "MERGED"])));
   }
   return found;
 }
@@ -216,19 +217,22 @@ export async function fetchLandRequestPullRequests(
     "--state",
     "open",
     "--json",
-    "number,headRefName,title",
+    "number,headRefName,title,state",
     "--limit",
     "200",
   ]);
   if (!r.ok) return [];
-  return parsePullRequests(r.stdout);
+  return parsePullRequests(r.stdout, new Set(["OPEN"]));
 }
 
 // `gh pr list --json` output, defensively. A field the forge answered in a
 // shape this cannot read drops the pull request rather than the whole list: an
 // unreadable entry is one chunk not landed this cycle, and a throw here is a
 // run that will not start.
-function parsePullRequests(stdout: string): readonly PullRequestSummary[] {
+function parsePullRequests(
+  stdout: string,
+  acceptedStates: ReadonlySet<string>,
+): readonly PullRequestSummary[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout.trim() || "[]");
@@ -242,7 +246,11 @@ function parsePullRequests(stdout: string): readonly PullRequestSummary[] {
     const o = raw as Record<string, unknown>;
     const number = o["number"];
     const headRefName = o["headRefName"];
-    if (typeof number !== "number" || typeof headRefName !== "string") continue;
+    const state = o["state"];
+    if (
+      typeof number !== "number" || typeof headRefName !== "string" ||
+      typeof state !== "string" || !acceptedStates.has(state)
+    ) continue;
     out.push({
       number,
       headRefName,
@@ -255,7 +263,7 @@ function parsePullRequests(stdout: string): readonly PullRequestSummary[] {
 export type ReconcileResult = {
   // One entry per chunk branch found already on the source branch, in root
   // order. Empty is the overwhelmingly common answer.
-  readonly reconciled: readonly ChunkWrapup[];
+  readonly reconciled: readonly ReconciledChunk[];
   // Every issue closed across all of them, which is what the caller adds to its
   // "already merged this run" exclusion set.
   readonly closedIssues: readonly number[];
@@ -267,6 +275,12 @@ export type ReconcileResult = {
   // holding, and a caller that guesses promises a repair that is not coming.
   // `chunkResidue` in `chunk-land.ts` is the split, and it is what `run.ts`
   // reports off.
+};
+
+export type ReconciledChunk = ChunkWrapup & {
+  // Time spent finishing this target alone. Discovery and sibling chunks are
+  // deliberately outside it: a landed event describes one work unit.
+  readonly durationMs: number;
 };
 
 /**
@@ -287,6 +301,12 @@ export async function reconcileLandedChunks(cfg: {
   readonly chunks: readonly LandedChunk[];
   readonly log?: (line: string) => void | Promise<void>;
   readonly beforeOriginWrite: OriginWriteBarrier;
+  // The durable-outcome boundary. Awaited immediately after each completed
+  // wrap-up, before another target can make irreversible writes.
+  readonly onReconciled?: (
+    chunk: ReconciledChunk,
+  ) => void | Promise<void>;
+  readonly clock?: Clock;
   // Test seam. The real one talks to `gh` and to origin.
   readonly adapter?: ChunkWrapupAdapter;
   readonly findLanded?: (
@@ -328,19 +348,22 @@ export async function reconcileLandedChunks(cfg: {
       beforeOriginWrite: cfg.beforeOriginWrite,
     });
 
-  const reconciled: ChunkWrapup[] = [];
+  const reconciled: ReconciledChunk[] = [];
   const closedIssues: number[] = [];
   for (const target of targets) {
     await log(
       `reconcile ${target.branch}: already on ${cfg.sourceBranch}; ` +
         `${target.members.length} member(s) to close`,
     );
+    const targetTimer = startTimer(cfg.clock);
     const wrapup = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: cfg.sourceBranch,
       provenance: "reconciled",
       log,
     });
-    reconciled.push({ target, ...wrapup });
+    const reconciledChunk = { target, ...wrapup, durationMs: targetTimer() };
+    await cfg.onReconciled?.(reconciledChunk);
+    reconciled.push(reconciledChunk);
     closedIssues.push(...wrapup.closed);
   }
   return { reconciled, closedIssues };

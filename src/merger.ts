@@ -339,6 +339,7 @@ import {
   CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT,
   CHUNK_LAND_ABANDONED_PR_COMMENT,
   type ChunkLandTarget,
+  type ChunkBranchRetirement,
   type ChunkWrapup,
   LAND_LABEL,
   type PullRequestCloseOutcome,
@@ -856,7 +857,8 @@ export type MergerAdapter = ResolveAdapter & {
   deleteChunkBranch(
     chunkBranch: string,
     memberIssues: readonly number[],
-  ): Promise<void>;
+    sourceBranch: string,
+  ): Promise<ChunkBranchRetirement>;
   commentOnPullRequest(pr: number, body: string): Promise<void>;
   // Takes `land` back off, which is what stops a request being honoured
   // again. The wrap-up drops it when a chunk lands; the merge loop drops it on

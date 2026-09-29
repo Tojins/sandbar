@@ -261,6 +261,7 @@ import { type Stack, startStack } from "./gate-stack.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
 import { containerResourcesOf } from "./container-resources.js";
 import {
+  CHUNK_ISSUE_BRANCHES_KEPT_BANNER,
   CHUNK_LANDED_UNNAMED_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
   CHUNK_RESIDUE_RETIRED_BANNER,
@@ -2067,15 +2068,15 @@ export async function run(
         chunks: resolution.landedChunks,
         beforeOriginWrite: renewOriginLease,
         log: (line) => runRecord.emit({ kind: "reconcile", action: "trace", detail: line }).then(() => undefined),
+        // A completed reconciliation is irreversible: its chunk branch may
+        // already be gone. Record it before the reconciler starts a sibling.
+        onReconciled: (chunk) => recordLandingOutcome({
+          kind: "chunk-on-source",
+          target: chunk.target,
+          durationMs: chunk.durationMs,
+        }),
       });
       if (reconciliation.reconciled.length > 0) {
-        for (const r of reconciliation.reconciled) {
-          await runRecord.emit({
-            kind: "reconcile",
-            action: "landed-chunk",
-            detail: `${r.target.branch} already on ${config.sourceBranch}; closed ${r.closed.length} issue(s)`,
-          });
-        }
         // Same exclusion the merger's own closes get (#16): the listing
         // endpoint the planner uses lags a close by seconds, so an
         // issue closed one line ago can still come back as a candidate.
@@ -2104,6 +2105,16 @@ export async function run(
       // of every recompute, so stopping the run in front of it would spend the
       // whole run on a repair that repairs itself.
       const reconcileResidue = chunkResidue(reconciliation.reconciled);
+      const reconcileKeptIssueBranches = reconciliation.reconciled.filter(
+        (chunk) => chunk.keptIssueBranches.length > 0,
+      );
+      if (reconcileKeptIssueBranches.length > 0) {
+        await runRecord.emit({ kind: "complaint", severity: "warning", message:
+          CHUNK_ISSUE_BRANCHES_KEPT_BANNER({
+            chunks: reconcileKeptIssueBranches,
+            sourceBranch: config.sourceBranch,
+          }) });
+      }
       // The twin of the merge phase's own report, one phase down and for the
       // same reason: a branch already on the source branch that no chunk
       // claims is deleted having closed nothing, and the only trace of it left
@@ -2812,6 +2823,16 @@ export async function run(
       // cannot happen, since the branch those lines came with is gone.
       const landedChunks = mergerSummary?.mergedChunks ?? [];
       const landedResidue = chunkResidue(landedChunks);
+      const landedKeptIssueBranches = landedChunks.filter(
+        (chunk) => chunk.keptIssueBranches.length > 0,
+      );
+      if (landedKeptIssueBranches.length > 0) {
+        await runRecord.emit({ kind: "complaint", severity: "warning", message:
+          CHUNK_ISSUE_BRANCHES_KEPT_BANNER({
+            chunks: landedKeptIssueBranches,
+            sourceBranch: config.sourceBranch,
+          }) });
+      }
 
       // A chunk that landed while naming no member to close. Sandbar honours
       // such a request on purpose — a human labelled a branch that origin has,

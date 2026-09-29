@@ -8,6 +8,7 @@ import {
   CHUNK_LAND_REFUSED_PR_COMMENT,
   CHUNK_LANDED_PR_COMMENT,
   CHUNK_LANDED_UNNAMED_BANNER,
+  CHUNK_ISSUE_BRANCHES_KEPT_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
   CHUNK_RESIDUE_RETIRED_BANNER,
   type ChunkWrapup,
@@ -378,6 +379,7 @@ function makeWrapupAdapter(
       },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
+        return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
       },
     },
   };
@@ -592,6 +594,54 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(r.branchDeleted).toBe(true);
     expect(r.residue).toEqual([]);
   });
+
+  it("reports issue branches deleted or kept by the safety check", async () => {
+    const { adapter } = makeWrapupAdapter();
+    adapter.deleteChunkBranch = async () => ({
+      deletedIssueBranches: ["sandbar/issue-42-alpha"],
+      keptIssueBranches: ["sandbar/issue-43-beta"],
+      cache: "updated",
+    });
+    const lines: string[] = [];
+
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+      log: (line) => { lines.push(line); },
+    });
+
+    expect(r.branchDeleted).toBe(true);
+    expect(r.keptIssueBranches).toEqual(["sandbar/issue-43-beta"]);
+    expect(lines).toContain(
+      "chunk sandbar/chunk-42-alpha: deleted landed issue branch(es) " +
+        "sandbar/issue-42-alpha",
+    );
+    expect(lines).toContain(
+      "chunk sandbar/chunk-42-alpha: kept sandbar/issue-43-beta; it has " +
+        "non-merge commits outside origin/main",
+    );
+  });
+
+  it("reports a failed cache transaction without denying the remote retirement", async () => {
+    const { adapter } = makeWrapupAdapter();
+    adapter.deleteChunkBranch = async () => ({
+      deletedIssueBranches: ["sandbar/issue-42-alpha"],
+      keptIssueBranches: [],
+      cache: "stale",
+      cacheError: "cannot lock ref",
+    });
+
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+
+    expect(r.branchDeleted).toBe(true);
+    expect(r.residue.join("\n")).toContain(
+      "deleted on origin, but their cached issue refs could not be removed atomically",
+    );
+    expect(r.residue.join("\n")).toContain("cannot lock ref");
+  });
 });
 
 describe("the prose (#64)", () => {
@@ -792,6 +842,44 @@ describe("wrapUpLandedChunk error propagation (#99)", () => {
     ).rejects.toThrow("ENOSPC after branch delete");
     expect(calls.filter((call) => call.op === "deleteChunkBranch")).toHaveLength(1);
   });
+
+  it.each([
+    {
+      name: "deleted issue branches",
+      retirement: {
+        deletedIssueBranches: ["sandbar/issue-42-alpha"],
+        keptIssueBranches: [],
+        cache: "updated" as const,
+      },
+      line: "deleted landed issue branch(es)",
+    },
+    {
+      name: "kept issue branches",
+      retirement: {
+        deletedIssueBranches: [],
+        keptIssueBranches: ["sandbar/issue-43-beta"],
+        cache: "updated" as const,
+      },
+      line: "non-merge commits outside",
+    },
+  ])("propagates the original log failure for $name", async ({ retirement, line }) => {
+    const { adapter, calls } = makeWrapupAdapter();
+    adapter.deleteChunkBranch = async () => {
+      calls.push({ op: "deleteChunkBranch", arg: target.branch });
+      return retirement;
+    };
+    const failure = new Error(`ENOSPC while recording ${line}`);
+
+    await expect(wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+      log: (message) => {
+        if (message.includes(line)) throw failure;
+      },
+    })).rejects.toBe(failure);
+
+    expect(calls.filter((call) => call.op === "deleteChunkBranch")).toHaveLength(1);
+  });
 });
 
 // #64 — reading the residue back. Both of `run.ts`'s reports are built from
@@ -809,6 +897,7 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
     closed: [],
     branchDeleted,
     residue,
+    keptIssueBranches: [],
   });
 
   it("splits on the branch, which is the question 'will anything retry this?'", () => {
@@ -840,6 +929,21 @@ describe("chunkResidue and the banners it feeds (#64)", () => {
     expect(banner).toContain("sandbar/chunk-4-unnamed");
     expect(banner).toContain("sandbar/member-*");
     expect(banner).toContain("no later run will find it");
+  });
+
+  it("reports unsafe issue branches as retained work rather than residue", () => {
+    const kept = {
+      ...wrapup("sandbar/chunk-1-c", true, []),
+      keptIssueBranches: ["sandbar/issue-1-parked"],
+    };
+    const banner = CHUNK_ISSUE_BRANCHES_KEPT_BANNER({
+      chunks: [kept],
+      sourceBranch: "main",
+    });
+
+    expect(banner).toContain("sandbar/issue-1-parked");
+    expect(banner).toContain("non-merge commit outside `origin/main`");
+    expect(chunkResidue([kept]).untidy).toEqual([]);
   });
 
   it("says the reconciler FOUND such a chunk rather than landing it", () => {
