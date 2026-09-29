@@ -372,6 +372,12 @@ outcomes.
   directions: a branch origin carried and then lost is dropped from the cache
   (deleting it on origin is how a parked issue's work is abandoned), unless
   the cache holds more than origin ever had, which refuses instead.
+  A tracker-confirmed CLOSED issue is the non-refusing counterpart (#179):
+  preflight applies the same origin sync, then drops the cache branch and its
+  durable evidence ref when every non-merge commit is already on
+  `origin/<sourceBranch>`. A survivor is kept with a complaint naming the
+  unresolved origin or containment fact and is omitted from the UI's parked
+  Waiting rows; an unknown tracker state remains a startup refusal.
   The seeding fallback guard, the origin sync and the re-rooting argument are
   `src/git-ops.ts`'s.
 - **A chunk is derived, never declared (#54 §2, #58).** A chunk is a connected
@@ -668,7 +674,9 @@ outcomes.
   every request. Terminal causes stay full in the event feed and lead the
   compact HARD-ERROR retry, parked and recently-finished projections. A pending
   restart request stays on the header for the whole drain, so a pool that has
-  stopped admitting says why (#146). A live
+  stopped admitting says why (#146). A CLOSED issue's retained cache branch is
+  represented only by its typed preflight complaint, not inferred as a parked
+  Waiting row (#179). A live
   run hosts it in-process; `sandbar ui` hosts the same
   module for post-mortem browsing. The page polls every two seconds. A growing
   file plus live matching `run.pid` means working; a dead/missing PID without

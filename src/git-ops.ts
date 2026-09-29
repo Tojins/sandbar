@@ -26,6 +26,12 @@
 // callers for the reason `fetchOriginChunkBranch` does: the seeding here, and
 // preflight, which runs it over every branch it keeps so a diverged one refuses
 // the run at the terminal rather than one cycle in.
+//
+// `hasNonMergeCommitOutside` is the shared safety test for retiring issue
+// branches (#177, #179). Chunk wrap-up applies it to origin's freshly fetched
+// copy; preflight applies it to a CLOSED issue's cache copy. Keeping the git
+// question here prevents those two cleanup paths from acquiring subtly
+// different meanings for "nothing to lose".
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -339,6 +345,63 @@ const worktreeHoldingBranch = async (
   }
   return null;
 };
+
+/** Whether `tip` carries any non-merge commit that `base` does not. */
+export async function hasNonMergeCommitOutside(
+  repoDir: string,
+  tip: string,
+  base: string,
+): Promise<boolean> {
+  const { stdout } = await exec(
+    "git",
+    ["rev-list", "--no-merges", tip, `^${base}`],
+    { cwd: repoDir },
+  );
+  return stdout.trim() !== "";
+}
+
+export type CachedIssueBranchDeletion =
+  | { readonly kind: "deleted" }
+  | { readonly kind: "checked-out"; readonly worktree: string };
+
+// Delete the cache branch and its durable last-seen-origin evidence in one ref
+// transaction. A live worktree keeps both: removing its checked-out ref behind
+// its back would turn the worktree into an unexplained recovery artefact.
+export async function deleteCachedIssueBranch(
+  repoDir: string,
+  branch: string,
+): Promise<CachedIssueBranchDeletion> {
+  const worktree = await worktreeHoldingBranch(repoDir, branch);
+  if (worktree !== null) return { kind: "checked-out", worktree };
+  const localRef = `refs/heads/${branch}`;
+  const evidenceRef = `refs/remotes/origin/${branch}`;
+  const refs = (
+    await Promise.all([
+      revParseOrNull(repoDir, localRef),
+      revParseOrNull(repoDir, evidenceRef),
+    ])
+  ).flatMap((sha, index) => sha === null
+    ? []
+    : [{ ref: index === 0 ? localRef : evidenceRef, sha }]);
+  if (refs.length === 0) return { kind: "deleted" };
+  await new Promise<void>((resolve, reject) => {
+    const child = execFile(
+      "git",
+      ["update-ref", "--stdin"],
+      { cwd: repoDir },
+      (err) => err ? reject(err) : resolve(),
+    );
+    child.stdin?.on("error", reject);
+    child.stdin?.end([
+      "start",
+      ...refs.map(({ ref, sha }) => `delete ${ref} ${sha}`),
+      "prepare",
+      "commit",
+      "",
+    ].join("\n"));
+  });
+  return { kind: "deleted" };
+}
 
 const fastForwardCacheBranch = async (
   repoDir: string,

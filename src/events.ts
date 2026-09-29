@@ -20,6 +20,9 @@
 // reused execution span, OR-ed with Podman's State.OOMKilled; a whole-container
 // teardown reports any non-zero count). Both are measurements only. An
 // unavailable fact is omitted rather than encoded as zero (#141).
+// A complaint may carry a typed subject when its prose is the sole UI surface
+// for that entity. CLOSED issue-branch complaints use this to suppress the
+// generic cached-ref-to-Waiting inference without parsing their message (#179).
 //
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
@@ -110,6 +113,12 @@ export type CachedIssueRef = {
   readonly tip: string;
 };
 
+export type ComplaintSubject = {
+  readonly kind: "closed-issue-branch";
+  readonly issue: number;
+  readonly branch: string;
+};
+
 export type UsageFields = {
   readonly inputTokens?: number;
   readonly cachedInputTokens?: number;
@@ -191,7 +200,14 @@ export type EventInput =
   | { readonly kind: "follow-up"; readonly action: "route" | "re-queued" | "lane-override"; readonly detail: string; readonly issue?: number; readonly title?: string }
   | { readonly kind: "reconcile"; readonly action: "trace" | "landed-chunk" | "land-requested" | "chunk-refreshed" | "chunk-refresh-failed"; readonly detail: string }
   | { readonly kind: "notice"; readonly message: string }
-  | { readonly kind: "complaint"; readonly severity: "warning" | "error"; readonly message: string }
+  | {
+      readonly kind: "complaint";
+      readonly severity: "warning" | "error";
+      readonly message: string;
+      // Present only when the complaint is also the canonical UI surface for
+      // an entity that must not be inferred into another section (#179).
+      readonly subject?: ComplaintSubject;
+    }
   | { readonly kind: "exit"; readonly tag: ExitTag; readonly reason: string; readonly exitCode: number }
   | { readonly kind: "run-end"; readonly reason: string }
   | (TitledEventIssue & { readonly kind: "admitted"; readonly branch: string; readonly chunk: string | null; readonly seedRef: string })
