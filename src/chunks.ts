@@ -55,7 +55,7 @@
 // attempts to replace `ready-for-agent` with `needs-review` for humans.
 //
 // The swap is not authoritative. Containment by any fetched chunk branch is
-// the fail-safe de-queue fact; membership on the exact derived branch is the
+// the fail-safe de-queue fact; membership on the exact selected branch is the
 // stricter blocker-satisfaction fact. Membership is never read from a label.
 // The planner reads those members from git and fetches their issues back into
 // the candidate graph so the chunk cannot re-root around whatever remains queued.
@@ -139,7 +139,7 @@
 // every self-referencing issue an in-degree Kahn's could never retire.
 
 import type { Lane } from "./lanes.js";
-import { chunkBranchName } from "./naming.js";
+import { chunkBranchName, rootIssueFromChunkBranch } from "./naming.js";
 
 // The display label a review-gated issue carries once its work is on its chunk
 // branch: OPEN and still to be reviewed. Sandbar writes and later removes it,
@@ -224,8 +224,10 @@ export type Chunk = {
   readonly root: number;
   // Every issue that lands on this chunk's branch, ascending, root included.
   readonly members: readonly number[];
-  // `sandbar/chunk-<root>-<slug>`. Derived, not created — no branch of this
-  // name exists yet.
+  // `sandbar/chunk-<root>-<slug>`. One origin branch for `root` keeps its
+  // existing name across title edits; otherwise the name is derived from the
+  // current title. This function remains pure because origin's branch names
+  // are an explicit input.
   readonly branch: string;
 };
 
@@ -333,6 +335,7 @@ const ascending = (a: number, b: number): number => a - b;
 export function deriveChunks(
   issues: readonly ChunkIssue[],
   lanes: ReadonlyMap<number, { readonly lane: Lane }>,
+  originChunkBranches: readonly string[] = [],
 ): ChunkDerivation {
   const gated = new Map<number, ChunkIssue>();
   for (const issue of issues) {
@@ -409,6 +412,14 @@ export function deriveChunks(
 
   const chunks: Chunk[] = [];
   const chunkOf = new Map<number, number>();
+  const originBranchesByRoot = new Map<number, string[]>();
+  for (const branch of originChunkBranches) {
+    const root = rootIssueFromChunkBranch(branch);
+    if (root === null) continue;
+    const existing = originBranchesByRoot.get(root);
+    if (existing) existing.push(branch);
+    else originBranchesByRoot.set(root, [branch]);
+  }
   for (const rawMembers of componentMembers.values()) {
     const members = [...rawMembers].sort(ascending);
     const inChunk = new Set(members);
@@ -423,7 +434,15 @@ export function deriveChunks(
     // `Map.get` are typed `T | undefined`.
     const root = parentless[0] ?? members[0] ?? 0;
     const title = gated.get(root)?.title ?? "";
-    chunks.push({ root, members, branch: chunkBranchName(root, title) });
+    const originBranches = originBranchesByRoot.get(root) ?? [];
+    // The issue number is the durable identity. A title edit changes only the
+    // human-readable slug, so one existing origin branch for this root wins
+    // over today's spelling. More than one is deliberately not selected: the
+    // planner reports every competing branch as drifted and holds new work.
+    const branch = originBranches.length === 1
+      ? originBranches[0]!
+      : chunkBranchName(root, title);
+    chunks.push({ root, members, branch });
     for (const member of members) chunkOf.set(member, root);
   }
   chunks.sort((a, b) => a.root - b.root);
