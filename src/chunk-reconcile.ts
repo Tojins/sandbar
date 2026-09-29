@@ -78,6 +78,7 @@ import {
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
+import { type Clock, startTimer } from "./timing.js";
 
 const exec = promisify(execFile);
 
@@ -262,7 +263,7 @@ function parsePullRequests(
 export type ReconcileResult = {
   // One entry per chunk branch found already on the source branch, in root
   // order. Empty is the overwhelmingly common answer.
-  readonly reconciled: readonly ChunkWrapup[];
+  readonly reconciled: readonly ReconciledChunk[];
   // Every issue closed across all of them, which is what the caller adds to its
   // "already merged this run" exclusion set.
   readonly closedIssues: readonly number[];
@@ -274,6 +275,12 @@ export type ReconcileResult = {
   // holding, and a caller that guesses promises a repair that is not coming.
   // `chunkResidue` in `chunk-land.ts` is the split, and it is what `run.ts`
   // reports off.
+};
+
+export type ReconciledChunk = ChunkWrapup & {
+  // Time spent finishing this target alone. Discovery and sibling chunks are
+  // deliberately outside it: a landed event describes one work unit.
+  readonly durationMs: number;
 };
 
 /**
@@ -294,6 +301,12 @@ export async function reconcileLandedChunks(cfg: {
   readonly chunks: readonly LandedChunk[];
   readonly log?: (line: string) => void | Promise<void>;
   readonly beforeOriginWrite: OriginWriteBarrier;
+  // The durable-outcome boundary. Awaited immediately after each completed
+  // wrap-up, before another target can make irreversible writes.
+  readonly onReconciled?: (
+    chunk: ReconciledChunk,
+  ) => void | Promise<void>;
+  readonly clock?: Clock;
   // Test seam. The real one talks to `gh` and to origin.
   readonly adapter?: ChunkWrapupAdapter;
   readonly findLanded?: (
@@ -335,19 +348,22 @@ export async function reconcileLandedChunks(cfg: {
       beforeOriginWrite: cfg.beforeOriginWrite,
     });
 
-  const reconciled: ChunkWrapup[] = [];
+  const reconciled: ReconciledChunk[] = [];
   const closedIssues: number[] = [];
   for (const target of targets) {
     await log(
       `reconcile ${target.branch}: already on ${cfg.sourceBranch}; ` +
         `${target.members.length} member(s) to close`,
     );
+    const targetTimer = startTimer(cfg.clock);
     const wrapup = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: cfg.sourceBranch,
       provenance: "reconciled",
       log,
     });
-    reconciled.push({ target, ...wrapup });
+    const reconciledChunk = { target, ...wrapup, durationMs: targetTimer() };
+    await cfg.onReconciled?.(reconciledChunk);
+    reconciled.push(reconciledChunk);
     closedIssues.push(...wrapup.closed);
   }
   return { reconciled, closedIssues };

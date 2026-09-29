@@ -46,7 +46,7 @@ function fakeAdapter(
       },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
-        return { deletedIssueBranches: [], keptIssueBranches: [] };
+        return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
       },
     },
   };
@@ -200,5 +200,56 @@ describe("reconcileLandedChunks (#64)", () => {
 
     expect(r.reconciled.map((x) => x.target.root)).toEqual([42, 99]);
     expect(r.closedIssues).toEqual([99]);
+  });
+
+  it("records each completed target before starting the next, with its own duration", async () => {
+    const { adapter, calls } = fakeAdapter();
+    const readings = [10, 25, 100, 147];
+    const outcomes: Array<{ root: number; durationMs: number }> = [];
+
+    const r = await reconcileLandedChunks({
+      repoDir: REPO_DIR,
+      repo: REPO,
+      sourceBranch: "main",
+      chunks: [chunk(42, [42]), chunk(99, [99])],
+      adapter,
+      beforeOriginWrite: async () => undefined,
+      findLanded: async () => ["sandbar/chunk-99-c", "sandbar/chunk-42-c"],
+      findPullRequests: async () => [],
+      clock: () => readings.shift() ?? 0,
+      onReconciled: (landed) => {
+        outcomes.push({ root: landed.target.root, durationMs: landed.durationMs });
+        calls.push({ op: "outcome", arg: String(landed.target.root) });
+      },
+    });
+
+    expect(outcomes).toEqual([
+      { root: 42, durationMs: 15 },
+      { root: 99, durationMs: 47 },
+    ]);
+    expect(r.reconciled.map((landed) => landed.durationMs)).toEqual([15, 47]);
+    expect(calls.findIndex((call) => call.op === "outcome" && call.arg === "42"))
+      .toBeLessThan(calls.findIndex((call) => call.op === "closeIssue" && call.arg === "99"));
+  });
+
+  it("does not start another target when the completed outcome cannot be recorded", async () => {
+    const { adapter, calls } = fakeAdapter();
+
+    await expect(reconcileLandedChunks({
+      repoDir: REPO_DIR,
+      repo: REPO,
+      sourceBranch: "main",
+      chunks: [chunk(42, [42]), chunk(99, [99])],
+      adapter,
+      beforeOriginWrite: async () => undefined,
+      findLanded: async () => ["sandbar/chunk-42-c", "sandbar/chunk-99-c"],
+      findPullRequests: async () => [],
+      onReconciled: () => {
+        throw new Error("event record unavailable");
+      },
+    })).rejects.toThrow("event record unavailable");
+
+    expect(calls.some((call) => call.op === "closeIssue" && call.arg === "99"))
+      .toBe(false);
   });
 });

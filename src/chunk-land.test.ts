@@ -266,7 +266,7 @@ function makeWrapupAdapter(
       },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
-        return { deletedIssueBranches: [], keptIssueBranches: [] };
+        return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
       },
     },
   };
@@ -487,6 +487,7 @@ describe("wrapUpLandedChunk (#64)", () => {
     adapter.deleteChunkBranch = async () => ({
       deletedIssueBranches: ["sandbar/issue-42-alpha"],
       keptIssueBranches: ["sandbar/issue-43-beta"],
+      cache: "updated",
     });
     const lines: string[] = [];
 
@@ -497,6 +498,7 @@ describe("wrapUpLandedChunk (#64)", () => {
     });
 
     expect(r.branchDeleted).toBe(true);
+    expect(r.keptIssueBranches).toEqual(["sandbar/issue-43-beta"]);
     expect(lines).toContain(
       "chunk sandbar/chunk-42-alpha: deleted landed issue branch(es) " +
         "sandbar/issue-42-alpha",
@@ -505,6 +507,27 @@ describe("wrapUpLandedChunk (#64)", () => {
       "chunk sandbar/chunk-42-alpha: kept sandbar/issue-43-beta; it has " +
         "non-merge commits outside origin/main",
     );
+  });
+
+  it("reports a failed cache transaction without denying the remote retirement", async () => {
+    const { adapter } = makeWrapupAdapter();
+    adapter.deleteChunkBranch = async () => ({
+      deletedIssueBranches: ["sandbar/issue-42-alpha"],
+      keptIssueBranches: [],
+      cache: "stale",
+      cacheError: "cannot lock ref",
+    });
+
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+
+    expect(r.branchDeleted).toBe(true);
+    expect(r.residue.join("\n")).toContain(
+      "deleted on origin, but their cached issue refs could not be removed atomically",
+    );
+    expect(r.residue.join("\n")).toContain("cannot lock ref");
   });
 });
 
@@ -704,6 +727,44 @@ describe("wrapUpLandedChunk error propagation (#99)", () => {
         },
       }),
     ).rejects.toThrow("ENOSPC after branch delete");
+    expect(calls.filter((call) => call.op === "deleteChunkBranch")).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: "deleted issue branches",
+      retirement: {
+        deletedIssueBranches: ["sandbar/issue-42-alpha"],
+        keptIssueBranches: [],
+        cache: "updated" as const,
+      },
+      line: "deleted landed issue branch(es)",
+    },
+    {
+      name: "kept issue branches",
+      retirement: {
+        deletedIssueBranches: [],
+        keptIssueBranches: ["sandbar/issue-43-beta"],
+        cache: "updated" as const,
+      },
+      line: "non-merge commits outside",
+    },
+  ])("propagates the original log failure for $name", async ({ retirement, line }) => {
+    const { adapter, calls } = makeWrapupAdapter();
+    adapter.deleteChunkBranch = async () => {
+      calls.push({ op: "deleteChunkBranch", arg: target.branch });
+      return retirement;
+    };
+    const failure = new Error(`ENOSPC while recording ${line}`);
+
+    await expect(wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+      log: (message) => {
+        if (message.includes(line)) throw failure;
+      },
+    })).rejects.toBe(failure);
+
     expect(calls.filter((call) => call.op === "deleteChunkBranch")).toHaveLength(1);
   });
 });

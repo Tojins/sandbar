@@ -489,6 +489,10 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       for (const argv of recorded) {
         expect(argv.slice(0, 2)).toEqual(["pr", "list"]);
         expect(repoFlagOf(argv)).toBe("acme/app");
+        expect(argv.slice(argv.indexOf("--state"), argv.indexOf("--state") + 2))
+          .toEqual(["--state", "all"]);
+        expect(argv.slice(argv.indexOf("--json"), argv.indexOf("--json") + 2))
+          .toEqual(["--json", "number,headRefName,title,state"]);
       }
     });
   });

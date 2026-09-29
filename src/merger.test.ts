@@ -385,7 +385,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.order.push("chunk-branch-delete");
       const e = script.wrapupFails?.deleteChunkBranch;
       if (e) throw new SandbarError(e);
-      return { deletedIssueBranches: [], keptIssueBranches: [] };
+      return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
     },
     async commentOnPullRequest(pr, body) {
       calls.prComments.push({ pr, body });

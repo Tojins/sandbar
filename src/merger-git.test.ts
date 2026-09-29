@@ -595,6 +595,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(result).toEqual({
       deletedIssueBranches: ["sandbar/issue-1-parked"],
       keptIssueBranches: ["sandbar/issue-2-unlanded"],
+      cache: "updated",
     });
     expect(await originHas("refs/heads/sandbar/issue-1-parked")).toBeNull();
     expect(await originHas("refs/heads/sandbar/issue-2-unlanded")).toBe(unlandedTip);
@@ -636,6 +637,9 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(await originHas("refs/heads/sandbar/issue-1-safe")).toBe(racedTip);
     expect(await originHas("refs/heads/sandbar/chunk-1-c")).toBe(sourceTip);
     expect(await originHas("refs/heads/sandbar/member-1")).toBe(sourceTip);
+    expect(
+      await git(wt, "rev-parse", "refs/sandbar/poll/origin/sandbar/issue-1-safe"),
+    ).toBe(sourceTip);
   });
 
   it("atomically deletes real refs when a snapshotted member ref is already absent", async () => {

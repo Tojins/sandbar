@@ -641,7 +641,10 @@ export type PullRequestCloseOutcome = "closed" | "merged";
 export type ChunkBranchRetirement = {
   readonly deletedIssueBranches: readonly string[];
   readonly keptIssueBranches: readonly string[];
-};
+} & (
+  | { readonly cache: "updated" }
+  | { readonly cache: "stale"; readonly cacheError: string }
+);
 
 // The tracker and forge writes the wrap-up needs. A structural subset of
 // `MergerAdapter`, so the merge phase passes itself; the reconciler builds its
@@ -670,9 +673,12 @@ export type ChunkWrapupAdapter = {
  * The one implementation of those writes — see the header for why there is
  * exactly one, and why `gitCwd` is its only parameter.
  *
- * Every method throws on failure rather than swallowing. The wrap-up catches
- * these forge-write failures and turns them into residue; failures from its
- * separate durable-log callback propagate.
+ * Remote-write failures throw rather than being swallowed. The one local-only
+ * cache transaction reports a discriminated stale-cache result after origin's
+ * retirement has succeeded, because calling that a remote delete failure would
+ * make the wrap-up promise a retry through a chunk branch that is already gone.
+ * The wrap-up turns write failures into residue; failures from its separate
+ * durable-log callback propagate.
  */
 export function chunkForgeWrites(deps: {
   readonly repo: RepoRef;
@@ -844,16 +850,6 @@ export function chunkForgeWrites(deps: {
           else deletedIssueRefs.push(issueRef);
         }
 
-        // Remove the disposable cache refs before the remote write. This makes
-        // the plan rebuilt immediately after reconciliation stop advertising a
-        // successfully retired branch. If the atomic push fails, the next
-        // reconciliation fetch restores them from origin before retrying.
-        if (deletedIssueRefs.length > 0) {
-          await Promise.all(deletedIssueRefs.map(({ ref, sha }) =>
-            exec("git", ["update-ref", "-d", ref, sha], { cwd: deps.gitCwd })
-          ));
-        }
-
         await deps.beforeOriginWrite();
         // Delete only the strict membership set this wrap-up closed. Older
         // chunks kept for a failed close may be ancestors of this branch; their
@@ -881,10 +877,37 @@ export function chunkForgeWrites(deps: {
           ],
           { cwd: deps.gitCwd },
         );
-        return {
+        const retired = {
           deletedIssueBranches: deletedIssueRefs.map(({ branch }) => branch),
           keptIssueBranches,
         };
+
+        // Origin is authoritative, so its all-or-nothing retirement happens
+        // before cache visibility changes. Remove the corresponding poll refs
+        // in one local ref transaction afterwards: a rejected remote push then
+        // leaves the cache exactly as it was, and a local failure cannot leave
+        // only some of the retired branches hidden.
+        if (deletedIssueRefs.length === 0) {
+          return { ...retired, cache: "updated" };
+        }
+        const cacheError: unknown = await execWithInput(
+          "git",
+          ["update-ref", "--stdin"],
+          [
+            "start",
+            ...deletedIssueRefs.map(({ ref, sha }) => `delete ${ref} ${sha}`),
+            "prepare",
+            "commit",
+            "",
+          ].join("\n"),
+          deps.gitCwd,
+        ).then(
+          () => null,
+          (err: unknown) => err,
+        );
+        return cacheError === null
+          ? { ...retired, cache: "updated" }
+          : { ...retired, cache: "stale", cacheError: detail(cacheError) };
       } catch (err) {
         throw wrap(
           `failed to delete the landed chunk branch ${chunkBranch} on origin`,
@@ -893,6 +916,22 @@ export function chunkForgeWrites(deps: {
       }
     },
   };
+}
+
+function execWithInput(
+  file: string,
+  args: readonly string[],
+  input: string,
+  cwd: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(file, [...args], { cwd }, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+    child.stdin?.on("error", reject);
+    child.stdin?.end(input);
+  });
 }
 
 export type ChunkWrapupResult = {
@@ -1057,14 +1096,27 @@ export async function wrapUpLandedChunk(
   // that is the right answer and what it costs.
   let branchDeleted = false;
   if (closesComplete) {
+    let issueBranches: ChunkBranchRetirement | null = null;
     try {
-      const issueBranches = await adapter.deleteChunkBranch(
+      issueBranches = await adapter.deleteChunkBranch(
         target.branch,
         target.members.map((member) => member.number),
         opts.sourceBranch,
       );
+    } catch (err) {
+      residue.push(
+        `the chunk branch ${target.branch} is landed but could not be deleted on origin: ${detail(err)}`,
+      );
+    }
+    if (issueBranches !== null) {
       branchDeleted = true;
       keptIssueBranches = issueBranches.keptIssueBranches;
+      if (issueBranches.cache === "stale") {
+        residue.push(
+          `the chunk and safe issue branches were deleted on origin, but their ` +
+            `cached issue refs could not be removed atomically: ${issueBranches.cacheError}`,
+        );
+      }
       if (issueBranches.deletedIssueBranches.length > 0) {
         await log(
           `chunk ${target.branch}: deleted landed issue branch(es) ` +
@@ -1077,12 +1129,8 @@ export async function wrapUpLandedChunk(
             `outside origin/${opts.sourceBranch}`,
         );
       }
-    } catch (err) {
-      residue.push(
-        `the chunk branch ${target.branch} is landed but could not be deleted on origin: ${detail(err)}`,
-      );
+      await log(`chunk ${target.branch}: deleted on origin`);
     }
-    if (branchDeleted) await log(`chunk ${target.branch}: deleted on origin`);
   } else {
     residue.push(
       `${target.branch} is kept on origin so the next run retries the ${

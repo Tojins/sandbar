@@ -345,6 +345,41 @@ describe("run event reducer", () => {
     ]);
   });
 
+  it("does not resurrect a member landed in an earlier run", () => {
+    const events: RunEvent[] = [
+      at(1, "2026-09-08T09:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar",
+        configPath: null, workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-08T09:01:00Z", {
+        kind: "recompute", n: 1, trigger: "launch", admitted: [], active: [],
+        waiting: [], landRequests: [], deferredChunks: [], candidates: [],
+        refs: [{
+          issue: 383,
+          branch: "sandbar/issue-383-parked",
+          tip: "retained-unlanded-tip",
+        }],
+      }),
+    ];
+    const priorChunk = {
+      pullRequest: 389,
+      title: "Chunk 383",
+      members: [383],
+      target: "main",
+      ms: 42,
+      at: "2026-09-07T09:01:00Z",
+    };
+
+    const state = reduceRunEvents(events, {
+      now: new Date("2026-09-08T09:02:00Z"),
+      pidAlive: true,
+      recentLandedChunks: [priorChunk],
+    });
+
+    expect(state.waiting).toEqual([]);
+    expect(state.landedChunks).toEqual([priorChunk]);
+  });
+
   it("projects explicit landing status and moves a landed request into history", () => {
     const base = [
       at(1, "2026-09-17T13:00:00Z", {

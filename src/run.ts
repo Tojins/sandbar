@@ -2052,7 +2052,6 @@ export async function run(
       // The re-plan reads the same authoritative GraphQL batch, which is
       // strongly consistent about the closes just made even while the candidate
       // listing lags.
-      const reconciliationTimer = startTimer();
       const reconciliation = await reconcileLandedChunks({
         repoDir: layout.repoDir,
         repo,
@@ -2060,19 +2059,15 @@ export async function run(
         chunks: resolution.landedChunks,
         beforeOriginWrite: renewOriginLease,
         log: (line) => runRecord.emit({ kind: "reconcile", action: "trace", detail: line }).then(() => undefined),
+        // A completed reconciliation is irreversible: its chunk branch may
+        // already be gone. Record it before the reconciler starts a sibling.
+        onReconciled: (chunk) => recordLandingOutcome({
+          kind: "chunk-on-source",
+          target: chunk.target,
+          durationMs: chunk.durationMs,
+        }),
       });
-      const reconciliationDurationMs = reconciliationTimer();
       if (reconciliation.reconciled.length > 0) {
-        for (const r of reconciliation.reconciled) {
-          // The same structured landing event the merger emits. The UI already
-          // knows how to turn this into one Finished chunk row and deliberately
-          // does not manufacture Finished rows for its individual members.
-          await recordLandingOutcome({
-            kind: "chunk-on-source",
-            target: r.target,
-            durationMs: reconciliationDurationMs,
-          });
-        }
         // Same exclusion the merger's own closes get (#16): the listing
         // endpoint the planner uses lags a close by seconds, so an
         // issue closed one line ago can still come back as a candidate.
