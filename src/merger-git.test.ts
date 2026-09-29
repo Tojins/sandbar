@@ -610,6 +610,49 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     ).toBe(unlandedTip);
   });
 
+  it("reports a stale cache when atomic cache retirement cannot lock one ref", async () => {
+    const sourceTip = await git(seed, "rev-parse", "main");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/member-1");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/member-2");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/issue-1-safe");
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/issue-2-safe");
+
+    const lockedRef = join(
+      wt,
+      ".git",
+      "refs/sandbar/poll/origin/sandbar/issue-2-safe.lock",
+    );
+    const result = await adapter(async () => {
+      // deleteChunkBranch has fetched both poll refs before this barrier. Hold
+      // one lock so the later real update-ref transaction fails at prepare;
+      // origin is a separate bare repository and can still retire every ref.
+      await writeFile(lockedRef, "held by test\n");
+    }).deleteChunkBranch("sandbar/chunk-1-c", [1, 2], "main");
+
+    expect(result).toEqual({
+      deletedIssueBranches: ["sandbar/issue-1-safe", "sandbar/issue-2-safe"],
+      keptIssueBranches: [],
+      cache: "stale",
+      cacheError: expect.stringContaining("cannot lock ref"),
+    });
+    for (const ref of [
+      "refs/heads/sandbar/chunk-1-c",
+      "refs/heads/sandbar/member-1",
+      "refs/heads/sandbar/member-2",
+      "refs/heads/sandbar/issue-1-safe",
+      "refs/heads/sandbar/issue-2-safe",
+    ]) {
+      expect(await originHas(ref)).toBeNull();
+    }
+    expect(
+      await git(wt, "rev-parse", "refs/sandbar/poll/origin/sandbar/issue-1-safe"),
+    ).toBe(sourceTip);
+    expect(
+      await git(wt, "rev-parse", "refs/sandbar/poll/origin/sandbar/issue-2-safe"),
+    ).toBe(sourceTip);
+  });
+
   it("keeps every ref when a safe issue branch moves before atomic deletion", async () => {
     const sourceTip = await git(seed, "rev-parse", "main");
     await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
