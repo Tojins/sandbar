@@ -167,30 +167,30 @@ export const AGENT_PROVIDER_PACKAGES: Readonly<
   Record<AgentProviderName, AgentProviderPackage>
 > = {
   claude: {
-    version: "2.1.257",
+    version: "2.1.293",
     artifacts: {
       x64: [
         {
           variant: "glibc",
-          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-x64/claude",
-          sha256: "9a64bda9d8722a1fa05bef9a5961d07e0331b99597eda9e2f6a732f3a0ff7f05",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.293/linux-x64/claude",
+          sha256: "8968405e26db478af44eabc4635ab5ca557057b702a54460a59c13e1b253e978",
         },
         {
           variant: "musl",
-          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-x64-musl/claude",
-          sha256: "51e08d1948c31d4ab386cd744ba633739236ac0cbedded05d0ef07f2d60e950e",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.293/linux-x64-musl/claude",
+          sha256: "853fff235f19ce65ae304b79f126f7dd8a60855d5c7ce98e43e3e12416b782bc",
         },
       ],
       arm64: [
         {
           variant: "glibc",
-          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-arm64/claude",
-          sha256: "22f7d48f17193952c3c2d0b8bf2f31db2cd08fd5fb09a374fa321496b711d017",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.293/linux-arm64/claude",
+          sha256: "a43629e888f0a7d96c5e8de62abf44852433a7ff2481574688db3e5b6399491f",
         },
         {
           variant: "musl",
-          url: "https://downloads.claude.ai/claude-code-releases/2.1.257/linux-arm64-musl/claude",
-          sha256: "c5c088fb49fb514f8df5af9840731bfbe38f74a2d85f21bbd233a6e7b6b8d2e2",
+          url: "https://downloads.claude.ai/claude-code-releases/2.1.293/linux-arm64-musl/claude",
+          sha256: "00755ae106b6925c1adb2b17e4c6d9b0c41eb4cc55bcad3581345b0aa3176c85",
         },
       ],
     },

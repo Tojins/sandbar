@@ -244,6 +244,22 @@ an unattended pull has none of the operator's environment and a key list that
 came out empty there would strip every key off root. The key list stays
 exclusive: a key not remembered is removed.
 
+That file is the whole list of people with SSH access — root and every
+installation user — and a bootstrap that sets `SANDBAR_OPERATOR_SSH_KEY`
+REPLACES it. Against a box that already has it, leave the variable unset and
+the play uses the remembered list; or pass that list itself, one key per line:
+
+```sh
+SANDBAR_OPERATOR_SSH_KEY="$(ssh sandbar-box cat /etc/sandbar/operator-ssh-keys)" \
+  ansible-playbook -i inventory.yml site.yml
+```
+
+To give someone access, append their OpenSSH public key (a PuTTY
+`---- BEGIN SSH2 PUBLIC KEY ----` file converts with `ssh-keygen -i -f <file>`)
+as one line to that file on the box; the next pull, within five minutes,
+authorizes it everywhere. Remove the line to revoke. Like VPN devices, people
+are box state, never inventory data, because this directory is public.
+
 The account and directory passes cover every installation before the play
 reaches its expected missing-file refusal. Place secrets once per installation,
 as that installation's user:
