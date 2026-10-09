@@ -1429,6 +1429,60 @@ describe("run quota orchestration (#109)", () => {
       .toBeLessThan(seams.plan.mock.invocationCallOrder[0]!);
   });
 
+  it("retries a planning tracker read that never reached the forge", async () => {
+    const arrived = issue("136");
+    const stderr = "error connecting to api.github.com\n" +
+      "check your internet connection or https://githubstatus.com\n";
+    seams.plan
+      .mockRejectedValueOnce(Object.assign(
+        new Error(`Command failed: gh issue list\n${stderr}`),
+        { code: 1, stderr },
+      ))
+      .mockResolvedValue(resolution([arrived]));
+    vi.mocked(fetchOriginRefs).mockResolvedValue({
+      sourceChanged: false,
+      failures: [],
+    });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:4");
+
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(seams.plan.mock.invocationCallOrder[1])
+      .toBeLessThan(seams.innerLoop.mock.invocationCallOrder[0]!);
+    expect(eventsOf("notice")).toContainEqual({
+      kind: "notice",
+      message: "Tracker read failed; retrying in 1ms: " +
+        `Command failed: gh issue list\n${stderr}`,
+    });
+    expect(eventsOf("exit")).toEqual([expect.objectContaining({ tag: "quota" })]);
+  });
+
+  it("halts on a planning tracker read the forge answered", async () => {
+    const stderr = "HTTP 401: Bad credentials (https://api.github.com/graphql)\n";
+    seams.plan.mockRejectedValue(Object.assign(
+      new Error(`Command failed: gh issue list\n${stderr}`),
+      { code: 1, stderr },
+    ));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(seams.plan).toHaveBeenCalledOnce();
+    expect(eventsOf("notice").some((event) =>
+      String(event.message).startsWith("Tracker read failed"))).toBe(false);
+    expect(eventsOf("exit")).toEqual([expect.objectContaining({ tag: "halted" })]);
+  });
+
   // The drained daemon's only wake is that poll timer, so a fetch that stays
   // broken used to hold the deploy on a process that would never leave —
   // including when the commit waiting to run is the revert for that fetch

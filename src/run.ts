@@ -116,7 +116,9 @@
 // recorded as a feed-only notice and waits for the next wake instead of
 // killing the daemon, unless
 // `decideAfterFailedRefresh` says this daemon is a drained restart whose exit
-// reads no refs at all (#146); startup preflight remains fatal. A no-op poll is silent. A stable label-actor
+// reads no refs at all (#146); startup preflight remains fatal. A planning
+// `gh` read that never reached the forge (`isForgeTransportFailure`) takes the
+// same notice-and-retry path; a forge ANSWER still halts. A no-op poll is silent. A stable label-actor
 // exclusion is recorded on each poll because its required diagnostic
 // makes that recompute reportable. Source movement from either
 // a human push or this process latches an image-input refresh; the next
@@ -194,7 +196,11 @@ import {
   graphRootSpaceIsLow,
   podmanGraphRoot,
 } from "./disk-space.js";
-import { SandbarError, faultDetail } from "./errors.js";
+import {
+  SandbarError,
+  faultDetail,
+  isForgeTransportFailure,
+} from "./errors.js";
 import {
   runStampFromDate,
   startEventRecord,
@@ -1814,7 +1820,7 @@ export async function run(
   }
 
   const recoverFromRefRefreshFailure = async (
-    boundary: "Poll" | "Planning ref",
+    boundary: "Poll refresh" | "Planning ref refresh" | "Tracker read",
     failures: readonly string[],
   ): Promise<"exit" | "retry"> => {
     // Planning and landing cannot safely use a partially refreshed namespace.
@@ -1830,7 +1836,7 @@ export async function run(
       ? "the pending restart needs none of it, so exiting"
       : `retrying in ${config.pollIntervalMs}ms`;
     const message =
-      `${boundary} refresh failed; ${next}: ${failures.join("; ")}`;
+      `${boundary} failed; ${next}: ${failures.join("; ")}`;
     await runRecord.emit(stalled.kind === "exit"
       ? { kind: "complaint", severity: "warning", message }
       : { kind: "notice", message });
@@ -1847,6 +1853,22 @@ export async function run(
     }
     nextPlanTrigger = await waitForSchedulerWake();
     return "retry";
+  };
+
+  // A planning-time tracker read whose `gh` request never reached the forge is
+  // the same non-answer a failed ref refresh is, and takes the same recovery:
+  // the record gets a notice and the recompute is retried at the next wake.
+  // Only that transport class is caught; every forge ANSWER (an HTTP status, a
+  // GraphQL error) and every non-gh fault still halts the run as before.
+  const readTracker = async <T>(
+    read: () => Promise<T>,
+  ): Promise<{ readonly value: T } | { readonly failure: string }> => {
+    try {
+      return { value: await read() };
+    } catch (err) {
+      if (!isForgeTransportFailure(err)) throw err;
+      return { failure: err instanceof Error ? err.message : String(err) };
+    }
   };
 
   // -------------------------------------------------------------------------
@@ -1869,7 +1891,7 @@ export async function run(
       if (planTrigger === "poll") {
         const refresh = await fetchOriginRefs(layout.repoDir, config.sourceBranch);
         if (refresh.failures.length > 0) {
-          if (await recoverFromRefRefreshFailure("Poll", refresh.failures) === "exit") {
+          if (await recoverFromRefRefreshFailure("Poll refresh", refresh.failures) === "exit") {
             break;
           }
           continue;
@@ -1967,7 +1989,7 @@ export async function run(
       if (planningRefresh.failures.length > 0) {
         if (
           await recoverFromRefRefreshFailure(
-            "Planning ref",
+            "Planning ref refresh",
             planningRefresh.failures,
           ) === "exit"
         ) {
@@ -2014,35 +2036,49 @@ export async function run(
         sourceBranch: config.sourceBranch,
         ongoing: new Set([...pool.startedIds()].map(Number)),
       };
-      let resolution = await buildPlan(repo, planOptions);
-
-      // The chunk-review scan (#95). Every chunk with work on origin is asked
-      // whether a human has requested changes on its pull request, and each
-      // review that has not already been handled is routed to and re-queues
-      // the landed member(s) it concerns. Inert until a chunk's first landing:
-      // `landedChunks` is empty, and the scan makes no call at all.
-      //
-      // RE-PLANNED when it re-queues anything. The existing issues are handed
-      // back rather than re-listed: the listing `gh issue list` serves lags a
-      // label flip by seconds (#96), so it may not carry the re-queue this
-      // cycle made.
-      const followUps = await routeChunkReviewFollowUps({
-        chunks: resolution.landedChunks,
-        adapter: followUpAdapter,
-        log: (line) => runRecord.emit({ kind: "follow-up", action: "route", detail: line }).then(() => undefined),
+      // Every forge call the plan makes before the reconciler. A transport
+      // failure mid-scan leaves the follow-up scan exactly where a halt and
+      // restart would: its ledger is written last, so the retried recompute
+      // may repeat a completed prefix but never loses a review.
+      const planned = await readTracker(async () => {
+        let initial = await buildPlan(repo, planOptions);
+        // The chunk-review scan (#95). Every chunk with work on origin is asked
+        // whether a human has requested changes on its pull request, and each
+        // review that has not already been handled is routed to and re-queues
+        // the landed member(s) it concerns. Inert until a chunk's first landing:
+        // `landedChunks` is empty, and the scan makes no call at all.
+        //
+        // RE-PLANNED when it re-queues anything. The existing issues are handed
+        // back rather than re-listed: the listing `gh issue list` serves lags a
+        // label flip by seconds (#96), so it may not carry the re-queue this
+        // cycle made.
+        const followUps = await routeChunkReviewFollowUps({
+          chunks: initial.landedChunks,
+          adapter: followUpAdapter,
+          log: (line) => runRecord.emit({ kind: "follow-up", action: "route", detail: line }).then(() => undefined),
+        });
+        if (followUps.length > 0) {
+          const filed = followUps.map((f) => `#${f.number}`).join(", ");
+          await runRecord.emit({
+            kind: "follow-up",
+            action: "re-queued",
+            detail: `Re-queued ${followUps.length} chunk member(s): ${filed}`,
+          });
+          initial = await buildPlan(repo, {
+            ...planOptions,
+            extraCandidates: followUps,
+          });
+        }
+        return { resolution: initial, followUps };
       });
-      if (followUps.length > 0) {
-        const filed = followUps.map((f) => `#${f.number}`).join(", ");
-        await runRecord.emit({
-          kind: "follow-up",
-          action: "re-queued",
-          detail: `Re-queued ${followUps.length} chunk member(s): ${filed}`,
-        });
-        resolution = await buildPlan(repo, {
-          ...planOptions,
-          extraCandidates: followUps,
-        });
+      if ("failure" in planned) {
+        if (await recoverFromRefRefreshFailure("Tracker read", [planned.failure]) === "exit") {
+          break;
+        }
+        continue;
       }
+      const { followUps } = planned.value;
+      let resolution = planned.value.resolution;
 
       // ---------------------------------------------------------------------
       // Reconcile chunks that reached the source branch without us (#64)
@@ -2086,10 +2122,19 @@ export async function run(
         // without it would drop the work this cycle just queued.
         // `planOptions.excluded` is
         // `mergedThisRun` itself, so the numbers just added are already in it.
-        resolution = await buildPlan(repo, {
+        // The reconciliation is already recorded, so a failed re-plan retries
+        // from a recompute that finds those chunks gone.
+        const replanned = await readTracker(() => buildPlan(repo, {
           ...planOptions,
           extraCandidates: followUps,
-        });
+        }));
+        if ("failure" in replanned) {
+          if (await recoverFromRefRefreshFailure("Tracker read", [replanned.failure]) === "exit") {
+            break;
+          }
+          continue;
+        }
+        resolution = replanned.value;
       }
       // What the reconciler left behind, in the three shapes it comes in
       // (#64). Split rather than reported as one list, and each report counting

@@ -40,6 +40,34 @@ export function isExitStatus(err: unknown, status: number): boolean {
   return propertyEquals(err, "status", status);
 }
 
+// What `gh` writes to stderr when its request never got an HTTP answer: its
+// own "error connecting to <host>" for DNS/TCP/TLS failures, and the Go
+// transport errors it passes through when a connection dies mid-request. Any
+// HTTP status — 401, 404, a 5xx — is the forge answering and stays out.
+const FORGE_TRANSPORT_STDERR = [
+  /\berror connecting to \S/,
+  /\bconnection reset by peer\b/,
+  /\bi\/o timeout\b/,
+  /\bTLS handshake timeout\b/,
+];
+
+// True when a `gh` failure, or any error wrapping one as its `cause`, is a
+// request that never reached the forge — a non-answer about the tracker, as
+// opposed to the tracker saying no. Reads STDERR only: the message quotes the
+// argv, and a comment body that quotes this very error must not classify.
+export function isForgeTransportFailure(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e !== undefined && depth < 8; depth += 1) {
+    if (typeof e !== "object" || e === null) return false;
+    const stderr = (e as { stderr?: unknown }).stderr;
+    if (
+      typeof stderr === "string" &&
+      FORGE_TRANSPORT_STDERR.some((pattern) => pattern.test(stderr))
+    ) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 // How a fault is rendered for an operator, wherever sandbar prints one and
 // stops: run.ts's top-level handler, the bin's, and `runGateCommand`'s (#45).
 // An operator-actionable SandbarError prints as its message alone; anything
