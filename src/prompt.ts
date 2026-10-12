@@ -1,17 +1,15 @@
 // Prompt assembly for the inner-loop roles:
 // project anchor (shared verbatim by both agents), issue anchor
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
-// commit list + diff stat (progressive disclosure, #158), sandbox-stack report
-// #44, gate trace, typed reviewer feedback
-// (including an approved quality pass whose correctness pass was skipped), and
-// the same coding standards the reviewer applies plus a live
-// pre-promise diff checklist (#78); reviewer: diff stat + commits, split into a
-// self-sufficient quality pass (tests and standards) and the correctness pass
-// gated on it (#19, #121), plus every earlier successful review round (#88).
-// Both prompts are self-sufficient because neither pass resumes the other's
-// session — which is what lets the two sit on different vendors (#121).
-// After its first whole-branch quality listing, that history also anchors a
-// strict review of only the lines no quality pass has seen yet (#107).
+// commit list + diff stat (progressive disclosure, #158), the quality fixer's
+// commits since the last attempt (#185), sandbox-stack report #44, gate trace,
+// the latest correctness rejection, and the same coding standards the fixer
+// applies plus a live pre-promise diff checklist (#78); quality fixer: diff
+// stat + commits and, after its first pass, a stat of what changed since the
+// head it last left (#185); correctness reviewer: diff stat + commits plus
+// every earlier correctness round (#88). Every prompt is self-sufficient
+// because no role resumes another's session — which is what lets the fixer
+// and the reviewer sit on different vendors (#121).
 // The adjudicator (#167) gets the shared anchors plus one rejected report and
 // its immutable head, deliberately without prior-round history or implementer
 // speech so it must re-establish every blocking claim from the code.
@@ -49,7 +47,6 @@ import { promisify } from "node:util";
 import { SandbarError, isErrno, isExitCode } from "./errors.js";
 import type { PromptExtension } from "./config.js";
 import type { IssueBranchBase } from "./git-ops.js";
-import type { ReviewerFeedback } from "./inner-loop-machine.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
@@ -63,8 +60,6 @@ const exec = promisify(execFile);
 const CODING_STANDARDS = loadTemplate("coding-standards");
 const REVIEWER_TPL = loadTemplate("reviewer");
 const REVIEWER_QUALITY_TPL = loadTemplate("reviewer-quality");
-const REVIEWER_QUALITY_LISTING_TPL = loadTemplate("reviewer-quality-listing");
-const REVIEWER_QUALITY_VERIFY_TPL = loadTemplate("reviewer-quality-verify");
 const REVIEWER_PRIOR_ROUNDS_TPL = loadTemplate("reviewer-prior-rounds");
 const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
 const IMPLEMENTER_TPL = loadTemplate("implementer");
@@ -72,7 +67,7 @@ const UI_CHECK_TPL = loadTemplate("ui-check");
 const PARTITION_CHECK_TPL = loadTemplate("partition-check");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
-const IMPLEMENTER_APPROVED_QUALITY_TPL = loadTemplate("implementer-approved-quality");
+const IMPLEMENTER_QUALITY_COMMITS_TPL = loadTemplate("implementer-quality-commits");
 const IMPLEMENTER_ESCALATION_TPL = loadTemplate("implementer-escalation");
 const IMPLEMENTER_SANDBOX_STACK_TPL = loadTemplate("implementer-sandbox-stack");
 const IMPLEMENTER_SANDBOX_GATE_ACCESS_ISOLATED_TPL = loadTemplate(
@@ -202,7 +197,12 @@ export type PromptInputs = {
   // Project history still comes from `ProjectAnchorOptions.sourceBranch`.
   readonly base: IssueBranchBase;
   readonly extraReprompt?: string;
-  readonly latestReviewerFeedback?: ReviewerFeedback;
+  // The latest correctness rejection, as the state machine retains it.
+  readonly latestReviewerFeedback?: string;
+  // Commits the quality fixer made since this implementer's previous attempt,
+  // oldest first, from the host's own collected range (#185) — never parsed
+  // back out of commit authors.
+  readonly qualityCommits?: readonly string[];
   // Host addition to this role's prompt. A path is probed in `worktreePath`,
   // because a branch may add the file it asks the implementer to follow.
   readonly promptExtension?: PromptExtension;
@@ -245,48 +245,35 @@ export type ReviewerPromptInputs = {
   // What the branch was seeded from, and what the commit list and diff below
   // are measured against (#61). Same value the implementer was given.
   readonly base: IssueBranchBase;
-  // Independent additions for the correctness and quality reviewer roles.
-  readonly reviewerPromptExtension?: PromptExtension;
-  readonly reviewerQualityPromptExtension?: PromptExtension;
+  // This role's host addition (`promptExtensions.reviewer` for correctness,
+  // `promptExtensions.reviewerQuality` for the fixer).
+  readonly promptExtension?: PromptExtension;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
-  // Successful reviews earlier in this sandbox cycle (#88). A harness failure
-  // adds no entry and consumes no round, so a retry reuses its number and the
-  // history remains contiguous. The runner owns this history: it is prompt
-  // material, not state-machine input.
+};
+
+export type CorrectnessPromptInputs = ReviewerPromptInputs & {
+  // Earlier correctness verdicts in this sandbox cycle (#88). A harness
+  // failure adds no entry and consumes no round, so a retry reuses its number
+  // and the history remains contiguous. The runner owns this history: it is
+  // prompt material, not state-machine input.
   readonly priorRounds: readonly PriorReviewRound[];
 };
 
+export type QualityPromptInputs = ReviewerPromptInputs & {
+  // The head the fixer's previous pass in this sandbox cycle left, or null on
+  // its first pass (#185). A later pass still gets the whole branch stat, plus
+  // what changed since this head as its focus.
+  readonly lastQualityHead: string | null;
+};
+
+// An adjudicator OVERRULED ends the issue (#167, #185), so every recorded
+// round still stands as the reviewer gave it.
 export type PriorReviewRound = {
   readonly round: number;
   readonly head: string;
-  // In execution order (#121): quality gates the round, so every recorded round
-  // carries its verdict and only a round quality approved carries correctness.
-  readonly quality: PriorReviewPass;
-  readonly correctness?: PriorReviewPass;
+  readonly correctness: ParsedVerdict;
 };
-
-export type PriorReviewPass =
-  | ParsedVerdict
-  | { readonly verdict: "OVERRULED"; readonly prose: ""; readonly specGap: null };
-
-export type QualityReviewContext =
-  | { readonly mode: "list"; readonly anchor: null }
-  | { readonly mode: "verify"; readonly anchor: string };
-
-// A quality review is represented by its verdict line in #88's history, and the
-// newest such entry gives both first-ness and the exact last head this pass
-// reviewed without adding runner state (#107). Since #121 the quality pass runs
-// first, so a round that produced no quality verdict produced no record at all
-// (`priorReviewRound`) and the newest entry IS the newest quality review — the
-// derivation is unchanged, the scan for it is simply the last element. A round
-// whose quality pass REJECTED still anchors: it listed the whole branch.
-export function qualityReviewContext(
-  priorRounds: readonly PriorReviewRound[],
-): QualityReviewContext {
-  const newest = priorRounds.at(-1);
-  return newest ? { mode: "verify", anchor: newest.head } : { mode: "list", anchor: null };
-}
 
 export async function buildPrompt(
   inputs: PromptInputs,
@@ -362,15 +349,12 @@ export async function branchIsAheadOfSeed(
   )).trim() !== "0";
 }
 
-// Both passes review one immutable, gate-green branch snapshot. Build every
-// shared layer and git range once so the second pass cannot gain a second
-// issue fetch failure point or observe a different prompt surface — and build
-// both even when only the first will run, because the cost is one git read
-// and the alternative is two divergent renderings of the same snapshot.
-export async function buildReviewerPrompts(
+// The shared project and issue anchors of a cold branch-reading role, with
+// the doc probes derived from the worktree that role reads (#34).
+async function buildBranchRoleAnchors(
   inputs: ReviewerPromptInputs,
-): Promise<Readonly<Record<"quality" | "correctness", string>>> {
-  const [projectAnchor, issueAnchor, slotInputs] = await Promise.all([
+): Promise<readonly [string, string]> {
+  return await Promise.all([
     buildProjectAnchor(
       {
         repo: inputs.repo,
@@ -382,33 +366,60 @@ export async function buildReviewerPrompts(
       inputs.worktreePath,
     ),
     buildIssueAnchor(inputs.issue.id, inputs.repo),
-    buildReviewerSlotInputs(inputs),
   ]);
-  const assemble = (slot: string): string =>
-    [projectAnchor, issueAnchor, slot].join("\n\n---\n\n");
-  return {
-    quality: assemble(renderReviewerQualitySlot({
-      ...slotInputs,
-      promptExtension: resolvePromptExtension(
-        inputs.worktreePath,
-        inputs.reviewerQualityPromptExtension,
-      ),
-    })),
-    correctness: assemble(renderReviewerSlot({
-      ...slotInputs,
-      promptExtension: resolvePromptExtension(
-        inputs.worktreePath,
-        inputs.reviewerPromptExtension,
-      ),
-    })),
-  };
 }
 
-export type AdjudicatorPromptInputs = Omit<
-  ReviewerPromptInputs,
-  "reviewerPromptExtension" | "reviewerQualityPromptExtension" | "priorRounds"
-> & {
-  readonly pass: "quality" | "correctness";
+// The correctness pass reviews one immutable, gate-green branch snapshot: the
+// head the quality fixer left (#185).
+export async function buildCorrectnessPrompt(
+  inputs: CorrectnessPromptInputs,
+): Promise<string> {
+  const [[projectAnchor, issueAnchor], picture] = await Promise.all([
+    buildBranchRoleAnchors(inputs),
+    readBranchPicture(inputs, "a correctness reviewer"),
+  ]);
+  return [
+    projectAnchor,
+    issueAnchor,
+    renderReviewerSlot({
+      ...inputs,
+      ...picture,
+      promptExtension: resolvePromptExtension(inputs.worktreePath, inputs.promptExtension),
+    }),
+  ].join("\n\n---\n\n");
+}
+
+// The quality fixer's prompt (#185). Its first pass in a sandbox cycle walks
+// the whole seed-anchored stat; a later pass gets the same stat plus what
+// changed since the head its previous pass left, as focus.
+export async function buildQualityPrompt(
+  inputs: QualityPromptInputs,
+): Promise<string> {
+  const [[projectAnchor, issueAnchor], picture, changedSinceStat] = await Promise.all([
+    buildBranchRoleAnchors(inputs),
+    readBranchPicture(inputs, "the quality fixer"),
+    inputs.lastQualityHead === null
+      ? Promise.resolve(null)
+      : readGit(
+          ["diff", FULL_PATH_DIFF_STAT, `${inputs.lastQualityHead}..HEAD`],
+          inputs.worktreePath,
+          `the diff stat since the last quality pass for ${inputs.issue.branch}, ` +
+            `anchored at ${inputs.lastQualityHead}`,
+        ).then((stat) => stat.trim()),
+  ]);
+  return [
+    projectAnchor,
+    issueAnchor,
+    renderQualitySlot({
+      ...inputs,
+      ...picture,
+      changedSinceStat,
+      promptExtension: resolvePromptExtension(inputs.worktreePath, inputs.promptExtension),
+    }),
+  ].join("\n\n---\n\n");
+}
+
+export type AdjudicatorPromptInputs = Omit<ReviewerPromptInputs, "promptExtension"> & {
   readonly head: string;
   readonly report: string;
 };
@@ -419,24 +430,11 @@ export type AdjudicatorPromptInputs = Omit<
 export async function buildAdjudicatorPrompt(
   inputs: AdjudicatorPromptInputs,
 ): Promise<string> {
-  const [projectAnchor, issueAnchor] = await Promise.all([
-    buildProjectAnchor(
-      {
-        repo: inputs.repo,
-        repoDir: inputs.repoDir,
-        claudeMdPath: inputs.claudeMdPath,
-        contextMdPath: inputs.contextMdPath,
-        sourceBranch: inputs.sourceBranch,
-      },
-      inputs.worktreePath,
-    ),
-    buildIssueAnchor(inputs.issue.id, inputs.repo),
-  ]);
+  const [projectAnchor, issueAnchor] = await buildBranchRoleAnchors(inputs);
   return [
     projectAnchor,
     issueAnchor,
     render(ADJUDICATOR_TPL, {
-      pass: inputs.pass,
       head: inputs.head,
       branch: inputs.issue.branch,
       baseRef: inputs.base.ref,
@@ -526,7 +524,8 @@ async function buildAttemptSlot(
   // Empty is a legitimate answer HERE and only here: attempt 1 has no commits.
   // Which is exactly why the read must not be able to fail quietly — the one
   // slot whose emptiness is unremarkable is the one that hid #40.
-  const [commits, stat] = await Promise.all([
+  const qualityCommits = inputs.qualityCommits ?? [];
+  const [commits, stat, qualityCommitLog] = await Promise.all([
     readGit(
       ["log", "--reverse", "--oneline", `${base.ref}..HEAD`],
       worktreePath,
@@ -537,6 +536,13 @@ async function buildAttemptSlot(
       worktreePath,
       `the branch diff stat for ${inputs.issue.branch}, anchored at ${base.ref}`,
     ),
+    qualityCommits.length === 0
+      ? Promise.resolve("")
+      : readGit(
+          ["log", "--no-walk=unsorted", "--oneline", ...qualityCommits],
+          worktreePath,
+          `the quality pass's commits on ${inputs.issue.branch}`,
+        ),
   ]);
 
   const promptExtension = resolvePromptExtension(
@@ -551,17 +557,21 @@ async function buildAttemptSlot(
     ...(anchor.contextMdPath ? { contextMdPath: anchor.contextMdPath } : {}),
     commits: commits.trim(),
     stat: stat.trim(),
+    qualityCommitLog: qualityCommitLog.trim(),
   });
 }
 
 // Pure renderer for the implementer slot, separated from the git I/O above so
 // the prompt's shape is table-testable. Optional sections collapse to "" when
 // their input is absent; `section()` supplies the trailing blank line.
-export type AttemptSlotRender = PromptInputs & {
+export type AttemptSlotRender = Omit<PromptInputs, "qualityCommits"> & {
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly commits: string;
   readonly stat: string;
+  // `git log --oneline` of `PromptInputs.qualityCommits`; "" when the quality
+  // fixer committed nothing since the previous attempt.
+  readonly qualityCommitLog: string;
 };
 
 export function renderAttemptSlot(inputs: AttemptSlotRender): string {
@@ -574,6 +584,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     latestReviewerFeedback,
     commits,
     stat,
+    qualityCommitLog,
   } = inputs;
 
   const workDone = commits
@@ -597,13 +608,12 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     ? render(IMPLEMENTER_GATE_FAILURE_TPL, { trace: lastFailureTrace })
     : "";
 
+  const qualityCommitsSection = qualityCommitLog
+    ? render(IMPLEMENTER_QUALITY_COMMITS_TPL, { commits: qualityCommitLog })
+    : "";
+
   const reviewerFeedback = latestReviewerFeedback
-    ? render(
-        latestReviewerFeedback.disposition === "CHANGES-REQUESTED"
-          ? IMPLEMENTER_REVIEWER_FEEDBACK_TPL
-          : IMPLEMENTER_APPROVED_QUALITY_TPL,
-        { prose: latestReviewerFeedback.prose },
-      )
+    ? render(IMPLEMENTER_REVIEWER_FEEDBACK_TPL, { prose: latestReviewerFeedback })
     : "";
 
   const sandboxStack = renderSandboxStackSlot(
@@ -629,6 +639,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     branch: issue.branch,
     chunkBase: section(chunkBase),
     workDone: section(workDone),
+    qualityCommits: section(qualityCommitsSection),
     sandboxStack: section(sandboxStack),
     gateFailure: section(gateFailure),
     reviewerFeedback: section(reviewerFeedback),
@@ -692,9 +703,11 @@ export function renderSandboxStackSlot(
   });
 }
 
-async function buildReviewerSlotInputs(
+// The commit list and diff stat every branch-reading role is handed (#158).
+async function readBranchPicture(
   inputs: ReviewerPromptInputs,
-): Promise<ReviewerSlotRender> {
+  role: string,
+): Promise<{ readonly commits: string; readonly stat: string }> {
   const { worktreePath } = inputs;
   const base = inputs.base.ref;
 
@@ -706,22 +719,22 @@ async function buildReviewerSlotInputs(
     )
   ).trim();
 
-  // An empty changeset is never a legitimate reviewer prompt (#40). A reviewer
-  // is reached only through a COMPLETE that `parsePromise` did not downgrade —
-  // which requires accumulated commits — followed by a green gate-1 over a
-  // clean tree whose HEAD is still `refs/heads/<branch>`. So an empty list is
-  // not "nothing to review"; it is this module and the inner loop disagreeing
-  // about what the branch holds, and the only thing a reviewer can do with it
-  // is return a verdict uninformed by any code. Refusing is what catches the
-  // next wrong base ref even if it is wrong for a reason `origin/` does not
-  // cover — the check that would have caught #40 on cycle 1 rather than after
-  // 25 minutes of agent time spent reviewing nothing.
+  // An empty changeset is never a legitimate prompt for these roles (#40).
+  // Both are reached only through a COMPLETE that `parsePromise` did not
+  // downgrade — which requires accumulated commits — over a clean tree whose
+  // HEAD is still `refs/heads/<branch>`. So an empty list is not "nothing to
+  // review"; it is this module and the inner loop disagreeing about what the
+  // branch holds, and the only thing an agent can do with it is act uninformed
+  // by any code. Refusing is what catches the next wrong base ref even if it
+  // is wrong for a reason `origin/` does not cover — the check that would have
+  // caught #40 on cycle 1 rather than after 25 minutes of agent time spent
+  // reviewing nothing.
   if (commits === "") {
     throw new SandbarError(
-      `refusing to launch a reviewer for issue #${inputs.issue.id}: ` +
-        `\`${base}..HEAD\` is empty in ${worktreePath}, but a reviewer only runs on ` +
-        `committed work that has already passed gate-1. The branch's commits and the ` +
-        `range used to render them disagree.`,
+      `refusing to launch ${role} for issue #${inputs.issue.id}: ` +
+        `\`${base}..HEAD\` is empty in ${worktreePath}, but it only runs on ` +
+        `committed work the implementer reported COMPLETE. The branch's commits and ` +
+        `the range used to render them disagree.`,
     );
   }
 
@@ -733,92 +746,76 @@ async function buildReviewerSlotInputs(
     )
   ).trim();
 
-  // The quality pass's mode and anchor are one fact read off #88's history
-  // (#107), derived again by the renderer; only the diff payload needs git.
-  const quality = qualityReviewContext(inputs.priorRounds);
-  const changedSinceStat = quality.mode === "verify"
-    ? (
-        await readGit(
-          ["diff", FULL_PATH_DIFF_STAT, `${quality.anchor}..HEAD`],
-          worktreePath,
-          `the diff stat since the last quality review for ${inputs.issue.branch}, anchored at ${quality.anchor}`,
-        )
-      ).trim()
-    : undefined;
-
-  return { ...inputs, commits, stat, changedSinceStat };
+  return { commits, stat };
 }
 
-// Pure renderer for the reviewer slot. Extracted so tests can pin the prompt's
-// shape without mocking git. Each invocation stays cold across rounds, while
-// the runner supplies the earlier rounds' decisions as explicit prompt data
-// (#88); this preserves fresh investigation without reviewer amnesia.
-export type ReviewerSlotRender = Omit<
-  ReviewerPromptInputs,
-  "reviewerPromptExtension" | "reviewerQualityPromptExtension"
-> & {
-  readonly promptExtension?: PromptExtension;
+// Pure renderers for the two branch-reading slots. Extracted so tests can pin
+// each prompt's shape without mocking git. Each invocation stays cold across
+// rounds; the correctness reviewer is handed its earlier rounds' decisions as
+// explicit prompt data (#88), which preserves fresh investigation without
+// reviewer amnesia.
+type BranchSlotRender = Omit<ReviewerPromptInputs, "repo" | "repoDir" | "worktreePath"> & {
   readonly commits: string;
   readonly stat: string;
-  // `git diff --stat <anchor>..HEAD`, required exactly when `priorRounds` puts the
-  // quality pass in verify mode (#107). Not a source of the mode: the renderer
-  // reads that off `priorRounds`, and a verify render without this field is
-  // refused rather than shown as "no changes" (#40).
-  readonly changedSinceStat?: string;
+};
+
+export type ReviewerSlotRender = BranchSlotRender & {
+  readonly priorRounds: readonly PriorReviewRound[];
+};
+
+export type QualitySlotRender = BranchSlotRender & {
+  readonly lastQualityHead: string | null;
+  // `git diff --stat <lastQualityHead>..HEAD`; null exactly when
+  // `lastQualityHead` is. "" means git said nothing changed, never that
+  // nothing was read (#40).
+  readonly changedSinceStat: string | null;
 };
 
 export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
-  return renderReviewerTemplate(REVIEWER_TPL, inputs);
+  const priorRounds = inputs.priorRounds.length === 0
+    ? ""
+    : render(REVIEWER_PRIOR_ROUNDS_TPL, {
+        rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
+      });
+  return render(REVIEWER_TPL, {
+    ...branchSlotVars(inputs),
+    priorRounds: section(priorRounds),
+  });
 }
 
-export function renderReviewerQualitySlot(inputs: ReviewerSlotRender): string {
-  return renderReviewerTemplate(REVIEWER_QUALITY_TPL, inputs);
-}
-
-// The two #107 slots of the quality template. Listing mode until an entry
-// in #88's history carries a quality verdict; verify mode anchored at the
-// newest one that does, with the changed files as a navigation stat for the
-// line-restricted diff. The stat payload is the one thing the async builder
-// alone can supply, so its
-// absence in verify mode is a caller error and throws — an empty stat means
-// git said nothing changed, never that nothing was read.
-function renderQualitySlots(
-  inputs: ReviewerSlotRender,
-): { readonly qualityMode: string; readonly changedSinceStat: string } {
-  const quality = qualityReviewContext(inputs.priorRounds);
-  if (quality.mode === "list") {
-    return {
-      qualityMode: section(REVIEWER_QUALITY_LISTING_TPL),
-      changedSinceStat: "",
-    };
-  }
-  if (inputs.changedSinceStat === undefined) {
+// The first pass in a sandbox cycle owns the whole branch; a later one is told
+// what changed since the head the previous pass left and may still touch
+// anything (#185).
+export function renderQualitySlot(inputs: QualitySlotRender): string {
+  if ((inputs.lastQualityHead === null) !== (inputs.changedSinceStat === null)) {
     throw new Error(
-      `reviewer quality prompt: verify mode anchored at ${quality.anchor} ` +
-        "was rendered without its changed-since diff stat",
+      "quality prompt: the changed-since stat must be supplied exactly when " +
+        "an earlier quality pass left a head",
     );
   }
-  const body = inputs.changedSinceStat
-    ? `\`\`\`\n${inputs.changedSinceStat}\n\`\`\``
-    : `(empty — no changes since \`${quality.anchor}\`)`;
-  return {
-    qualityMode: section(REVIEWER_QUALITY_VERIFY_TPL),
-    changedSinceStat: section(
-      `## Changed since the last quality review\n\n${body}\n\n` +
-        `Inspect these changes with \`git diff ${quality.anchor}..HEAD\`.`,
-    ),
-  };
+  const scope = inputs.lastQualityHead === null
+    ? "This is the first quality pass over this branch. Walk every changed " +
+      "file named by the branch diff stat, reading its hunks with the " +
+      "full-diff command above and opening the surrounding code."
+    : `## Changed since your last pass\n\n` +
+      (inputs.changedSinceStat
+        ? `\`\`\`\n${inputs.changedSinceStat}\n\`\`\``
+        : `(empty — no changes since \`${inputs.lastQualityHead}\`)`) +
+      `\n\nAn earlier quality pass left this branch at \`${inputs.lastQualityHead}\`. ` +
+      `Focus on what changed since, read with \`git diff ${inputs.lastQualityHead}..HEAD\`; ` +
+      "you may still fix anything on the branch.";
+  return render(REVIEWER_QUALITY_TPL, {
+    ...branchSlotVars(inputs),
+    scope: section(scope),
+  });
 }
 
-function renderReviewerTemplate(
-  template: string,
-  inputs: ReviewerSlotRender,
-): string {
+function branchSlotVars(inputs: BranchSlotRender): Record<string, string> {
   const { issue, base, sourceBranch, promptExtension, claudeMdPath, contextMdPath, commits, stat } =
     inputs;
 
   // Same slot as the implementer's, aimed at the other half of the mistake: an
-  // uninformed reviewer would go looking for the chunk's earlier work in this
+  // uninformed reader would go looking for the chunk's earlier work in this
   // diff and report it missing.
   const chunkBase = base.chunkBranch
     ? render(REVIEWER_CHUNK_BASE_TPL, {
@@ -832,20 +829,14 @@ function renderReviewerTemplate(
     : "";
 
   // Named ref, not "the source branch" (#61): for a chunk member that is the
-  // chunk tip, and calling it the source branch would tell the reviewer its
+  // chunk tip, and calling it the source branch would tell the reader its
   // emptiness was measured against a tree the branch was never cut from.
   const diffStatBlock = stat
     ? `## Branch diff stat\n\n\`\`\`\n${stat}\n\`\`\`\n\n` +
       `Read the full patch with \`git diff ${base.ref}...HEAD\` and inspect files in the worktree.`
     : `## Branch diff stat\n\n(empty — no changes against \`${base.ref}\`)`;
 
-  const priorRounds = inputs.priorRounds.length === 0
-    ? ""
-    : render(REVIEWER_PRIOR_ROUNDS_TPL, {
-        rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
-      });
-
-  return render(template, {
+  return {
     branch: issue.branch,
     baseRef: base.ref,
     sourceBranch,
@@ -854,34 +845,16 @@ function renderReviewerTemplate(
     issueTitle: issue.title,
     commits: section(commitsBlock),
     diffStat: section(diffStatBlock),
-    priorRounds: section(priorRounds),
-    // Only the quality template has these two slots. Supplying them to the
-    // correctness template too would let a future `{{qualityMode}}` in
-    // `reviewer.md` render silently; withholding them makes `render` throw
-    // instead, which keeps the correctness pass strict over the whole branch
-    // every round it runs (#107, #121).
-    ...(template === REVIEWER_QUALITY_TPL ? renderQualitySlots(inputs) : {}),
     codingStandards: CODING_STANDARDS,
     projectStandards: promptExtensionSlot(promptExtension),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
-  });
-}
-
-function reviewFindings(pass: PriorReviewPass): string {
-  return stripVerdictTokens(pass.prose).trim();
-}
-
-function renderPriorReviewPass(name: "quality" | "correctness", pass: PriorReviewPass): string {
-  const findings = reviewFindings(pass);
-  return `${name}: ${pass.verdict}${findings ? `\n${findings}` : ""}`;
+  };
 }
 
 function renderPriorReviewRound(round: PriorReviewRound): string {
-  return [
-    `### Round ${round.round} — head=${round.head}`,
-    renderPriorReviewPass("quality", round.quality),
-    ...(round.correctness ? [renderPriorReviewPass("correctness", round.correctness)] : []),
-  ].join("\n");
+  const findings = stripVerdictTokens(round.correctness.prose).trim();
+  return `### Round ${round.round} — head=${round.head}\n` +
+    `correctness: ${round.correctness.verdict}${findings ? `\n${findings}` : ""}`;
 }
 
 // One spelling shared by both roles: the conventions are the same documents,

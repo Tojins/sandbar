@@ -1,5 +1,5 @@
-// Reviewer policy (#19, #41, #121) — what counts as a review, how the two
-// sequential passes compose into one round, and what to do when nothing does.
+// Reviewer policy (#19, #41, #121, #185) — what counts as a review, and what to
+// do when nothing does.
 //
 // A reviewer INVOCATION yields a verdict or it yields nothing, and this module
 // is the only place that decides which:
@@ -14,41 +14,18 @@
 // Repository mutation aborts the invocation loop as a typed value, so no
 // second reviewer runs against state the first reviewer altered (#98).
 //
-// A review ROUND first applies that policy to QUALITY — tests and standards.
-// A quality rejection finishes the round immediately; an approval asks the
-// runner to wait for gate-1 and run CORRECTNESS only when it is green (#143),
-// and the second outcome completes the AND. This
-// module returns the one event the state machine understands, including which
-// pass rejected so the machine can charge that pass's budget (#129), while
-// keeping pass order and aggregation out of the I/O runner.
-//
-// Quality protects the EXPENSIVE correctness pass (#121). Gate-1 runs beside
-// quality (#123); a red result keeps that paid-for verdict and history but ends
-// the round with correctness explicitly skipped (#143). #19
-// ran correctness first so a
-// correctness rejection would skip the checklist's cost; measured, correctness
-// approved 11 of 11 judged rounds after #107 while costing two thirds of all
-// reviewer minutes, and 7 of those approvals were discarded by the second pass
-// in the same round. The pass that rejects is the one that should run first.
-//
-// Both passes are COLD. #19's resume (follow-up invocation 1 continuing the
-// correctness session) pointed at a pass that has not run once the order
-// flipped, so it is gone — which is also what lets the two passes sit on
-// different vendors (#121 §2), since a session cannot cross vendor CLIs.
-//
-// Neither pass's prose is labelled here: both prompts name their own dimension
-// headings (`### Correctness`/`### Spec`, `### Tests`/`### Standards`), which
-// they must, because each pass now carries more than one dimension. Quality may
-// additionally emit `### Correctness` — #19's escalation permission for a
-// defect it happens to notice — so the headings are not a partition and nothing
-// downstream parses them.
+// Only the correctness pass reviews (#185). The quality pass became a fixer
+// that commits and emits no verdict, so there is no round to compose: the one
+// cold correctness outcome maps directly to the state machine's event. It runs
+// only on a green gate-1 at the head the fixer left, and stays COLD — nothing
+// resumes a session — which is what lets it sit on a different vendor from the
+// fixer (#121 §2).
 //
 // The correctness pass may also declare one `<spec-gap>` block (#108).
-// `parseVerdict` keeps it on the parsed correctness verdict; composition does
-// not place it on the state-machine event because it is evidence, not a
-// decision input. The I/O runner reads it directly from the completed
-// correctness outcome and accumulates it beside prior-round history. A block
-// emitted by quality is therefore structurally ignored.
+// `parseVerdict` keeps it on the parsed verdict; the mapping does not place it
+// on the state-machine event because it is evidence, not a decision input. The
+// I/O runner reads it directly from the completed outcome and accumulates it
+// beside prior-round history.
 
 import type { ReviewerResult } from "./inner-loop-machine.js";
 import { type ParsedVerdict, parseVerdict } from "./verdict-parser.js";
@@ -106,93 +83,23 @@ export type CompletedReviewerOutcome = Exclude<
   { readonly kind: "aborted" }
 >;
 
-// In execution order (#121).
-export type ReviewerPass = "quality" | "correctness";
-
-export type ReviewRoundDecision =
-  | { readonly kind: "run-correctness" }
-  | {
-      readonly kind: "finished";
-      readonly event: Extract<
-        ReviewerResult,
-        { kind: "reviewer-result" | "reviewer-harness-failed" }
-      >;
-      readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED";
-      readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
-    };
-
-export type FinishedReviewRoundDecision = Extract<
-  ReviewRoundDecision,
-  { readonly kind: "finished" }
->;
-
-export function decideReviewRound(quality: CompletedReviewerOutcome): ReviewRoundDecision;
-export function decideReviewRound(
-  quality: CompletedReviewerOutcome,
-  correctness: CompletedReviewerOutcome,
-): FinishedReviewRoundDecision;
-export function decideReviewRound(
-  quality: CompletedReviewerOutcome,
-  correctness?: CompletedReviewerOutcome,
-): ReviewRoundDecision {
-  if (quality.kind === "harness-failed") {
+// The state machine's event for one completed correctness outcome. The detail
+// keeps its `correctness:` prefix so the human handoff names the pass even
+// though it is the only one that reviews.
+export function reviewerResult(outcome: CompletedReviewerOutcome): Extract<
+  ReviewerResult,
+  { kind: "reviewer-result" | "reviewer-harness-failed" }
+> {
+  if (outcome.kind === "harness-failed") {
     return {
-      kind: "finished",
-      event: {
-        kind: "reviewer-harness-failed",
-        pass: "quality",
-        detail: `quality: ${quality.detail}`,
-      },
-      quality: "HARNESS-FAILED",
-      correctness: "SKIPPED",
+      kind: "reviewer-harness-failed",
+      detail: `correctness: ${outcome.detail}`,
     };
   }
-  const qualityVerdict = quality.verdict;
-  if (qualityVerdict.verdict === "CHANGES-REQUESTED") {
-    return {
-      kind: "finished",
-      event: {
-        kind: "reviewer-result",
-        verdict: "CHANGES-REQUESTED",
-        rejectingPass: "quality",
-        prose: qualityVerdict.prose,
-      },
-      quality: "CHANGES-REQUESTED",
-      correctness: "SKIPPED",
-    };
-  }
-  if (correctness === undefined) return { kind: "run-correctness" };
-  if (correctness.kind === "harness-failed") {
-    return {
-      kind: "finished",
-      event: {
-        kind: "reviewer-harness-failed",
-        pass: "correctness",
-        detail: `correctness: ${correctness.detail}`,
-      },
-      quality: "APPROVED",
-      correctness: "HARNESS-FAILED",
-    };
-  }
-  const correctnessVerdict = correctness.verdict;
-  const event: Extract<ReviewerResult, { kind: "reviewer-result" }> =
-    correctnessVerdict.verdict === "CHANGES-REQUESTED"
-      ? {
-          kind: "reviewer-result",
-          verdict: "CHANGES-REQUESTED",
-          rejectingPass: "correctness",
-          prose: correctnessVerdict.prose,
-        }
-      : {
-          kind: "reviewer-result",
-          verdict: "APPROVED",
-          prose: correctnessVerdict.prose,
-        };
   return {
-    kind: "finished",
-    event,
-    quality: "APPROVED",
-    correctness: correctnessVerdict.verdict,
+    kind: "reviewer-result",
+    verdict: outcome.verdict.verdict,
+    prose: outcome.verdict.prose,
   };
 }
 

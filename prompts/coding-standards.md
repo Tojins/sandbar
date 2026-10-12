@@ -1,16 +1,17 @@
 ## Coding standards
 
-Gate-1 is green: every step this project defines as its gate passed on this
-branch, over a clean worktree. What those steps cover is the project's choice —
+Gate-1 runs every step this project defines as its gate against the branch,
+over a clean worktree. What those steps cover is the project's choice —
 usually a build and a test suite, but do not assume any particular one ran.
-Review for what the gate can't see: structural health. Be ambitious about
-simplification — prefer deleting a branch, helper, or layer over polishing it.
+These standards cover what the gate can't see: structural health. Be ambitious
+about simplification — prefer deleting a branch, helper, or layer over
+polishing it.
 
-### Block on these (each is a CHANGES-REQUESTED reason)
+### Violations (each one must be fixed before the branch ships)
 
 1. **Complexity that doesn't pay for itself.** A change that shuffles
    complexity around without reducing it, or leaves an obviously simpler form
-   on the table. Only block when you can name that simpler form concretely.
+   on the table. It counts only when you can name that simpler form concretely.
 2. **Spaghetti control flow.** Ad-hoc conditionals bolted onto existing flows;
    the same special case re-checked in several unrelated places instead of one
    dedicated abstraction.
@@ -30,11 +31,11 @@ simplification — prefer deleting a branch, helper, or layer over polishing it.
 6. **Non-atomic orchestration.** Multi-step state updates that can leave
    partial state on failure; independent async work serialized for no reason.
 
-### Do not block on
+### Not violations
 
 - Pure taste or naming you can't tie to a rule above.
 - "Could be nicer" with no concrete simpler form in hand.
 - Choices the issue or project conventions already settled.
 
-The standards — not your preferences — decide what ships. If you cannot name a
-concrete violation, APPROVE.
+The standards — not anyone's preferences — decide what ships. Where you cannot
+name a concrete violation, there is nothing to change.

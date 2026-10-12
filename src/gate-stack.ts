@@ -2100,7 +2100,7 @@ async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
 // environment, and nothing distinguishes them — so what matters is which way it
 // fails: a wrong HARD-ERROR costs two stack rebuilds and a misleading terminal,
 // while a wrong red asks an implementer to fix a service it never touched and
-// burns the consecutive quality budget against it, which is the failure this
+// burns the consecutive gate budget against it, which is the failure this
 // exists to close.
 async function assertIssueContainerHealthy(
   c: ResolvedStackContainer,

@@ -39,16 +39,15 @@
 //                              rebuilt after either, so a member re-queued now
 //                              is carried into this recompute and one closed now
 //                              stops blocking its dependents.
-//   Execution pool:           Each issue runs in its own sandbox under three
+//   Execution pool:           Each issue runs in its own sandbox under two
 //                              independent consecutive-failure budgets
-//                              (#129/#143). maxQualityRounds covers quality
-//                              rejection and pre-gate re-prompts, then resets
-//                              when quality approval reaches a completed
-//                              verdict. maxGateRounds covers red gate-1 results
-//                              and resets on green. maxReviewRounds covers only
-//                              correctness rejection. APPROVED → DONE;
-//                              CHANGES-REQUESTED loops back to a new impl
-//                              attempt carrying the rejecting pass's prose.
+//                              (#129/#143/#185). maxGateRounds covers red
+//                              gate-1 results and pre-gate re-prompts, and
+//                              resets on green. maxReviewRounds covers only
+//                              correctness rejection. Each round is the
+//                              quality fixer, gate-1, then correctness.
+//                              APPROVED → DONE; CHANGES-REQUESTED loops back
+//                              to a new impl attempt carrying its prose.
 //                              Reviewer harness failure spends none, leaves the
 //                              convergence counters unchanged, and its second
 //                              occurrence in the inner loop stops it (#41/#143).
@@ -1396,7 +1395,6 @@ export async function run(
     reviewerEffort: config.reviewerEffort,
     reviewerQualityEffort: config.reviewerQualityEffort,
     adjudicatorEffort: config.adjudicatorEffort,
-    maxQualityRounds: config.maxQualityRounds,
     maxGateRounds: config.maxGateRounds,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,
@@ -1408,6 +1406,8 @@ export async function run(
     contextMdPath: config.contextMdPath,
     adrDir: config.adrDir,
     promptExtensions: config.promptExtensions,
+    botName: config.botName,
+    botEmail: config.botEmail,
   };
   type IssueOutcome = { issue: PlannedIssue; terminal: Terminal };
   type ExecutionEvent = SettledIssue<PlannedIssue, Terminal>;

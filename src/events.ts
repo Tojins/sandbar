@@ -20,6 +20,11 @@
 // reused execution span, OR-ed with Podman's State.OOMKilled; a whole-container
 // teardown reports any non-zero count). Both are measurements only. An
 // unavailable fact is omitted rather than encoded as zero (#141).
+// Schema 5 (#185): the quality pass is a fixer, so its `quality-pass` event
+// records the commits it made and the residue the host discarded rather than
+// a verdict, `review-pass`/`adjudication` are correctness-only and carry no
+// pass, and `review-round` keeps only the gate and correctness outcomes and
+// the two remaining budgets.
 // A complaint may carry a typed subject when its prose is the sole UI surface
 // for that entity. CLOSED issue-branch complaints use this to suppress the
 // generic cached-ref-to-Waiting inference without parsing their message (#179).
@@ -34,14 +39,14 @@ import { join } from "node:path";
 
 import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
-import type { IssueBranchOriginSync } from "./git-ops.js";
+import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
 import type { ContainerResources } from "./container-resources.js";
 import {
   createTranscriptTree,
   type TranscriptTree,
 } from "./logs.js";
 
-export const EVENT_SCHEMA_VERSION = 4;
+export const EVENT_SCHEMA_VERSION = 5;
 
 export class EventRecordReadError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -81,6 +86,7 @@ export type IssuePhase =
   | "partition-check"
   | "ui-check"
   | "implementer"
+  | "quality"
   | "gate-1"
   | "review"
   | "adjudication";
@@ -144,6 +150,18 @@ export type GateStepEvent = ContainerResources & {
   readonly ok: boolean;
   readonly durationMs: number;
 };
+
+// What the quality fixer did (#185). It has no verdict, so its record is its
+// commits and the residue the host settled after it exited (git-ops.ts,
+// `settleQualityResidue`). A provider closure or size refusal ends the pass
+// before that settlement, so those results carry neither.
+export type QualityPassEvent =
+  | {
+      readonly result: "completed" | "failed";
+      readonly commits: readonly string[];
+      readonly discarded: QualityResidue;
+    }
+  | { readonly result: "input-too-large" | "quota" | "credential" };
 
 export type LandRequestStatus =
   | {
@@ -219,11 +237,12 @@ export type EventInput =
   | (EventIssue & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventIssue & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
-  | (EventIssue & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly pass: "quality" | "correctness"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
-  | (EventIssue & ContainerResources & { readonly kind: "adjudication"; readonly attempt: number; readonly round: number; readonly pass: "quality" | "correctness"; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & QualityPassEvent & { readonly kind: "quality-pass"; readonly attempt: number; readonly round: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "adjudication"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number })
   | (ContainerResources & { readonly kind: "container"; readonly stack: "gate" | "sandbox"; readonly name: string; readonly container: string; readonly lifecycle: "issue" | "attempt"; readonly durationMs: number; readonly issue?: number; readonly title?: string })
-  | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly qualityMode: "list" | "verify"; readonly gateOk: boolean; readonly quality: "APPROVED" | "CHANGES-REQUESTED" | "HARNESS-FAILED"; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "quality" | "correctness" | null; readonly qualityFailures: number; readonly gateFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
+  | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly gateOk: boolean; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "correctness" | null; readonly gateFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
   | (EventIssue & { readonly kind: "repair"; readonly attempt: number; readonly action: "fast-forward" | "re-prompt" | "promise-nudge"; readonly detail: string })
   | (EventIssue & { readonly kind: "hard-error"; readonly retry: number; readonly max: number; readonly reason: string })
   | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-PARTITION" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "HARD-ERROR" | "QUOTA" | "CREDENTIAL" | "REJECTED"; readonly reason: string | null; readonly durationMs: number })

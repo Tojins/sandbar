@@ -368,8 +368,8 @@ export function parseAgentProviderName(
 // routed set up front is deliberate
 // over discovering a missing credential in the resolve loop, after a run may
 // already have landed work — and for the quality pass it is also what puts its
-// CLI in the sandbox image (#75), a pass that gates every round being a pass
-// whose missing binary is a reviewer that cannot run at all.
+// CLI in the sandbox image (#75), a pass that opens every round being a pass
+// whose missing binary is a fixer that cannot run at all.
 export function requiredAgentProviders(roles: {
   readonly uiPrototypeCheck: boolean;
   readonly implementerAgent: AgentProviderName;

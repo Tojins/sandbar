@@ -25,7 +25,8 @@ import { ensureIssueBranch, sourceBranchBase } from "./git-ops.js";
 import {
   branchIsAheadOfSeed,
   buildPrompt,
-  buildReviewerPrompts,
+  buildCorrectnessPrompt,
+  buildQualityPrompt,
   contextChars,
   measureNetDiffChars,
   readGit,
@@ -140,7 +141,14 @@ const reviewerInputs = (base = sourceBranchBase("main"), sourceBranch = "main") 
   sourceBranch,
   base,
   claudeMdPath: "CLAUDE.md",
+});
+const correctnessInputs = (base = sourceBranchBase("main"), sourceBranch = "main") => ({
+  ...reviewerInputs(base, sourceBranch),
   priorRounds: [],
+});
+const qualityInputs = (lastQualityHead: string | null = null) => ({
+  ...reviewerInputs(),
+  lastQualityHead,
 });
 
 describe("prompt slots resolve their base ref in a worktree of the bare cache (#40)", () => {
@@ -178,7 +186,7 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
   it("hands the reviewer the commit list and diff stat, not the patch", async () => {
     await commitOnBranch();
 
-    const prompt = (await buildReviewerPrompts(reviewerInputs())).correctness;
+    const prompt = await buildCorrectnessPrompt(correctnessInputs());
 
     expect(prompt).toContain(SUBJECT);
     expect(prompt).toContain("b.txt");
@@ -191,10 +199,9 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     const listingHead = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
 
     const implementer = await buildPrompt(implementerInputs(), anchorOpts());
-    const listing = await buildReviewerPrompts(reviewerInputs());
     expect(implementer).toContain(LONG_PATH);
-    expect(listing.quality).toContain(LONG_PATH);
-    expect(listing.correctness).toContain(LONG_PATH);
+    expect(await buildQualityPrompt(qualityInputs())).toContain(LONG_PATH);
+    expect(await buildCorrectnessPrompt(correctnessInputs())).toContain(LONG_PATH);
     expect(implementer).not.toContain(".../components/visit-version-diff");
 
     const laterPath = `after-review/${LONG_PATH}`;
@@ -204,20 +211,10 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     await git(worktree, "add", "-A");
     await git(worktree, "commit", "-qm", "long-path-after-listing");
 
-    const verify = (await buildReviewerPrompts({
-      ...reviewerInputs(),
-      priorRounds: [{
-        round: 1,
-        head: listingHead,
-        quality: {
-          verdict: "APPROVED",
-          prose: "<verdict>APPROVED</verdict>",
-        },
-      }],
-    })).quality;
-    const changedSince = verify.slice(
-      verify.indexOf("## Changed since the last quality review"),
-      verify.indexOf("## Coding standards"),
+    const later = await buildQualityPrompt(qualityInputs(listingHead));
+    const changedSince = later.slice(
+      later.indexOf("## Changed since your last pass"),
+      later.indexOf("## Coding standards"),
     );
     expect(changedSince).toContain(laterPath);
     expect(changedSince).not.toContain(".../visit-version-diff");
@@ -233,28 +230,20 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     expect(contextChars("prompt", diff.length)).toBe(6 + diff.length);
   });
 
-  it("anchors the verify stat at the newest quality-reviewed head", async () => {
+  // #185: a later fixer pass is focused on what changed since the head the
+  // previous pass left, read from git at that anchor.
+  it("anchors the focus stat at the head the last quality pass left", async () => {
     await commitOnBranch();
-    const listingHead = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
+    const lastQualityHead = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
     const laterLine = "the-line-added-after-the-listing";
     await writeFile(join(worktree, "c.txt"), `${laterLine}\n`);
     await git(worktree, "add", "-A");
     await git(worktree, "commit", "-qm", "fix-after-listing");
 
-    const prompt = (await buildReviewerPrompts({
-      ...reviewerInputs(),
-      priorRounds: [{
-        round: 1,
-        head: listingHead,
-        quality: {
-          verdict: "CHANGES-REQUESTED",
-          prose: "### Tests\n\nAdd coverage.\n<verdict>CHANGES-REQUESTED</verdict>",
-        },
-      }],
-    })).quality;
+    const prompt = await buildQualityPrompt(qualityInputs(lastQualityHead));
 
     const changedSince = prompt.slice(
-      prompt.indexOf("## Changed since the last quality review"),
+      prompt.indexOf("## Changed since your last pass"),
       prompt.indexOf("## Coding standards"),
     );
     expect(changedSince).toContain("c.txt");
@@ -287,8 +276,8 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
   it("throws out of the reviewer slot instead of asking for a verdict on nothing", async () => {
     await commitOnBranch();
 
-    const built = buildReviewerPrompts(
-      reviewerInputs(sourceBranchBase("no-such-branch"), "no-such-branch"),
+    const built = buildCorrectnessPrompt(
+      correctnessInputs(sourceBranchBase("no-such-branch"), "no-such-branch"),
     );
 
     await expect(built).rejects.toBeInstanceOf(SandbarError);
@@ -299,9 +288,12 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
   // fix: it fires for a base ref that is wrong in some way that still resolves.
   // Here the range is valid and simply empty, which the loop's own invariants
   // say cannot happen by the time a reviewer runs.
-  it("refuses a reviewer over an empty changeset", async () => {
-    await expect(buildReviewerPrompts(reviewerInputs())).rejects.toThrow(
-      /refusing to launch a reviewer/,
+  it("refuses a reviewer or fixer over an empty changeset", async () => {
+    await expect(buildCorrectnessPrompt(correctnessInputs())).rejects.toThrow(
+      /refusing to launch a correctness reviewer/,
+    );
+    await expect(buildQualityPrompt(qualityInputs())).rejects.toThrow(
+      /refusing to launch the quality fixer/,
     );
   });
 });
@@ -403,11 +395,11 @@ describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
   });
 
   it("gives the reviewer this issue's changeset and not the chunk's", async () => {
-    const prompt = (await buildReviewerPrompts({
-      ...reviewerInputs(base),
+    const prompt = await buildCorrectnessPrompt({
+      ...correctnessInputs(base),
       issue: MEMBER_ISSUE,
       worktreePath: memberWt,
-    })).correctness;
+    });
 
     expect(prompt).toContain(MEMBER_SUBJECT);
     expect(prompt).toContain("member.txt");

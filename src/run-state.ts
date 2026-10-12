@@ -15,6 +15,10 @@
 // a completed attempt; an OOM kill names that failure in the feed.
 // A retained CLOSED issue branch is represented only by its typed preflight
 // complaint, never inferred back into a parked Waiting row (#179).
+// A round's serial steps — quality fixer, gate-1, correctness (#185) — are
+// one review-coloured lane span each, labelled by phase, so a red gate or a
+// rejection marks its own bar; the fixer's feed row names its commits and
+// whatever the host discarded after it.
 
 import type {
   GateStepEvent,
@@ -241,11 +245,21 @@ function feedText(event: RunEvent): FeedEvent | null {
       if (failure !== null) tone = "bad";
       break;
     }
+    case "quality-pass":
+      text = `round ${event.round} · quality pass${
+        event.result === "completed" || event.result === "failed"
+          ? `${event.result === "failed" ? " (invocation failed)" : ""} · ${event.commits.length} commit${event.commits.length === 1 ? "" : "s"}${
+              qualityResidueText(event.discarded)
+            }`
+          : ` · ${event.result}`
+      }`;
+      tone = event.result === "completed" || event.result === "failed" ? "" : "bad";
+      break;
     case "review-pass":
-      text = `round ${event.round} · ${event.pass} pass · invocation ${event.invocation}`;
+      text = `round ${event.round} · correctness pass · invocation ${event.invocation}`;
       break;
     case "adjudication":
-      text = `round ${event.round} · ${event.pass} adjudication · ${event.ruling}`;
+      text = `round ${event.round} · adjudication · ${event.ruling}`;
       tone = event.ruling === "UPHELD" ? "bad" : "good";
       break;
     case "resolve-attempt":
@@ -363,6 +377,23 @@ function finishRunningSpan(issue: MutableIssue, at: string): void {
   }
 }
 
+const REVIEW_PHASES: ReadonlySet<string> = new Set(["quality", "gate-1", "review"]);
+
+// What the host discarded after a quality pass, in feed form (#185); "" when
+// the pass left nothing to settle.
+function qualityResidueText(
+  residue: Extract<RunEvent, { kind: "quality-pass"; result: "completed" | "failed" }>["discarded"],
+): string {
+  const parts = [
+    ...(residue.dirtyPaths.length === 0
+      ? []
+      : [`${residue.dirtyPaths.length} uncommitted path${residue.dirtyPaths.length === 1 ? "" : "s"}`]),
+    ...(residue.strandedHead === null ? [] : [`off-branch HEAD ${residue.strandedHead}`]),
+    ...(residue.rewoundTip === null ? [] : [`rewound tip ${residue.rewoundTip}`]),
+  ];
+  return parts.length === 0 ? "" : ` · discarded ${parts.join(", ")}`;
+}
+
 // An empty phase set is the loop tearing the sandbox down after its verdict;
 // the terminal event that follows names the outcome (and DONE then reads
 // "landing" until its landing outcome is recorded).
@@ -377,8 +408,15 @@ function applyPhase(issue: MutableIssue, event: Extract<RunEvent, { kind: "phase
   issue.attempt = event.attempt;
   if (event.phases.includes("implementer")) {
     issue.spans.push({ kind: "impl", from: event.ts, to: null, label: `a${event.attempt}` });
-  } else if (event.phases.some((phase) => phase === "gate-1" || phase === "review")) {
-    issue.spans.push({ kind: "review", from: event.ts, to: null, label: "gate + review" });
+  } else if (event.phases.some((phase) => REVIEW_PHASES.has(phase))) {
+    // One review-coloured span per serial step of the round (#185), each
+    // labelled with its phase so a red gate or a rejection marks its own bar.
+    issue.spans.push({
+      kind: "review",
+      from: event.ts,
+      to: null,
+      label: event.phases.join(" + "),
+    });
   } else if (event.phases.includes("adjudication")) {
     issue.spans.push({
       kind: "adjudication",
@@ -567,7 +605,7 @@ export function reduceRunEvents(
         if (issue && last?.kind === "adjudication") {
           issue.spans[issue.spans.length - 1] = {
             ...last,
-            label: `${event.pass} · ${event.ruling}`,
+            label: event.ruling,
             ...(event.ruling === "UPHELD" ? { verdict: "no" as const } : {}),
           };
         }

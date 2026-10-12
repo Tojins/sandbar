@@ -50,7 +50,9 @@
 //        which `create` wraps as `podman run failed:` and the inner loop
 //        records as a hard-error `reason` the UI then serves. The sandbox's
 //        `HOME` is also why podman's own environment is left alone: a rootless
-//        client reads `HOME` for its storage root.
+//        client reads `HOME` for its storage root. `sandboxExecArgs` obeys
+//        the same rule for the one per-invocation record, `RunOptions.env`
+//        — the quality fixer's commit author (#185).
 //   F9 — a run that FAILS still carries out whatever the agent had emitted
 //        (`agentPartialOutput`) and what it had spent getting there
 //        (`agentPartialUsage`, #85/#109/#124 — an invocation that burned ten
@@ -340,19 +342,23 @@ export type ExecOptions = {
   // abort buys is that sandbar stops holding a process, three fds and a growing
   // output buffer for a run whose result it has already discarded.
   signal?: AbortSignal;
+  // Variables for this exec only, on top of the container's own. Handed to
+  // podman as a file like every other container variable (#154): the quality
+  // fixer's commit author is the one caller (#185).
+  env?: Readonly<Record<string, string>>;
 };
 
 export function sandboxExecArgs(
   containerName: string,
   command: string,
   opts?: ExecOptions,
-): string[] {
+): RuntimeInvocation {
   const args = ["exec"];
   if (opts?.stdin !== undefined) args.push("-i");
   if (opts?.cwd) args.push("-w", opts.cwd);
   if (opts?.sudo) args.push("--user", "0");
   args.push(containerName, "sh", "-c", command);
-  return args;
+  return { argv: args, env: opts?.env ?? {} };
 }
 
 type ExecResult = { stdout: string; stderr: string; exitCode: number };
@@ -419,6 +425,8 @@ export type RunOptions = {
   // Required because a role's signal is its contract, never a default. `[]`
   // ends only on process exit or idle timeout; grace is unreachable (#83).
   readonly completionSignal: readonly string[];
+  // Variables for this invocation only (see ExecOptions.env).
+  readonly env?: Readonly<Record<string, string>>;
   readonly idleTimeoutSeconds?: number;
   readonly completionTimeoutSeconds?: number;
 };
@@ -2037,9 +2045,9 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
       const handle: SandboxHandle = {
         worktreePath: sandboxWorktreePath,
         containerName,
-        exec: (command, opts) => {
-          const args = sandboxExecArgs(containerName, command, opts);
-          return new Promise<ExecResult>((resolveExec, rejectExec) => {
+        exec: (command, opts) => withRuntimeEnv(
+          sandboxExecArgs(containerName, command, opts),
+          (args) => new Promise<ExecResult>((resolveExec, rejectExec) => {
             const proc = spawn("podman", args, {
               stdio: [opts?.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
             });
@@ -2106,8 +2114,8 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
                 });
               });
             }
-          });
-        },
+          }),
+        ),
         close: async () => {
           unregisterShutdown();
           await new Promise<void>((resolveClose, rejectClose) => {
@@ -2256,6 +2264,7 @@ const invokeAgent = async (
     readonly agent: string;
     readonly model: string | null;
     readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
+    readonly env?: Readonly<Record<string, string>>;
   },
 ): Promise<{
   result: string;
@@ -2425,6 +2434,7 @@ const invokeAgent = async (
       .exec(printCmd.command, {
         cwd: sandboxRepoDir,
         stdin: printCmd.stdin,
+        ...(invocation.env === undefined ? {} : { env: invocation.env }),
         signal: abort.signal,
         onStdout: (chunk) => stdoutTail.push(chunk),
         onStderr: (chunk) => stderrTail.push(chunk),
@@ -2762,6 +2772,7 @@ export const createSandbox = async (
       readonly agent: string;
       readonly model: string | null;
       readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
+    readonly env?: Readonly<Record<string, string>>;
     },
   ): Promise<{
     result: string;
@@ -2889,6 +2900,7 @@ export const createSandbox = async (
           {
             agent: o.name ?? o.agent.name,
             model: o.model ?? null,
+            ...(o.env === undefined ? {} : { env: o.env }),
             onEnd: async (record) => {
               durationMs = record.durationMs;
               const resourceEnd = await options.sandbox.containerResourceSnapshot?.(
