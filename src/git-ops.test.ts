@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +14,7 @@ import {
   ensureIssueBranch,
   fastForwardOffBranchHead,
   headMismatch,
+  settleQualityResidue,
   symbolicHeadRef,
 } from "./git-ops.js";
 
@@ -436,6 +437,136 @@ describe("headMismatch (#27)", () => {
 // only arrangement in which the bug is visible at all: with `config.cwd`
 // defaulting to `process.cwd()` the two coincide, and a test that lets them
 // coincide passes just as happily with the `cwd` option deleted again.
+// #185: the quality fixer emits no token, so whatever it leaves is settled
+// host-side into a clean tree on the branch. Asserted against real git because
+// every arm is a git fact: what `reset`/`clean` leave, what is an ancestor.
+describe("settleQualityResidue (#185)", () => {
+  const BRANCH = "sandbar/issue-1-x";
+  let repo: string;
+  let start: string;
+
+  const git = async (...args: string[]) =>
+    (await exec("git", args, { cwd: repo })).stdout.trim();
+  const commit = async (file: string, message: string) => {
+    await writeFile(join(repo, file), `${message}\n`);
+    await git("add", "-A");
+    await git("commit", "-qm", message);
+    return await git("rev-parse", "HEAD");
+  };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), "sandbar-settle-"));
+    await git("init", "-q", "-b", BRANCH);
+    await git("config", "user.email", "t@t");
+    await git("config", "user.name", "t");
+    await writeFile(join(repo, ".gitignore"), "node_modules/\n");
+    await commit("app.ts", "implementer");
+    start = await git("rev-parse", "HEAD");
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  const noResidue = { dirtyPaths: [], strandedHead: null, rewoundTip: null };
+
+  it("keeps on-branch commits and reports nothing discarded", async () => {
+    const q1 = await commit("test.ts", "quality");
+    await expect(settleQualityResidue(repo, BRANCH, start)).resolves.toEqual({
+      commits: [{ sha: q1 }],
+      residue: noResidue,
+    });
+  });
+
+  it("returns no commits when the pass changed nothing", async () => {
+    await expect(settleQualityResidue(repo, BRANCH, start)).resolves.toEqual({
+      commits: [],
+      residue: noResidue,
+    });
+  });
+
+  it("discards uncommitted residue but never ignored files", async () => {
+    const q1 = await commit("test.ts", "quality");
+    await writeFile(join(repo, "app.ts"), "half-done edit\n");
+    await writeFile(join(repo, "scratch.ts"), "scratch\n");
+    await mkdir(join(repo, "node_modules"));
+    await writeFile(join(repo, "node_modules", "dep.js"), "kept\n");
+
+    const settled = await settleQualityResidue(repo, BRANCH, start);
+
+    expect(settled.commits).toEqual([{ sha: q1 }]);
+    expect(settled.residue.dirtyPaths).toEqual(["M app.ts", "?? scratch.ts"]);
+    expect(await dirtyWorktreePaths(repo)).toEqual([]);
+    expect(await git("cat-file", "-p", `HEAD:app.ts`)).toBe("implementer");
+    expect(await readFile(join(repo, "node_modules", "dep.js"), "utf8")).toBe("kept\n");
+  });
+
+  it("fast-forwards a detached HEAD the branch is an ancestor of", async () => {
+    await git("checkout", "-q", "--detach");
+    const q1 = await commit("test.ts", "quality on detached HEAD");
+
+    await expect(settleQualityResidue(repo, BRANCH, start)).resolves.toEqual({
+      commits: [{ sha: q1 }],
+      residue: noResidue,
+    });
+    expect(await symbolicHeadRef(repo)).toBe(`refs/heads/${BRANCH}`);
+  });
+
+  it("abandons a diverged HEAD and reattaches the branch", async () => {
+    const q1 = await commit("test.ts", "quality");
+    await git("checkout", "-q", "-b", "scratch", start);
+    const stray = await commit("stray.ts", "stray");
+
+    await expect(settleQualityResidue(repo, BRANCH, start)).resolves.toEqual({
+      commits: [{ sha: q1 }],
+      residue: { dirtyPaths: [], strandedHead: stray, rewoundTip: null },
+    });
+    expect(await symbolicHeadRef(repo)).toBe(`refs/heads/${BRANCH}`);
+    expect(await dirtyWorktreePaths(repo)).toEqual([]);
+  });
+
+  it("recreates a branch the pass deleted at the head it was handed", async () => {
+    await git("checkout", "-q", "--detach");
+    await git("branch", "-D", BRANCH);
+    const stray = await git("rev-parse", "HEAD");
+
+    await expect(settleQualityResidue(repo, BRANCH, start)).resolves.toEqual({
+      commits: [],
+      residue: { dirtyPaths: [], strandedHead: stray, rewoundTip: null },
+    });
+    expect(await git("rev-parse", `refs/heads/${BRANCH}`)).toBe(start);
+    expect(await symbolicHeadRef(repo)).toBe(`refs/heads/${BRANCH}`);
+  });
+
+  // The implementer's commits are not the fixer's to drop.
+  it("restores a branch the pass rewound past the head it was handed", async () => {
+    const implementerTip = await commit("feature.ts", "second implementer commit");
+    await git("reset", "-q", "--hard", "HEAD~1");
+
+    await expect(settleQualityResidue(repo, BRANCH, implementerTip)).resolves.toEqual({
+      commits: [],
+      residue: { dirtyPaths: [], strandedHead: null, rewoundTip: start },
+    });
+    expect(await git("rev-parse", `refs/heads/${BRANCH}`)).toBe(implementerTip);
+  });
+
+  it("puts a rewritten branch back at the head it was handed", async () => {
+    await commit("test.ts", "quality");
+    await git("checkout", "-q", "--orphan", "rewrite");
+    await git("commit", "-qm", "unrelated history");
+    const rewritten = await git("rev-parse", "HEAD");
+    await git("branch", "-f", BRANCH, rewritten);
+    await git("checkout", "-q", BRANCH);
+
+    await expect(settleQualityResidue(repo, BRANCH, start)).resolves.toEqual({
+      commits: [],
+      residue: { dirtyPaths: [], strandedHead: null, rewoundTip: rewritten },
+    });
+    expect(await git("rev-parse", `refs/heads/${BRANCH}`)).toBe(start);
+    expect(await dirtyWorktreePaths(repo)).toEqual([]);
+  });
+});
+
 describe("ensureIssueBranch — operates on repoDir, not process.cwd() (#34)", () => {
   let launchedFrom: string;
   let target: string;

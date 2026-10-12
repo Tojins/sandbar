@@ -27,6 +27,10 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   headMismatch: vi.fn(async () => null),
   branchTip: vi.fn(async () => "implemented-sha"),
   symbolicHeadRef: vi.fn(async () => "refs/heads/test"),
+  settleQualityResidue: vi.fn(async () => ({
+    commits: [],
+    residue: { dirtyPaths: [], strandedHead: null, rewoundTip: null },
+  })),
   ensureIssueBranch: seams.ensureIssueBranch,
 }));
 
@@ -79,10 +83,8 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./prompt.js")>(),
   buildPrompt: vi.fn(async () => "implement"),
   buildUiCheckPrompt: vi.fn(async () => "ui check"),
-  buildReviewerPrompts: vi.fn(async () => ({
-    quality: "quality review",
-    correctness: "correctness review",
-  })),
+  buildQualityPrompt: vi.fn(async () => "quality review"),
+  buildCorrectnessPrompt: vi.fn(async () => "correctness review"),
   branchIsAheadOfSeed: seams.branchIsAheadOfSeed,
   measureNetDiffChars: seams.measureNetDiffChars,
 }));
@@ -150,7 +152,6 @@ const config = (
   uiCheckAgent,
   reviewerAgent: "claude",
   reviewerQualityAgent: "claude",
-  maxQualityRounds: 1,
   maxGateRounds: 1,
   maxReviewRounds: 1,
   sandboxImage: "image",
@@ -163,7 +164,19 @@ const config = (
   gateStack: { containers: [], steps: [] },
   sandboxGateAttachments: { env: {}, mounts: [] },
   claudeMdPath: "CLAUDE.md",
+  botName: "sandbar-bot",
+  botEmail: "bot@example.test",
 });
+
+// What the quality fixer returns when it exits having committed nothing.
+const fixerRun = {
+  stdout: "",
+  durationMs: 5,
+  maxGapMs: 1,
+  toolCalls: 2,
+  peakContext: 40,
+  commits: [],
+};
 
 describe("runInnerLoop run-scoped quota closure (#109)", () => {
   beforeEach(() => {
@@ -447,7 +460,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(state.get("codex")).toEqual({ cause: "credential", detail });
   });
 
-  it("logs peak context for successful and failed reviewer invocations", async () => {
+  it("logs peak context for the fixer and for successful and failed reviewer invocations", async () => {
     const events: EventInput[] = [];
     const reviewerFailure = new Error("reviewer disconnected");
     seams.partialUsage.set(reviewerFailure, {
@@ -465,15 +478,8 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
         peakContext: 23,
         commits: [{ sha: "implemented-sha" }],
       })
+      .mockResolvedValueOnce(fixerRun)
       .mockRejectedValueOnce(reviewerFailure)
-      .mockResolvedValueOnce({
-        stdout: "<verdict>APPROVED</verdict>",
-        durationMs: 21,
-        maxGapMs: 2,
-        toolCalls: 3,
-        peakContext: 61,
-        commits: [],
-      })
       .mockResolvedValueOnce({
         stdout: "<verdict>APPROVED</verdict>",
         durationMs: 31,
@@ -488,37 +494,38 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "DONE" });
 
-    const passes = events.filter((event) => event.kind === "review-pass");
-    expect(passes).toEqual([
+    expect(events.filter((event) => event.kind === "quality-pass")).toEqual([{
+      kind: "quality-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+      provider: "claude", model: "model", effort: null, result: "completed",
+      commits: [], discarded: { dirtyPaths: [], strandedHead: null, rewoundTip: null },
+      durationMs: 5, maxGapMs: 1,
+      usage: { toolCalls: 2, peakContext: 40, contextChars: 14 },
+    }]);
+    expect(events.filter((event) => event.kind === "review-pass")).toEqual([
       {
         kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
-        pass: "quality", invocation: 1, provider: "claude", model: "model",
+        invocation: 1, provider: "claude", model: "model",
         effort: null, result: "failed", durationMs: expect.any(Number),
-        usage: { inputTokens: 7, toolCalls: 2, peakContext: 52, contextChars: 14 },
+        usage: { inputTokens: 7, toolCalls: 2, peakContext: 52, contextChars: 18 },
       },
       {
         kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
-        pass: "quality", invocation: 2, provider: "claude", model: "model",
-        effort: null, result: "completed", durationMs: 21, maxGapMs: 2,
-        usage: { toolCalls: 3, peakContext: 61, contextChars: 14 },
-      },
-      {
-        kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
-        pass: "correctness", invocation: 1, provider: "claude", model: "model",
+        invocation: 2, provider: "claude", model: "model",
         effort: null, result: "completed", durationMs: 31, maxGapMs: 2,
         usage: { toolCalls: 4, peakContext: 73, contextChars: 18 },
       },
     ]);
     expect(events.filter((event) => event.kind === "phase")).toEqual([
       { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["implementer"] },
-      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["gate-1", "review"] },
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["quality"] },
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["gate-1"] },
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["review"] },
       { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: [] },
     ]);
     expect(events.filter((event) => event.kind === "review-round")).toEqual([{
       kind: "review-round", issue: 125, title: "Issue 125", attempt: 1, round: 1,
-      head: "implemented-sha", qualityMode: "list", gateOk: true,
-      quality: "APPROVED", correctness: "APPROVED", rejectingPass: null,
-      qualityFailures: 0, gateFailures: 0, correctnessFailures: 0,
+      head: "implemented-sha", gateOk: true, correctness: "APPROVED",
+      rejectingPass: null, gateFailures: 0, correctnessFailures: 0,
       durationMs: expect.any(Number),
     }]);
   });
@@ -612,7 +619,15 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
   });
 
-  it("surfaces reviewer quota after one invocation without the reviewer retry", async () => {
+  it.each([
+    ["quality fixer", "quality-pass", 2, []],
+    ["correctness reviewer", "review-pass", 3, [fixerRun]],
+  ] as const)("surfaces %s quota after one invocation without a retry", async (
+    _role,
+    eventKind,
+    runs,
+    before,
+  ) => {
     const events: EventInput[] = [];
     const state = createRunProviderState();
     const measurement = {
@@ -620,17 +635,17 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       window: "five_hour",
       resetsAt: 42,
     };
-    seams.sandboxRun
-      .mockResolvedValueOnce({
-        stdout: "<promise>COMPLETE</promise>",
-        headBefore: "base-sha",
-        headAfter: "implemented-sha",
-        signalMs: 1,
-        maxGapMs: 1,
-        toolCalls: 0,
-        commits: [{ sha: "implemented-sha" }],
-      })
-      .mockRejectedValueOnce(new AgentQuotaError("claude", measurement));
+    seams.sandboxRun.mockResolvedValueOnce({
+      stdout: "<promise>COMPLETE</promise>",
+      headBefore: "base-sha",
+      headAfter: "implemented-sha",
+      signalMs: 1,
+      maxGapMs: 1,
+      toolCalls: 0,
+      commits: [{ sha: "implemented-sha" }],
+    });
+    for (const run of before) seams.sandboxRun.mockResolvedValueOnce(run);
+    seams.sandboxRun.mockRejectedValueOnce(new AgentQuotaError("claude", measurement));
 
     await expect(runInnerLoop(issue("112"), {
       config: config("codex"), hooks: {}, copyToWorktree: [], providerState: state,
@@ -639,13 +654,11 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
     });
-    expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
-    expect(events.filter((event) => event.kind === "review-pass")).toEqual([{
-      kind: "review-pass", issue: 112, title: "Issue 112", attempt: 1, round: 1,
-      pass: "quality", invocation: 1, provider: "claude", model: "model",
-      effort: null, result: "quota", durationMs: expect.any(Number),
-      usage: { quota: measurement, contextChars: 14 },
-    }]);
+    expect(seams.sandboxRun).toHaveBeenCalledTimes(runs);
+    expect(events.filter((event) => event.kind === eventKind).at(-1)).toMatchObject({
+      result: "quota",
+      usage: { quota: measurement },
+    });
 
     await expect(runInnerLoop(issue("113"), {
       config: config("claude"), hooks: {}, copyToWorktree: [], providerState: state,
@@ -654,10 +667,10 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
       specGaps: [],
     });
-    expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
+    expect(seams.sandboxRun).toHaveBeenCalledTimes(runs);
   });
 
-  it("closes a refused reviewer credential without a harness retry", async () => {
+  it("closes a refused quality-fixer credential without a retry", async () => {
     const events: EventInput[] = [];
     const state = createRunProviderState();
     const detail = "Your access token could not be refreshed. Please log out and sign in again.";
@@ -690,11 +703,10 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     });
 
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
-    expect(events.filter((event) => event.kind === "review-pass")).toEqual([{
-      kind: "review-pass", issue: 136, title: "Issue 136", attempt: 1, round: 1,
-      pass: "quality", invocation: 1, provider: "codex", model: "model",
-      effort: null, result: "credential", durationMs: expect.any(Number),
-      usage: { contextChars: 14 },
+    expect(events.filter((event) => event.kind === "quality-pass")).toEqual([{
+      kind: "quality-pass", issue: 136, title: "Issue 136", attempt: 1, round: 1,
+      provider: "codex", model: "model", effort: null, result: "credential",
+      durationMs: expect.any(Number), usage: { contextChars: 14 },
     }]);
     expect(state.get("codex")).toEqual({ cause: "credential", detail });
   });
@@ -715,8 +727,12 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
         toolCalls: 0,
         commits: [{ sha: "implemented-sha" }],
       })
+      .mockResolvedValueOnce(fixerRun)
       .mockRejectedValueOnce(new AgentQuotaError("claude", measurement));
-    seams.dirtyWorktreePaths.mockResolvedValueOnce([]).mockResolvedValueOnce(["review.txt"]);
+    seams.dirtyWorktreePaths
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(["review.txt"]);
 
     await expect(runInnerLoop(issue("114"), {
       config: config("codex"), hooks: {}, copyToWorktree: [],
@@ -726,6 +742,6 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       expect.stringContaining("reviewer changed the repository"),
     );
     expect(seams.deferWorktreeReclaim).toHaveBeenCalledOnce();
-    expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
+    expect(seams.sandboxRun).toHaveBeenCalledTimes(3);
   });
 });

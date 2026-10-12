@@ -1044,7 +1044,8 @@ function makeLocalProvider(
             }
             const proc = spawn("sh", ["-c", command], {
               cwd: execOpts?.cwd ?? worktreePath,
-              env: { ...process.env },
+              // The podman provider hands these to `podman exec` as a file.
+              env: { ...process.env, ...execOpts?.env },
               detached: true,
               stdio: [
                 execOpts?.stdin !== undefined ? "pipe" : "ignore",
@@ -1240,6 +1241,39 @@ describe("createSandbox integration (local provider)", () => {
       // The captured commit is the one the agent made on the branch.
       const log = await git(["log", "-1", "--format=%H", "sandbar/issue-1-demo"], dir);
       expect(log.stdout.trim()).toBe(run.commits[0]!.sha);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  // #185: the quality fixer's commits carry their own author, set for that
+  // invocation alone; the committer and every other run keep the sandbox's.
+  it("applies a run's own variables to that invocation only", async () => {
+    const branch = "sandbar/issue-185-author";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+    });
+    const committing = (message: string) => scriptedAgent(
+      `git commit --allow-empty -m "${message}" >/dev/null 2>&1 && ` +
+        `printf '%s\\n' '${JSON.stringify({ type: "result", result: "done" })}'`,
+    );
+    try {
+      await sandbox.run({
+        agent: committing("fixer"),
+        prompt: "go",
+        completionSignal: [],
+        env: { GIT_AUTHOR_NAME: "bot (quality)", GIT_AUTHOR_EMAIL: "bot@test.com" },
+      });
+      await sandbox.run({ agent: committing("implementer"), prompt: "go", completionSignal: [] });
+      const log = await git(["log", "-2", "--format=%s|%an <%ae>|%cn", branch], sandbox.worktreePath);
+      expect(log.stdout.trim().split("\n")).toEqual([
+        "implementer|Test Host <host@test.com>|Test Host",
+        "fixer|bot (quality) <bot@test.com>|Test Host",
+      ]);
     } finally {
       await sandbox.close();
     }
