@@ -928,25 +928,42 @@ export async function resolveReadyLabelPolicy(
   return { developers, viewerLogin: login };
 }
 
+// One GraphQL request PER ISSUE, a few in flight at a time. A single aliased
+// query over every issue was answered by GitHub's gateway with a 502/504
+// once it held several long timelines: a filtered `timelineItems` scans the
+// whole timeline, and outdoor issues with large ones took 6–7s each, so
+// sixteen of them in one request crossed the gateway's limit on every
+// attempt and halted the daemon at startup. Per issue, each request costs at
+// most one timeline.
+const ISSUE_READS_IN_FLIGHT = 4;
+
 async function ghIssueBatch(
   numbers: readonly number[],
   repo: RepoRef,
   selection: string,
 ): Promise<Record<string, GhIssueRecord | null>> {
-  const fields = [...new Set(numbers)]
-    .map((n) => `i${n}: issue(number: ${n}) { ${selection} }`)
-    .join("\n");
-  const query = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){${fields}}}`;
-  const { stdout } = await exec("gh", [
-    "api", "graphql", "-F", `owner=${repo.owner}`, "-F", `repo=${repo.name}`,
-    "-f", `query=${query}`,
-  ]);
-  return (JSON.parse(stdout) as {
-    data: { repository: Record<string, GhIssueRecord | null> };
-  }).data.repository;
+  const pending = [...new Set(numbers)];
+  const records: Record<string, GhIssueRecord | null> = {};
+  const readNext = async (): Promise<void> => {
+    for (let n = pending.shift(); n !== undefined; n = pending.shift()) {
+      const query = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){` +
+        `i${n}: issue(number: ${n}) { ${selection} }}}`;
+      const { stdout } = await exec("gh", [
+        "api", "graphql", "-F", `owner=${repo.owner}`, "-F", `repo=${repo.name}`,
+        "-f", `query=${query}`,
+      ]);
+      Object.assign(records, (JSON.parse(stdout) as {
+        data: { repository: Record<string, GhIssueRecord | null> };
+      }).data.repository);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(ISSUE_READS_IN_FLIGHT, pending.length) }, readNext),
+  );
+  return records;
 }
 
-// Authoritative facts for a set of issue numbers, via a single GraphQL batch.
+// Authoritative facts for a set of issue numbers, via `ghIssueBatch`.
 // Used for both blockers (the dependency gate) and the candidates themselves
 // (the stale-listing CLOSED guard, #16). GraphQL node lookups are strongly
 // consistent, unlike the listing endpoint `fetchCandidates` uses.

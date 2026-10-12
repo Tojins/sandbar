@@ -72,6 +72,19 @@ describe("authoritative ready-for-agent provenance (#136)", () => {
     await rm(shimBin, { recursive: true, force: true });
   });
 
+  it("reads each issue in its own GraphQL request", async () => {
+    await fetchIssueStates([12, 13, 12, 14], CONFIGURED);
+    const reads = (await readFile(callsPath, "utf8"))
+      .split("\n")
+      .filter((line) => line.startsWith("api graphql"));
+    expect(reads).toHaveLength(3);
+    for (const read of reads) {
+      expect(read.match(/issue\(number: /g)).toHaveLength(1);
+    }
+    expect(reads.map((read) => read.match(/issue\(number: (\d+)\)/)?.[1]).sort())
+      .toEqual(["12", "13", "14"]);
+  });
+
   it("selects the most recent application of the queue label by createdAt", async () => {
     const facts = await fetchIssueStates([12], CONFIGURED);
     expect(facts.get(12)?.readyLabelApplication).toEqual({
