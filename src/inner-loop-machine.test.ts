@@ -14,37 +14,27 @@ import {
   offBranchHeadReprompt,
   reviewerHarnessFailedReprompt,
   step,
+  visiblePhases,
 } from "./inner-loop-machine.js";
-import {
-  DEFAULT_MAX_GATE_ROUNDS,
-  DEFAULT_MAX_QUALITY_ROUNDS,
-  DEFAULT_MAX_REVIEW_ROUNDS,
-} from "./config.js";
+import { DEFAULT_MAX_GATE_ROUNDS } from "./config.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
 
-// Tiny driver: runs the machine to completion given a script of events. Each
-// event is paired with the action the runner just observed. Returns the
-// verdict and the full action trace so each case can assert both.
+const defaultOpts = {
+  issueBranch: "sandbar/issue-1-x",
+  maxGateRounds: 4,
+  maxReviewRounds: 3,
+  uiPrototypeCheck: false,
+  partitionCheck: false,
+} as const;
+
+// Tiny driver: runs the machine to completion given a script of events.
+// Returns the verdict and the full action trace so each case can assert both.
 function drive(
-  opts: {
-    maxQualityRounds: number;
-    maxGateRounds?: number;
-    maxReviewRounds: number;
-    uiPrototypeCheck?: boolean;
-    partitionCheck?: boolean;
-    issueBranch?: string;
-  },
+  opts: Partial<typeof defaultOpts> & { readonly maxGateRounds?: number; readonly maxReviewRounds?: number },
   script: readonly LoopEvent[],
 ): { readonly actions: readonly LoopAction[]; readonly verdict: Verdict } {
-  let state: LoopState = initialState({
-    issueBranch: opts.issueBranch ?? "sandbar/issue-1-x",
-    maxQualityRounds: opts.maxQualityRounds,
-    maxGateRounds: opts.maxGateRounds ?? DEFAULT_MAX_GATE_ROUNDS,
-    maxReviewRounds: opts.maxReviewRounds,
-    uiPrototypeCheck: opts.uiPrototypeCheck ?? false,
-    partitionCheck: opts.partitionCheck ?? false,
-  });
+  let state: LoopState = initialState({ ...defaultOpts, ...opts });
   const actions: LoopAction[] = [initialAction(state)];
   for (const event of script) {
     const r = step(state, event);
@@ -55,10 +45,21 @@ function drive(
     }
   }
   throw new Error(
-    `script exhausted without termination; last action: ${
-      actions[actions.length - 1]?.kind
-    }`,
+    `script exhausted without termination; last action: ${actions.at(-1)?.kind}`,
   );
+}
+
+// Applies several events in order, for cases that assert an intermediate state.
+function stepAll(state: LoopState, events: readonly LoopEvent[]): {
+  readonly state: LoopState;
+  readonly action: LoopAction;
+} {
+  let result: { state: LoopState; action: LoopAction } = {
+    state,
+    action: initialAction(state),
+  };
+  for (const event of events) result = step(result.state, event);
+  return result;
 }
 
 const complete: ParseSignal = { kind: "COMPLETE" };
@@ -66,249 +67,6 @@ const noSignal = (reprompt?: string): ParseSignal => ({
   kind: "NO-SIGNAL",
   reprompt: reprompt ?? "Still working. Emit <promise>...",
   missingTag: reprompt === undefined,
-});
-
-describe("unchanged rejection adjudication (#167)", () => {
-  const reachRejection = (pass: "quality" | "correctness", head = "abc") => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete, [], null, null, 1, head)).state;
-    return step(state, rejectedAt(pass, head));
-  };
-
-  it("routes a zero-commit COMPLETE at the rejected head to the adjudicator", () => {
-    const rejected = reachRejection("quality");
-    const disputed = step(
-      rejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    expect(disputed.action).toMatchObject({
-      kind: "run-adjudicator",
-      reviewRound: 1,
-      rejection: { pass: "quality", head: "abc", report: "finding" },
-    });
-  });
-
-  it("does not adjudicate after the implementer changes the head", () => {
-    const rejected = reachRejection("quality");
-    const changed = step(
-      rejected.state,
-      impl(complete, [], null, null, 1, "def"),
-    );
-    expect(changed.action.kind).toBe("run-gate-and-reviewer");
-  });
-
-  it("voids an overruled quality rejection and accepts correctness approval", () => {
-    const rejected = reachRejection("quality");
-    const disputed = step(
-      rejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const ruled = step(disputed.state, {
-      kind: "adjudicator-result",
-      pass: "quality",
-      head: "abc",
-      ruling: "OVERRULED",
-      reasoning: "the cited call has five arguments",
-      correctness: approved(),
-      reviewRound: null,
-    });
-    expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
-    expect(ruled.state.qualityFailures).toBe(0);
-  });
-
-  it("continues an overruled quality round into a chargeable correctness rejection", () => {
-    const rejected = reachRejection("quality");
-    const disputed = step(
-      rejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const ruled = step(disputed.state, {
-      kind: "adjudicator-result",
-      pass: "quality",
-      head: "abc",
-      ruling: "OVERRULED",
-      reasoning: "false quality report",
-      correctness: changes("real correctness finding"),
-      reviewRound: null,
-    });
-    expect(ruled.action.kind).toBe("run-implementer");
-    expect(ruled.state.qualityFailures).toBe(0);
-    expect(ruled.state.correctnessFailures).toBe(1);
-    expect(ruled.state.pendingRejection).toMatchObject({
-      round: 1,
-      pass: "correctness",
-      head: "abc",
-    });
-  });
-
-  it("keeps the original round through consecutive quality and correctness overrulings", () => {
-    const rejected = reachRejection("quality");
-    const qualityDispute = step(
-      rejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const correctnessRejected = step(qualityDispute.state, {
-      kind: "adjudicator-result",
-      pass: "quality",
-      head: "abc",
-      ruling: "OVERRULED",
-      reasoning: "false quality report",
-      correctness: changes("false correctness report"),
-      reviewRound: null,
-    });
-    expect(correctnessRejected.state.pendingRejection).toMatchObject({
-      round: 1,
-      pass: "correctness",
-      head: "abc",
-    });
-
-    const correctnessDispute = step(
-      correctnessRejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    expect(correctnessDispute.action).toMatchObject({
-      kind: "run-adjudicator",
-      reviewRound: 1,
-      rejection: { round: 1, pass: "correctness", head: "abc" },
-    });
-    const ruled = step(correctnessDispute.state, {
-      kind: "adjudicator-result",
-      pass: "correctness",
-      head: "abc",
-      ruling: "OVERRULED",
-      reasoning: "false correctness report",
-      correctness: null,
-      reviewRound: null,
-    });
-    expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
-  });
-
-  it("makes an overruled correctness rejection final approval", () => {
-    const rejected = reachRejection("correctness");
-    const disputed = step(
-      rejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const ruled = step(disputed.state, {
-      kind: "adjudicator-result",
-      pass: "correctness",
-      head: "abc",
-      ruling: "OVERRULED",
-      reasoning: "false correctness report",
-      correctness: null,
-      reviewRound: null,
-    });
-    expect(ruled.action).toMatchObject({ kind: "terminate", verdict: { type: "DONE" } });
-    expect(ruled.state.correctnessFailures).toBe(0);
-  });
-
-  it("offers one adjudication per head/pass after an upheld ruling", () => {
-    const rejected = reachRejection("quality");
-    const disputed = step(
-      rejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const upheld = step(disputed.state, {
-      kind: "adjudicator-result",
-      pass: "quality",
-      head: "abc",
-      ruling: "UPHELD",
-      reasoning: "the test is genuinely missing",
-      correctness: null,
-      reviewRound: null,
-    });
-    const repeated = step(
-      upheld.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    expect(repeated.action.kind).toBe("run-gate-and-reviewer");
-    if (upheld.action.kind !== "run-implementer") throw new Error("expected implementer");
-    expect(upheld.action.latestReviewerFeedback?.prose).toContain("UPHELD");
-    expect(upheld.action.latestReviewerFeedback?.prose).toContain(
-      "the test is genuinely missing",
-    );
-    expect(upheld.action.latestReviewerFeedback?.prose).toContain("finding");
-  });
-
-  it("parks immediately if the read-only adjudicator writes", () => {
-    const rejected = reachRejection("quality");
-    const disputed = step(
-      rejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const wrote = step(disputed.state, {
-      kind: "adjudicator-wrote",
-      detail: "Adjudicator changed git state",
-    });
-    expect(wrote.action).toMatchObject({
-      kind: "terminate",
-      verdict: { type: "NEEDS-HUMAN-REVIEW", cause: "adjudicator-wrote" },
-    });
-  });
-
-  it("charges no pass budget for missing rulings and stops on the second harness failure", () => {
-    const rejected = reachRejection("quality");
-    const disputed = step(
-      rejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const failedOnce = step(disputed.state, {
-      kind: "adjudicator-harness-failed",
-      detail: "no ruling",
-    });
-    expect(failedOnce.action.kind).toBe("run-implementer");
-    expect(failedOnce.state.qualityFailures).toBe(1);
-    const disputedAgain = step(
-      failedOnce.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const failedTwice = step(disputedAgain.state, {
-      kind: "adjudicator-harness-failed",
-      detail: "no ruling again",
-    });
-    expect(failedTwice.action).toMatchObject({
-      kind: "terminate",
-      verdict: { type: "NEEDS-HUMAN", cause: "reviewer-harness-failed" },
-    });
-    expect(failedTwice.state.qualityFailures).toBe(1);
-  });
-
-  it("preserves a rejected head's red gate trace through adjudicator harness failures", () => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete, [], null, null, 1, "abc")).state;
-    const rejected = step(state, {
-      ...rejectedAt("quality", "abc"),
-      gate: gate1Red("GATE-TRACE-T"),
-    });
-    const disputed = step(
-      rejected.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const failedOnce = step(disputed.state, {
-      kind: "adjudicator-harness-failed",
-      detail: "no ruling",
-    });
-    expect(asImpl(failedOnce.action).failureTrace).toBe("GATE-TRACE-T");
-
-    const disputedAgain = step(
-      failedOnce.state,
-      impl(complete, [], null, null, 0, "abc"),
-    );
-    const failedTwice = step(disputedAgain.state, {
-      kind: "adjudicator-harness-failed",
-      detail: "no ruling again",
-    });
-    expect(failedTwice.action).toMatchObject({
-      kind: "terminate",
-      verdict: {
-        type: "NEEDS-HUMAN",
-        cause: "reviewer-harness-failed",
-        failureTrace:
-          "Gate-1 failure:\nGATE-TRACE-T\n\n" +
-          "Reviewer harness failure:\nadjudicator: no ruling again",
-      },
-    });
-  });
 });
 const needsInfo = (questions: string): ParseSignal => ({
   kind: "NEEDS-INFO",
@@ -325,7 +83,7 @@ const gate1Red = (trace: string, failedStep = "test"): Gate1Result => ({
   failureTrace: trace,
   failedStep,
 });
-const approved = (prose: string = "lgtm"): ReviewerResult => ({
+const approved = (prose = "lgtm"): ReviewerResult => ({
   kind: "reviewer-result",
   verdict: "APPROVED",
   prose,
@@ -333,29 +91,14 @@ const approved = (prose: string = "lgtm"): ReviewerResult => ({
 const changes = (prose: string): ReviewerResult => ({
   kind: "reviewer-result",
   verdict: "CHANGES-REQUESTED",
-  rejectingPass: "correctness",
-  prose,
-});
-const qualityChanges = (prose: string): ReviewerResult => ({
-  kind: "reviewer-result",
-  verdict: "CHANGES-REQUESTED",
-  rejectingPass: "quality",
   prose,
 });
 // The reviewer was invoked its full budget and reviewed nothing (#41).
-const harnessFailed = (
-  detail = "invocation 1/2: …",
-  pass: "quality" | "correctness" = "quality",
-): ReviewerResult => ({
+const harnessFailed = (detail = "invocation 1/2: …"): ReviewerResult => ({
   kind: "reviewer-harness-failed",
-  pass,
   detail,
 });
-const judged = (gate: Gate1Result, reviewer: ReviewerResult): LoopEvent => ({
-  kind: "gate-and-reviewer-result",
-  gate,
-  reviewer,
-});
+
 // Clean tree and HEAD on the issue branch unless a case says otherwise — the
 // dirty routing (#24 D1) and the off-branch routing (#27) each have their own
 // describe block below.
@@ -363,10 +106,7 @@ const impl = (
   signal: ParseSignal,
   dirtyPaths: readonly string[] = [],
   offBranch: HeadMismatch | null = null,
-  fastForwarded: {
-    readonly fromSha: string;
-    readonly toSha: string;
-  } | null = null,
+  fastForwarded: { readonly fromSha: string; readonly toSha: string } | null = null,
   commits = 1,
   head = "head",
 ): LoopEvent => ({
@@ -379,29 +119,32 @@ const impl = (
   head,
 });
 
-const rejectedAt = (
-  pass: "quality" | "correctness",
-  head: string,
-  prose = "finding",
-): LoopEvent => ({
-  kind: "gate-and-reviewer-result",
-  gate: gate1Ok,
-  reviewer: pass === "quality" ? qualityChanges(prose) : changes(prose),
-  reviewRound: {
-    head,
-    qualityMode: "list",
-    quality: pass === "quality" ? "CHANGES-REQUESTED" : "APPROVED",
-    correctness: pass === "correctness" ? "CHANGES-REQUESTED" : "SKIPPED",
-    rejectingPass: pass,
-    durationMs: 1,
-  },
+const quality: LoopEvent = { kind: "quality-result" };
+const gated = (gate: Gate1Result, head = "head"): LoopEvent => ({
+  kind: "gate-result",
+  gate,
+  head,
+});
+const reviewed = (reviewer: ReviewerResult, head = "head"): LoopEvent => ({
+  kind: "correctness-result",
+  head,
+  reviewer,
 });
 
+// One serial round after a COMPLETE (#185): the fixer, gate-1 on the head it
+// left, and the correctness pass only when that gate is green.
+const round = (
+  gate: Gate1Result,
+  reviewer: ReviewerResult | null = null,
+  head = "head",
+): readonly LoopEvent[] => [
+  quality,
+  gated(gate, head),
+  ...(reviewer === null ? [] : [reviewed(reviewer, head)]),
+];
+
 // A HEAD that is detached, i.e. the #27 shape that leaves a CLEAN tree.
-const detached = (
-  headSha = "dead1",
-  branchSha = "base0",
-): HeadMismatch => ({
+const detached = (headSha = "dead1", branchSha = "base0"): HeadMismatch => ({
   branch: "sandbar/issue-1-x",
   headRef: null,
   headSha,
@@ -409,33 +152,204 @@ const detached = (
   branchIsAncestor: false,
 });
 
-const defaultOpts = {
-  issueBranch: "sandbar/issue-1-x",
-  maxQualityRounds: 4,
-  maxGateRounds: 4,
-  maxReviewRounds: 3,
-  uiPrototypeCheck: false,
-  partitionCheck: false,
-} as const;
+const asImpl = (a: LoopAction) => {
+  if (a.kind !== "run-implementer") throw new Error(`expected run-implementer, got ${a.kind}`);
+  return a;
+};
 
-const asImpl = (a: LoopAction) =>
-  a as Extract<LoopAction, { kind: "run-implementer" }>;
-const asReviewer = (a: LoopAction) =>
-  a as Extract<LoopAction, { kind: "run-gate-and-reviewer" }>;
+describe("inner-loop-machine — the serial round (#185)", () => {
+  it("runs the quality fixer, then gate-1, then correctness, then DONE", () => {
+    const { actions, verdict } = drive(defaultOpts, [
+      impl(complete),
+      ...round(gate1Ok, approved()),
+    ]);
+    expect(actions.map((a) => a.kind)).toEqual([
+      "run-implementer",
+      "run-quality",
+      "run-gate",
+      "run-correctness",
+      "terminate",
+    ]);
+    expect(verdict).toEqual({ type: "DONE" });
+  });
+
+  it("numbers each step of the round by the attempt that opened it", () => {
+    const { actions } = drive(defaultOpts, [
+      impl(complete),
+      ...round(gate1Red("red")),
+      impl(complete),
+      ...round(gate1Ok, approved()),
+    ]);
+    expect(actions.filter((a) => a.kind !== "terminate")).toEqual([
+      { kind: "run-implementer", attempt: 1, failureTrace: "", extraReprompt: null, latestReviewerFeedback: null },
+      { kind: "run-quality", attempt: 1 },
+      { kind: "run-gate", attempt: 1 },
+      { kind: "run-implementer", attempt: 2, failureTrace: "red", extraReprompt: null, latestReviewerFeedback: null },
+      { kind: "run-quality", attempt: 2 },
+      { kind: "run-gate", attempt: 2 },
+      { kind: "run-correctness", attempt: 2 },
+    ]);
+  });
+
+  // Correctness reads a green head and nothing else; a red gate returns to
+  // the implementer with no review spent on it.
+  it("never dispatches correctness on a red gate", () => {
+    const red = stepAll(initialState(defaultOpts), [impl(complete), quality, gated(gate1Red("FAIL x"))]);
+    expect(red.action).toMatchObject({ kind: "run-implementer", attempt: 2, failureTrace: "FAIL x" });
+    expect(red.state.correctnessFailures).toBe(0);
+  });
+
+  it("exposes one UI phase per serial step", () => {
+    expect(visiblePhases({ kind: "run-quality", attempt: 1 })).toEqual(["quality"]);
+    expect(visiblePhases({ kind: "run-gate", attempt: 1 })).toEqual(["gate-1"]);
+    expect(visiblePhases({ kind: "run-correctness", attempt: 1 })).toEqual(["review"]);
+  });
+
+  it.each([
+    ["the quality fixer", [impl(complete)]],
+    ["the correctness pass", [impl(complete), quality, gated(gate1Ok)]],
+  ] as const)("parks a context overage measured before %s", (_name, events) => {
+    const state = stepAll(initialState(defaultOpts), events).state;
+    const measured = step(state, {
+      kind: "context-over-budget",
+      slot: "review-correctness",
+      size: 700_000,
+      budget: 600_000,
+      detail: "completed branch is too large",
+    });
+    expect(measured.action).toMatchObject({
+      kind: "terminate",
+      verdict: { type: "NEEDS-PARTITION", cause: "measured", slot: "review-correctness" },
+    });
+  });
+
+  it("refuses a context overage reported by gate-1, which measures nothing", () => {
+    const state = stepAll(initialState(defaultOpts), [impl(complete), quality]).state;
+    expect(() =>
+      step(state, {
+        kind: "context-over-budget",
+        slot: "review-quality",
+        size: 1,
+        budget: 0,
+        detail: "x",
+      }),
+    ).toThrow(/context-over-budget event in phase needs-gate/);
+  });
+});
+
+describe("inner-loop-machine — unchanged rejection adjudication (#167)", () => {
+  const reachRejection = (head = "abc") =>
+    stepAll(initialState(defaultOpts), [
+      impl(complete, [], null, null, 1, head),
+      ...round(gate1Ok, changes("finding"), head),
+    ]);
+
+  it("routes a zero-commit COMPLETE at the rejected head to the adjudicator", () => {
+    const disputed = step(reachRejection().state, impl(complete, [], null, null, 0, "abc"));
+    expect(disputed.action).toEqual({
+      kind: "run-adjudicator",
+      attempt: 2,
+      rejection: { round: 1, head: "abc", report: "finding" },
+    });
+  });
+
+  it("does not adjudicate after the implementer changes the head", () => {
+    const changed = step(reachRejection().state, impl(complete, [], null, null, 1, "def"));
+    expect(changed.action).toEqual({ kind: "run-quality", attempt: 2 });
+  });
+
+  it("makes an overruled correctness rejection final approval and refunds it", () => {
+    const disputed = step(reachRejection().state, impl(complete, [], null, null, 0, "abc"));
+    const ruled = step(disputed.state, {
+      kind: "adjudicator-result",
+      head: "abc",
+      ruling: "OVERRULED",
+      reasoning: "the cited branch is handled",
+    });
+    expect(ruled.action).toEqual({ kind: "terminate", verdict: { type: "DONE" } });
+    expect(ruled.state.correctnessFailures).toBe(0);
+  });
+
+  it("offers one adjudication per head after an upheld ruling", () => {
+    const disputed = step(reachRejection().state, impl(complete, [], null, null, 0, "abc"));
+    const upheld = step(disputed.state, {
+      kind: "adjudicator-result",
+      head: "abc",
+      ruling: "UPHELD",
+      reasoning: "the null branch still crashes",
+    });
+    const feedback = asImpl(upheld.action).latestReviewerFeedback;
+    expect(feedback).toBe("Independent adjudicator: UPHELD\nthe null branch still crashes\n\nfinding");
+    expect(upheld.state.correctnessFailures).toBe(1);
+    // The same zero-commit move at the same head now takes the ordinary round.
+    const again = step(upheld.state, impl(complete, [], null, null, 0, "abc"));
+    expect(again.action).toEqual({ kind: "run-quality", attempt: 3 });
+    // A repeated rejection at that head carries the ruling's reasoning.
+    const rejectedAgain = stepAll(again.state, round(gate1Ok, changes("finding"), "abc"));
+    expect(asImpl(rejectedAgain.action).latestReviewerFeedback).toContain(
+      "Independent adjudicator: UPHELD",
+    );
+  });
+
+  it("refuses a ruling about a head other than the pending one", () => {
+    const disputed = step(reachRejection().state, impl(complete, [], null, null, 0, "abc"));
+    expect(() =>
+      step(disputed.state, {
+        kind: "adjudicator-result",
+        head: "zzz",
+        ruling: "OVERRULED",
+        reasoning: "",
+      }),
+    ).toThrow(/other than the pending head/);
+  });
+
+  it("parks immediately if the read-only adjudicator writes", () => {
+    const disputed = step(reachRejection().state, impl(complete, [], null, null, 0, "abc"));
+    const wrote = step(disputed.state, { kind: "adjudicator-wrote", detail: "it committed" });
+    expect(wrote.action).toEqual({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "adjudicator-wrote",
+        latestReviewerProse: "it committed",
+      },
+    });
+  });
+
+  it("charges no budget for missing rulings and stops on the second harness failure", () => {
+    const disputed = step(reachRejection().state, impl(complete, [], null, null, 0, "abc"));
+    const failed = step(disputed.state, { kind: "adjudicator-harness-failed", detail: "no ruling" });
+    const retry = asImpl(failed.action);
+    expect(retry.extraReprompt).toContain("independent adjudicator could not be run");
+    expect(failed.state.correctnessFailures).toBe(1);
+    expect(failed.state.gateFailures).toBe(0);
+    const disputedAgain = step(failed.state, impl(complete, [], null, null, 0, "abc"));
+    expect(disputedAgain.action.kind).toBe("run-adjudicator");
+    const failedTwice = step(disputedAgain.state, {
+      kind: "adjudicator-harness-failed",
+      detail: "no ruling again",
+    });
+    expect(failedTwice.action).toMatchObject({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-HUMAN",
+        cause: "reviewer-harness-failed",
+        failureTrace: "adjudicator: no ruling again",
+        latestReviewerProse: "finding",
+      },
+    });
+  });
+});
 
 describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
   it("runs before attempt 1 without spending an attempt, then proceeds on CLEAR", () => {
-    let state = initialState({ ...defaultOpts, uiPrototypeCheck: true });
+    const state = initialState({ ...defaultOpts, uiPrototypeCheck: true });
     expect(initialAction(state)).toEqual({ kind: "run-ui-check" });
-    const result = step(state, {
-      kind: "ui-check-result",
-      result: { kind: "CLEAR" },
-    });
-    state = result.state;
+    const result = step(state, { kind: "ui-check-result", result: { kind: "CLEAR" } });
     expect(result.action).toMatchObject({ kind: "run-implementer", attempt: 1 });
-    expect(state.attempt).toBe(1);
-    expect(state.qualityFailures).toBe(0);
-    expect(state.correctnessFailures).toBe(0);
+    expect(result.state.attempt).toBe(1);
+    expect(result.state.gateFailures).toBe(0);
+    expect(result.state.correctnessFailures).toBe(0);
   });
 
   it("terminates before attempt 1 when a prototype is needed", () => {
@@ -453,13 +367,10 @@ describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
       },
     });
     expect(result.state.attempt).toBe(1);
-    expect(result.state.qualityFailures).toBe(0);
-    expect(result.state.correctnessFailures).toBe(0);
   });
 
   it("starts directly with the implementer when disabled", () => {
-    const state = initialState({ ...defaultOpts, uiPrototypeCheck: false });
-    expect(initialAction(state)).toMatchObject({
+    expect(initialAction(initialState(defaultOpts))).toMatchObject({
       kind: "run-implementer",
       attempt: 1,
     });
@@ -467,10 +378,7 @@ describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
 
   it("parks a checker that writes before trusting its classification", () => {
     const state = initialState({ ...defaultOpts, uiPrototypeCheck: true });
-    const result = step(state, {
-      kind: "ui-checker-wrote",
-      detail: "UI checker changed git state",
-    });
+    const result = step(state, { kind: "ui-checker-wrote", detail: "UI checker changed git state" });
     expect(result.action).toEqual({
       kind: "terminate",
       verdict: {
@@ -484,11 +392,7 @@ describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
 
 describe("inner-loop-machine — issue partition check (#158)", () => {
   it("runs before UI and attempt 1, then proceeds on CLEAR", () => {
-    const state = initialState({
-      ...defaultOpts,
-      partitionCheck: true,
-      uiPrototypeCheck: true,
-    });
+    const state = initialState({ ...defaultOpts, partitionCheck: true, uiPrototypeCheck: true });
     expect(initialAction(state)).toEqual({ kind: "run-partition-check" });
     const checked = step(state, {
       kind: "partition-check-result",
@@ -521,111 +425,36 @@ describe("inner-loop-machine — issue partition check (#158)", () => {
     });
   });
 
-  it("parks a measured overage before gate/review dispatch", () => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete)).state;
-    const measured = step(state, {
-      kind: "context-over-budget",
-      slot: "review-correctness",
-      size: 700_000,
-      budget: 600_000,
-      detail: "completed branch is too large",
-    });
-    expect(measured.action).toMatchObject({
+  it("parks a checker that writes", () => {
+    const state = initialState({ ...defaultOpts, partitionCheck: true });
+    const result = step(state, { kind: "partition-checker-wrote", detail: "wrote" });
+    expect(result.action).toMatchObject({
       kind: "terminate",
-      verdict: {
-        type: "NEEDS-PARTITION",
-        cause: "measured",
-        slot: "review-correctness",
-      },
+      verdict: { type: "NEEDS-HUMAN-REVIEW", cause: "partition-checker-wrote" },
     });
   });
 });
 
-describe("inner-loop-machine — happy paths", () => {
-  it("attempt 1 COMPLETE → gate-1 green → APPROVED → DONE", () => {
-    const { actions, verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    expect(actions.map((a) => a.kind)).toEqual([
-      "run-implementer",
-      "run-gate-and-reviewer",
-      "terminate",
-    ]);
-    expect(verdict).toEqual({ type: "DONE" });
-  });
-
+describe("inner-loop-machine — implementer escalations", () => {
   it("attempt 1 NEEDS-INFO short-circuits to NEEDS-INFO with questions block", () => {
-    const { actions, verdict } = drive(defaultOpts, [
-      impl(needsInfo("what's the foo?")),
-    ]);
-    expect(actions.map((a) => a.kind)).toEqual(["run-implementer", "terminate"]);
-    expect(verdict).toEqual({ type: "NEEDS-INFO", questions: "what's the foo?", strandedHead: null });
+    const { verdict } = drive(defaultOpts, [impl(needsInfo("which currency?"))]);
+    expect(verdict).toEqual({ type: "NEEDS-INFO", questions: "which currency?", strandedHead: null });
   });
 
-  it("attempt 1 NEEDS-UI-PROTOTYPE short-circuits — no gate, no reviewer (#21)", () => {
-    const { actions, verdict } = drive(defaultOpts, [
-      impl(needsUiPrototype("new settings screen, layout invented")),
-    ]);
+  it("attempt 1 NEEDS-UI-PROTOTYPE short-circuits — no round (#21)", () => {
+    const { actions, verdict } = drive(defaultOpts, [impl(needsUiPrototype("a modal"))]);
     expect(actions.map((a) => a.kind)).toEqual(["run-implementer", "terminate"]);
-    expect(verdict).toEqual({
-      type: "NEEDS-UI-PROTOTYPE",
-      uiImpact: "new settings screen, layout invented",
-      strandedHead: null,
-    });
+    expect(verdict).toEqual({ type: "NEEDS-UI-PROTOTYPE", uiImpact: "a modal", strandedHead: null });
   });
 
   it("a late NEEDS-UI-PROTOTYPE terminates mid-loop without burning further attempts", () => {
     const { actions, verdict } = drive(defaultOpts, [
       impl(complete),
-      judged(gate1Red("trace A"), approved("discarded")),
-      impl(needsUiPrototype("only now do I see the invented flow")),
+      ...round(gate1Ok, changes("add the error state")),
+      impl(needsUiPrototype("the error state needs a screen")),
     ]);
-    expect(actions.map((a) => a.kind)).toEqual([
-      "run-implementer",
-      "run-gate-and-reviewer",
-      "run-implementer",
-      "terminate",
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-UI-PROTOTYPE",
-      uiImpact: "only now do I see the invented flow",
-      strandedHead: null,
-    });
-  });
-
-  // The escalation must win over quality-budget exhaustion: it hands the issue
-  // to a human directly and therefore does not charge the second failure.
-  it("escalating after a quality failure terminates NEEDS-UI-PROTOTYPE", () => {
-    const { verdict } = drive(
-      { maxQualityRounds: 2, maxReviewRounds: 3 },
-      [
-        impl(complete),
-        judged(gate1Red("trace A"), approved("discarded")),
-        impl(needsUiPrototype("the remaining work is all invented UI")),
-      ],
-    );
-    expect(verdict).toEqual({
-      type: "NEEDS-UI-PROTOTYPE",
-      uiImpact: "the remaining work is all invented UI",
-      strandedHead: null,
-    });
-  });
-
-  it("escalating after a CHANGES-REQUESTED round discards the stashed reviewer prose", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, changes("extract the helper")),
-      impl(needsUiPrototype("the reviewer's ask means redesigning the screen")),
-    ]);
-    // The terminal carries only the UI assessment — the human is being asked
-    // for a prototype, not for a verdict on the reviewer's request.
-    expect(verdict).toEqual({
-      type: "NEEDS-UI-PROTOTYPE",
-      uiImpact: "the reviewer's ask means redesigning the screen",
-      strandedHead: null,
-    });
+    expect(actions.filter((a) => a.kind === "run-implementer")).toHaveLength(2);
+    expect(verdict.type).toBe("NEEDS-UI-PROTOTYPE");
   });
 });
 
@@ -633,825 +462,262 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
   it("multiple gate-1 reds before green, then APPROVED → DONE", () => {
     const { actions, verdict } = drive(defaultOpts, [
       impl(complete),
-      judged(gate1Red("trace A"), approved("discarded")),
+      ...round(gate1Red("red 1")),
       impl(complete),
-      judged(gate1Red("trace B"), approved("discarded")),
+      ...round(gate1Red("red 2")),
       impl(complete),
-      judged(gate1Ok, approved()),
+      ...round(gate1Ok, approved()),
     ]);
-
-    expect(actions.map((a) => a.kind)).toEqual([
-      "run-implementer",
-      "run-gate-and-reviewer",
-      "run-implementer",
-      "run-gate-and-reviewer",
-      "run-implementer",
-      "run-gate-and-reviewer",
-      "terminate",
-    ]);
-
-    const third = actions[4] as Extract<LoopAction, { kind: "run-implementer" }>;
-    expect(third.attempt).toBe(3);
-    expect(third.failureTrace).toBe("trace B");
-    expect(third.extraReprompt).toBeNull();
-    expect(third.latestReviewerFeedback).toEqual({
-      disposition: "APPROVED-CORRECTNESS-SKIPPED",
-      prose: "discarded",
-    });
-
     expect(verdict).toEqual({ type: "DONE" });
+    const implementers = actions.filter((a) => a.kind === "run-implementer");
+    expect(implementers.map((a) => asImpl(a).failureTrace)).toEqual(["", "red 1", "red 2"]);
   });
 
-  it("keeps a red-round quality rejection and spends the quality budget", () => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete)).state;
-    state = step(state, judged(gate1Ok, changes("earlier gated review"))).state;
-    state = step(state, impl(complete)).state;
-    const rejected = step(
-      state,
-      judged(gate1Red("trace X"), qualityChanges("keep me")),
-    );
-    expect(rejected.state.qualityFailures).toBe(1);
-    expect(rejected.state.gateFailures).toBe(1);
-    expect(asImpl(rejected.action).latestReviewerFeedback).toEqual({
-      disposition: "CHANGES-REQUESTED",
-      prose: "keep me",
-    });
-    expect(asImpl(rejected.action).failureTrace).toBe("trace X");
+  it("red-red-green resets the gate streak", () => {
+    const state = stepAll(initialState(defaultOpts), [
+      impl(complete), ...round(gate1Red("r1")),
+      impl(complete), ...round(gate1Red("r2")),
+      impl(complete), quality, gated(gate1Ok),
+    ]).state;
+    expect(state.gateFailures).toBe(0);
+    expect(state.lastFailureTrace).toBe("");
   });
 
-  it("red-red-green resets only the gate streak", () => {
-    let state = initialState(defaultOpts);
-    for (const gate of [gate1Red("one"), gate1Red("two")]) {
-      state = step(state, impl(complete)).state;
-      state = step(state, judged(gate, approved())).state;
-    }
-    expect(state.gateFailures).toBe(2);
-    expect(state.qualityFailures).toBe(0);
-    state = step(state, impl(complete)).state;
-    const green = step(state, judged(gate1Ok, changes("correctness")));
-    expect(green.state.gateFailures).toBe(0);
-    expect(green.state.qualityFailures).toBe(0);
-  });
-
-  it("red rounds with quality approval leave the quality streak untouched", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, qualityChanges("quality one")),
-      impl(complete),
-      judged(gate1Red("trace X"), approved("quality approved")),
-      impl(complete),
-      judged(gate1Ok, approved()),
+  it("keeps an earlier correctness rejection beside a later gate failure", () => {
+    const r = stepAll(initialState(defaultOpts), [
+      impl(complete), ...round(gate1Ok, changes("handle null")),
+      impl(complete), ...round(gate1Red("the quality pass's new test fails")),
     ]);
-    expect(asImpl(actions[4]!).latestReviewerFeedback).toEqual({
-      disposition: "APPROVED-CORRECTNESS-SKIPPED",
-      prose: "quality approved",
-    });
-  });
-});
-
-describe("inner-loop-machine — reviewer CHANGES-REQUESTED loop", () => {
-  it("one impl + CHANGES-REQUESTED → next impl carries typed feedback + clears trace", () => {
-    const { actions, verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, changes("- naming nit in foo.ts")),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-
-    const reviewerAction = actions[1] as Extract<
-      LoopAction,
-      { kind: "run-gate-and-reviewer" }
-    >;
-    expect(reviewerAction.reviewRound).toBe(1);
-
-    const secondImpl = actions[2] as Extract<
-      LoopAction,
-      { kind: "run-implementer" }
-    >;
-    expect(secondImpl.attempt).toBe(2);
-    expect(secondImpl.latestReviewerFeedback?.prose).toBe("- naming nit in foo.ts");
-    expect(secondImpl.failureTrace).toBe("");
-    expect(secondImpl.extraReprompt).toBeNull();
-
-    expect(verdict).toEqual({ type: "DONE" });
-  });
-
-  it("reviewer round records retain the attempt number when intervening work is unreviewed", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, changes("round 1 notes")),
-      impl(complete),
-      judged(gate1Red("trace"), approved("discarded")),
-      impl(complete),
-      judged(gate1Ok, changes("round 2 notes")),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    const firstReviewer = actions[1] as Extract<
-      LoopAction,
-      { kind: "run-gate-and-reviewer" }
-    >;
-    const secondReviewer = actions[5] as Extract<
-      LoopAction,
-      { kind: "run-gate-and-reviewer" }
-    >;
-    const thirdReviewer = actions[7] as Extract<
-      LoopAction,
-      { kind: "run-gate-and-reviewer" }
-    >;
-    expect(firstReviewer.reviewRound).toBe(1);
-    expect(secondReviewer.reviewRound).toBe(3);
-    expect(thirdReviewer.reviewRound).toBe(4);
-  });
-
-  it("red-round quality prose replaces an earlier review", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, changes("prose-from-round-1")),
-      impl(complete),
-      judged(gate1Red("trace X"), approved("red-round quality approved")),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    const implAfterGateRed = actions[4] as Extract<
-      LoopAction,
-      { kind: "run-implementer" }
-    >;
-    expect(implAfterGateRed.attempt).toBe(3);
-    expect(implAfterGateRed.failureTrace).toBe("trace X");
-    expect(implAfterGateRed.latestReviewerFeedback).toEqual({
-      disposition: "APPROVED-CORRECTNESS-SKIPPED",
-      prose: "red-round quality approved",
-    });
-  });
-
-  it("latest reviewer prose replaces an older one on a subsequent CHANGES-REQUESTED", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, changes("old prose")),
-      impl(complete),
-      judged(gate1Ok, changes("new prose")),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    const finalImpl = actions[4] as Extract<
-      LoopAction,
-      { kind: "run-implementer" }
-    >;
-    expect(finalImpl.latestReviewerFeedback?.prose).toBe("new prose");
-  });
-});
-
-describe("inner-loop-machine — reviewer harness failure (#41)", () => {
-  it("parks immediately when a reviewer writes git state (#98)", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, { kind: "reviewer-wrote", detail: "before a; after b; M src/x.ts" }),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "reviewer-wrote",
-      latestReviewerProse: "before a; after b; M src/x.ts",
-    });
-  });
-
-  it("reviewer-wrote still parks when the concurrent gate is red", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Red("red"), { kind: "reviewer-wrote", detail: "changed HEAD" }),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "reviewer-wrote",
-      latestReviewerProse: "changed HEAD",
-    });
-  });
-  it("spends neither failure budget", () => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete)).state;
-    const result = step(state, judged(gate1Ok, harnessFailed()));
-    expect(result.state.qualityFailures).toBe(0);
-    expect(result.state.correctnessFailures).toBe(0);
-    expect(result.action).toMatchObject({ kind: "run-implementer", attempt: 2 });
-  });
-
-  it("under a red gate carries both traces and charges only the gate streak", () => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete)).state;
-    const result = step(
-      state,
-      judged(gate1Red("tests failed"), harnessFailed("reviewer timed out")),
-    );
-    expect(result.state.qualityFailures).toBe(0);
-    expect(result.state.gateFailures).toBe(1);
-    expect(result.state.correctnessFailures).toBe(0);
-    expect(result.state.reviewerHarnessFailures).toBe(1);
-    expect(asImpl(result.action)).toMatchObject({
-      failureTrace: "tests failed",
-      extraReprompt: reviewerHarnessFailedReprompt(false),
-    });
-  });
-
-  it("a quality harness failure preserves the existing quality streak", () => {
-    let state = initialState({ ...defaultOpts, maxQualityRounds: 2 });
-    state = step(state, impl(complete)).state;
-    state = step(
-      state,
-      judged(gate1Ok, qualityChanges("first quality failure")),
-    ).state;
-    expect(state.qualityFailures).toBe(1);
-
-    state = step(state, impl(complete)).state;
-    const failed = step(state, judged(gate1Ok, harnessFailed("idle", "quality")));
-    expect(failed.state.qualityFailures).toBe(1);
-    expect(failed.action).toMatchObject({ kind: "run-implementer", attempt: 3 });
-
-    state = step(failed.state, impl(complete)).state;
-    const exhausted = step(
-      state,
-      judged(gate1Ok, qualityChanges("second quality failure")),
-    );
-    expect(exhausted.action).toEqual({
-      kind: "terminate",
-      verdict: {
-        type: "NEEDS-HUMAN-REVIEW",
-        cause: "quality-budget-exhausted",
-        roundsUsed: 2,
-        latestReviewerProse: "second quality failure",
-      },
-    });
-  });
-
-  it("cannot exhaust the review budget — a maxReviewRounds of 1 survives it", () => {
-    // The charge #41 objects to, at its sharpest: with one round to spend, a
-    // reviewer that emitted nothing used to end the issue as
-    // NEEDS-HUMAN-REVIEW quoting its own error message as the reviewer's
-    // report. The real CHANGES-REQUESTED that follows is what spends the round.
-    const { verdict } = drive(
-      { maxQualityRounds: 8, maxReviewRounds: 1 },
-      [
-        impl(complete),
-        judged(gate1Ok, harnessFailed()),
-        impl(complete),
-        judged(gate1Ok, changes("a real report")),
-      ],
-    );
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "correctness-budget-exhausted",
-      roundsUsed: 1,
-      latestReviewerProse: "a real report",
-    });
-  });
-
-  it("re-prompts as an ORCHESTRATOR note and quotes none of the harness detail", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, harnessFailed("invocation 1/2: podman exec died\ninvocation 2/2: idle 600s")),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    const next = asImpl(actions[2]!);
-    expect(next.attempt).toBe(2);
-    expect(next.extraReprompt).toBe(reviewerHarnessFailedReprompt(true));
-    // The whole of #41: the harness's error text is not reviewer feedback, and
-    // an implementer must not be handed one as the other.
-    expect(next.latestReviewerFeedback).toBeNull();
-    expect(next.extraReprompt).not.toContain("podman");
-    expect(next.extraReprompt).not.toContain("idle 600s");
-  });
-
-  it("leaves an earlier round's real prose exactly as it was", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, changes("round 1: rename the thing")),
-      impl(complete),
-      judged(gate1Ok, harnessFailed("the reviewer emitted nothing")),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    const next = asImpl(actions[4]!);
-    expect(next.latestReviewerFeedback?.prose).toBe("round 1: rename the thing");
-    expect(next.latestReviewerFeedback?.prose).not.toContain("emitted nothing");
-
-    // And the note rendered beside it must not contradict either disposition
-    // of retained reviewer prose.
-    expect(next.extraReprompt).toBe(
-      reviewerHarnessFailedReprompt(true, "CHANGES-REQUESTED"),
-    );
-    expect(next.extraReprompt).not.toContain("there is none");
-    expect(next.extraReprompt).toContain("retained CHANGES-REQUESTED report");
-    expect(next.extraReprompt).toContain("concerns still stand");
-  });
-
-  it("describes a retained red-round approval as informational after a harness failure", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Red("red"), approved("quality approved")),
-      impl(complete),
-      judged(gate1Ok, harnessFailed("reviewer unavailable")),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    const next = asImpl(actions[4]!);
-    expect(next.latestReviewerFeedback).toEqual({
-      disposition: "APPROVED-CORRECTNESS-SKIPPED",
-      prose: "quality approved",
-    });
-    expect(next.extraReprompt).toContain("retained quality approval");
-    expect(next.extraReprompt).toContain("informational");
-    expect(next.extraReprompt).not.toContain("what to address");
-  });
-
-  it("carries no gate trace forward — gate-1 was green to reach the reviewer", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Red("an OLD red from attempt 1"), approved("discarded")),
-      impl(complete),
-      judged(gate1Ok, harnessFailed()),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    expect(asImpl(actions[4]!).failureTrace).toBe("");
-  });
-
-  it("a second harness failure terminates instead of grinding the budget", () => {
-    const { actions, verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, harnessFailed("first")),
-      impl(complete),
-      judged(gate1Ok, harnessFailed("second")),
-    ]);
-    expect(actions[actions.length - 1]?.kind).toBe("terminate");
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "reviewer-harness-failed",
-      failureTrace: "second",
-      latestReviewerProse: null,
-      budgetExhausted: null,
-      strandedHead: null,
-    });
-  });
-
-  it("a second harness failure under red carries both failure traces", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, harnessFailed("first harness failure")),
-      impl(complete),
-      judged(gate1Red("tests failed"), harnessFailed("second harness failure")),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "reviewer-harness-failed",
-      failureTrace:
-        "Gate-1 failure:\ntests failed\n\n" +
-        "Reviewer harness failure:\nsecond harness failure",
-      latestReviewerProse: null,
-      budgetExhausted: null,
-      strandedHead: null,
-    });
-  });
-
-  it("a first harness failure under the exhausting red gate parks on the gate budget", () => {
-    const { verdict } = drive({ ...defaultOpts, maxGateRounds: 1 }, [
-      impl(complete),
-      judged(gate1Red("only red"), harnessFailed("reviewer timed out")),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "gate-red",
-      failureTrace: "only red",
-      latestReviewerProse: null,
-      budgetExhausted: { budget: "gate", roundsUsed: 1, failedStep: "test" },
-      strandedHead: null,
-    });
-  });
-
-  it("two non-consecutive harness failures still park", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, harnessFailed("first")),
-      impl(complete),
-      judged(gate1Ok, changes("a real report")),
-      impl(complete),
-      judged(gate1Ok, harnessFailed("second")),
-    ]);
-    expect(verdict).toMatchObject({
-      type: "NEEDS-HUMAN",
-      cause: "reviewer-harness-failed",
-      failureTrace: "second",
-    });
-  });
-
-  it("a red gate between two harness failures does not reset the total", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, harnessFailed("first")),
-      impl(complete),
-      judged(gate1Red("red"), approved("discarded")),
-      impl(complete),
-      judged(gate1Ok, harnessFailed("second")),
-    ]);
-    expect(verdict).toMatchObject({
-      type: "NEEDS-HUMAN",
-      cause: "reviewer-harness-failed",
-    });
-  });
-
-  it("a second harness failure keeps an earlier round's prose for the handoff", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, changes("round 1 prose")),
-      impl(complete),
-      judged(gate1Ok, harnessFailed("first")),
-      impl(complete),
-      judged(gate1Ok, harnessFailed("second")),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "reviewer-harness-failed",
-      failureTrace: "second",
-      latestReviewerProse: "round 1 prose",
-      budgetExhausted: null,
-      strandedHead: null,
-    });
-  });
-});
-
-describe("inner-loop-machine — review-round budget exhaustion", () => {
-  it("3 CHANGES-REQUESTED rounds → NEEDS-HUMAN-REVIEW with latest prose", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Ok, changes("r1")),
-      impl(complete),
-      judged(gate1Ok, changes("r2")),
-      impl(complete),
-      judged(gate1Ok, changes("r3")),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "correctness-budget-exhausted",
-      roundsUsed: 3,
-      latestReviewerProse: "r3",
-    });
-  });
-
-  it("at the defaults reaches four correctness rejections before parking", () => {
-    const script: LoopEvent[] = [];
-    for (let round = 1; round <= DEFAULT_MAX_REVIEW_ROUNDS; round++) {
-      script.push(impl(complete), judged(gate1Ok, changes(`r${round}`)));
-    }
-    const { actions, verdict } = drive(
-      {
-        maxQualityRounds: DEFAULT_MAX_QUALITY_ROUNDS,
-        maxReviewRounds: DEFAULT_MAX_REVIEW_ROUNDS,
-        uiPrototypeCheck: false,
-      },
-      script,
-    );
-    const rounds = actions
-      .filter((a) => a.kind === "run-gate-and-reviewer")
-      .map((a) => asReviewer(a).reviewRound);
-    expect(rounds).toEqual(
-      Array.from({ length: DEFAULT_MAX_REVIEW_ROUNDS }, (_, i) => i + 1),
-    );
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "correctness-budget-exhausted",
-      roundsUsed: DEFAULT_MAX_REVIEW_ROUNDS,
-      latestReviewerProse: `r${DEFAULT_MAX_REVIEW_ROUNDS}`,
-    });
-  });
-
-  it("maxReviewRounds=1 with one CHANGES-REQUESTED surfaces immediately", () => {
-    const { verdict } = drive({ ...defaultOpts, maxReviewRounds: 1 }, [
-      impl(complete),
-      judged(gate1Ok, changes("only round")),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "correctness-budget-exhausted",
-      roundsUsed: 1,
-      latestReviewerProse: "only round",
-    });
-  });
-
-  it("quality rejections exhaust only the quality budget", () => {
-    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
-      impl(complete),
-      judged(gate1Ok, qualityChanges("q1")),
-      impl(complete),
-      judged(gate1Ok, qualityChanges("q2")),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "quality-budget-exhausted",
-      roundsUsed: 2,
-      latestReviewerProse: "q2",
-    });
-  });
-
-  it("a non-exhausting quality rejection sends that pass's prose to the implementer", () => {
-    let state = initialState({ ...defaultOpts, maxQualityRounds: 2 });
-    state = step(state, impl(complete)).state;
-    const result = step(
-      state,
-      judged(gate1Ok, qualityChanges("add the missing standards test")),
-    );
-    expect(result.action).toMatchObject({
-      kind: "run-implementer",
-      latestReviewerFeedback: {
-        disposition: "CHANGES-REQUESTED",
-        prose: "add the missing standards test",
-      },
-    });
-  });
-});
-
-describe("inner-loop-machine — NO-SIGNAL re-prompting", () => {
-  it("carries the parser's reprompt into the next attempt", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(noSignal("Still working. Emit <promise>...")),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    const second = actions[1] as Extract<LoopAction, { kind: "run-implementer" }>;
-    expect(second.attempt).toBe(2);
-    expect(second.extraReprompt).toBe("Still working. Emit <promise>...");
-  });
-
-  it("clears the reprompt after one use", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(noSignal("first reprompt")),
-      impl(complete),
-      judged(gate1Red("trace"), approved("discarded")),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    const third = actions[3] as Extract<LoopAction, { kind: "run-implementer" }>;
-    expect(third.attempt).toBe(3);
-    expect(third.extraReprompt).toBeNull();
-  });
-
-  it("carries the missing-tag correction into the next attempt", () => {
-    const { actions } = drive(defaultOpts, [
-      impl(noSignal()),
-      impl(complete),
-      judged(gate1Ok, approved()),
-    ]);
-    const second = actions[1] as Extract<LoopAction, { kind: "run-implementer" }>;
-    expect(second.attempt).toBe(2);
-    expect(second.extraReprompt).toBe("Still working. Emit <promise>...");
-  });
-});
-
-describe("inner-loop-machine — quality and gate budget exhaustion", () => {
-  it("red plus quality rejection exhausts the staggered gate budget", () => {
-    const { verdict } = drive(
-      { ...defaultOpts, maxGateRounds: 1, maxQualityRounds: 2 },
-      [impl(complete), judged(gate1Red("red"), qualityChanges("reject"))],
-    );
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "gate-red",
-      failureTrace: "red",
-      latestReviewerProse: "reject",
-      budgetExhausted: { budget: "gate", roundsUsed: 1, failedStep: "test" },
-      strandedHead: null,
-    });
-  });
-
-  it("red plus quality rejection exhausts the staggered quality budget", () => {
-    const { verdict } = drive(
-      { ...defaultOpts, maxGateRounds: 2, maxQualityRounds: 1 },
-      [impl(complete), judged(gate1Red("red"), qualityChanges("reject"))],
-    );
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "quality-budget-exhausted",
-      roundsUsed: 1,
-      latestReviewerProse: "reject",
-    });
+    const next = asImpl(r.action);
+    expect(next.failureTrace).toBe("the quality pass's new test fails");
+    expect(next.latestReviewerFeedback).toBe("handle null");
+    expect(r.state.correctnessFailures).toBe(1);
+    expect(r.state.gateFailures).toBe(1);
   });
 
   it("repeated gate-1 red exhausts the gate budget with the latest step, trace and review", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete),
-      judged(gate1Red("trace 1", "compile"), approved("approved 1")),
-      impl(complete),
-      judged(gate1Red("trace 2"), approved("approved 2")),
-      impl(complete),
-      judged(gate1Red("trace 3"), approved("approved 3")),
-      impl(complete),
-      judged(gate1Red("trace 4"), approved("approved 4")),
+    const { verdict } = drive({ maxGateRounds: 2 }, [
+      impl(complete), ...round(gate1Ok, changes("earlier finding")),
+      impl(complete), ...round(gate1Red("first", "lint")),
+      impl(complete), ...round(gate1Red("second", "test")),
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN",
       cause: "gate-red",
-      failureTrace: "trace 4",
-      latestReviewerProse: "approved 4",
-      budgetExhausted: {
-        budget: "gate",
-        roundsUsed: DEFAULT_MAX_GATE_ROUNDS,
-        failedStep: "test",
-      },
-      strandedHead: null,
-    });
-  });
-
-  it("repeated NO-SIGNAL exhausts with its own honest cause", () => {
-    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
-      impl(noSignal()),
-      impl(noSignal()),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "no-signal-exhausted",
-      failureTrace: "The final implementer attempt emitted no <promise> token.",
-      latestReviewerProse: null,
-      budgetExhausted: { budget: "quality", roundsUsed: 2 },
-      strandedHead: null,
-    });
-  });
-
-  it("NO-SIGNAL exhaustion preserves an older gate trace", () => {
-    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
-      impl(complete),
-      judged(gate1Red("recorded trace"), approved("discarded")),
-      impl(noSignal()),
-      impl(noSignal()),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "no-signal-exhausted",
-      failureTrace:
-        "Last gate failure:\nrecorded trace\n\n" +
-        "The final implementer attempt emitted no <promise> token.",
-      latestReviewerProse: null,
-      budgetExhausted: { budget: "quality", roundsUsed: 2 },
-      strandedHead: null,
-    });
-  });
-
-  it("NO-SIGNAL guard exhaustion carries the parser correction", () => {
-    const correction =
-      "You declared <promise>COMPLETE</promise> but made no commits this run.";
-    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 1 }, [
-      impl(noSignal(correction)),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "no-signal-exhausted",
-      failureTrace: `The final implementer signal failed validation:\n${correction}`,
-      latestReviewerProse: null,
-      budgetExhausted: { budget: "quality", roundsUsed: 1 },
+      failureTrace: "second",
+      latestReviewerProse: "earlier finding",
+      budgetExhausted: { budget: "gate", roundsUsed: 2, failedStep: "test" },
       strandedHead: null,
     });
   });
 
   it("maxGateRounds=1 with one gate-1 red surfaces NEEDS-HUMAN", () => {
-    const { verdict } = drive({ ...defaultOpts, maxGateRounds: 1 }, [
-      impl(complete),
-      judged(gate1Red("trace"), approved("quality approved")),
-    ]);
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN",
-      cause: "gate-red",
-      failureTrace: "trace",
-      latestReviewerProse: "quality approved",
-      budgetExhausted: { budget: "gate", roundsUsed: 1, failedStep: "test" },
-      strandedHead: null,
-    });
+    const { verdict } = drive({ maxGateRounds: 1 }, [impl(complete), ...round(gate1Red("boom"))]);
+    expect(verdict).toMatchObject({ type: "NEEDS-HUMAN", cause: "gate-red" });
   });
 });
 
-describe("inner-loop-machine — interleaved budgets", () => {
-  it("a correctness rejection resets the consecutive quality count", () => {
-    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
+describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
+  it("one impl + CHANGES-REQUESTED → next impl carries the prose and clears the trace", () => {
+    const r = stepAll(initialState(defaultOpts), [
       impl(complete),
-      judged(gate1Red("quality failure 1"), qualityChanges("quality reject")),
-      impl(complete),
-      judged(gate1Ok, changes("correctness 1")),
-      impl(complete),
-      judged(gate1Red("quality failure after reset"), approved("discarded")),
-      impl(complete),
-      judged(gate1Ok, approved()),
+      ...round(gate1Ok, changes("handle null")),
     ]);
-    expect(verdict).toEqual({ type: "DONE" });
-  });
-
-  it("quality rejections do not spend the correctness budget", () => {
-    const { verdict } = drive(
-      { maxQualityRounds: 3, maxReviewRounds: 2, uiPrototypeCheck: false },
-      [
-        impl(complete),
-        judged(gate1Ok, changes("correctness 1")),
-        impl(complete),
-        judged(gate1Ok, qualityChanges("quality 1")),
-        impl(complete),
-        judged(gate1Ok, qualityChanges("quality 2")),
-        impl(complete),
-        judged(gate1Ok, changes("correctness 2")),
-      ],
-    );
-    expect(verdict).toEqual({
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "correctness-budget-exhausted",
-      roundsUsed: 2,
-      latestReviewerProse: "correctness 2",
+    expect(r.action).toEqual({
+      kind: "run-implementer",
+      attempt: 2,
+      failureTrace: "",
+      extraReprompt: null,
+      latestReviewerFeedback: "handle null",
     });
+    expect(r.state.pendingRejection).toEqual({ round: 1, head: "head", report: "handle null" });
   });
 
-  it("correctness rejections do not spend the quality budget", () => {
-    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 1 }, [
-      impl(complete),
-      judged(gate1Ok, changes("r1")),
-      impl(complete),
-      judged(gate1Ok, changes("r2")),
-      impl(complete),
-      judged(gate1Ok, changes("r3")),
+  it("latest reviewer prose replaces an older one on a subsequent CHANGES-REQUESTED", () => {
+    const r = stepAll(initialState(defaultOpts), [
+      impl(complete), ...round(gate1Ok, changes("first")),
+      impl(complete), ...round(gate1Ok, changes("second")),
+    ]);
+    expect(asImpl(r.action).latestReviewerFeedback).toBe("second");
+  });
+
+  it("maxReviewRounds CHANGES-REQUESTED rounds → NEEDS-HUMAN-REVIEW with latest prose", () => {
+    const { verdict } = drive(defaultOpts, [
+      impl(complete), ...round(gate1Ok, changes("one")),
+      impl(complete), ...round(gate1Ok, changes("two")),
+      impl(complete), ...round(gate1Ok, changes("three")),
     ]);
     expect(verdict).toEqual({
       type: "NEEDS-HUMAN-REVIEW",
       cause: "correctness-budget-exhausted",
       roundsUsed: 3,
-      latestReviewerProse: "r3",
+      latestReviewerProse: "three",
     });
   });
 
-  it("a correctness harness failure preserves the quality streak", () => {
-    let state = initialState({ ...defaultOpts, maxQualityRounds: 2 });
-    state = step(state, impl(complete)).state;
-    state = step(state, judged(gate1Ok, qualityChanges("quality rejection"))).state;
-    expect(state.qualityFailures).toBe(1);
-    state = step(state, impl(complete)).state;
-    const failed = step(
-      state,
-      judged(gate1Ok, harnessFailed("correctness failed", "correctness")),
-    );
-    expect(failed.state.qualityFailures).toBe(1);
-    expect(failed.state.correctnessFailures).toBe(0);
+  it("correctness rejections do not spend the gate budget", () => {
+    const state = stepAll(initialState({ ...defaultOpts, maxGateRounds: 1 }), [
+      impl(complete), ...round(gate1Ok, changes("one")),
+      impl(complete), ...round(gate1Ok, changes("two")),
+    ]).state;
+    expect(state.gateFailures).toBe(0);
+    expect(state.correctnessFailures).toBe(2);
   });
 
-  it("#141's quality reject, red reject, red approval, green reject exhausts neither", () => {
-    let state = initialState(defaultOpts);
-    const rounds = [
-      [gate1Ok, qualityChanges("round 1")],
-      [gate1Red("round 2 red"), qualityChanges("round 2")],
-      [gate1Red("round 3 red"), approved("round 3 quality approved")],
-      [gate1Ok, qualityChanges("round 4")],
-    ] as const;
-    for (const [gate, reviewer] of rounds) {
-      state = step(state, impl(complete)).state;
-      const result = step(state, judged(gate, reviewer));
-      expect(result.action.kind).toBe("run-implementer");
-      state = result.state;
-    }
-    expect(state.qualityFailures).toBe(3);
-    expect(state.gateFailures).toBe(0);
+  it("gate failures and pre-gate re-prompts do not spend the review budget", () => {
+    const state = stepAll(initialState({ ...defaultOpts, maxReviewRounds: 1 }), [
+      impl(complete), ...round(gate1Red("red")),
+      impl(noSignal()),
+      impl(complete), quality, gated(gate1Ok),
+    ]).state;
     expect(state.correctnessFailures).toBe(0);
+    expect(state.phase).toBe("needs-correctness");
+  });
+
+  it("parks immediately when the reviewer writes git state (#98)", () => {
+    const { verdict } = drive(defaultOpts, [
+      impl(complete),
+      ...round(gate1Ok, { kind: "reviewer-wrote", detail: "reviewer committed" }),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN-REVIEW",
+      cause: "reviewer-wrote",
+      latestReviewerProse: "reviewer committed",
+    });
+  });
+});
+
+describe("inner-loop-machine — reviewer harness failure (#41)", () => {
+  it("spends neither budget and re-prompts with an orchestrator note", () => {
+    const r = stepAll(initialState(defaultOpts), [impl(complete), ...round(gate1Ok, harnessFailed("idle 600s"))]);
+    const next = asImpl(r.action);
+    expect(r.state.gateFailures).toBe(0);
+    expect(r.state.correctnessFailures).toBe(0);
+    expect(r.state.reviewerHarnessFailures).toBe(1);
+    expect(next.extraReprompt).toBe(reviewerHarnessFailedReprompt(false));
+    expect(next.extraReprompt).not.toContain("idle 600s");
+    expect(next.failureTrace).toBe("");
+    expect(next.latestReviewerFeedback).toBeNull();
+  });
+
+  it("cannot exhaust the review budget — a maxReviewRounds of 1 survives it", () => {
+    const r = stepAll(initialState({ ...defaultOpts, maxReviewRounds: 1 }), [
+      impl(complete), ...round(gate1Ok, harnessFailed()),
+    ]);
+    expect(r.action.kind).toBe("run-implementer");
+  });
+
+  it("leaves an earlier round's real prose exactly as it was", () => {
+    const r = stepAll(initialState(defaultOpts), [
+      impl(complete), ...round(gate1Ok, changes("real finding")),
+      impl(complete), ...round(gate1Ok, harnessFailed()),
+    ]);
+    const next = asImpl(r.action);
+    expect(next.latestReviewerFeedback).toBe("real finding");
+    expect(next.extraReprompt).toBe(reviewerHarnessFailedReprompt(true));
+  });
+
+  it("a second harness failure terminates instead of grinding the budget", () => {
+    const { verdict } = drive(defaultOpts, [
+      impl(complete), ...round(gate1Ok, changes("real finding")),
+      impl(complete), ...round(gate1Ok, harnessFailed("first")),
+      impl(complete), ...round(gate1Red("red between")),
+      impl(complete), ...round(gate1Ok, harnessFailed("second")),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "reviewer-harness-failed",
+      failureTrace: "second",
+      latestReviewerProse: "real finding",
+      budgetExhausted: null,
+      strandedHead: null,
+    });
+  });
+});
+
+// #185 folds every attempt that produced no commit the gate could judge into
+// the gate budget, and a green gate resets that streak.
+describe("inner-loop-machine — pre-gate re-prompts spend the gate budget", () => {
+  it("charges NO-SIGNAL to the gate streak", () => {
+    const r = step(initialState(defaultOpts), impl(noSignal("Emit a token.")));
+    expect(r.state.gateFailures).toBe(1);
+    expect(asImpl(r.action).extraReprompt).toBe("Emit a token.");
+  });
+
+  it("a green gate resets a streak of pre-gate failures", () => {
+    const state = stepAll(initialState(defaultOpts), [
+      impl(noSignal()),
+      impl(complete, ["?? a.ts"]),
+      impl(complete), quality, gated(gate1Ok),
+    ]).state;
+    expect(state.gateFailures).toBe(0);
+  });
+
+  it("mixes red gates and pre-gate failures in one streak", () => {
+    const { verdict } = drive({ maxGateRounds: 3 }, [
+      impl(complete), ...round(gate1Red("red", "lint")),
+      impl(noSignal()),
+      impl(noSignal("still nothing")),
+    ]);
+    expect(verdict).toEqual({
+      type: "NEEDS-HUMAN",
+      cause: "no-signal-exhausted",
+      failureTrace: "Last gate failure:\nred\n\nThe final implementer signal failed validation:\nstill nothing",
+      latestReviewerProse: null,
+      budgetExhausted: { budget: "gate", roundsUsed: 3, failedStep: null },
+      strandedHead: null,
+    });
+  });
+
+  it("repeated NO-SIGNAL exhausts with its own honest cause", () => {
+    const { verdict } = drive({ maxGateRounds: 2 }, [impl(noSignal()), impl(noSignal())]);
+    expect(verdict).toMatchObject({
+      type: "NEEDS-HUMAN",
+      cause: "no-signal-exhausted",
+      failureTrace: "The final implementer attempt emitted no <promise> token.",
+      budgetExhausted: { budget: "gate", roundsUsed: 2, failedStep: null },
+    });
+  });
+
+  it("clears the NO-SIGNAL reprompt after one use", () => {
+    const r = stepAll(initialState(defaultOpts), [
+      impl(noSignal("correction")),
+      impl(complete), ...round(gate1Red("red")),
+    ]);
+    expect(asImpl(r.action).extraReprompt).toBeNull();
+  });
+
+  it("defaults the shared budget to four", () => {
+    expect(initialState({ ...defaultOpts, maxGateRounds: DEFAULT_MAX_GATE_ROUNDS }).maxGateRounds).toBe(4);
   });
 });
 
 describe("inner-loop-machine — phase invariants", () => {
   it("stepping after terminate throws", () => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(needsInfo("q"))).state;
-    expect(() => step(state, impl(complete))).toThrow(/after termination/);
+    const r = step(initialState(defaultOpts), impl(needsInfo("q")));
+    expect(() => step(r.state, impl(complete))).toThrow(/after termination/);
   });
 
-  it("combined gate/reviewer result before COMPLETE throws", () => {
-    const state = initialState(defaultOpts);
-    expect(() => step(state, judged(gate1Ok, approved()))).toThrow(
-      /gate-and-reviewer-result.*expected needs-gate-and-reviewer/,
+  it.each([
+    ["a quality result before COMPLETE", quality, /quality-result event in phase needs-implementer/],
+    ["a gate result before COMPLETE", gated(gate1Ok), /gate-result event in phase needs-implementer/],
+    ["a correctness result before COMPLETE", reviewed(approved()), /correctness-result event in phase needs-implementer/],
+  ] as const)("%s throws", (_name, event, message) => {
+    expect(() => step(initialState(defaultOpts), event)).toThrow(message);
+  });
+
+  it("a correctness result before the gate throws", () => {
+    const state = stepAll(initialState(defaultOpts), [impl(complete), quality]).state;
+    expect(() => step(state, reviewed(approved()))).toThrow(/expected needs-correctness/);
+  });
+
+  it.each([
+    ["maxGateRounds", 0],
+    ["maxReviewRounds", 1.5],
+  ] as const)("initialState rejects non-positive %s", (field, value) => {
+    expect(() => initialState({ ...defaultOpts, [field]: value })).toThrow(
+      new RegExp(`${field} must be a positive integer`),
     );
-  });
-
-  it("implementer-result during gate-1 phase throws", () => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete)).state;
-    expect(() => step(state, impl(complete))).toThrow(
-      /implementer-result.*expected needs-implementer/,
-    );
-  });
-
-  it("initialState rejects non-positive maxQualityRounds", () => {
-    expect(() => initialState({ ...defaultOpts, maxQualityRounds: 0 })).toThrow();
-    expect(() => initialState({ ...defaultOpts, maxQualityRounds: -1 })).toThrow();
-    expect(() => initialState({ ...defaultOpts, maxQualityRounds: 1.5 })).toThrow();
-  });
-
-  it("initialState rejects non-positive maxReviewRounds", () => {
-    expect(() => initialState({ ...defaultOpts, maxReviewRounds: 0 })).toThrow();
-    expect(() => initialState({ ...defaultOpts, maxReviewRounds: -1 })).toThrow();
-    expect(() => initialState({ ...defaultOpts, maxReviewRounds: 1.5 })).toThrow();
-  });
-
-  it("initialState rejects non-positive maxGateRounds", () => {
-    expect(() => initialState({ ...defaultOpts, maxGateRounds: 0 })).toThrow();
-    expect(() => initialState({ ...defaultOpts, maxGateRounds: -1 })).toThrow();
-    expect(() => initialState({ ...defaultOpts, maxGateRounds: 1.5 })).toThrow();
   });
 });
 
@@ -1479,9 +745,7 @@ describe("decideAfterTerminal", () => {
     ];
     for (const v of verdicts) {
       expect(decideAfterTerminal(v, 0)).toEqual({ kind: "surface" });
-      expect(decideAfterTerminal(v, HARD_ERROR_MAX_RETRIES)).toEqual({
-        kind: "surface",
-      });
+      expect(decideAfterTerminal(v, HARD_ERROR_MAX_RETRIES)).toEqual({ kind: "surface" });
     }
   });
 
@@ -1495,9 +759,7 @@ describe("decideAfterTerminal", () => {
       kind: "retry-with-fresh-sandbox",
       nextRetriesUsed: 2,
     });
-    expect(decideAfterTerminal(hardError, HARD_ERROR_MAX_RETRIES)).toEqual({
-      kind: "surface",
-    });
+    expect(decideAfterTerminal(hardError, HARD_ERROR_MAX_RETRIES)).toEqual({ kind: "surface" });
   });
 
   it("respects an injected maxRetries", () => {
@@ -1516,94 +778,72 @@ describe("decideAfterTerminal", () => {
 describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () => {
   const dirty = ["?? src/new-file.ts", " M src/existing.ts"];
 
-  it("routes back to the implementer instead of the gate", () => {
+  it("routes back to the implementer instead of the round", () => {
     const r = step(initialState(defaultOpts), impl(complete, dirty));
     expect(r.action.kind).toBe("run-implementer");
-    // Not run-gate-1: the whole point is that no stack bringup is paid for a
-    // claim that cannot be gated.
     expect(r.state.phase).toBe("needs-implementer");
     expect(r.state.attempt).toBe(2);
   });
 
   it("names the dirty paths in the re-prompt", () => {
-    const r = step(initialState(defaultOpts), impl(complete, dirty));
-    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
-    expect(r.action.extraReprompt).toContain("?? src/new-file.ts");
-    expect(r.action.extraReprompt).toContain(" M src/existing.ts");
-    expect(r.action.extraReprompt).toContain("uncommitted");
+    const next = asImpl(step(initialState(defaultOpts), impl(complete, dirty)).action);
+    expect(next.extraReprompt).toContain("?? src/new-file.ts");
+    expect(next.extraReprompt).toContain(" M src/existing.ts");
+    expect(next.extraReprompt).toContain("uncommitted");
   });
 
   it("elides a long dirty list rather than filling the prompt with it", () => {
     const many = Array.from({ length: 25 }, (_, i) => `?? f${i}.ts`);
-    const r = step(initialState(defaultOpts), impl(complete, many));
-    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
-    expect(r.action.extraReprompt).toContain("?? f19.ts");
-    expect(r.action.extraReprompt).not.toContain("?? f20.ts");
-    expect(r.action.extraReprompt).toContain("… and 5 more");
+    const next = asImpl(step(initialState(defaultOpts), impl(complete, many)).action);
+    expect(next.extraReprompt).toContain("?? f19.ts");
+    expect(next.extraReprompt).not.toContain("?? f20.ts");
+    expect(next.extraReprompt).toContain("… and 5 more");
   });
 
   it("tells the agent its gate artifacts must be gitignored", () => {
-    // The consumer-side corollary of mounting the worktree: a step that writes
-    // outside .gitignore reports its own exhaust as uncommitted work on every
-    // attempt, and the loop dies of budget exhaustion with no other symptom.
-    const r = step(initialState(defaultOpts), impl(complete, dirty));
-    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
-    expect(r.action.extraReprompt).toContain("gitignored");
+    const next = asImpl(step(initialState(defaultOpts), impl(complete, dirty)).action);
+    expect(next.extraReprompt).toContain("gitignored");
   });
 
-  it("gates normally once the tree is clean", () => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete, dirty)).state;
-    const r = step(state, impl(complete));
-    expect(r.action.kind).toBe("run-gate-and-reviewer");
+  it("starts the round normally once the tree is clean", () => {
+    const r = stepAll(initialState(defaultOpts), [impl(complete, dirty), impl(complete)]);
+    expect(r.action.kind).toBe("run-quality");
   });
 
-  it("spends an attempt, and exhausting the budget on dirt is NEEDS-HUMAN", () => {
+  it("spends the gate budget, and exhausting it on dirt is NEEDS-HUMAN", () => {
     // Each attempt leaves a DIFFERENT dirty set, so the agent is visibly still
     // working and the loop lets it run to the end of the budget.
-    const { actions, verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
+    const { actions, verdict } = drive({ maxGateRounds: 2 }, [
       impl(complete, ["?? a.ts"]),
       impl(complete, ["?? b.ts"]),
     ]);
-    expect(actions.map((a) => a.kind)).toEqual([
-      "run-implementer",
-      "run-implementer",
-      "terminate",
-    ]);
-    expect(verdict.type).toBe("NEEDS-HUMAN");
+    expect(actions.map((a) => a.kind)).toEqual(["run-implementer", "run-implementer", "terminate"]);
+    expect(verdict).toMatchObject({
+      type: "NEEDS-HUMAN",
+      cause: "uncommittable-worktree",
+      budgetExhausted: { budget: "gate", roundsUsed: 2, failedStep: null },
+    });
     if (verdict.type !== "NEEDS-HUMAN") throw new Error("unreachable");
-    expect(verdict.cause).toBe("uncommittable-worktree");
-    // Not the generic "budget exhausted with no green gate": no gate ran.
     expect(verdict.failureTrace).toContain("?? b.ts");
   });
 
   it("stops immediately when an attempt leaves the dirty set unchanged", () => {
-    // The realistic causes — a gate step's non-gitignored exhaust, a file a
-    // container wrote as another uid — are not the implementer's to remove, so
-    // every remaining attempt would be a full agent run ending in the identical
-    // reprompt. Terminates on attempt 2 with quality budget still remaining.
-    const { actions, verdict } = drive(defaultOpts, [
-      impl(complete, dirty),
-      impl(complete, dirty),
-    ]);
-    expect(actions.map((a) => a.kind)).toEqual([
-      "run-implementer",
-      "run-implementer",
-      "terminate",
-    ]);
-    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
-    expect(verdict.cause).toBe("uncommittable-worktree");
-    expect(verdict.budgetExhausted).toBeNull();
+    const { actions, verdict } = drive(defaultOpts, [impl(complete, dirty), impl(complete, dirty)]);
+    expect(actions.map((a) => a.kind)).toEqual(["run-implementer", "run-implementer", "terminate"]);
+    expect(verdict).toMatchObject({
+      type: "NEEDS-HUMAN",
+      cause: "uncommittable-worktree",
+      budgetExhausted: null,
+    });
   });
 
-  it("annotates a repeated dirty-set stop that also exhausts quality", () => {
-    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
-      impl(complete, dirty),
-      impl(complete, dirty),
-    ]);
-    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
-    expect(verdict.cause).toBe("uncommittable-worktree");
-    expect(verdict.budgetExhausted).toEqual({ budget: "quality", roundsUsed: 2 });
+  it("annotates a repeated dirty-set stop that also exhausts the gate budget", () => {
+    const { verdict } = drive({ maxGateRounds: 2 }, [impl(complete, dirty), impl(complete, dirty)]);
+    expect(verdict).toMatchObject({
+      type: "NEEDS-HUMAN",
+      cause: "uncommittable-worktree",
+      budgetExhausted: { budget: "gate", roundsUsed: 2, failedStep: null },
+    });
   });
 
   it("treats a reordered dirty set as unchanged", () => {
@@ -1611,29 +851,23 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
       impl(complete, ["?? a.ts", "?? b.ts"]),
       impl(complete, ["?? b.ts", "?? a.ts"]),
     ]);
-    expect(actions.filter((a) => a.kind === "run-implementer")).toHaveLength(2);
-    expect(actions[actions.length - 1]?.kind).toBe("terminate");
+    expect(actions.at(-1)?.kind).toBe("terminate");
   });
 
   it("keeps going when the agent commits SOME of the dirt", () => {
-    // Shrinking the set is progress, so the budget is not cut short.
-    const r1 = step(initialState(defaultOpts), impl(complete, ["?? a.ts", "?? b.ts"]));
-    const r2 = step(r1.state, impl(complete, ["?? b.ts"]));
-    expect(r2.action.kind).toBe("run-implementer");
+    const r = stepAll(initialState(defaultOpts), [
+      impl(complete, ["?? a.ts", "?? b.ts"]),
+      impl(complete, ["?? b.ts"]),
+    ]);
+    expect(r.action.kind).toBe("run-implementer");
   });
 
   it("clears the dirty memory once the tree comes back clean", () => {
-    // A later dirty attempt must not be compared against a stale set from
-    // before a green run — that would terminate on a first offence.
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete, dirty)).state;
-    state = step(state, impl(complete)).state; // clean → gate
+    const state = stepAll(initialState(defaultOpts), [impl(complete, dirty), impl(complete)]).state;
     expect(state.lastDirtyPaths).toBeNull();
   });
 
   it("does not block the short-circuit terminals — dirt is irrelevant to them", () => {
-    // NEEDS-INFO / NEEDS-UI-PROTOTYPE hand the issue to a human with a question,
-    // not a verdict, so there is nothing for a clean tree to be a proof of.
     const info = drive(defaultOpts, [impl(needsInfo("which currency?"), dirty)]);
     expect(info.verdict.type).toBe("NEEDS-INFO");
   });
@@ -1652,301 +886,165 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     branchIsAncestor: false,
   };
 
-  it("does NOT dispatch the gate for COMPLETE over a clean tree off the branch", () => {
-    // The whole bug in one assertion: dirtyPaths is [], so nothing else in the
-    // system would object.
+  it("does NOT start the round for COMPLETE over a clean tree off the branch", () => {
     const r = step(initialState(defaultOpts), impl(complete, [], detached()));
     expect(r.action.kind).toBe("run-implementer");
     expect(r.state.attempt).toBe(2);
+    expect(r.state.gateFailures).toBe(1);
   });
 
   it("names where HEAD actually is, and where the branch still is", () => {
-    const r = step(
-      initialState(defaultOpts),
-      impl(complete, [], detached("dead1", "base0")),
-    );
-    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
-    expect(r.action.extraReprompt).toContain("DETACHED at dead1");
-    expect(r.action.extraReprompt).toContain("sandbar/issue-1-x");
-    expect(r.action.extraReprompt).toContain("base0");
+    const next = asImpl(step(initialState(defaultOpts), impl(complete, [], detached("dead1", "base0"))).action);
+    expect(next.extraReprompt).toContain("DETACHED at dead1");
+    expect(next.extraReprompt).toContain("sandbar/issue-1-x");
+    expect(next.extraReprompt).toContain("base0");
   });
 
   it("names the scratch branch when HEAD is on one", () => {
-    const r = step(initialState(defaultOpts), impl(complete, [], onBranchScratch));
-    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
-    expect(r.action.extraReprompt).toContain("refs/heads/scratch");
+    const next = asImpl(step(initialState(defaultOpts), impl(complete, [], onBranchScratch)).action);
+    expect(next.extraReprompt).toContain("refs/heads/scratch");
   });
 
   it("unconditionally warns against `git branch -f`", () => {
-    // The safe ancestor case was repaired before the event was built, so every
-    // mismatch reaching this prose would lose branch history if forced.
     const text = offBranchHeadReprompt(detached());
     expect(text).toContain("Do not force the ref");
     expect(text).toContain("cherry-pick");
-    expect(text).not.toContain("If `sandbar/issue-1-x` is an ancestor");
   });
 
   const repaired = { fromSha: "base0", toSha: "head1" } as const;
-  const gatedAfterRepair = () =>
-    step(
-      initialState(defaultOpts),
-      impl(complete, [], null, repaired),
-    );
+  const roundAfterRepair = (events: readonly LoopEvent[]) =>
+    stepAll(initialState(defaultOpts), [impl(complete, [], null, repaired), ...events]);
 
   it.each([
     {
       route: "dirty tree",
-      next: () =>
-        step(
-          initialState(defaultOpts),
-          impl(complete, ["?? pending.ts"], null, repaired),
-        ),
+      next: () => step(initialState(defaultOpts), impl(complete, ["?? pending.ts"], null, repaired)),
       routeContext: "?? pending.ts",
     },
     {
       route: "NO-SIGNAL",
       next: () =>
-        step(
-          initialState(defaultOpts),
-          impl(noSignal("Emit a valid promise token."), [], null, repaired),
-        ),
+        step(initialState(defaultOpts), impl(noSignal("Emit a valid promise token."), [], null, repaired)),
       routeContext: "Emit a valid promise token.",
     },
     {
       route: "gate red",
-      next: () => {
-        const gated = gatedAfterRepair();
-        return step(
-          gated.state,
-          judged(gate1Red("gate exploded"), approved("discarded")),
-        );
-      },
+      next: () => roundAfterRepair(round(gate1Red("gate exploded"))),
       routeContext: "gate exploded",
     },
     {
-      route: "correctness reviewer rejection",
-      next: () => {
-        const gated = gatedAfterRepair();
-        return step(
-          gated.state,
-          judged(gate1Ok, changes("adjust this")),
-        );
-      },
+      route: "correctness rejection",
+      next: () => roundAfterRepair(round(gate1Ok, changes("adjust this"))),
       routeContext: "adjust this",
     },
     {
-      route: "quality reviewer rejection",
-      next: () => {
-        const gated = gatedAfterRepair();
-        return step(
-          gated.state,
-          judged(gate1Ok, qualityChanges("add a standards test")),
-        );
-      },
-      routeContext: "add a standards test",
-    },
-    {
       route: "reviewer harness failure",
-      next: () => {
-        const gated = gatedAfterRepair();
-        return step(gated.state, judged(gate1Ok, harnessFailed()));
-      },
+      next: () => roundAfterRepair(round(gate1Ok, harnessFailed())),
       routeContext: "reviewer could not be run",
     },
-  ])(
-    "carries the free repair note and $route context into the next attempt",
-    ({ next, routeContext }) => {
-      const result = next();
-      if (result.action.kind !== "run-implementer") {
-        throw new Error("expected next implementer");
-      }
-      expect(result.action.extraReprompt).toContain(
-        "moved `sandbar/issue-1-x` from base0",
-      );
-      expect(result.action.extraReprompt).toContain("HEAD at head1");
-      expect([
-        result.action.extraReprompt,
-        result.action.failureTrace,
-        result.action.latestReviewerFeedback?.prose,
-      ].join("\n")).toContain(routeContext);
-      expect(result.state.lastOffBranch).toBe(false);
-    },
-  );
+  ])("carries the free repair note and $route context into the next attempt", ({ next, routeContext }) => {
+    const result = next();
+    const action = asImpl(result.action);
+    expect(action.extraReprompt).toContain("moved `sandbar/issue-1-x` from base0");
+    expect(action.extraReprompt).toContain("HEAD at head1");
+    expect([action.extraReprompt, action.failureTrace, action.latestReviewerFeedback].join("\n"))
+      .toContain(routeContext);
+    expect(result.state.lastOffBranch).toBe(false);
+  });
 
   it("does not spend the off-branch correction when a repair precedes another route", () => {
-    let state = step(
-      initialState(defaultOpts),
-      impl(noSignal(), [], null, repaired),
-    ).state;
+    const state = step(initialState(defaultOpts), impl(noSignal(), [], null, repaired)).state;
     expect(state.lastOffBranch).toBe(false);
-    const relapse = step(state, impl(complete, [], detached("head2")));
-    expect(relapse.action.kind).toBe("run-implementer");
+    expect(step(state, impl(complete, [], detached("head2"))).action.kind).toBe("run-implementer");
   });
 
   it.each([
     ["NEEDS-INFO", needsInfo("which currency?")],
     ["NEEDS-UI-PROTOTYPE", needsUiPrototype("a new settings screen")],
-  ] as const)(
-    "does not report repaired commits as stranded on a %s escalation",
-    (expectedType, signal) => {
-      const repaired = { fromSha: "base0", toSha: "head1" } as const;
-      const result = drive(defaultOpts, [
-        impl(signal, [], null, repaired),
-      ]);
-      expect(result.verdict.type).toBe(expectedType);
-      if (
-        result.verdict.type !== "NEEDS-INFO" &&
-        result.verdict.type !== "NEEDS-UI-PROTOTYPE"
-      ) {
-        throw new Error("expected escalation");
-      }
-      expect(result.verdict.strandedHead).toBeNull();
-    },
-  );
-
-  it("also fires on NO-SIGNAL, replacing the generic hint", () => {
-    // An off-branch agent usually reads as "made no commits this run" (commit
-    // capture reads refs/heads/<branch>), which sends it to fix the wrong thing.
-    const r = step(
-      initialState(defaultOpts),
-      impl(
-        { kind: "NO-SIGNAL", reprompt: "Still working.", missingTag: true },
-        [],
-        detached(),
-      ),
-    );
-    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
-    expect(r.action.extraReprompt).toContain("not on the issue branch");
-    expect(r.action.extraReprompt).not.toContain("Still working.");
+  ] as const)("does not report repaired commits as stranded on a %s escalation", (expectedType, signal) => {
+    const { verdict } = drive(defaultOpts, [impl(signal, [], null, repaired)]);
+    expect(verdict).toMatchObject({ type: expectedType, strandedHead: null });
   });
 
-  it("gates normally once HEAD is back on the branch", () => {
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete, [], detached())).state;
-    const r = step(state, impl(complete));
-    expect(r.action.kind).toBe("run-gate-and-reviewer");
+  it("also fires on NO-SIGNAL, replacing the generic hint", () => {
+    const next = asImpl(step(
+      initialState(defaultOpts),
+      impl({ kind: "NO-SIGNAL", reprompt: "Still working.", missingTag: true }, [], detached()),
+    ).action);
+    expect(next.extraReprompt).toContain("not on the issue branch");
+    expect(next.extraReprompt).not.toContain("Still working.");
+  });
+
+  it("starts the round normally once HEAD is back on the branch", () => {
+    const r = stepAll(initialState(defaultOpts), [impl(complete, [], detached()), impl(complete)]);
+    expect(r.action.kind).toBe("run-quality");
   });
 
   it("terminates on a SECOND consecutive off-branch attempt, well inside the budget", () => {
-    // One correction, not a whole budget: unlike a dirty set there is no partial
-    // progress to wait for, and each further attempt buries the stranded commits
-    // under more stranded commits. Deliberately unlike sameDirtySet, the sha is
-    // not compared either — a NEW detached sha is not progress, just another
-    // commit landing nowhere.
     const { actions, verdict } = drive(defaultOpts, [
       impl(complete, [], detached("dead1")),
       impl(complete, [], detached("dead2")),
     ]);
-    expect(actions.map((a) => a.kind)).toEqual([
-      "run-implementer",
-      "run-implementer",
-      "terminate",
-    ]);
-    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
-    expect(verdict.cause).toBe("off-branch-head");
-    // The sha is the only handle on the stranded commits once the worktree goes.
+    expect(actions.map((a) => a.kind)).toEqual(["run-implementer", "run-implementer", "terminate"]);
+    expect(verdict).toMatchObject({
+      type: "NEEDS-HUMAN",
+      cause: "off-branch-head",
+      budgetExhausted: null,
+      strandedHead: { headSha: "dead2" },
+    });
+    if (verdict.type !== "NEEDS-HUMAN") throw new Error("unreachable");
     expect(verdict.failureTrace).toContain("dead2");
-    expect(verdict.budgetExhausted).toBeNull();
   });
 
-  it("annotates a repeated off-branch stop that also exhausts quality", () => {
-    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 2 }, [
+  it("annotates a repeated off-branch stop that also exhausts the gate budget", () => {
+    const { verdict } = drive({ maxGateRounds: 2 }, [
       impl(complete, [], detached("dead1")),
       impl(complete, [], detached("dead2")),
     ]);
-    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
-    expect(verdict.cause).toBe("off-branch-head");
-    expect(verdict.budgetExhausted).toEqual({ budget: "quality", roundsUsed: 2 });
+    expect(verdict).toMatchObject({
+      type: "NEEDS-HUMAN",
+      cause: "off-branch-head",
+      budgetExhausted: { budget: "gate", roundsUsed: 2, failedStep: null },
+    });
   });
 
   it("counts CONSECUTIVE attempts, so a later relapse gets its own correction", () => {
-    // Off-branch, back on (no signal), off-branch again: the third attempt is
-    // the first of a new run, so it is re-prompted rather than terminated.
-    let state = initialState(defaultOpts);
-    state = step(state, impl(complete, [], detached())).state;
-    state = step(state, impl(noSignal())).state;
-    const relapse = step(state, impl(complete, [], detached()));
+    const relapse = stepAll(initialState(defaultOpts), [
+      impl(complete, [], detached()),
+      impl(noSignal()),
+      impl(complete, [], detached()),
+    ]);
     expect(relapse.action.kind).toBe("run-implementer");
-    // And the one after THAT does terminate.
-    const r = step(relapse.state, impl(complete, [], detached()));
-    expect(r.action.kind).toBe("terminate");
+    expect(step(relapse.state, impl(complete, [], detached())).action.kind).toBe("terminate");
   });
 
   it("exhausting the budget off-branch is off-branch-head, not gate-red", () => {
-    // No gate ever ran, so the generic "budget exhausted with no green gate"
-    // would describe a failure that did not happen.
-    const { verdict } = drive({ ...defaultOpts, maxQualityRounds: 1 }, [
-      impl(complete, [], detached()),
-    ]);
-    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
-    expect(verdict.cause).toBe("off-branch-head");
-    expect(verdict.failureTrace).toContain("HEAD");
+    const { verdict } = drive({ maxGateRounds: 1 }, [impl(complete, [], detached())]);
+    expect(verdict).toMatchObject({ type: "NEEDS-HUMAN", cause: "off-branch-head" });
   });
 
   it("is checked BEFORE the dirty tree — the branch is the deeper problem", () => {
-    // Committing first would only put the commit further off the branch.
-    const r = step(
-      initialState(defaultOpts),
-      impl(complete, ["?? src/new.ts"], detached()),
-    );
-    if (r.action.kind !== "run-implementer") throw new Error("expected re-prompt");
-    expect(r.action.extraReprompt).toContain("not on the issue branch");
+    const next = asImpl(step(initialState(defaultOpts), impl(complete, ["?? src/new.ts"], detached())).action);
+    expect(next.extraReprompt).toContain("not on the issue branch");
   });
 
-  it("does not block the two hand-to-human terminals", () => {
-    // Re-prompting would risk spending the budget on a question the agent had
-    // already formed, and would swap a precise handoff (the question, the UI
-    // assessment) for a generic one.
-    const info = drive(defaultOpts, [
-      impl(needsInfo("which currency?"), [], detached()),
-    ]);
-    expect(info.verdict.type).toBe("NEEDS-INFO");
-    const ui = drive(defaultOpts, [
-      impl({ kind: "NEEDS-UI-PROTOTYPE", uiImpact: "a modal" }, [], detached()),
-    ]);
-    expect(ui.verdict.type).toBe("NEEDS-UI-PROTOTYPE");
-  });
-
-  // Exempt must not mean silent. The commits are counted on the BRANCH, so an
-  // off-branch escalation reports zero, and finalize then deletes the branch and
-  // posts a comment about the UI question only — the sha would exist nowhere and
-  // the work would go at the next gc. That is the loss #27 exists to prevent,
-  // arriving through the terminal the check chose not to guard.
+  // Exempt must not mean silent: the commits are counted on the BRANCH, so an
+  // off-branch escalation reports zero and the sha would otherwise exist
+  // nowhere once the worktree goes.
   it("carries the mismatch into both exempted terminals so the sha survives", () => {
     const m = detached("stranded1");
-    const info = drive(defaultOpts, [impl(needsInfo("which currency?"), [], m)]);
-    if (info.verdict.type !== "NEEDS-INFO") throw new Error("expected NEEDS-INFO");
-    expect(info.verdict.strandedHead?.headSha).toBe("stranded1");
-
-    const ui = drive(defaultOpts, [
-      impl({ kind: "NEEDS-UI-PROTOTYPE", uiImpact: "a modal" }, [], m),
-    ]);
-    if (ui.verdict.type !== "NEEDS-UI-PROTOTYPE") throw new Error("expected UI");
-    expect(ui.verdict.strandedHead?.headSha).toBe("stranded1");
-  });
-
-  it("leaves strandedHead null on the ordinary on-branch escalations", () => {
-    const info = drive(defaultOpts, [impl(needsInfo("which currency?"))]);
-    if (info.verdict.type !== "NEEDS-INFO") throw new Error("expected NEEDS-INFO");
-    expect(info.verdict.strandedHead).toBeNull();
-  });
-
-  it("carries the mismatch on the off-branch-head terminal too", () => {
-    const { verdict } = drive(defaultOpts, [
-      impl(complete, [], detached("dead1")),
-      impl(complete, [], detached("dead2")),
-    ]);
-    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
-    expect(verdict.strandedHead?.headSha).toBe("dead2");
+    expect(drive(defaultOpts, [impl(needsInfo("q"), [], m)]).verdict).toMatchObject({
+      type: "NEEDS-INFO",
+      strandedHead: { headSha: "stranded1" },
+    });
+    expect(drive(defaultOpts, [impl(needsUiPrototype("a modal"), [], m)]).verdict).toMatchObject({
+      type: "NEEDS-UI-PROTOTYPE",
+      strandedHead: { headSha: "stranded1" },
+    });
   });
 
   it("leaves strandedHead null on the other NEEDS-HUMAN causes", () => {
-    const { verdict } = drive({ ...defaultOpts, maxGateRounds: 1 }, [
-      impl(complete),
-      judged(gate1Red("boom"), approved("discarded")),
-    ]);
-    if (verdict.type !== "NEEDS-HUMAN") throw new Error("expected NEEDS-HUMAN");
-    expect(verdict.cause).toBe("gate-red");
-    expect(verdict.strandedHead).toBeNull();
+    const { verdict } = drive({ maxGateRounds: 1 }, [impl(complete), ...round(gate1Red("boom"))]);
+    expect(verdict).toMatchObject({ type: "NEEDS-HUMAN", cause: "gate-red", strandedHead: null });
   });
 });

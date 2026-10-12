@@ -450,13 +450,13 @@ const EVENT_PHASE: Readonly<Record<
 };
 
 // A role measures its own context before it runs (#158): the partition check
-// its anchor, the fixer its prompt, and the gate the correctness prompt it is
-// gating for, so an oversized branch parks before gate or review dispatch.
+// its anchor, and the fixer and the correctness reviewer the branch picture
+// they are about to read. Gate-1 reads no prompt and measures nothing.
 const CONTEXT_MEASURING_PHASES: readonly LoopPhase[] = [
   "needs-partition-check",
   "needs-implementer",
   "needs-quality",
-  "needs-gate",
+  "needs-correctness",
 ];
 
 export function step(state: LoopState, event: LoopEvent): StepResult {
