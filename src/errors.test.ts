@@ -38,6 +38,10 @@ describe("isForgeTransportFailure", () => {
       'Post "https://api.github.com/graphql": read tcp 10.0.0.2:51234->140.82.121.6:443: read: connection reset by peer\n',
       'Post "https://api.github.com/graphql": dial tcp 140.82.121.6:443: i/o timeout\n',
       'Get "https://api.github.com/repos/o/r": net/http: TLS handshake timeout\n',
+      "HTTP 502: Bad Gateway (https://api.github.com/graphql)\n",
+      "<html>\n<head><title>502 Bad Gateway</title></head>\n</html>\ngh: HTTP 502\n",
+      "HTTP 503: Service Unavailable (https://api.github.com/repos/o/r/issues)\n",
+      "gh: HTTP 504\n",
     ]) {
       expect(isForgeTransportFailure(ghFailure(stderr))).toBe(true);
     }
@@ -53,7 +57,8 @@ describe("isForgeTransportFailure", () => {
   it("leaves forge answers and unrelated failures fatal", () => {
     for (const err of [
       ghFailure("HTTP 401: Bad credentials (https://api.github.com/graphql)\n"),
-      ghFailure("HTTP 502: Bad Gateway (https://api.github.com/graphql)\n"),
+      ghFailure("HTTP 500: Internal Server Error (https://api.github.com/graphql)\n"),
+      new Error("Command failed: gh issue comment --body gh: HTTP 502"),
       ghFailure("GraphQL: Could not resolve to a Repository with the name 'o/r'.\n"),
       new Error("Command failed: gh issue comment --body error connecting to api.github.com"),
       new SyntaxError("Unexpected token"),

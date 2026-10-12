@@ -225,8 +225,8 @@ poll or planning fetch is reported and retried after another interval — unless
 a latched restart has nothing left to drain, the one state whose action needs
 none of the refs the fetch did not get (#146); only the startup fetch remains a
 preflight refusal.
-A planning `gh` read that never reached the forge takes the same retry; a
-forge answer (any HTTP status) still halts.
+A planning `gh` read the forge never answered — a transport fault or a
+gateway 502/503/504 — takes the same retry; any other forge answer still halts.
 The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
 
 Provider closure by quota or a permanent credential refusal stops admissions

@@ -40,15 +40,20 @@ export function isExitStatus(err: unknown, status: number): boolean {
   return propertyEquals(err, "status", status);
 }
 
-// What `gh` writes to stderr when its request never got an HTTP answer: its
-// own "error connecting to <host>" for DNS/TCP/TLS failures, and the Go
-// transport errors it passes through when a connection dies mid-request. Any
-// HTTP status — 401, 404, a 5xx — is the forge answering and stays out.
+// What `gh` writes to stderr when its request never got an answer from the
+// forge: its own "error connecting to <host>" for DNS/TCP/TLS failures, the Go
+// transport errors it passes through when a connection dies mid-request, and
+// a 502/503/504 from GitHub's gateway, which says the backend behind it did
+// not answer in time. Those three statuses were once kept fatal; a slow
+// GraphQL backend then served them to ordinary planning reads intermittently
+// and halted outdoor's daemon three times in one morning. Every other HTTP
+// status — 401, 404, a 500 — is the forge answering and stays out.
 const FORGE_TRANSPORT_STDERR = [
   /\berror connecting to \S/,
   /\bconnection reset by peer\b/,
   /\bi\/o timeout\b/,
   /\bTLS handshake timeout\b/,
+  /\bHTTP 50[234]\b/,
 ];
 
 // True when a `gh` failure, or any error wrapping one as its `cause`, is a
