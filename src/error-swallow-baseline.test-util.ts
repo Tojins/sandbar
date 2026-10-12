@@ -34,7 +34,9 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "gate-stack.ts": 6,
   // The UI-check invocation (#126) classifies a failed read-only agent write
   // before rethrowing the original invocation error, mirroring the reviewer.
-  "inner-loop.ts": 9,
+  // The tenth is the quality fixer (#185): an agent exit or timeout is the
+  // named end of its pass, and every other failure is rethrown.
+  "inner-loop.ts": 10,
   "keepawake.ts": 1,
   "lock.ts": 4,
   "merger.ts": 11,

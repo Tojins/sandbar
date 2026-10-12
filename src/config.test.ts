@@ -14,7 +14,6 @@ import {
   DEFAULT_CONTAINERFILE_PATH,
   DEFAULT_CONTEXT_MD_PATH,
   DEFAULT_MAX_GATE_ROUNDS,
-  DEFAULT_MAX_QUALITY_ROUNDS,
   DEFAULT_MAX_REVIEW_ROUNDS,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_KEEP_AWAKE_WHILE_IDLE,
@@ -395,7 +394,6 @@ describe("resolveConfig", () => {
     // a host whose credentials all come from the process environment still has
     // to DECLARE the keys, because the fallback is per declared key.
     expect(r.env).toEqual({});
-    expect(r.maxQualityRounds).toBe(DEFAULT_MAX_QUALITY_ROUNDS);
     expect(r.maxGateRounds).toBe(DEFAULT_MAX_GATE_ROUNDS);
     expect(r.maxReviewRounds).toBe(DEFAULT_MAX_REVIEW_ROUNDS);
     expect(r.pollIntervalMs).toBe(DEFAULT_POLL_INTERVAL_MS);
@@ -444,22 +442,31 @@ describe("resolveConfig", () => {
       .toThrow(message);
   });
 
-  it("defaults all three independent convergence budgets to four (#129/#143)", () => {
-    expect(DEFAULT_MAX_QUALITY_ROUNDS).toBe(4);
+  it("defaults both independent convergence budgets to four (#129/#143/#185)", () => {
     expect(DEFAULT_MAX_GATE_ROUNDS).toBe(4);
     expect(DEFAULT_MAX_REVIEW_ROUNDS).toBe(4);
     const r = resolveConfig(minimal);
-    expect(r.maxQualityRounds).toBe(4);
     expect(r.maxGateRounds).toBe(4);
     expect(r.maxReviewRounds).toBe(4);
   });
 
   it.each([8, undefined])(
-    "refuses removed maxImplAttempts=%s and names all three replacements",
+    "refuses removed maxImplAttempts=%s and names both replacements",
     (maxImplAttempts) => {
       expect(() =>
         resolveConfig({ ...minimal, maxImplAttempts } as RunConfig),
-      ).toThrow(/maxImplAttempts.*maxQualityRounds.*maxGateRounds.*maxReviewRounds/s);
+      ).toThrow(/maxImplAttempts.*maxGateRounds.*maxReviewRounds/s);
+    },
+  );
+
+  // Present at all — even as undefined — is a config written for the quality
+  // budget the fixer no longer has (#185), refused like maxImplAttempts.
+  it.each([4, undefined])(
+    "refuses removed maxQualityRounds=%s with its migration",
+    (maxQualityRounds) => {
+      expect(() =>
+        resolveConfig({ ...minimal, maxQualityRounds } as RunConfig),
+      ).toThrow(/maxQualityRounds was removed \(#185\).*maxGateRounds.*delete the key/s);
     },
   );
 
@@ -471,8 +478,6 @@ describe("resolveConfig", () => {
   );
 
   it.each([
-    ["maxQualityRounds", 0],
-    ["maxQualityRounds", 1.5],
     ["maxGateRounds", 0],
     ["maxGateRounds", 1.5],
     ["maxReviewRounds", -1],
@@ -569,7 +574,6 @@ describe("resolveConfig", () => {
       ...minimal,
       sourceBranch: "develop",
       implementerModelId: "claude-haiku-4-5-20251001",
-      maxQualityRounds: 3,
       maxGateRounds: 5,
       maxReviewRounds: 2,
       coauthorTrailer: "Co-authored-by: Someone Else <x@y.z>",
@@ -577,7 +581,6 @@ describe("resolveConfig", () => {
     });
     expect(r.sourceBranch).toBe("develop");
     expect(r.implementerModelId).toBe("claude-haiku-4-5-20251001");
-    expect(r.maxQualityRounds).toBe(3);
     expect(r.maxGateRounds).toBe(5);
     expect(r.maxReviewRounds).toBe(2);
     expect(r.coauthorTrailer).toBe("Co-authored-by: Someone Else <x@y.z>");

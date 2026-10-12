@@ -40,7 +40,8 @@ import {
   buildAdjudicatorPrompt,
   buildPrompt,
   buildProjectAnchor,
-  buildReviewerPrompts,
+  buildCorrectnessPrompt,
+  buildQualityPrompt,
   buildUiCheckPrompt,
 } from "./prompt.js";
 
@@ -292,10 +293,10 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   // against `repoDir` (as it was until #38) or against a source tree at
   // `origin/<sourceBranch>` (as it was after), this drops the @ref and the
   // reviewer judges the commit without the standards that commit authored.
-  it("points the reviewer at standards the BRANCH adds", async () => {
+  it("points the quality pass at standards the BRANCH adds", async () => {
     await writeFile(join(launchedFrom, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = (await buildReviewerPrompts({
+    const prompt = await buildQualityPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -303,9 +304,9 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       sourceBranch: "main",
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
-      reviewerQualityPromptExtension: { path: "CODING_STANDARDS.md" },
-      priorRounds: [],
-    })).quality;
+      promptExtension: { path: "CODING_STANDARDS.md" },
+      lastQualityHead: null,
+    });
 
     expect(prompt).toContain("@CODING_STANDARDS.md");
   });
@@ -315,7 +316,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     // review — so probing the wrong one emits an @ref the reviewer cannot open.
     await writeFile(join(target, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = (await buildReviewerPrompts({
+    const prompt = await buildQualityPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -323,9 +324,9 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       sourceBranch: "main",
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
-      reviewerQualityPromptExtension: { path: "CODING_STANDARDS.md" },
-      priorRounds: [],
-    })).quality;
+      promptExtension: { path: "CODING_STANDARDS.md" },
+      lastQualityHead: null,
+    });
 
     expect(prompt).not.toContain("@CODING_STANDARDS.md");
   });
@@ -380,7 +381,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
   // History is the half that must NOT follow the branch.
   it("builds the reviewer's history from the repo, not from the worktree under review", async () => {
-    const prompt = (await buildReviewerPrompts({
+    const prompt = await buildCorrectnessPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -389,7 +390,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       priorRounds: [],
-    })).correctness;
+    });
 
     expect(prompt).toContain("commit-from-target-repo");
     expect(prompt).not.toContain("commit-from-launch-dir");

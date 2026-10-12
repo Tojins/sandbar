@@ -152,16 +152,14 @@ describe("terminalFinalizeInputs", () => {
     });
   });
 
-  it.each([
-    ["quality-budget-exhausted", "quality", "quality prose"],
-    ["correctness-budget-exhausted", "correctness", "correctness prose"],
-  ] as const)("maps %s with its complete review handoff payload", (cause, budget, prose) => {
+  it("maps correctness-budget-exhausted with its complete review handoff payload", () => {
+    const prose = "correctness prose";
     const [input] = terminalFinalizeInputs([
       {
         issue: issue("129"),
         terminal: {
           type: "NEEDS-HUMAN-REVIEW",
-          cause,
+          cause: "correctness-budget-exhausted",
           roundsUsed: 3,
           latestReviewerProse: prose,
           commits: [{ sha: "abc" }],
@@ -172,7 +170,6 @@ describe("terminalFinalizeInputs", () => {
     expect(input).toEqual({
       kind: "review-budget-exhausted",
       issue: issue("129"),
-      budget,
       roundsUsed: 3,
       latestReviewerProse: prose,
       specGaps: [{ round: 1, text: "missing requirement" }],

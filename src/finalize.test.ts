@@ -295,10 +295,10 @@ describe("comment templates", () => {
     expect(body).toContain("stack…");
     expect(body).toContain(AGENT_STUCK);
     expect(body).toContain(READY_FOR_AGENT);
-    expect(body).toContain("gate-1 was red for 4 consecutive rounds");
+    expect(body).toContain("stopped after 4 consecutive attempts without a green gate-1");
     expect(body).toContain("latest failing step: `tests`");
     expect(body).not.toContain("step `tests` was red for 4");
-    expect(body.indexOf("Latest quality review")).toBeLessThan(
+    expect(body.indexOf("Latest correctness review (an earlier round)")).toBeLessThan(
       body.indexOf("<details>"),
     );
     expect(body.endsWith("re-apply `ready-for-agent`.")).toBe(true);
@@ -306,7 +306,6 @@ describe("comment templates", () => {
   it("REVIEW_BUDGET_EXHAUSTED body includes bot prefix, the branch, the latest reviewer prose verbatim, and the configured labels", () => {
     const body = REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
       "sandbar/issue-45-t-45",
-      "quality",
       4,
       "## Bar violations\n- foo not extracted\n- naming is unclear",
       AGENT_STUCK,
@@ -322,9 +321,9 @@ describe("comment templates", () => {
     // every other assertion here would still pass.
     expect(body).toContain(READY_FOR_AGENT);
     expect(body).toContain(
-      "quality review pass stopped after 4 consecutive failures",
+      "correctness review pass stopped after 4 consecutive rejections",
     );
-    expect(body).not.toContain("consecutive rejections");
+    expect(body).toContain("Latest correctness reviewer report");
     expect(body.indexOf("foo not extracted")).toBeLessThan(
       body.indexOf("Action:"),
     );
@@ -988,7 +987,7 @@ describe("finalizeOne", () => {
         issue: i,
         cause: "gate-red",
         failureTrace: "AssertionError: red",
-        latestReviewerProse: "quality review from the red round",
+        latestReviewerProse: "correctness review from an earlier round",
         budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: "tests" },
       },
       adapter,
@@ -1001,8 +1000,8 @@ describe("finalizeOne", () => {
     expect(calls.comments.length).toBe(1);
     expect(calls.comments[0]!.body).toContain("AssertionError: red");
     expect(calls.comments[0]!.body).toContain("latest failing step: `tests`");
-    expect(calls.comments[0]!.body).toContain("4 consecutive rounds");
-    expect(calls.comments[0]!.body).toContain("quality review from the red round");
+    expect(calls.comments[0]!.body).toContain("4 consecutive attempts");
+    expect(calls.comments[0]!.body).toContain("correctness review from an earlier round");
     // #70 — "push a fix on this branch" used to never say which.
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
@@ -1021,7 +1020,7 @@ describe("finalizeOne", () => {
         cause: "no-signal-exhausted",
         failureTrace: "The final implementer signal failed validation: guard correction",
         latestReviewerProse: null,
-        budgetExhausted: { budget: "quality", roundsUsed: 4 },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: null },
       },
       adapter,
       LABELS,
@@ -1033,37 +1032,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).not.toContain("never emitted");
     expect(calls.comments[0]!.body).not.toContain("no gate ran");
     expect(calls.comments[0]!.body).not.toContain("Last failure trace");
-    expect(calls.comments[0]!.body).toContain("quality pass stopped after 4 consecutive failures");
-  });
-
-  it("quality review exhaustion names its budget, count, and latest prose", async () => {
-    const { adapter, calls } = makeAdapter();
-    const i = issue(45);
-    const action = await finalizeOne(
-      {
-        kind: "review-budget-exhausted",
-        issue: i,
-        budget: "quality",
-        roundsUsed: 4,
-        latestReviewerProse: "## Extract the duplicated lifecycle dispatch",
-      },
-      adapter,
-      LABELS,
-    );
-
-    expect(action).toEqual({ kind: "pushed" });
-    expect(calls.pushes).toEqual([i.branch]);
-    expect(calls.comments.length).toBe(1);
-    const body = calls.comments[0]!.body;
-    expect(body).toContain("Extract the duplicated lifecycle dispatch");
-    expect(body).toContain(
-      "quality review pass stopped after 4 consecutive failures",
-    );
-    expect(body).toContain(i.branch); // #70
-    expect(body).not.toContain("standards-violation report");
-    expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
-    ]);
+    expect(calls.comments[0]!.body).toContain("stopped after 4 consecutive attempts without a green gate-1");
   });
 
   it("needs-human reviewer-harness-failed, nothing ever reviewed: says so in the strongest form (#41)", async () => {
@@ -1383,7 +1352,6 @@ describe("finalizeOne", () => {
       {
         kind: "review-budget-exhausted",
         issue: i,
-        budget: "correctness",
         roundsUsed: 4,
         latestReviewerProse: "## Bar violations\n- too much indirection",
       },
@@ -1725,10 +1693,10 @@ describe("finalizeOne", () => {
         cause: "no-signal-exhausted",
         failureTrace: "attempt produced no commit or promise",
         latestReviewerProse: null,
-        budgetExhausted: { budget: "quality", roundsUsed: 4 },
+        budgetExhausted: { budget: "gate", roundsUsed: 4, failedStep: null },
         strandedHead: null,
       } as const,
-      context: "quality pass stopped after 4 consecutive failures",
+      context: "stopped after 4 consecutive attempts without a green gate-1",
       remove: [READY_FOR_AGENT],
     },
     {
@@ -1770,7 +1738,6 @@ describe("finalizeOne", () => {
       input: {
         kind: "review-budget-exhausted",
         issue: issue(75),
-        budget: "correctness",
         roundsUsed: 4,
         latestReviewerProse: "still violates the contract",
       } as const,
@@ -2191,8 +2158,7 @@ describe("finalizeOne", () => {
         {
           kind: "review-budget-exhausted",
           issue: issue(45),
-          budget: "correctness",
-          roundsUsed: 4,
+            roundsUsed: 4,
           latestReviewerProse: "violations",
         },
         adapter,

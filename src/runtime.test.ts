@@ -2,7 +2,7 @@
 // ENVIRONMENT VALUE (#154).
 //
 // It lives here rather than beside any one builder because it is a claim about
-// ALL of them at once, and the four are in three modules. The argument the
+// ALL of them at once, and the five are in three modules. The argument the
 // issue rests on is that no wrapper anywhere can leak a credential it never
 // saw — node's `execFile` error message is `Command failed: <argv joined>`, and
 // the inner loop records that as a `hard-error` event `reason` the UI then
@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { sandboxRunArgs } from "./agent-sandbox.js";
+import { sandboxExecArgs, sandboxRunArgs } from "./agent-sandbox.js";
 import { resolveGateStack } from "./config.js";
 import { SandbarError } from "./errors.js";
 import { containerRunArgs, stepExecArgs } from "./gate-stack.js";
@@ -93,6 +93,14 @@ const BUILDERS: ReadonlyArray<readonly [string, () => RuntimeInvocation]> = [
       }),
   ],
   ["stepExecArgs", () => stepExecArgs("sandbar-42-app", ["npm", "test"])],
+  [
+    "sandboxExecArgs",
+    () =>
+      sandboxExecArgs("sandbar-w0011223-abc", "claude -p", {
+        cwd: "/home/agent/workspace",
+        env: { GIT_AUTHOR_NAME: "sandbar (quality)", GH_TOKEN: PAT },
+      }),
+  ],
   [
     "buildResolveRunArgv",
     () =>

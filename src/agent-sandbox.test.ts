@@ -89,13 +89,14 @@ const execFileP = promisify(execFile);
 
 describe("sandboxExecArgs", () => {
   it("passes an ordinary command unchanged", () => {
-    expect(sandboxExecArgs("box", "echo ok")).toEqual([
-      "exec", "box", "sh", "-c", "echo ok",
-    ]);
+    expect(sandboxExecArgs("box", "echo ok")).toEqual({
+      argv: ["exec", "box", "sh", "-c", "echo ok"],
+      env: {},
+    });
   });
 
   it("implements privileged hooks with podman --user 0", () => {
-    expect(sandboxExecArgs("box", "setup", { sudo: true })).toEqual([
+    expect(sandboxExecArgs("box", "setup", { sudo: true }).argv).toEqual([
       "exec", "--user", "0", "box", "sh", "-c", "setup",
     ]);
   });
@@ -103,10 +104,22 @@ describe("sandboxExecArgs", () => {
   it("orders stdin, cwd, and root options before the container", () => {
     expect(sandboxExecArgs("box", "setup", {
       stdin: "input", cwd: "/work", sudo: true,
-    })).toEqual([
+    }).argv).toEqual([
       "exec", "-i", "-w", "/work", "--user", "0",
       "box", "sh", "-c", "setup",
     ]);
+  });
+
+  // The quality fixer's author (#185) is a per-exec variable, and like every
+  // other container variable it reaches podman as a file (#154).
+  it("returns per-exec variables beside an argv that names none of them", () => {
+    const invocation = sandboxExecArgs("box", "run", {
+      env: { GIT_AUTHOR_NAME: "bot (quality)" },
+    });
+    expect(invocation).toEqual({
+      argv: ["exec", "box", "sh", "-c", "run"],
+      env: { GIT_AUTHOR_NAME: "bot (quality)" },
+    });
   });
 });
 

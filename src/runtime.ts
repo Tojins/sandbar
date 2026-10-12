@@ -46,7 +46,7 @@
 // `ENV_FILE_FLAG` below is the ONE production spelling of any podman
 // environment flag, and runtime.test.ts asserts exactly that by scanning
 // `src/`: a table test can only cover the builders someone added to it, so the
-// scan is what a fifth builder written with `-e KEY=VALUE` runs into. A module
+// scan is what a sixth builder written with `-e KEY=VALUE` runs into. A module
 // that genuinely needs one of those flags for something else has to move that
 // assertion deliberately.
 import { execFile } from "node:child_process";

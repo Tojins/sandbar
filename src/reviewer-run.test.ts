@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   REVIEWER_DETAIL_TAIL_CHARS,
   REVIEWER_MAX_INVOCATIONS,
-  decideReviewRound,
   type ReviewerOutcome,
   type ReviewerRun,
+  reviewerResult,
   runReviewerInvocations,
 } from "./reviewer-run.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -28,122 +28,38 @@ const failed = (detail: string): ReviewerOutcome => ({
   invocations: 2,
 });
 
-describe("sequential review round policy (#19, #121)", () => {
-  const approved = reviewed("<verdict>APPROVED</verdict>");
-  const rejected = (prose: string) =>
-    reviewed(`${prose}\n<verdict>CHANGES-REQUESTED</verdict>`);
-
-  // Every (quality, correctness) pair the round can compose, including the
-  // pairs where the second pass never runs. Quality gates: only its approval
-  // reaches correctness, and only both approvals reach APPROVED.
+describe("reviewerResult (#185)", () => {
+  // The correctness outcome is the whole review now: there is no quality
+  // verdict to compose with, so each outcome maps straight to the machine.
   it.each([
     {
-      name: "quality harness failure",
-      quality: failed("idle"),
-      correctness: undefined,
+      name: "harness failure",
+      outcome: failed("crashed"),
+      expected: { kind: "reviewer-harness-failed", detail: "correctness: crashed" },
+    },
+    {
+      name: "rejection",
+      outcome: reviewed("### Spec\n\nrequirement 2 is unmet\n<verdict>CHANGES-REQUESTED</verdict>"),
       expected: {
-        kind: "finished",
-        event: {
-          kind: "reviewer-harness-failed",
-          pass: "quality",
-          detail: "quality: idle",
-        },
-        quality: "HARNESS-FAILED",
-        correctness: "SKIPPED",
+        kind: "reviewer-result",
+        verdict: "CHANGES-REQUESTED",
+        // Verbatim: the correctness prompt names its own dimension headings.
+        prose: "### Spec\n\nrequirement 2 is unmet\n<verdict>CHANGES-REQUESTED</verdict>",
       },
     },
     {
-      name: "quality rejection",
-      quality: rejected("### Tests\n\nno coverage"),
-      correctness: undefined,
+      name: "approval",
+      outcome: reviewed("<verdict>APPROVED</verdict>"),
       expected: {
-        kind: "finished",
-        event: {
-          kind: "reviewer-result",
-          verdict: "CHANGES-REQUESTED",
-          rejectingPass: "quality",
-          // Verbatim: the quality prompt names its own dimension headings, so
-          // nothing here may label prose that already carries `### Tests`.
-          prose: "### Tests\n\nno coverage\n<verdict>CHANGES-REQUESTED</verdict>",
-        },
-        quality: "CHANGES-REQUESTED",
-        correctness: "SKIPPED",
+        kind: "reviewer-result",
+        verdict: "APPROVED",
+        prose: "<verdict>APPROVED</verdict>",
       },
     },
-    {
-      name: "quality approval alone",
-      quality: approved,
-      correctness: undefined,
-      expected: { kind: "run-correctness" },
-    },
-    {
-      name: "correctness harness failure",
-      quality: approved,
-      correctness: failed("crashed"),
-      expected: {
-        kind: "finished",
-        event: {
-          kind: "reviewer-harness-failed",
-          pass: "correctness",
-          detail: "correctness: crashed",
-        },
-        quality: "APPROVED",
-        correctness: "HARNESS-FAILED",
-      },
-    },
-    {
-      name: "correctness rejection",
-      quality: approved,
-      correctness: rejected("### Spec\n\nrequirement 2 is unmet"),
-      expected: {
-        kind: "finished",
-        event: {
-          kind: "reviewer-result",
-          verdict: "CHANGES-REQUESTED",
-          rejectingPass: "correctness",
-          prose:
-            "### Spec\n\nrequirement 2 is unmet\n<verdict>CHANGES-REQUESTED</verdict>",
-        },
-        quality: "APPROVED",
-        correctness: "CHANGES-REQUESTED",
-      },
-    },
-    {
-      name: "both approvals",
-      quality: approved,
-      correctness: approved,
-      expected: {
-        kind: "finished",
-        event: {
-          kind: "reviewer-result",
-          verdict: "APPROVED",
-          prose: "<verdict>APPROVED</verdict>",
-        },
-        quality: "APPROVED",
-        correctness: "APPROVED",
-      },
-    },
-  ])("decides $name", ({ quality, correctness, expected }) => {
-    expect(
-      correctness === undefined
-        ? decideReviewRound(quality)
-        : decideReviewRound(quality, correctness),
-    ).toEqual(expected);
+  ] as const)("maps a $name", ({ outcome, expected }) => {
+    if (outcome.kind === "aborted") throw new Error("fixture is a completed outcome");
+    expect(reviewerResult(outcome)).toEqual(expected);
   });
-
-  // The gate is what #121 buys: a quality pass that did not approve must not
-  // let a correctness outcome — however it was obtained — reach the round.
-  it.each([
-    ["harness-failed", failed("idle"), "HARNESS-FAILED"],
-    ["rejecting", rejected("### Tests\n\nno coverage"), "CHANGES-REQUESTED"],
-  ] as const)(
-    "ignores a correctness outcome handed alongside a %s quality pass",
-    (_name, quality, qualityField) => {
-      const decision = decideReviewRound(quality, approved);
-      expect(decision.quality).toBe(qualityField);
-      expect(decision.correctness).toBe("SKIPPED");
-    },
-  );
 });
 
 // Drives the policy over a fixed script, recording what it was asked for.
