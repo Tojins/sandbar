@@ -10,8 +10,9 @@ Issue #{{issueId}}: {{issueTitle}}
 
 {{chunkBase}}{{commits}}{{diffStat}}{{priorRounds}}{{projectStandards}}## Review process
 
-Gate-1 is green and this round's tests-and-standards pass has already approved.
-Review these two dimensions, using the project conventions in
+Gate-1 is green at this head, which includes any standards fixes and tests the
+quality pass committed on top of the implementer's work. Review these two
+dimensions, using the project conventions in
 {{conventionsRef}} to understand the implementation's invariants and settled
 choices:
 
@@ -26,7 +27,9 @@ not the review surface.
    requirements and scope creep. An unmet requirement blocks wherever it is.
 
 Explicitly exclude style, coding standards, test-quality, and test-coverage
-judgments from this pass — the pass before it owns them. A change request must
+judgments from this pass — the quality pass owns them. An implementer commit
+that changes or deletes a quality-pass test must name the test and why it
+contradicts the issue; judge that claim as part of spec conformance. A change request must
 name the defect's location, explain the concrete failure, and state the change
 that clears it. Do not block on speculation or preference: if you cannot name a
 concrete defect on either dimension, APPROVE.

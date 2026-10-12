@@ -280,7 +280,7 @@ const needsHumanGateExplanation = (
 ): string =>
   (latestReviewerProse === null
     ? ""
-    : `Latest quality review from the red round:\n\n${latestReviewerProse}\n\n`) +
+    : `Latest correctness review (an earlier round):\n\n${latestReviewerProse}\n\n`) +
   `<details><summary>Gate trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
@@ -297,14 +297,17 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   `${needsHumanGateExplanation(failureTrace, latestReviewerProse)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "push a fix");
 
+// The gate budget counts attempts that never reached a green gate-1, red or
+// ungateable alike (#185), so the stop lines speak of attempts, not reds.
+const noGreenGate = (roundsUsed: number): string =>
+  `stopped after ${roundsUsed} consecutive ` +
+  `attempt${roundsUsed === 1 ? "" : "s"} without a green gate-1`;
+
 const gateRedStop = (failedStep: string, roundsUsed: number): string =>
-  `gate-1 was red for ${roundsUsed} consecutive ` +
-  `round${roundsUsed === 1 ? "" : "s"}; latest failing step: ` +
-  `\`${failedStep}\`.`;
+  `${noGreenGate(roundsUsed)}; latest failing step: \`${failedStep}\`.`;
 
 const noSignalStop = (roundsUsed: number): string =>
-  `the quality pass stopped after ${roundsUsed} consecutive ` +
-  `failure${roundsUsed === 1 ? "" : "s"}; the final attempt had no actionable signal.`;
+  `${noGreenGate(roundsUsed)}; the final attempt had no actionable signal.`;
 
 const needsHumanNoSignalExplanation = (failureTrace: string): string =>
   `<details><summary>Attempt summary</summary>\n\n` +
@@ -322,10 +325,10 @@ export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
   handoffAction(branch, stuckLabel, readyLabel, "inspect the transcripts and push a fix");
 
 // The worktree could not be brought to a committed state, so no gate ever ran
-// (#24 D1). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE, which says "exhausted
-// the quality budget without a green gate" — true-ish but it sends the reader
-// looking for a failing test. It may fire early when two attempts leave the
-// same dirty set, or when the quality budget expires across changing sets.
+// (#24 D1). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE, which names a failing
+// gate step — true-ish but it sends the reader looking for a failing test. It
+// may fire early when two attempts leave the same dirty set, or when the gate
+// budget expires across changing sets.
 // What the human needs is the path list and the knowledge that the cause is
 // almost never the branch's code.
 const needsHumanUncommittableExplanation = (
@@ -334,19 +337,19 @@ const needsHumanUncommittableExplanation = (
   `<details><summary>Uncommitted paths</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
-const uncommittableStop = (qualityRounds: number | null): string =>
-  qualityRounds === null
+const uncommittableStop = (gateRounds: number | null): string =>
+  gateRounds === null
     ? "stopped because the worktree stayed uncommitted."
-    : `the quality pass stopped after ${qualityRounds} consecutive failures; the worktree stayed uncommitted.`;
+    : `${noGreenGate(gateRounds)}; the worktree stayed uncommitted.`;
 
 export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
   branch: string,
-  qualityRounds: number | null,
+  gateRounds: number | null,
   failureTrace: string,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} ${uncommittableStop(qualityRounds)}\n\n` +
+  `${BOT_COMMENT_PREFIX} ${uncommittableStop(gateRounds)}\n\n` +
   `${needsHumanUncommittableExplanation(failureTrace)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "commit or ignore the paths");
 
@@ -409,21 +412,21 @@ const needsHumanOffBranchExplanation = (
   `<details><summary>What the implementer was told</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
-const offBranchStop = (branch: string, qualityRounds: number | null): string =>
-  qualityRounds === null
+const offBranchStop = (branch: string, gateRounds: number | null): string =>
+  gateRounds === null
     ? `stopped because the implementer remained off \`${branch}\`.`
-    : `the quality pass stopped after ${qualityRounds} consecutive failures; the implementer remained off \`${branch}\`.`;
+    : `${noGreenGate(gateRounds)}; the implementer remained off \`${branch}\`.`;
 
 export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   branch: string,
-  qualityRounds: number | null,
+  gateRounds: number | null,
   failureTrace: string,
   strandedHead: StrandedHead,
   reclaim: IssueCloneReclaim,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} ${offBranchStop(branch, qualityRounds)}\n\n` +
+  `${BOT_COMMENT_PREFIX} ${offBranchStop(branch, gateRounds)}\n\n` +
   `${needsHumanOffBranchExplanation(failureTrace)}` +
   `${STRANDED_COMMITS_NOTE(strandedHead, reclaim)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "fold in the stranded commits");
@@ -460,25 +463,19 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   `${needsHumanReviewerHarnessExplanation(failureTrace, latestReviewerProse)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "review the branch or repair the harness");
 
-const reviewBudgetExhaustedExplanation = (
-  budget: "quality" | "correctness",
-  latestReviewerProse: string,
-): string => {
-  return `Latest ${budget} reviewer report:\n\n${latestReviewerProse}`;
-};
+const reviewBudgetExhaustedExplanation = (latestReviewerProse: string): string =>
+  `Latest correctness reviewer report:\n\n${latestReviewerProse}`;
 
 export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   branch: string,
-  budget: "quality" | "correctness",
   roundsUsed: number,
   latestReviewerProse: string,
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} the ${budget} review pass stopped after ${roundsUsed} ` +
-  `consecutive ${budget === "quality" ? "failure" : "rejection"}` +
-  `${roundsUsed === 1 ? "" : "s"}.\n\n` +
-  `${reviewBudgetExhaustedExplanation(budget, latestReviewerProse)}\n\n` +
+  `${BOT_COMMENT_PREFIX} the correctness review pass stopped after ${roundsUsed} ` +
+  `consecutive rejection${roundsUsed === 1 ? "" : "s"}.\n\n` +
+  `${reviewBudgetExhaustedExplanation(latestReviewerProse)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "push a fix or correct the governing instructions");
 
 export const SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE = (
@@ -567,7 +564,7 @@ type FinalizeKindInput =
       readonly strandedHead: StrandedHead | null;
     }
   | {
-      // Quality-budget exhaustion, or a blocker the agent cannot clear.
+      // Gate-budget exhaustion, or a blocker the agent cannot clear.
       // `cause` selects the comment so the human is pointed at the real blocker
       // (#17): gate-red surfaces the failure trace; uncommittable-worktree surfaces
       // the paths that stayed dirty across attempts (no gate ever ran, so a
@@ -589,20 +586,18 @@ type FinalizeKindInput =
         | "reviewer-harness-failed";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
+      // `failedStep` is null when the deciding attempt never reached the
+      // gate: #185 charges pre-gate re-prompts to the same budget.
       readonly budgetExhausted: {
-        readonly budget: "quality";
-        readonly roundsUsed: number;
-      } | {
         readonly budget: "gate";
         readonly roundsUsed: number;
-        readonly failedStep: string;
+        readonly failedStep: string | null;
       } | null;
       readonly strandedHead: StrandedHead | null;
     }
   | {
       readonly kind: "review-budget-exhausted";
       readonly issue: IssueRef;
-      readonly budget: "quality" | "correctness";
       readonly roundsUsed: number;
       readonly latestReviewerProse: string;
     }
@@ -810,9 +805,7 @@ function needsHumanComments(
   labels: LabelConfig,
   reclaim: IssueCloneReclaim,
 ): { readonly published: string; readonly refused: string } {
-  const qualityRounds = input.budgetExhausted?.budget === "quality"
-    ? input.budgetExhausted.roundsUsed
-    : null;
+  const gateRounds = input.budgetExhausted?.roundsUsed ?? null;
   const pair = (() => {
     switch (input.cause) {
       case "reviewer-harness-failed":
@@ -835,13 +828,13 @@ function needsHumanComments(
         return {
           published: NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE(
             input.issue.branch,
-            qualityRounds,
+            gateRounds,
             input.failureTrace,
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
           refused:
-            `${uncommittableStop(qualityRounds)}\n\n` +
+            `${uncommittableStop(gateRounds)}\n\n` +
             needsHumanUncommittableExplanation(input.failureTrace),
         };
       case "off-branch-head":
@@ -851,7 +844,7 @@ function needsHumanComments(
         return {
           published: NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE(
             input.issue.branch,
-            qualityRounds,
+            gateRounds,
             input.failureTrace,
             input.strandedHead,
             reclaim,
@@ -859,15 +852,16 @@ function needsHumanComments(
             READY_FOR_AGENT_LABEL,
           ),
           refused:
-            `${offBranchStop(input.issue.branch, qualityRounds)}\n\n` +
+            `${offBranchStop(input.issue.branch, gateRounds)}\n\n` +
             needsHumanOffBranchExplanation(input.failureTrace) +
             STRANDED_COMMITS_NOTE(input.strandedHead, reclaim),
         };
       case "gate-red": {
-        if (input.budgetExhausted?.budget !== "gate") {
-          throw new Error("gate-red handoff missing gate budget");
+        const failedStep = input.budgetExhausted?.failedStep ?? null;
+        if (gateRounds === null || failedStep === null) {
+          throw new Error("gate-red handoff missing its failing gate step");
         }
-        const { failedStep, roundsUsed } = input.budgetExhausted;
+        const roundsUsed = gateRounds;
         return {
           published: NEEDS_HUMAN_COMMENT_TEMPLATE(
             input.issue.branch,
@@ -884,19 +878,19 @@ function needsHumanComments(
         };
       }
       case "no-signal-exhausted": {
-        if (qualityRounds === null) {
-          throw new Error("no-signal handoff missing quality budget");
+        if (gateRounds === null) {
+          throw new Error("no-signal handoff missing gate budget");
         }
         return {
           published: NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE(
             input.issue.branch,
-            qualityRounds,
+            gateRounds,
             input.failureTrace,
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
           refused:
-            `${noSignalStop(qualityRounds)}\n\n` +
+            `${noSignalStop(gateRounds)}\n\n` +
             needsHumanNoSignalExplanation(input.failureTrace),
         };
       }
@@ -1336,17 +1330,13 @@ export async function finalizeOne(
       await adapter.reclaimIssueClone(input.issue.branch);
       const body = REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
         input.issue.branch,
-        input.budget,
         input.roundsUsed,
         input.latestReviewerProse,
         labels.agentStuck,
         READY_FOR_AGENT_LABEL,
       );
       const refused = await pushBranchOrPark(input, adapter, labels, {
-        context: reviewBudgetExhaustedExplanation(
-          input.budget,
-          input.latestReviewerProse,
-        ),
+        context: reviewBudgetExhaustedExplanation(input.latestReviewerProse),
       });
       if (refused) return refused;
       await adapter.postComment(

@@ -997,3 +997,74 @@ export async function fastForwardOffBranchHead(
       : commits.split("\n").map((sha) => ({ sha })),
   };
 }
+
+// --------------------------------------------------------------------------
+// #185 — what the quality fixer leaves behind.
+// --------------------------------------------------------------------------
+//
+// The fixer emits no completion token: process exit is done, and no outcome
+// of it is a harness failure. Whatever it leaves is therefore settled here,
+// host-side, into the one shape gate-1 can judge — a clean tree whose HEAD is
+// `refs/heads/<branch>` and whose branch still contains `startSha`, the head
+// the pass was handed. Every commit the pass made on that branch is kept;
+// what could not be kept is returned so the run record says what went.
+//
+//   - A dirty tree is discarded (`reset --hard` plus `clean -fd`; ignored
+//     files are untouched, exactly as they are untouched by the D1 check).
+//   - An off-branch HEAD the branch is an ancestor of is fast-forwarded, the
+//     same #127 repair an implementer attempt gets. Any other off-branch HEAD
+//     is abandoned and HEAD reattached to the branch (recreated at `startSha`
+//     if the pass deleted it); its sha is reported as stranded.
+//   - A branch that no longer contains `startSha` was rewound or rewritten by
+//     the pass; it is put back at `startSha` and the tip it had is reported.
+//     The implementer's commits are not the fixer's to drop.
+export type QualityResidue = {
+  // `git status --porcelain` lines the pass left uncommitted.
+  readonly dirtyPaths: readonly string[];
+  // An off-branch HEAD whose commits could not be fast-forwarded onto the
+  // branch, or null.
+  readonly strandedHead: string | null;
+  // The branch tip the pass left when it no longer contained `startSha`, or
+  // null.
+  readonly rewoundTip: string | null;
+};
+
+export async function settleQualityResidue(
+  worktreePath: string,
+  branch: string,
+  startSha: string,
+): Promise<{
+  readonly commits: readonly { readonly sha: string }[];
+  readonly residue: QualityResidue;
+}> {
+  const git = (args: readonly string[]) =>
+    exec("git", [...args], { cwd: worktreePath });
+  const dirtyPaths = await dirtyWorktreePaths(worktreePath);
+  if (dirtyPaths.length > 0) {
+    await git(["reset", "--hard", "--quiet", "HEAD"]);
+    await git(["clean", "-fdq"]);
+  }
+  let strandedHead: string | null = null;
+  const mismatch = await headMismatch(worktreePath, branch);
+  if (mismatch?.branchIsAncestor) {
+    await fastForwardOffBranchHead(worktreePath, mismatch);
+  } else if (mismatch !== null) {
+    strandedHead = mismatch.headSha;
+    if (mismatch.branchSha === null) await git(["branch", branch, startSha]);
+    await git(["symbolic-ref", "HEAD", `refs/heads/${branch}`]);
+    await git(["reset", "--hard", "--quiet", `refs/heads/${branch}`]);
+  }
+  let rewoundTip: string | null = null;
+  const tip = await revParse(worktreePath, `refs/heads/${branch}`);
+  if (!(await isAncestor(worktreePath, startSha, tip))) {
+    rewoundTip = tip;
+    await git(["reset", "--hard", "--quiet", startSha]);
+  }
+  const range = (
+    await git(["rev-list", "--reverse", `${startSha}..refs/heads/${branch}`])
+  ).stdout.trim();
+  return {
+    commits: range === "" ? [] : range.split("\n").map((sha) => ({ sha })),
+    residue: { dirtyPaths, strandedHead, rewoundTip },
+  };
+}

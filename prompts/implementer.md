@@ -3,7 +3,7 @@
 Fix issue #{{issueId}}: {{issueTitle}}
 Branch: {{branch}}
 
-{{chunkBase}}{{workDone}}{{sandboxStack}}{{gateFailure}}{{reviewerFeedback}}{{orchestratorNote}}{{escalation}}If you realise mid-implementation that you are inventing non-trivial visible UI
+{{chunkBase}}{{workDone}}{{qualityCommits}}{{sandboxStack}}{{gateFailure}}{{reviewerFeedback}}{{orchestratorNote}}{{escalation}}If you realise mid-implementation that you are inventing non-trivial visible UI
 the initial check did not cover, commit what you have, then stop and emit
 `<promise>NEEDS-UI-PROTOTYPE</promise>` followed by a `<ui-impact>` block. A
 late escalation is better than a merged guess.
@@ -27,9 +27,9 @@ branch's commit list and diff stat, while uncommitted changes are
 left behind unexplained. Small, frequent commits make an interrupted attempt
 cheap to resume.
 
-The following is the text handed verbatim to the reviewer that will judge this
-branch; read it before writing as well as before promising. You are the party
-these standards are applied to, not the reviewer instructed to apply them.
+The following is the text the quality pass applies to this branch after you;
+read it before writing as well as before promising. Your work is what these
+standards are applied to.
 
 {{codingStandards}}
 
@@ -46,6 +46,18 @@ with `git diff {{baseRef}}...HEAD` and `git log {{baseRef}}..HEAD`, then:
    conventions.
 5. Re-read the issue, list its stated requirements, tick each against the diff,
    and delete anything the issue did not ask for.
+
+## The quality pass
+
+After you report COMPLETE and before gate-1, a quality pass may commit
+standards fixes and new or rewritten tests on top of your work; its commits carry
+`(quality)` in their author name. They are part of the branch from then on:
+
+- A failing test the quality pass added reports a correctness defect in your
+  implementation. The fix is to make that test pass, not to delete it.
+- Modify or delete a quality-pass test only when it contradicts the issue, and
+  then name the test and the reason in that commit's message. The correctness
+  reviewer judges that call.
 
 ## Done signal
 

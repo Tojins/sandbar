@@ -21,28 +21,34 @@
 // The partition and UI-prototype decisions (#158/#126) are cold agent calls in
 // the existing issue sandbox and spend no convergence budget. Partition runs
 // once per admission and only at the seed; UI runs once per sandbox cycle, so
-// a fresh HARD-ERROR asks it again. Before review dispatch, the complete role
-// picture (rendered prompt plus seed-anchored net diff) is measured against the
-// configured useful-context budget; a resumed branch gets the same enforcement
-// at admission. A provider size refusal maps to the same partition terminal
-// instead of entering HARD-ERROR replay. Two deliberate exceptions to "all
-// branching lives in the SM" stay within one action each. The promise nudge
-// in runImplementer gives an implementer
-// that ends with no `<promise>` tag at all one `--continue` follow-up before
-// the NO-SIGNAL reaches the SM
-// — the SM never sees the nudge, only the re-parsed result. The full argument
-// is at the call site. A review round is likewise a QUALITY pass followed, only
-// when approved AND gate-1 is green, by the correctness pass on its own
-// separately configured provider and model (#121/#143); the SM receives one aggregate reviewer result,
-// including the rejecting pass, and charges only that pass (#129). Both passes
-// are cold — nothing resumes anything — which is what lets them run on
-// different vendors.
-// A rejected report whose next implementer attempt creates no commit at that
-// head is routed once per head/pass to a cold adjudicator (#167). The judge
+// a fresh HARD-ERROR asks it again. Before the quality fixer and before the
+// correctness pass, that role's complete picture (rendered prompt plus
+// seed-anchored net diff) is measured against the configured useful-context
+// budget; a resumed branch gets the same enforcement at admission. A provider
+// size refusal maps to the same partition terminal instead of entering
+// HARD-ERROR replay. Two deliberate exceptions to "all branching lives in the
+// SM" stay within one action each. The promise nudge in runImplementer gives
+// an implementer that ends with no `<promise>` tag at all one `--continue`
+// follow-up before the NO-SIGNAL reaches the SM — the SM never sees the nudge,
+// only the re-parsed result. The full argument is at the call site.
+//
+// After a clean, on-branch COMPLETE the round is serial (#185): the quality
+// FIXER, then gate-1 on the head it left, then — only on a green gate — the
+// cold correctness reviewer on its own separately configured provider and
+// model (#121). The fixer runs in this same writable sandbox, routed through
+// `reviewerQuality*` and committing under a `<botName> (quality)` author the
+// host sets for that invocation only. It emits no token: whatever it leaves,
+// `settleQualityResidue` (git-ops.ts) discards uncommitted residue, puts HEAD
+// back on the branch (with #127's repair where it applies), keeps every commit
+// it made and records what was discarded; a failed invocation is the same
+// "process exit" and never a harness failure. The fixer's commits since the
+// implementer's last attempt are handed to the next implementer prompt, and
+// the head it left anchors the next pass's "changed since" focus.
+// A correctness rejection whose next implementer attempt creates no commit at
+// that head is routed once per head to a cold adjudicator (#167). The judge
 // sees that report without implementer speech or prior-round wording, is held
 // to the same read-only snapshot contract, and either leaves its charged
-// rejection upheld or rewrites history to OVERRULED and refunds it. A quality
-// overrule continues directly into the correctness pass at the same head.
+// rejection upheld or rewrites history to OVERRULED and refunds it.
 //
 // The other deliberate runner-side exception is #127's off-branch repair.
 // `headMismatch` has already made the mechanical ancestry decision; when the
@@ -61,24 +67,20 @@
 // receives only its configured prompt
 // extension; prompt.ts probes path extensions in the issue worktree so a
 // branch can introduce the instructions it is expected to follow (#78, #91).
-// Successful review rounds accumulate here beside the commits they judged and
-// are handed to both cold reviewer prompts on later rounds (#88). Harness
-// failures add no entry, and a fresh HARD-ERROR cycle resets the history.
-// An optional `<spec-gap>` declared by the correctness pass is accumulated
-// beside that history but around the state machine, preserved across fresh
-// cycles, and carried on every terminal for finalise to record (#108).
-// That history also switches the quality pass from its one whole-branch listing
-// to a review anchored at the newest earlier quality head; the round record
-// exposes that list/verify mode without storing another piece of state (#107).
+// Successful correctness rounds accumulate here beside the commits they judged
+// and are handed to the next correctness prompt (#88). Harness failures add no
+// entry, and a fresh HARD-ERROR cycle resets the history and the fixer's
+// ledger. An optional `<spec-gap>` declared by the correctness pass is
+// accumulated beside that history but around the state machine, preserved
+// across fresh cycles, and carried on every terminal for finalise to record
+// (#108).
 // Each implementer invocation publishes its private clone's issue ref to the
-// host cache on success (#98). After an invocation failure the same publish is
-// recovery-only: its failure is logged and may not replace the provider error.
-// Gate-1 and quality review are dispatched together after COMPLETE (#123).
-// A red gate keeps the quality result and reviewer history, while correctness
-// is not dispatched until both quality and gate-1 approve (#143). Reviewer
-// mutation still parks regardless of the gate result.
-// Partition-check, UI-check, reviewer and adjudicator invocations snapshot tip and status; any mutation
-// parks the issue and preserves the clone rather than trusting that call.
+// host cache on success (#98), as does each settled quality pass. After an
+// implementer invocation failure the same publish is recovery-only: its
+// failure is logged and may not replace the provider error.
+// Partition-check, UI-check, reviewer and adjudicator invocations snapshot tip
+// and status; any mutation parks the issue and preserves the clone rather than
+// trusting that call. The quality fixer is the one cold role exempt (#185).
 // Invocation filenames use one run-owned, per-issue sequence across fresh
 // HARD-ERROR cycles and later admissions: the state machine's attempt and
 // UI-check counters restart at both boundaries, but an earlier invocation
@@ -108,6 +110,7 @@ import * as agentSandbox from "./agent-sandbox.js";
 import {
   AgentCredentialError,
   AgentError,
+  AgentIdleTimeoutError,
   AgentInputTooLargeError,
   AgentQuotaError,
   agentPartialContainerResources,
@@ -126,6 +129,7 @@ import type { AgentUsage } from "./agent-usage.js";
 import type { ChunkTarget } from "./chunks.js";
 import type { CodexAuthMount } from "./codex-auth.js";
 import type {
+  PromptExtension,
   PromptExtensions,
   ResolvedCopyToWorktreeEntry,
   ResolvedGateStack,
@@ -138,7 +142,7 @@ import {
 } from "./agent-tools.js";
 import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
-import type { EventInput, UsageFields } from "./events.js";
+import type { EventInput, QualityPassEvent, UsageFields } from "./events.js";
 import { parsePartitionCheck } from "./partition-check-parser.js";
 import { summarizeGateFailure } from "./gate.js";
 import type { GateSemaphore } from "./gate-semaphore.js";
@@ -157,16 +161,15 @@ import {
   ensureIssueBranch,
   fastForwardOffBranchHead,
   headMismatch,
+  settleQualityResidue,
   symbolicHeadRef,
 } from "./git-ops.js";
 import {
   HARD_ERROR_MAX_RETRIES,
-  type Gate1Result,
   type ContextSlot,
   type LoopAction,
   type LoopEvent,
   type LoopState,
-  type ReviewRoundObservation,
   type ReviewerResult,
   type Verdict,
   decideAfterTerminal,
@@ -194,12 +197,8 @@ import {
 } from "./sandbox-stack.js";
 import {
   REVIEWER_MAX_INVOCATIONS,
-  decideReviewRound,
+  reviewerResult,
   runReviewerInvocations,
-  type CompletedReviewerOutcome,
-  type FinishedReviewRoundDecision,
-  type ReviewerOutcome,
-  type ReviewerPass,
 } from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
@@ -212,15 +211,16 @@ import {
 import {
   type ProjectAnchorOptions,
   type PriorReviewRound,
+  type ReviewerPromptInputs,
   buildPrompt,
   buildAdjudicatorPrompt,
+  buildCorrectnessPrompt,
   buildPartitionCheckPrompt,
-  buildReviewerPrompts,
+  buildQualityPrompt,
   buildUiCheckPrompt,
   contextChars,
   measureNetDiffChars,
   branchIsAheadOfSeed,
-  qualityReviewContext,
 } from "./prompt.js";
 
 export const FAILURE_TAIL_LINES = 200;
@@ -252,80 +252,6 @@ function combinePromiseNudge(
   return {
     stdout: `${run.stdout}\n${nudge.stdout}`,
     commitCount: run.commits.length + nudge.commits.length,
-  };
-}
-
-// The runner-owned projection from pass outcomes to prompt history (#88).
-// A harness failure produced no review, so the whole round contributes no
-// entry; a quality rejection and an approved quality pass stopped by a red gate
-// both have no correctness outcome and retain the quality verdict (#121/#143).
-// Completed outcomes only: a detected reviewer write (#98) aborts the round
-// before any history could be recorded, so an abort is not a case this
-// projection answers for — the parameter type says so rather than the body
-// treating "not harness-failed" as "reviewed".
-export function priorReviewRound(
-  reviewRound: number,
-  head: string,
-  quality: CompletedReviewerOutcome,
-  correctness: CompletedReviewerOutcome | undefined,
-): PriorReviewRound | null {
-  if (quality.kind === "harness-failed") return null;
-  if (quality.verdict.verdict === "CHANGES-REQUESTED") {
-    return { round: reviewRound, head, quality: quality.verdict };
-  }
-  // Approved quality with no correctness outcome is the deliberate red-gate
-  // skip (#143), not a harness failure: a correctness harness failure is a
-  // present, typed `harness-failed` outcome below.
-  if (correctness === undefined) {
-    return { round: reviewRound, head, quality: quality.verdict };
-  }
-  if (correctness.kind !== "reviewed") return null;
-  return {
-    round: reviewRound,
-    head,
-    quality: quality.verdict,
-    correctness: correctness.verdict,
-  };
-}
-
-// Which CLI and model each PASS runs on (#121). Extracted as a pure table
-// because it is the one new invariant the runner cannot state for itself: the
-// two passes are argument-shaped in `runReviewer`, and swapping the pairs —
-// quality onto the correctness model, correctness onto the quality one —
-// type-checks and passes every other test in the suite while inverting exactly
-// what this issue is about. `runPass` indexes this and the prompt record by the
-// same pass name, so the pairing has one spelling and one place to get wrong.
-export function reviewerPassRouting(
-  config: Pick<
-    InnerLoopConfig,
-    | "reviewerAgent"
-    | "reviewerModelId"
-    | "reviewerEffort"
-    | "reviewerQualityAgent"
-    | "reviewerQualityModelId"
-    | "reviewerQualityEffort"
-  >,
-): Readonly<
-  Record<
-    ReviewerPass,
-    {
-      readonly agent: AgentProviderName;
-      readonly modelId: string;
-      readonly effort: string | undefined;
-    }
-  >
-> {
-  return {
-    quality: {
-      agent: config.reviewerQualityAgent,
-      modelId: config.reviewerQualityModelId,
-      effort: config.reviewerQualityEffort,
-    },
-    correctness: {
-      agent: config.reviewerAgent,
-      modelId: config.reviewerModelId,
-      effort: config.reviewerEffort,
-    },
   };
 }
 
@@ -384,23 +310,17 @@ export type Terminal =
         | "reviewer-harness-failed";
       readonly failureTrace: string;
       readonly latestReviewerProse: string | null;
-      readonly budgetExhausted: {
-        readonly budget: "quality";
-        readonly roundsUsed: number;
-      } | {
-        readonly budget: "gate";
-        readonly roundsUsed: number;
-        readonly failedStep: string;
-      } | null;
+      readonly budgetExhausted: Extract<
+        Verdict,
+        { readonly type: "NEEDS-HUMAN" }
+      >["budgetExhausted"];
       readonly strandedHead: HeadMismatch | null;
       readonly specGaps: readonly SpecGap[];
     }
   | {
       readonly type: "NEEDS-HUMAN-REVIEW";
       readonly latestReviewerProse: string;
-      readonly cause:
-        | "quality-budget-exhausted"
-        | "correctness-budget-exhausted";
+      readonly cause: "correctness-budget-exhausted";
       readonly roundsUsed: number;
       readonly commits: readonly { sha: string }[];
       readonly specGaps: readonly SpecGap[];
@@ -592,8 +512,9 @@ export type InnerLoopConfig = {
   // credential each member needs.
   readonly implementerAgent: AgentProviderName;
   readonly reviewerAgent: AgentProviderName;
-  // The quality pass's CLI (#121). Resolution defaults it to `reviewerAgent`,
-  // so this is a distinct provider only where the host asked for one.
+  // The quality fixer's CLI (#121, #185). Resolution defaults it to
+  // `reviewerAgent`, so this is a distinct provider only where the host asked
+  // for one.
   readonly reviewerQualityAgent: AgentProviderName;
   readonly adjudicatorAgent: AgentProviderName;
   // The pre-attempt UI classifier (#126), defaulted during config resolution
@@ -610,7 +531,6 @@ export type InnerLoopConfig = {
   readonly uiPrototypeCheck: boolean;
   readonly partitionCheck: boolean;
   readonly maxContextChars: number;
-  readonly maxQualityRounds: number;
   readonly maxGateRounds: number;
   readonly maxReviewRounds: number;
   readonly sandboxImage: string;
@@ -627,6 +547,10 @@ export type InnerLoopConfig = {
   readonly contextMdPath?: string;
   readonly adrDir?: string;
   readonly promptExtensions?: PromptExtensions;
+  // The identity the quality fixer's commits are authored under, as
+  // `<botName> (quality) <botEmail>` (#185); the committer stays the sandbox's.
+  readonly botName: string;
+  readonly botEmail: string;
 };
 
 export type InnerLoopOptions = {
@@ -849,6 +773,11 @@ async function runSandboxCycle(
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
   const priorReviewRounds: PriorReviewRound[] = [];
+  const quality: QualityLedger = {
+    lastHead: null,
+    sinceImplementer: [],
+    openRound: null,
+  };
   const specGaps: SpecGap[] = [];
   let preparedWorktreePath: string | null = null;
 
@@ -1186,7 +1115,6 @@ async function runSandboxCycle(
 
     let state: LoopState = initialState({
       issueBranch: issue.branch,
-      maxQualityRounds: config.maxQualityRounds,
       maxGateRounds: config.maxGateRounds,
       maxReviewRounds: config.maxReviewRounds,
       uiPrototypeCheck: config.uiPrototypeCheck,
@@ -1202,8 +1130,7 @@ async function runSandboxCycle(
     });
 
     while (action.kind !== "terminate") {
-      const executedAction = action;
-      const event = await executeAction(executedAction, {
+      const event = await executeAction(action, {
         issue,
         sandbox,
         opts,
@@ -1214,48 +1141,34 @@ async function runSandboxCycle(
         worktreePath,
         accumulated,
         priorReviewRounds,
+        quality,
         specGaps,
         sandboxStatuses,
-        state,
         invocationSequence,
       });
       const r = step(state, event);
       state = r.state;
       action = r.action;
-      if (
-        (event.kind === "gate-and-reviewer-result" && event.reviewRound) ||
-        (event.kind === "adjudicator-result" && event.reviewRound)
-      ) {
-        let reviewAttempt: number;
-        let reviewRound: number;
-        let gateOk: boolean;
-        if (event.kind === "gate-and-reviewer-result") {
-          if (executedAction.kind !== "run-gate-and-reviewer") {
-            throw new Error("review-round metadata came from a non-review action");
-          }
-          reviewAttempt = executedAction.attempt;
-          reviewRound = executedAction.reviewRound;
-          gateOk = event.gate.ok;
-        } else {
-          if (executedAction.kind !== "run-adjudicator") {
-            throw new Error("continued review metadata came from a non-adjudicator action");
-          }
-          reviewAttempt = executedAction.attempt;
-          reviewRound = executedAction.reviewRound;
-          gateOk = true;
+      // Emitted after the step so the record carries both post-round budgets
+      // (#132/#143). A round is quality + gate-1 + correctness; it closes at a
+      // red gate or at the correctness outcome.
+      const round = closedReviewRound(event);
+      if (round !== null) {
+        const opened = quality.openRound;
+        if (opened === null) {
+          throw new Error("a review round closed without a quality pass opening it");
         }
         await opts.onEvent({
           kind: "review-round",
           issue: Number(issue.id),
           title: issue.title,
-          attempt: reviewAttempt,
-          round: reviewRound,
-          ...event.reviewRound,
-          gateOk,
-          rejectingPass: event.reviewRound.rejectingPass,
-          qualityFailures: state.qualityFailures,
+          attempt: opened.attempt,
+          round: opened.attempt,
+          ...round,
+          rejectingPass: round.correctness === "CHANGES-REQUESTED" ? "correctness" : null,
           gateFailures: state.gateFailures,
           correctnessFailures: state.correctnessFailures,
+          durationMs: opened.timer(),
         });
       }
       // The #27 re-prompt only. A rejected review is the `review-round`
@@ -1416,15 +1329,53 @@ type ExecuteActionCtx = {
   // fresh HARD-ERROR cycle so every terminal can hand the run's evidence to
   // finalize.
   readonly priorReviewRounds: PriorReviewRound[];
+  readonly quality: QualityLedger;
   readonly specGaps: SpecGap[];
   // What came up beside the agent, for the implementer's prompt slot (#44 D8).
   // Empty when the consumer declares no `inSandbox` container.
   readonly sandboxStatuses: readonly SandboxContainerStatus[];
-  // State before the action. Review aggregation applies the pure transition
-  // once to record both independent budgets after the completed round.
-  readonly state: LoopState;
   readonly invocationSequence: AgentInvocationSequence;
 };
+
+// Runner-owned facts about the quality fixer in this sandbox cycle (#185):
+// prompt and record material, never state-machine input. A fresh HARD-ERROR
+// cycle starts a new ledger, as it does a new review history.
+export type QualityLedger = {
+  // The head the fixer's previous pass left; anchors the next pass's
+  // "changed since" focus. Null before the first pass.
+  lastHead: string | null;
+  // The fixer's commits since the implementer's last attempt, oldest first,
+  // from the host-collected range. The next implementer prompt names them and
+  // runImplementer clears the list.
+  sinceImplementer: string[];
+  // The round the latest quality pass opened: its attempt number and a timer
+  // spanning fixer, gate-1 and, when it runs, correctness.
+  openRound: { readonly attempt: number; readonly timer: () => number } | null;
+};
+
+// The round a gate-1 or correctness result closes, for the `review-round`
+// record; null for every other event, and for a reviewer write (which parks).
+export function closedReviewRound(event: LoopEvent): {
+  readonly head: string;
+  readonly gateOk: boolean;
+  readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
+} | null {
+  if (event.kind === "gate-result") {
+    return event.gate.ok
+      ? null
+      : { head: event.head, gateOk: false, correctness: "SKIPPED" };
+  }
+  if (event.kind !== "correctness-result") return null;
+  const { reviewer } = event;
+  if (reviewer.kind === "reviewer-wrote") return null;
+  return {
+    head: event.head,
+    gateOk: true,
+    correctness: reviewer.kind === "reviewer-harness-failed"
+      ? "HARNESS-FAILED"
+      : reviewer.verdict,
+  };
+}
 
 async function executeAction(
   action: LoopAction,
@@ -1437,8 +1388,12 @@ async function executeAction(
       return runUiCheck(action, ctx);
     case "run-implementer":
       return runImplementer(action, ctx);
-    case "run-gate-and-reviewer":
-      return runGateAndReviewer(action, ctx);
+    case "run-quality":
+      return runQuality(action, ctx);
+    case "run-gate":
+      return runGate(action, ctx);
+    case "run-correctness":
+      return runCorrectness(action, ctx);
     case "run-adjudicator":
       return runAdjudicator(action, ctx);
     case "terminate":
@@ -1737,96 +1692,185 @@ export async function runUiCheck(
   throw new Error("unreachable UI-check invocation count");
 }
 
-type GateAndReviewerJobs = {
-  readonly gate: typeof runGate1;
-  readonly reviewer: typeof runReviewer;
-  readonly prepareReview: (
-    ctx: ExecuteActionCtx,
-  ) => Promise<{
-    readonly prompts: Readonly<Record<ReviewerPass, string>>;
-    readonly netDiffChars: number;
-  }>;
-};
-
-const prepareReview = async (ctx: ExecuteActionCtx) => ({
-  prompts: await buildReviewerPrompts(inputsForReviewer(ctx)),
-  netDiffChars: await measureNetDiffChars(ctx.sandbox.worktreePath, ctx.base.ref),
-});
-
-export async function runGateAndReviewer(
-  action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
+// The anchors and branch range every branch-reading cold role is built from,
+// with that role's own prompt extension.
+const branchRoleInputs = (
   ctx: ExecuteActionCtx,
-  jobs: GateAndReviewerJobs = {
-    gate: runGate1,
-    reviewer: runReviewer,
-    prepareReview,
-  },
-): Promise<Extract<LoopEvent, {
-  kind: "gate-and-reviewer-result" | "context-over-budget";
-}>> {
-  const prepared = await jobs.prepareReview(ctx);
-  const sizes = {
-    quality: contextChars(prepared.prompts.quality, prepared.netDiffChars),
-    correctness: contextChars(prepared.prompts.correctness, prepared.netDiffChars),
-  };
-  const over = (["quality", "correctness"] as const)
-    .map((pass) => ({ pass, size: sizes[pass] }))
-    .filter(({ size }) => size > ctx.config.maxContextChars)
-    .sort((a, b) => b.size - a.size)[0];
-  if (over !== undefined) {
-    return {
-      kind: "context-over-budget",
-      slot: over.pass === "quality" ? "review-quality" : "review-correctness",
-      size: over.size,
-      budget: ctx.config.maxContextChars,
-      detail: "The completed branch exceeds the configured context budget before review.",
-    };
-  }
-  // Wait for both jobs before cycle teardown can remove resources either one
-  // is still using. If both reject, the gate remains the first surfaced error.
-  const gateJob = jobs.gate(action, ctx);
-  const reviewerJob = jobs.reviewer(action, ctx, gateJob, prepared);
-  const [gateResult, reviewerResult] = await Promise.allSettled([
-    gateJob,
-    reviewerJob,
-  ]);
-  if (gateResult.status === "rejected") throw gateResult.reason;
-  if (reviewerResult.status === "rejected") throw reviewerResult.reason;
-  const gate = gateResult.value;
-  const reviewer = reviewerResult.value;
-  if (reviewer.historyEntry !== null) {
-    ctx.priorReviewRounds.push(reviewer.historyEntry);
-  }
-  if (reviewer.specGap) {
-    ctx.specGaps.push({ round: action.reviewRound, text: reviewer.specGap });
-  }
-  return {
-    kind: "gate-and-reviewer-result",
-    gate,
-    reviewer: reviewer.event,
-    ...(reviewer.round === null ? {} : { reviewRound: reviewer.round }),
-  };
-}
-
-const inputsForReviewer = (ctx: ExecuteActionCtx) => ({
+  promptExtension: PromptExtension | undefined,
+): ReviewerPromptInputs => ({
   issue: ctx.issue,
   repo: ctx.config.repo,
   repoDir: ctx.config.layout.repoDir,
   worktreePath: ctx.sandbox.worktreePath,
   sourceBranch: ctx.config.sourceBranch,
   base: ctx.base,
-  reviewerPromptExtension: ctx.config.promptExtensions?.reviewer,
-  reviewerQualityPromptExtension: ctx.config.promptExtensions?.reviewerQuality,
+  ...(promptExtension === undefined ? {} : { promptExtension }),
   claudeMdPath: ctx.config.claudeMdPath,
-  contextMdPath: ctx.config.contextMdPath,
-  priorRounds: ctx.priorReviewRounds,
+  ...(ctx.config.contextMdPath === undefined ? {} : { contextMdPath: ctx.config.contextMdPath }),
 });
+
+async function requireIssueTip(ctx: ExecuteActionCtx, when: string): Promise<string> {
+  const tip = await branchTip(ctx.worktreePath, ctx.issue.branch);
+  if (tip === null) {
+    throw new SandbarError(`issue branch ${ctx.issue.branch} disappeared ${when}`);
+  }
+  return tip;
+}
+
+// The quality fixer's commit author, set for its invocation only (#185). The
+// committer stays the sandbox's identity, so the pair says who wrote a change
+// and that it went through this sandbox.
+export const qualityAuthorEnv = (
+  config: Pick<InnerLoopConfig, "botName" | "botEmail">,
+): Readonly<Record<string, string>> => ({
+  GIT_AUTHOR_NAME: `${config.botName} (quality)`,
+  GIT_AUTHOR_EMAIL: config.botEmail,
+});
+
+// The quality pass (#185): a cold fixer in the implementer's writable sandbox.
+// It is told the coding standards and conventions and commits what it fixes;
+// it emits nothing the loop parses. Process exit — clean, non-zero, idle or
+// completion timeout alike (`AgentError`/`AgentIdleTimeoutError`) — is the end
+// of the pass, and the host then settles whatever it left. Only a provider
+// closure or size refusal stops the round, with the same meaning as for every
+// other role; anything else is infrastructure and propagates to HARD-ERROR.
+export async function runQuality(
+  action: Extract<LoopAction, { kind: "run-quality" }>,
+  ctx: ExecuteActionCtx,
+): Promise<Extract<LoopEvent, { kind: "quality-result" | "context-over-budget" }>> {
+  const { issue, sandbox, opts, config, quality } = ctx;
+  quality.openRound = { attempt: action.attempt, timer: startTimer() };
+  const prompt = await buildQualityPrompt({
+    ...branchRoleInputs(ctx, config.promptExtensions?.reviewerQuality),
+    lastQualityHead: quality.lastHead,
+  });
+  const measuredContextChars = contextChars(
+    prompt,
+    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
+  );
+  if (measuredContextChars > config.maxContextChars) {
+    return {
+      kind: "context-over-budget",
+      slot: "review-quality",
+      size: measuredContextChars,
+      budget: config.maxContextChars,
+      detail: "The completed branch exceeds the configured context budget before the quality pass.",
+    };
+  }
+  const startSha = await requireIssueTip(ctx, "before the quality pass");
+  const timer = startTimer();
+  type Measurements = {
+    readonly durationMs: number;
+    readonly maxGapMs?: number;
+    readonly usage?: AgentUsage;
+    readonly toolCalls?: number;
+    readonly peakContext?: number;
+    readonly rateLimit?: RateLimitMeasurement;
+    readonly resources: ContainerResources;
+  };
+  const record = async (outcome: QualityPassEvent, m: Measurements): Promise<void> => {
+    const usageFields = eventUsage(
+      m.usage,
+      m.toolCalls,
+      m.peakContext,
+      m.rateLimit,
+      measuredContextChars,
+    );
+    await opts.onEvent({
+      kind: "quality-pass",
+      issue: Number(issue.id),
+      title: issue.title,
+      attempt: action.attempt,
+      round: action.attempt,
+      provider: config.reviewerQualityAgent,
+      model: config.reviewerQualityModelId,
+      effort: config.reviewerQualityEffort ?? null,
+      ...outcome,
+      durationMs: m.durationMs,
+      ...(m.maxGapMs === undefined ? {} : { maxGapMs: m.maxGapMs }),
+      ...(usageFields === undefined ? {} : { usage: usageFields }),
+      ...m.resources,
+    });
+  };
+
+  let exited: "completed" | "failed";
+  let measurements: Measurements;
+  try {
+    const run = await runWithProviderState(
+      opts.providerState,
+      config.reviewerQualityAgent,
+      () => sandbox.run({
+        name: `quality-${issue.id}-attempt-${action.attempt}`,
+        model: config.reviewerQualityModelId,
+        agent: buildAgentProvider(config.reviewerQualityAgent, config.reviewerQualityModelId, {
+          effort: config.reviewerQualityEffort,
+        }),
+        prompt,
+        completionSignal: [],
+        env: qualityAuthorEnv(config),
+        ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
+          role: "quality", attempt: action.attempt,
+        })),
+      }),
+    );
+    exited = "completed";
+    measurements = {
+      durationMs: run.durationMs,
+      maxGapMs: run.maxGapMs,
+      ...(run.usage === undefined ? {} : { usage: run.usage }),
+      toolCalls: run.toolCalls,
+      ...(run.peakContext === undefined ? {} : { peakContext: run.peakContext }),
+      ...(run.rateLimit === undefined ? {} : { rateLimit: run.rateLimit }),
+      resources: containerResourcesOf(run),
+    };
+  } catch (err) {
+    const partial = agentPartialUsage(err);
+    const rateLimit = partial.rateLimit ??
+      (err instanceof AgentQuotaError ? err.measurement : undefined);
+    measurements = {
+      durationMs: agentPartialDurationMs(err) ?? timer(),
+      ...(partial.usage === undefined ? {} : { usage: partial.usage }),
+      ...(partial.toolCalls === undefined ? {} : { toolCalls: partial.toolCalls }),
+      ...(partial.peakContext === undefined ? {} : { peakContext: partial.peakContext }),
+      ...(rateLimit === undefined ? {} : { rateLimit }),
+      resources: agentPartialContainerResources(err),
+    };
+    const closed = err instanceof AgentInputTooLargeError
+      ? "input-too-large"
+      : err instanceof AgentQuotaError
+        ? "quota"
+        : err instanceof AgentCredentialError
+          ? "credential"
+          : null;
+    if (closed !== null) {
+      await record({ result: closed }, measurements);
+      throw providerSizeRefusal(err, "review-quality", measuredContextChars, config.maxContextChars);
+    }
+    if (!(err instanceof AgentError || err instanceof AgentIdleTimeoutError)) throw err;
+    exited = "failed";
+  }
+
+  const settled = await settleQualityResidue(ctx.worktreePath, issue.branch, startSha);
+  const commits = settled.commits.map(({ sha }) => sha);
+  await record({ result: exited, commits, discarded: settled.residue }, measurements);
+  // Gate-1 and the correctness pass read this clone; the merger reads the
+  // cache. A publish that fails is infrastructure, exactly as for the
+  // implementer (#98).
+  await sandbox.syncBranchToCache();
+  ctx.accumulated.push(...settled.commits);
+  quality.sinceImplementer.push(...commits);
+  quality.lastHead = await requireIssueTip(ctx, "after the quality pass");
+  return { kind: "quality-result" };
+}
 
 export async function runImplementer(
   action: Extract<LoopAction, { kind: "run-implementer" }>,
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
   const { issue, sandbox, opts, config, anchorOpts, accumulated } = ctx;
+  // Handed to this attempt's prompt once: the next attempt is told only about
+  // what the fixer committed after this one.
+  const qualityCommits = ctx.quality.sinceImplementer.splice(0);
   const prompt = await buildPrompt(
     {
       issue,
@@ -1835,6 +1879,7 @@ export async function runImplementer(
       lastFailureTrace: action.failureTrace,
       base: ctx.base,
       promptExtension: config.promptExtensions?.implementer,
+      qualityCommits,
       ...(action.extraReprompt !== null ? { extraReprompt: action.extraReprompt } : {}),
       ...(action.latestReviewerFeedback !== null
         ? { latestReviewerFeedback: action.latestReviewerFeedback }
@@ -2156,11 +2201,14 @@ export async function runSandboxAndPublish(
   return result;
 }
 
-export async function runGate1(
-  action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
+// Gate-1 on the head the quality pass left (#185). Serial, not beside the
+// fixer: the gate mounts the worktree the fixer writes.
+export async function runGate(
+  action: Extract<LoopAction, { kind: "run-gate" }>,
   ctx: ExecuteActionCtx,
-): Promise<Gate1Result> {
+): Promise<Extract<LoopEvent, { kind: "gate-result" }>> {
   const { issue, opts, gateStack } = ctx;
+  const head = await requireIssueTip(ctx, "before gate-1");
   const admitted = await opts.gateSemaphore.run(() => gateStack.runGate());
   const gate1 = admitted.value;
   // Before the verdict is classified, for #135's reason: the re-prompt is the
@@ -2189,15 +2237,19 @@ export async function runGate1(
     steps: Object.fromEntries(gate1.steps.map(({ name, ...step }) => [name, step])),
   });
   return {
-    ok: gate1.ok,
-    failedStep: gate1.failedStep,
-    // Summarize the STEP output, then append the container logs — never the
-    // other way round. The cascade collapse looks for many lines sharing one
-    // signature, and a service log is full of them (see GateResult.containerLogs).
-    failureTrace: gate1.ok
-      ? ""
-      : summarizeGateFailure(`${gate1.stdout}\n${gate1.stderr}`, FAILURE_TAIL_LINES) +
-        gate1.containerLogs,
+    kind: "gate-result",
+    head,
+    gate: {
+      ok: gate1.ok,
+      failedStep: gate1.failedStep,
+      // Summarize the STEP output, then append the container logs — never the
+      // other way round. The cascade collapse looks for many lines sharing one
+      // signature, and a service log is full of them (see GateResult.containerLogs).
+      failureTrace: gate1.ok
+        ? ""
+        : summarizeGateFailure(`${gate1.stdout}\n${gate1.stderr}`, FAILURE_TAIL_LINES) +
+          gate1.containerLogs,
+    },
   };
 }
 
@@ -2277,25 +2329,8 @@ export async function enforceReviewerSnapshot(
   };
 }
 
-function recordOverruledPass(
-  rounds: PriorReviewRound[],
-  round: number,
-  head: string,
-  pass: ReviewerPass,
-): void {
-  const index = rounds.findIndex((entry) => entry.round === round && entry.head === head);
-  if (index < 0) {
-    throw new SandbarError(
-      `cannot record ${pass} adjudication for round ${round} at ${head}: review history entry is missing`,
-    );
-  }
-  const entry = rounds[index]!;
-  const overruled = { verdict: "OVERRULED" as const, prose: "" as const, specGap: null };
-  rounds[index] = pass === "quality"
-    ? { ...entry, quality: overruled }
-    : { ...entry, correctness: overruled };
-}
-
+// The cold judge of one unchanged correctness rejection (#167). OVERRULED ends
+// the issue as approved, so no history entry needs rewriting afterwards.
 export async function runAdjudicator(
   action: Extract<LoopAction, { kind: "run-adjudicator" }>,
   ctx: ExecuteActionCtx,
@@ -2305,15 +2340,7 @@ export async function runAdjudicator(
   const { issue, sandbox, opts, config } = ctx;
   const { rejection } = action;
   const prompt = await buildAdjudicatorPrompt({
-    issue,
-    repo: config.repo,
-    repoDir: config.layout.repoDir,
-    worktreePath: sandbox.worktreePath,
-    sourceBranch: config.sourceBranch,
-    base: ctx.base,
-    claudeMdPath: config.claudeMdPath,
-    contextMdPath: config.contextMdPath,
-    pass: rejection.pass,
+    ...branchRoleInputs(ctx, undefined),
     head: rejection.head,
     report: rejection.report,
   });
@@ -2336,73 +2363,11 @@ export async function runAdjudicator(
   let peakContext: number | undefined;
   let resources: ContainerResources = {};
   const details: string[] = [];
-  const finishRuling = async (
-    ruling: "UPHELD" | "OVERRULED",
-    output: string,
-  ): Promise<Extract<LoopEvent, { kind: "adjudicator-result" }>> => {
-    let correctness: ReviewerResult | null = null;
-    let reviewRound: ReviewRoundObservation | null = null;
-    if (ruling === "OVERRULED") {
-      recordOverruledPass(
-        ctx.priorReviewRounds,
-        action.reviewRound,
-        rejection.head,
-        rejection.pass,
-      );
-    }
-    if (ruling === "OVERRULED" && rejection.pass === "quality" && rejection.gateOk) {
-      // The adjudication bar ends at the ruling. Correctness is a review pass
-      // in the same logical round, but a distinct pool-lane span (#167).
-      await opts.onEvent({
-        kind: "phase",
-        issue: Number(issue.id),
-        title: issue.title,
-        attempt: action.attempt,
-        phases: ["review"],
-      });
-      const reviewAction = {
-        kind: "run-gate-and-reviewer" as const,
-        attempt: action.attempt,
-        reviewRound: action.reviewRound,
-      };
-      const continued = await runReviewer(
-        reviewAction,
-        ctx,
-        Promise.resolve({ ok: true, failureTrace: "", failedStep: null }),
-        undefined,
-        { skipQuality: true },
-      );
-      correctness = continued.event;
-      reviewRound = continued.round;
-      if (continued.historyEntry?.correctness !== undefined) {
-        const index = ctx.priorReviewRounds.findIndex(
-          (entry) => entry.round === action.reviewRound && entry.head === rejection.head,
-        );
-        const entry = ctx.priorReviewRounds[index]!;
-        ctx.priorReviewRounds[index] = {
-          ...entry,
-          correctness: continued.historyEntry.correctness,
-        };
-      }
-      if (continued.specGap) {
-        ctx.specGaps.push({ round: action.reviewRound, text: continued.specGap });
-      }
-    }
-    return {
-      kind: "adjudicator-result",
-      pass: rejection.pass,
-      head: rejection.head,
-      ruling,
-      reasoning: stripAdjudicationRulingTokens(output).trim(),
-      correctness,
-      reviewRound,
-    };
-  };
   for (let invocation = 1; invocation <= REVIEWER_MAX_INVOCATIONS; invocation += 1) {
     const before = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
     if (before.tip !== rejection.head) {
       throw new SandbarError(
-        `refusing to adjudicate issue #${issue.id} round ${action.reviewRound}: ` +
+        `refusing to adjudicate issue #${issue.id} round ${rejection.round}: ` +
           `rejected head ${rejection.head} moved to ${before.tip}`,
       );
     }
@@ -2411,7 +2376,7 @@ export async function runAdjudicator(
         opts.providerState,
         config.adjudicatorAgent,
         () => sandbox.run({
-          name: `adjudicator-${issue.id}-round-${action.reviewRound}-${rejection.pass}` +
+          name: `adjudicator-${issue.id}-round-${rejection.round}` +
             (invocation > 1 ? `-invocation-${invocation}` : ""),
           model: config.adjudicatorModelId,
           agent: buildAgentProvider(config.adjudicatorAgent, config.adjudicatorModelId, {
@@ -2424,7 +2389,6 @@ export async function runAdjudicator(
             ctx.invocationSequence.filename({
               role: "adjudicator",
               attempt: action.attempt,
-              pass: rejection.pass,
               invocation,
             }),
           ),
@@ -2491,8 +2455,7 @@ export async function runAdjudicator(
         issue: Number(issue.id),
         title: issue.title,
         attempt: action.attempt,
-        round: action.reviewRound,
-        pass: rejection.pass,
+        round: rejection.round,
         head: rejection.head,
         ruling,
         provider: config.adjudicatorAgent,
@@ -2503,7 +2466,12 @@ export async function runAdjudicator(
         ...(measuredUsage === undefined ? {} : { usage: measuredUsage }),
         ...resources,
       });
-      return await finishRuling(ruling, output);
+      return {
+        kind: "adjudicator-result",
+        head: rejection.head,
+        ruling,
+        reasoning: stripAdjudicationRulingTokens(output).trim(),
+      };
     }
 
     details.push(
@@ -2518,7 +2486,7 @@ export async function runAdjudicator(
         kind: "notice",
         message:
           `issue=${issue.id} attempt=${action.attempt} adjudication ` +
-          `pass=${rejection.pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} ` +
+          `invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} ` +
           "no-ruling — retrying",
       });
     }
@@ -2526,283 +2494,189 @@ export async function runAdjudicator(
   return { kind: "adjudicator-harness-failed", detail: details.join("\n\n") };
 }
 
-export async function runReviewer(
-  action: Extract<LoopAction, { kind: "run-gate-and-reviewer" }>,
+// The correctness pass (#121, #185): the one reviewer, cold, read-only, run
+// only on a green gate-1 at the head the quality pass left. Its picture is
+// measured before it runs; reviewer-run.ts owns what its invocations mean.
+export async function runCorrectness(
+  action: Extract<LoopAction, { kind: "run-correctness" }>,
   ctx: ExecuteActionCtx,
-  gateResult: Promise<Gate1Result>,
-  prepared?: {
-    readonly prompts: Readonly<Record<ReviewerPass, string>>;
-    readonly netDiffChars: number;
-  },
-  reviewOptions: { readonly skipQuality?: boolean } = {},
-): Promise<{
-  readonly event: ReviewerResult;
-  readonly historyEntry: PriorReviewRound | null;
-  readonly specGap: string | null;
-  readonly round: ReviewRoundObservation | null;
-}> {
+): Promise<Extract<LoopEvent, { kind: "correctness-result" | "context-over-budget" }>> {
   const { issue, sandbox, opts, config } = ctx;
-  const head = ctx.accumulated.at(-1)?.sha;
-  if (!head) {
-    throw new SandbarError(
-      `cannot review issue #${issue.id} round ${action.reviewRound}: no accumulated HEAD`,
-    );
+  const head = await requireIssueTip(ctx, "before the correctness pass");
+  const prompt = await buildCorrectnessPrompt({
+    ...branchRoleInputs(ctx, config.promptExtensions?.reviewer),
+    priorRounds: ctx.priorReviewRounds,
+  });
+  const measuredContextChars = contextChars(
+    prompt,
+    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
+  );
+  if (measuredContextChars > config.maxContextChars) {
+    return {
+      kind: "context-over-budget",
+      slot: "review-correctness",
+      size: measuredContextChars,
+      budget: config.maxContextChars,
+      detail: "The completed branch exceeds the configured context budget before review.",
+    };
   }
+  const agent = config.reviewerAgent;
+  const modelId = config.reviewerModelId;
+  const effort = config.reviewerEffort;
   const snapshot = (): Promise<ReadOnlyAgentSnapshot> =>
     snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
   const detectWrite = async (
     before: ReadOnlyAgentSnapshot,
     transcript: string,
-  ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }> | null> => {
-    const after = await snapshot();
-    return enforceReviewerSnapshot(sandbox, before, after, transcript);
-  };
+  ): Promise<Extract<ReviewerResult, { kind: "reviewer-wrote" }> | null> =>
+    enforceReviewerSnapshot(sandbox, before, await snapshot(), transcript);
 
-  // The whole round — both passes and every retried invocation inside them.
-  // This is the unit every #77 §3.A idea removes, and at 10.2 minutes measured
-  // end to end it is ~60% of an issue.
-  const roundTimer = startTimer();
-  const qualityMode = qualityReviewContext(ctx.priorReviewRounds).mode;
-  const reviewerPrompts = prepared?.prompts ??
-    await buildReviewerPrompts(inputsForReviewer(ctx));
-  const netDiffChars = prepared?.netDiffChars ??
-    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref);
-  const routing = reviewerPassRouting(config);
-  // Prompt, CLI and model all indexed by the pass name, never passed in
-  // parallel: three arguments in the same order at two call sites is how a
-  // pass ends up reviewed by the other one's prompt.
-  const runPass = async (pass: ReviewerPass): Promise<ReviewerOutcome> => {
-    const { agent, modelId, effort } = routing[pass];
-    const prompt = reviewerPrompts[pass];
-    const measuredContextChars = contextChars(prompt, netDiffChars);
-    return runReviewerInvocations(
-      async (invocation) => {
-        const beforeInvocation = await snapshot();
-        // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
-        // what failed — in the observed case the implementer was working in it
-        // concurrently — and rebuilding it would restart the whole issue from
-        // attempt 1 through the HARD-ERROR path, discarding a green gate to
-        // re-run a reviewer.
-        // One line per INVOCATION, not per round (#82): a round is up to two
-        // sequential calls on two independently routed provider/model pairs
-        // (#19, #121), and the pass-order and parallel-pass ideas all need the
-        // two sets of minutes apart. `model=` and `provider=` are on the line for
-        // the same reason — the number is meaningless without knowing which model
-        // spent it, and both are per-call config a stats reader cannot recover.
-        const passTimer = startTimer();
-        // `signalMs` has no reviewer meaning: the reviewer names no completion
-        // signal (#83), so the grace phase it measures is unreachable here.
-        const logPass = async (
-          result: "completed" | "failed" | "quota" | "credential" | "input-too-large",
-          durationMs: number,
-          maxGapMs: number | undefined,
-          usage: AgentUsage | undefined,
-          toolCalls: number | undefined,
-          peakContext: number | undefined,
-          rateLimit: RateLimitMeasurement | undefined,
-          resources: ContainerResources,
-        ): Promise<void> => {
-          await opts.onEvent({
-            kind: "review-pass",
-            issue: Number(issue.id),
-            title: issue.title,
-            attempt: action.attempt,
-            round: action.reviewRound,
-            pass,
-            invocation,
-            provider: agent,
-            model: modelId,
-            effort: effort ?? null,
-            result,
-            durationMs,
-            ...(maxGapMs === undefined ? {} : { maxGapMs }),
-            ...(eventUsage(usage, toolCalls, peakContext, rateLimit, measuredContextChars) === undefined
-              ? {}
-              : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit, measuredContextChars) }),
-            ...resources,
-          });
-        };
-        try {
-          const reviewerRun = await runWithProviderState(opts.providerState, agent, () => sandbox.run({
-            name:
-              `reviewer-${issue.id}-round-${action.reviewRound}-${pass}` +
-              (invocation > 1 ? `-invocation-${invocation}` : ""),
-            model: modelId,
-            // Cold, always (#121): neither pass resumes the other's session, so
-            // each is self-sufficient and the two may run on different vendors.
-            agent: buildAgentProvider(agent, modelId, { effort }),
-            prompt,
-            // A reviewer owns no completion signal. Process exit is the honest
-            // end of its single artefact; inherited role contracts are banned.
-            completionSignal: [],
-            ...invocationLog(
-              opts.attemptLogger,
-              ctx.invocationSequence.filename({
-                role: "reviewer", attempt: action.attempt, pass, invocation,
-              }),
-            ),
-          }));
-          await logPass(
-            "completed",
-            reviewerRun.durationMs,
-            reviewerRun.maxGapMs,
-            reviewerRun.usage,
-            reviewerRun.toolCalls,
-            reviewerRun.peakContext,
-            reviewerRun.rateLimit,
-            containerResourcesOf(reviewerRun),
-          );
-          const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
-          return event === null
-            ? { kind: "run", run: { output: reviewerRun.stdout, error: null } }
-            : { kind: "aborted", event, transcript: reviewerRun.stdout };
-        } catch (err) {
-          // A failed invocation is timed too: an invocation that burned the ten
-          // minutes and died is the expensive case, and one that fell over in a
-          // second is a different fault entirely.
-          const partial = agentPartialUsage(err);
-          const resources = agentPartialContainerResources(err);
-          await logPass(
-            err instanceof AgentInputTooLargeError
-              ? "input-too-large"
-              : err instanceof AgentQuotaError
-              ? "quota"
-              : err instanceof AgentCredentialError
-                ? "credential"
-                : "failed",
-            agentPartialDurationMs(err) ?? passTimer(),
-            undefined,
-            partial.usage,
-            partial.toolCalls,
-            partial.peakContext,
-            partial.rateLimit ??
-              (err instanceof AgentQuotaError ? err.measurement : undefined),
-            resources,
-          );
-          const transcript = agentPartialOutput(err);
-          const event = await detectWrite(beforeInvocation, transcript);
-          if (event !== null) return { kind: "aborted", event, transcript };
-          if (err instanceof AgentInputTooLargeError) {
-            throw providerSizeRefusal(
-              err,
-              pass === "quality" ? "review-quality" : "review-correctness",
-              measuredContextChars,
-              config.maxContextChars,
-            );
-          }
-          if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) throw err;
-          // The bytes the agent had emitted before it failed ride out on the
-          // error (#41, agent-sandbox F9). Without them a reviewer that emitted
-          // a verdict and then died is indistinguishable from one that emitted
-          // nothing, and only the second is a harness fault.
-          return {
-            kind: "run",
-            run: {
-              output: transcript,
-              error: err instanceof Error ? err.message : String(err),
-            },
-          };
-        }
-      },
-      {
-        onRetry: async (invocation, detail) => {
-          const line =
-            `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.reviewRound} ` +
-            `pass=${pass} invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — ` +
-            `retrying (${detail.split("\n")[0]})`;
-          await opts.onEvent({
-            kind: "notice",
-            message: line,
-          });
-        },
-      },
-    );
-  };
-
-  const syntheticQuality: CompletedReviewerOutcome = {
-    kind: "reviewed",
-    verdict: {
-      verdict: "APPROVED",
-      prose: "<verdict>APPROVED</verdict>",
-      specGap: null,
-    },
-    transcript: "",
-    invocations: 0,
-  };
-  const quality: ReviewerOutcome = reviewOptions.skipQuality
-    ? syntheticQuality
-    : await runPass("quality");
-  if (quality.kind === "aborted") {
-    return {
-      event: quality.event,
-      historyEntry: null,
-      specGap: null,
-      round: null,
-    };
-  }
-
-  const afterQuality = decideReviewRound(quality);
-  let decision: FinishedReviewRoundDecision;
-  // Completed only: the abort arm below returns, so nothing past it holds a
-  // reviewer-write outcome, and `decideReviewRound`/`priorReviewRound` are
-  // both spelled for completed outcomes.
-  let correctness: CompletedReviewerOutcome | undefined;
-  if (afterQuality.kind === "run-correctness") {
-    const gate = await gateResult;
-    if (gate.ok) {
-      const correctnessOutcome = await runPass("correctness");
-      if (correctnessOutcome.kind === "aborted") {
-        return {
-          event: correctnessOutcome.event,
-          historyEntry: null,
-          specGap: null,
-          round: null,
-        };
-      }
-      correctness = correctnessOutcome;
-      decision = decideReviewRound(quality, correctness);
-    } else {
-      if (quality.kind !== "reviewed" || quality.verdict.verdict !== "APPROVED") {
-        throw new Error("red gate reached correctness skip without quality approval");
-      }
-      decision = {
-        kind: "finished",
-        event: {
-          kind: "reviewer-result",
-          verdict: "APPROVED",
-          prose: quality.verdict.prose,
-        },
-        quality: "APPROVED",
-        correctness: "SKIPPED",
+  const outcome = await runReviewerInvocations(
+    async (invocation) => {
+      const beforeInvocation = await snapshot();
+      // The retry is a fresh agent run in the SAME sandbox. The sandbox is not
+      // what failed, and rebuilding it would restart the whole issue from
+      // attempt 1 through the HARD-ERROR path, discarding a green gate to
+      // re-run a reviewer.
+      // One line per INVOCATION (#82). `model=` and `provider=` are on the
+      // line because the number is meaningless without knowing which model
+      // spent it, and both are per-call config a stats reader cannot recover.
+      const passTimer = startTimer();
+      // `signalMs` has no reviewer meaning: the reviewer names no completion
+      // signal (#83), so the grace phase it measures is unreachable here.
+      const logPass = async (
+        result: "completed" | "failed" | "quota" | "credential" | "input-too-large",
+        durationMs: number,
+        maxGapMs: number | undefined,
+        usage: AgentUsage | undefined,
+        toolCalls: number | undefined,
+        peakContext: number | undefined,
+        rateLimit: RateLimitMeasurement | undefined,
+        resources: ContainerResources,
+      ): Promise<void> => {
+        const usageFields = eventUsage(usage, toolCalls, peakContext, rateLimit, measuredContextChars);
+        await opts.onEvent({
+          kind: "review-pass",
+          issue: Number(issue.id),
+          title: issue.title,
+          attempt: action.attempt,
+          round: action.attempt,
+          invocation,
+          provider: agent,
+          model: modelId,
+          effort: effort ?? null,
+          result,
+          durationMs,
+          ...(maxGapMs === undefined ? {} : { maxGapMs }),
+          ...(usageFields === undefined ? {} : { usage: usageFields }),
+          ...resources,
+        });
       };
-    }
-  } else {
-    decision = afterQuality;
-  }
-
-  const historyEntry = priorReviewRound(
-    action.reviewRound,
-    head,
-    quality,
-    correctness,
-  );
-  const roundMs = roundTimer();
-  const rejectingPass = decision.event.kind === "reviewer-result" &&
-      decision.event.verdict === "CHANGES-REQUESTED"
-    ? decision.event.rejectingPass
-    : null;
-  return {
-    event: decision.event,
-    historyEntry,
-    specGap:
-      correctness?.kind === "reviewed" ? correctness.verdict.specGap : null,
-    round: {
-      head,
-      qualityMode,
-      quality: decision.quality,
-      correctness: decision.correctness,
-      rejectingPass,
-      durationMs: roundMs,
+      try {
+        const reviewerRun = await runWithProviderState(opts.providerState, agent, () => sandbox.run({
+          name:
+            `reviewer-${issue.id}-round-${action.attempt}` +
+            (invocation > 1 ? `-invocation-${invocation}` : ""),
+          model: modelId,
+          // Cold, always (#121): nothing resumes a session, so the reviewer is
+          // self-sufficient and may run on a different vendor from the fixer.
+          agent: buildAgentProvider(agent, modelId, { effort }),
+          prompt,
+          // A reviewer owns no completion signal. Process exit is the honest
+          // end of its single artefact; inherited role contracts are banned.
+          completionSignal: [],
+          ...invocationLog(
+            opts.attemptLogger,
+            ctx.invocationSequence.filename({
+              role: "reviewer", attempt: action.attempt, invocation,
+            }),
+          ),
+        }));
+        await logPass(
+          "completed",
+          reviewerRun.durationMs,
+          reviewerRun.maxGapMs,
+          reviewerRun.usage,
+          reviewerRun.toolCalls,
+          reviewerRun.peakContext,
+          reviewerRun.rateLimit,
+          containerResourcesOf(reviewerRun),
+        );
+        const event = await detectWrite(beforeInvocation, reviewerRun.stdout);
+        return event === null
+          ? { kind: "run", run: { output: reviewerRun.stdout, error: null } }
+          : { kind: "aborted", event, transcript: reviewerRun.stdout };
+      } catch (err) {
+        // A failed invocation is timed too: an invocation that burned the ten
+        // minutes and died is the expensive case, and one that fell over in a
+        // second is a different fault entirely.
+        const partial = agentPartialUsage(err);
+        await logPass(
+          err instanceof AgentInputTooLargeError
+            ? "input-too-large"
+            : err instanceof AgentQuotaError
+            ? "quota"
+            : err instanceof AgentCredentialError
+              ? "credential"
+              : "failed",
+          agentPartialDurationMs(err) ?? passTimer(),
+          undefined,
+          partial.usage,
+          partial.toolCalls,
+          partial.peakContext,
+          partial.rateLimit ??
+            (err instanceof AgentQuotaError ? err.measurement : undefined),
+          agentPartialContainerResources(err),
+        );
+        const transcript = agentPartialOutput(err);
+        const event = await detectWrite(beforeInvocation, transcript);
+        if (event !== null) return { kind: "aborted", event, transcript };
+        if (err instanceof AgentInputTooLargeError) {
+          throw providerSizeRefusal(
+            err,
+            "review-correctness",
+            measuredContextChars,
+            config.maxContextChars,
+          );
+        }
+        if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) throw err;
+        // The bytes the agent had emitted before it failed ride out on the
+        // error (#41, agent-sandbox F9). Without them a reviewer that emitted
+        // a verdict and then died is indistinguishable from one that emitted
+        // nothing, and only the second is a harness fault.
+        return {
+          kind: "run",
+          run: {
+            output: transcript,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        };
+      }
     },
-  };
+    {
+      onRetry: async (invocation, detail) => {
+        await opts.onEvent({
+          kind: "notice",
+          message:
+            `issue=${issue.id} attempt=${action.attempt} reviewer round=${action.attempt} ` +
+            `invocation=${invocation}/${REVIEWER_MAX_INVOCATIONS} no-review — ` +
+            `retrying (${detail.split("\n")[0]})`,
+        });
+      },
+    },
+  );
+  if (outcome.kind === "aborted") {
+    return { kind: "correctness-result", head, reviewer: outcome.event };
+  }
+  if (outcome.kind === "reviewed") {
+    ctx.priorReviewRounds.push({
+      round: action.attempt,
+      head,
+      correctness: outcome.verdict,
+    });
+    if (outcome.verdict.specGap) {
+      ctx.specGaps.push({ round: action.attempt, text: outcome.verdict.specGap });
+    }
+  }
+  return { kind: "correctness-result", head, reviewer: reviewerResult(outcome) };
 }

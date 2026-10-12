@@ -23,9 +23,9 @@ export const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
 // and finite". 15 minutes clears a full browser suite on a cold cache several
 // times over, so a default-bounded step that trips this has hung rather than
 // been slow — which matters, because a spurious timeout is a false red that
-// costs the issue one quality failure. It also keeps the worst case legible: a
+// costs the issue one gate failure. It also keeps the worst case legible: a
 // gate run stops at the first red, so one hung step costs one bound, and four
-// consecutive timeouts exhaust the default quality budget in an hour.
+// consecutive timeouts exhaust the default gate budget in an hour.
 export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
 
 // The handoff labels sandbar APPLIES when it parks an issue for a human. These
@@ -654,9 +654,10 @@ export type RunConfig = {
   // The correctness pass — the one that ends an issue (#121). `reviewerAgent`
   // is its CLI.
   readonly reviewerModelId?: string;
-  // The quality pass (tests and standards), which runs FIRST and gates the
-  // correctness one (#121). Since neither pass resumes the other's session it
-  // may name another vendor's model, paired with `reviewerQualityAgent`.
+  // The quality pass (#121, #185): a fixer that commits standards fixes and
+  // tests ahead of gate-1 and the correctness pass, with no verdict. It runs
+  // cold in the implementer's sandbox, so it may name another vendor's model,
+  // paired with `reviewerQualityAgent`.
   // Renamed from `reviewerFollowupModelId`, which is now refused by name.
   readonly reviewerQualityModelId?: string;
   // Independent judge for an unchanged rejected head (#167). Defaults to the
@@ -675,10 +676,9 @@ export type RunConfig = {
   readonly uiCheckAgent?: AgentProviderName;
   readonly reviewerAgent?: AgentProviderName;
   // The quality pass's CLI (#121). Defaults to `reviewerAgent`, so a config
-  // that says nothing keeps one reviewer vendor. Routing it elsewhere is what
-  // moves ~64% of reviewer rounds off the correctness vendor's rate window
-  // while the deciding verdict stays where it was; it is only possible because
-  // the passes no longer share a session.
+  // that says nothing keeps one reviewer vendor. Routing it elsewhere moves the
+  // fixer off the correctness vendor's rate window while the deciding verdict
+  // stays where it was; it is only possible because no pass shares a session.
   readonly reviewerQualityAgent?: AgentProviderName;
   readonly adjudicatorAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
@@ -735,14 +735,14 @@ export type RunConfig = {
   // leaks wholesale. Default: {}.
   readonly env?: Record<string, string>;
 
-  // Independent consecutive-failure budgets (#129/#143). `maxQualityRounds`
-  // counts quality rejection, NO-SIGNAL, dirty tree, and off-branch HEAD, then
-  // resets after quality approval leads to a completed reviewer verdict.
-  // `maxGateRounds` counts red gate-1 results and resets on green gate-1.
-  // `maxReviewRounds` counts correctness rejections only. Reviewer harness
-  // failures spend none; their second occurrence anywhere in the inner loop is
-  // the separate #41 bound. There is deliberately no total attempt ceiling.
-  readonly maxQualityRounds?: number;
+  // Independent consecutive-failure budgets (#129/#143/#185).
+  // `maxGateRounds` counts red gate-1 results plus every attempt that failed
+  // to produce a commit the gate could judge (NO-SIGNAL, a dirty tree, an
+  // off-branch HEAD), and resets on green gate-1. `maxReviewRounds` counts
+  // correctness rejections only. The quality pass is a fixer with no verdict,
+  // so it has no budget. Reviewer harness failures spend none; their second
+  // occurrence anywhere in the inner loop is the separate #41 bound. There is
+  // deliberately no total attempt ceiling.
   readonly maxGateRounds?: number;
   readonly maxReviewRounds?: number;
   // Maximum prompt characters plus the net branch diff a role is instructed
@@ -929,18 +929,14 @@ export const DEFAULT_MERGER_MODEL_ID = "opus";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
-// Four consecutive quality/standards rejections or pre-gate failures are enough
-// to establish a circling quality path while tolerating transient churn.
-// Quality approval followed by a completed reviewer verdict resets the count,
-// so these do not consume the correctness budget they protect (#129/#143).
-export const DEFAULT_MAX_QUALITY_ROUNDS = 4;
 // A green gate completely answers earlier red gates, so only four consecutive
-// reds establish that the implementer cannot restore the branch's own checks.
+// reds or ungateable attempts establish that the implementer cannot restore
+// the branch's own checks (#185 folded the pre-gate re-prompts in here).
 export const DEFAULT_MAX_GATE_ROUNDS = 4;
 // Four correctness rejections. #8 converged on its fourth correctness look
 // after three distinct real findings; a default of three would have parked it
 // one round before approval. This caps the deciding pass, not total loop cost:
-// each correctness rejection may be preceded by a fresh quality-failure streak.
+// each correctness rejection may be preceded by a fresh gate-failure streak.
 export const DEFAULT_MAX_REVIEW_ROUNDS = 4;
 export const DEFAULT_MAX_PARALLEL_ISSUES = 3;
 // Absence is load-bearing: it keeps every existing host's gates unlimited.
@@ -2030,10 +2026,17 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   }
   if ("maxImplAttempts" in config) {
     throw new SandbarError(
-      "config.maxImplAttempts was removed (#129); use config.maxQualityRounds " +
-        "to bound consecutive quality failures, config.maxGateRounds to bound " +
-        "consecutive red gates, and config.maxReviewRounds to bound correctness " +
-        "rejections.",
+      "config.maxImplAttempts was removed (#129); use config.maxGateRounds to " +
+        "bound consecutive red or ungateable attempts and config.maxReviewRounds " +
+        "to bound correctness rejections.",
+    );
+  }
+  if ("maxQualityRounds" in config) {
+    throw new SandbarError(
+      "config.maxQualityRounds was removed (#185): the quality pass now fixes " +
+        "standards and tests by committing and never rejects, so it has no " +
+        "budget. Pre-gate re-prompts are bounded by config.maxGateRounds; " +
+        "delete the key.",
     );
   }
   if ("maxTotalIssues" in config) {
@@ -2248,10 +2251,6 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     // through the process environment still has to DECLARE the keys, because
     // the fallback is per declared key and never a wholesale leak.
     env,
-    maxQualityRounds: requirePositiveInteger(
-      "maxQualityRounds",
-      config.maxQualityRounds ?? DEFAULT_MAX_QUALITY_ROUNDS,
-    ),
     maxGateRounds: requirePositiveInteger(
       "maxGateRounds",
       config.maxGateRounds ?? DEFAULT_MAX_GATE_ROUNDS,

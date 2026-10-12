@@ -40,18 +40,9 @@ export type AttemptLogger = {
 // would sit beside `attempt-7.log` calling itself attempt 1.
 export type AgentInvocationIdentity =
   | { readonly role: "implementer"; readonly attempt: number; readonly nudge: boolean }
-  | {
-      readonly role: "reviewer";
-      readonly attempt: number;
-      readonly pass: "quality" | "correctness";
-      readonly invocation: number;
-    }
-  | {
-      readonly role: "adjudicator";
-      readonly attempt: number;
-      readonly pass: "quality" | "correctness";
-      readonly invocation: number;
-    }
+  | { readonly role: "quality"; readonly attempt: number }
+  | { readonly role: "reviewer"; readonly attempt: number; readonly invocation: number }
+  | { readonly role: "adjudicator"; readonly attempt: number; readonly invocation: number }
   | { readonly role: "gate"; readonly attempt: number }
   | { readonly role: "ui-check"; readonly invocation: number }
   | { readonly role: "partition-check"; readonly invocation: number };
@@ -64,10 +55,12 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
   switch (identity.role) {
     case "implementer":
       return `attempt-${identity.attempt}${identity.nudge ? "-nudge" : ""}.log`;
+    case "quality":
+      return `attempt-${identity.attempt}-quality.log`;
     case "reviewer":
-      return `attempt-${identity.attempt}-reviewer-${identity.pass}-${identity.invocation}.log`;
+      return `attempt-${identity.attempt}-reviewer-${identity.invocation}.log`;
     case "adjudicator":
-      return `attempt-${identity.attempt}-adjudicator-${identity.pass}-${identity.invocation}.log`;
+      return `attempt-${identity.attempt}-adjudicator-${identity.invocation}.log`;
     case "gate":
       return `attempt-${identity.attempt}-gate.log`;
     case "ui-check":

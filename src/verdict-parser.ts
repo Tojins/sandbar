@@ -8,10 +8,9 @@
 // and the answer the correctness reviewer applied (#108); it is evidence only
 // and never changes the verdict.
 //
-// Convergence relies on each pass having a sharp bar. The correctness prompt
-// requires a located, concrete defect and otherwise APPROVES; the quality pass
-// receives sandbar's built-in prompts/coding-standards.md plus any project
-// standards file that extends it. That keeps either verdict deterministic.
+// Convergence relies on a sharp bar. The correctness prompt requires a
+// located, concrete defect and otherwise APPROVES. Since #185 it is the only
+// verdict: the quality pass fixes what it finds and emits none.
 //
 // A token is one of those two literal strings and nothing else (#113). A
 // `<verdict>` quoted in prose without a closer, a mis-cased or empty tag, a

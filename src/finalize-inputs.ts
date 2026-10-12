@@ -127,15 +127,10 @@ export function terminalFinalizeInputs(
         });
         break;
       case "NEEDS-HUMAN-REVIEW":
-        if (
-          t.cause === "quality-budget-exhausted" ||
-          t.cause === "correctness-budget-exhausted"
-        ) {
+        if (t.cause === "correctness-budget-exhausted") {
           inputs.push({
             kind: "review-budget-exhausted",
             issue: o.issue,
-            budget:
-              t.cause === "quality-budget-exhausted" ? "quality" : "correctness",
             roundsUsed: t.roundsUsed,
             latestReviewerProse: t.latestReviewerProse,
             specGaps: t.specGaps,

@@ -321,37 +321,43 @@ alone. Disable it only when work is partitioned before it reaches Sandbar.
 
 `maxContextChars` (default 600,000) bounds the complete working picture for an
 issue-loop role: its rendered prompt plus the seed-anchored net diff it is told
-to read from the worktree. Sandbar measures resumed work at admission and every
-completed attempt before starting gate-1 or review. An oversize issue parks as
+to read from the worktree. Sandbar measures resumed work at admission, and the
+branch again before the quality pass and before the correctness review. An oversize issue parks as
 `NEEDS-PARTITION` under `labels.needsInfo`; the comment asks for a `## Blocked
 by` chain whose independently landable members each fit the budget. This is a
 useful-context budget, not a provider input limit. A provider size refusal maps
 to the same terminal instead of rebuilding a sandbox and replaying the prompt.
 
-The three convergence budgets remain independent:
+After the implementer reports COMPLETE, each round is serial. First the
+**quality pass** — routed by `reviewerQualityAgent`, `reviewerQualityModelId`
+and `reviewerQualityEffort` — runs in the implementer's writable sandbox as a
+fixer: it brings the branch up to the coding standards and conventions and
+writes or rewrites tests, committing under a `<botName> (quality)` author. It
+has no verdict and cannot reject; a test it writes that fails is how it reports
+a correctness defect. Whatever it leaves uncommitted or off the branch is
+discarded and recorded. Then gate-1 runs on the head it left, and the
+correctness reviewer runs only on a green gate there. Per-commit rules the
+quality pass must follow (a version bump, say) reach it through the anchor
+docs; `promptExtensions.reviewerQuality` adds anything else.
 
-`maxQualityRounds` (default 4) bounds consecutive quality
-`CHANGES-REQUESTED` verdicts and pre-gate re-prompts: NO-SIGNAL, a dirty tree,
-or HEAD off the issue branch. A completed reviewer verdict following a quality
-approval resets that count.
+The two convergence budgets are independent:
 
-`maxGateRounds` (default 4) separately bounds consecutive red gate-1 results.
-Any green gate-1 result resets that count; red rounds neither spend nor reset
-the quality streak unless their retained quality verdict requests changes.
+`maxGateRounds` (default 4) bounds consecutive attempts without a green
+gate-1: red gate-1 results and pre-gate re-prompts (NO-SIGNAL, a dirty tree,
+or HEAD off the issue branch). Any green gate-1 result resets that count.
+`maxQualityRounds` was removed; a config that still sets it is refused.
 
-`maxReviewRounds` (default 4) separately bounds correctness rejections. A
-quality rejection never spends it. Reviewer harness failures spend none of the
-three budgets, leave the convergence streaks unchanged, and the second harness
+`maxReviewRounds` (default 4) separately bounds correctness rejections.
+Reviewer harness failures spend neither budget, and the second harness
 failure anywhere in one inner loop stops it. There is no total implementer-attempt
-ceiling: each attempt is charged only to the pass or pre-review condition that
-rejected it.
+ceiling: each attempt is charged only to the condition that sent it back.
 
-After a review rejection, an implementer attempt that completes with no commit
+After a correctness rejection, an implementer attempt that completes with no commit
 at the rejected head sends that report to a cold, read-only adjudicator instead
 of repeating the review. `adjudicatorAgent`, `adjudicatorModelId`, and
 `adjudicatorEffort` default to the correctness reviewer's routing. An overruled
 rejection spends no pass budget; an upheld rejection remains chargeable and is
-offered for adjudication only once at that head/pass. Adjudicator harness
+offered for adjudication only once at that head. Adjudicator harness
 failures share the review harness's two-failure inner-loop stop.
 
 ### `images` — what sandbar builds
@@ -411,7 +417,7 @@ branch**. The tag alone cannot express that: it exists, so it is reused, and an
 issue branch that changes the lockfile gets gated against dependencies built
 from the source branch. Both directions are silent false verdicts — a branch
 that *adds* a dependency reds with a module-not-found nobody can reproduce (and
-can burn its whole quality budget onto `agent-stuck` for it), and a branch that
+can burn its whole gate budget onto `agent-stuck` for it), and a branch that
 *removes* one greens against a dependency it deleted.
 
 Declare what the image is built from and sandbar owns the rest:
@@ -719,7 +725,7 @@ rather than spending the rest of its budget on it.
 
 The host project also supplies on disk:
 - A `Containerfile` for the sandbox image (or whatever `images` names)
-- Optionally, files named by `{ path }` entries in `promptExtensions`; implementer and reviewer roles still receive the built-in coding standards in `prompts/coding-standards.md`
+- Optionally, files named by `{ path }` entries in `promptExtensions`; the implementer and the quality pass still receive the built-in coding standards in `prompts/coding-standards.md`
 - `GH_TOKEN` and a credential for every routed agent provider, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`; `splitRoleRouting` can reserve that same file's `SANDBAR_*` keys for per-installation routing
 
 `verified` mode additionally uses the host's own `gh` auth (not the container's
