@@ -725,7 +725,7 @@ rather than spending the rest of its budget on it.
 
 The host project also supplies on disk:
 - A `Containerfile` for the sandbox image (or whatever `images` names)
-- Optionally, files named by `{ path }` entries in `promptExtensions`; the implementer and the quality pass still receive the built-in coding standards in `prompts/coding-standards.md`
+- Optionally, files named by `{ path }` entries in `promptExtensions`; the quality pass still receives the built-in coding standards in `prompts/coding-standards.md`; the implementer does not
 - `GH_TOKEN` and a credential for every routed agent provider, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`; `splitRoleRouting` can reserve that same file's `SANDBAR_*` keys for per-installation routing
 
 `verified` mode additionally uses the host's own `gh` auth (not the container's

@@ -89,9 +89,9 @@ export default {
   },
 
   // Project rules on top of sandbar's built-in coding standards, for the
-  // roles that write and judge code; resolved inside the worktree.
+  // quality pass and the correctness reviewer; resolved inside the worktree.
+  // The implementer is deliberately not given them.
   promptExtensions: {
-    implementer: { path: "CODING_STANDARDS.md" },
     reviewer: { path: "CODING_STANDARDS.md" },
     reviewerQuality: { path: "CODING_STANDARDS.md" },
   },

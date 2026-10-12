@@ -3,8 +3,9 @@
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
 // commit list + diff stat (progressive disclosure, #158), the quality fixer's
 // commits since the last attempt (#185), sandbox-stack report #44, gate trace,
-// the latest correctness rejection, and the same coding standards the fixer
-// applies plus a live pre-promise diff checklist (#78); quality fixer: diff
+// the latest correctness rejection, and a live pre-promise diff checklist
+// (#78) — deliberately WITHOUT the built-in coding standards, which are the
+// quality fixer's bar alone; quality fixer: diff
 // stat + commits and, after its first pass, a stat of what changed since the
 // head it last left (#185); correctness reviewer: diff stat + commits plus
 // every earlier correctness round (#88). Every prompt is self-sufficient
@@ -645,7 +646,6 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     reviewerFeedback: section(reviewerFeedback),
     orchestratorNote: section(orchestratorNote),
     escalation: section(escalation),
-    codingStandards: CODING_STANDARDS,
     projectStandards: promptExtensionSlot(inputs.promptExtension),
     conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
     baseRef: base.ref,

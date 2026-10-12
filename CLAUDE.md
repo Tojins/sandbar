@@ -47,8 +47,9 @@ consumer, the box's own build of `main` for the deployment this repo ships
 (#146). The consumer repo supplies neutral
 development inputs: its `Containerfile`(s), anchor docs (`CLAUDE.md`,
 `CONTEXT.md`, optional ADR dir), and everything its **gate stack**
-(`config.gateStack`, #24) evaluates. Coding standards for the implementer and
-reviewer ship built-in (`prompts/coding-standards.md`); an installation may add
+(`config.gateStack`, #24) evaluates. Coding standards for the quality pass
+ship built-in (`prompts/coding-standards.md`) and are deliberately withheld from
+the implementer; an installation may add
 per-role instructions via `config.promptExtensions`. Sandbar then drives a
 GitHub-Issues-driven coding-agent loop against that consumer.
 
