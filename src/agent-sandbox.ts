@@ -50,7 +50,9 @@
 //        which `create` wraps as `podman run failed:` and the inner loop
 //        records as a hard-error `reason` the UI then serves. The sandbox's
 //        `HOME` is also why podman's own environment is left alone: a rootless
-//        client reads `HOME` for its storage root.
+//        client reads `HOME` for its storage root. `sandboxExecArgs` obeys
+//        the same rule for the one per-invocation record, `RunOptions.env`
+//        — the quality fixer's commit author (#185).
 //   F9 — a run that FAILS still carries out whatever the agent had emitted
 //        (`agentPartialOutput`) and what it had spent getting there
 //        (`agentPartialUsage`, #85/#109/#124 — an invocation that burned ten

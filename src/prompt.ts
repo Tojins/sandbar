@@ -267,15 +267,13 @@ export type QualityPromptInputs = ReviewerPromptInputs & {
   readonly lastQualityHead: string | null;
 };
 
+// An adjudicator OVERRULED ends the issue (#167, #185), so every recorded
+// round still stands as the reviewer gave it.
 export type PriorReviewRound = {
   readonly round: number;
   readonly head: string;
-  readonly correctness: PriorReviewPass;
+  readonly correctness: ParsedVerdict;
 };
-
-export type PriorReviewPass =
-  | ParsedVerdict
-  | { readonly verdict: "OVERRULED"; readonly prose: ""; readonly specGap: null };
 
 export async function buildPrompt(
   inputs: PromptInputs,

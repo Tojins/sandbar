@@ -258,7 +258,7 @@ describe("inner-loop-machine — unchanged rejection adjudication (#167)", () =>
     expect(changed.action).toEqual({ kind: "run-quality", attempt: 2 });
   });
 
-  it("makes an overruled correctness rejection final approval and refunds it", () => {
+  it("makes an overruled correctness rejection final approval", () => {
     const disputed = step(reachRejection().state, impl(complete, [], null, null, 0, "abc"));
     const ruled = step(disputed.state, {
       kind: "adjudicator-result",
@@ -267,7 +267,6 @@ describe("inner-loop-machine — unchanged rejection adjudication (#167)", () =>
       reasoning: "the cited branch is handled",
     });
     expect(ruled.action).toEqual({ kind: "terminate", verdict: { type: "DONE" } });
-    expect(ruled.state.correctnessFailures).toBe(0);
   });
 
   it("offers one adjudication per head after an upheld ruling", () => {

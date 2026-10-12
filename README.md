@@ -356,8 +356,8 @@ After a correctness rejection, an implementer attempt that completes with no com
 at the rejected head sends that report to a cold, read-only adjudicator instead
 of repeating the review. `adjudicatorAgent`, `adjudicatorModelId`, and
 `adjudicatorEffort` default to the correctness reviewer's routing. An overruled
-rejection spends no pass budget; an upheld rejection remains chargeable and is
-offered for adjudication only once at that head. Adjudicator harness
+rejection completes the issue as approved; an upheld rejection remains
+chargeable and is offered for adjudication only once at that head. Adjudicator harness
 failures share the review harness's two-failure inner-loop stop.
 
 ### `images` — what sandbar builds

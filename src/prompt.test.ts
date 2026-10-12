@@ -624,15 +624,6 @@ describe("reviewer prior-round history (#88)", () => {
     expect(slot).not.toContain("<verdict>CHANGES-REQUESTED</verdict>\n\n## Review process");
   });
 
-  it("records an overruled rejection without carrying its report", () => {
-    const slot = render([{
-      ...rejection,
-      correctness: { verdict: "OVERRULED", prose: "", specGap: null },
-    }]);
-    expect(slot).toContain("correctness: OVERRULED");
-    expect(slot).not.toContain("Null input crashes");
-  });
-
   // The strip recognises exactly what `parseVerdict` does (#113): well-formed
   // tokens go, a malformed tag is prose and stays, and a quoted opener
   // without a closer cannot swallow the findings between it and the real

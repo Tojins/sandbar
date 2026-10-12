@@ -861,19 +861,18 @@ function needsHumanComments(
         if (gateRounds === null || failedStep === null) {
           throw new Error("gate-red handoff missing its failing gate step");
         }
-        const roundsUsed = gateRounds;
         return {
           published: NEEDS_HUMAN_COMMENT_TEMPLATE(
             input.issue.branch,
             failedStep,
-            roundsUsed,
+            gateRounds,
             input.failureTrace,
             input.latestReviewerProse,
             labels.agentStuck,
             READY_FOR_AGENT_LABEL,
           ),
           refused:
-            `${gateRedStop(failedStep, roundsUsed)}\n\n` +
+            `${gateRedStop(failedStep, gateRounds)}\n\n` +
             needsHumanGateExplanation(input.failureTrace, input.latestReviewerProse),
         };
       }

@@ -15,6 +15,10 @@
 // a completed attempt; an OOM kill names that failure in the feed.
 // A retained CLOSED issue branch is represented only by its typed preflight
 // complaint, never inferred back into a parked Waiting row (#179).
+// A round's serial steps — quality fixer, gate-1, correctness (#185) — are
+// one review-coloured lane span each, labelled by phase, so a red gate or a
+// rejection marks its own bar; the fixer's feed row names its commits and
+// whatever the host discarded after it.
 
 import type {
   GateStepEvent,

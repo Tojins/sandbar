@@ -20,6 +20,11 @@
 // reused execution span, OR-ed with Podman's State.OOMKilled; a whole-container
 // teardown reports any non-zero count). Both are measurements only. An
 // unavailable fact is omitted rather than encoded as zero (#141).
+// Schema 5 (#185): the quality pass is a fixer, so its `quality-pass` event
+// records the commits it made and the residue the host discarded rather than
+// a verdict, `review-pass`/`adjudication` are correctness-only and carry no
+// pass, and `review-round` keeps only the gate and correctness outcomes and
+// the two remaining budgets.
 // A complaint may carry a typed subject when its prose is the sole UI surface
 // for that entity. CLOSED issue-branch complaints use this to suppress the
 // generic cached-ref-to-Waiting inference without parsing their message (#179).

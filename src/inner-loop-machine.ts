@@ -40,9 +40,9 @@
 //
 // A zero-commit COMPLETE at the head of a pending correctness rejection enters
 // one adjudication per head (#167). UPHELD keeps the original charge and makes
-// another zero-commit attempt take the ordinary round; OVERRULED refunds the
-// charge and finishes the issue as approved. With no quality rejection,
-// adjudication is correctness-only (#185).
+// another zero-commit attempt take the ordinary round; OVERRULED finishes the
+// issue as approved. With no quality rejection, adjudication is
+// correctness-only (#185).
 //
 // A reviewer that produced NO review is not a verdict (#41); that judgment is
 // reviewer-run.ts's. `reviewer-harness-failed` consumes no review round,
@@ -974,23 +974,11 @@ function onAdjudicatorResult(
   if (rejection === null || rejection.head !== event.head) {
     throw new Error("adjudicator ruled on a rejection other than the pending head");
   }
-  const adjudicatedHeads = [...state.adjudicatedHeads, rejection.head];
-  if (event.ruling === "OVERRULED") {
-    return terminate(
-      {
-        ...state,
-        adjudicatedHeads,
-        pendingRejection: null,
-        upheldAdjudication: null,
-        latestReviewerFeedback: null,
-        correctnessFailures: Math.max(0, state.correctnessFailures - 1),
-      },
-      { type: "DONE" },
-    );
-  }
+  // Every finding in the only rejection the head carries is false: approved.
+  if (event.ruling === "OVERRULED") return terminate(state, { type: "DONE" });
   const upheldState: LoopState = {
     ...state,
-    adjudicatedHeads,
+    adjudicatedHeads: [...state.adjudicatedHeads, rejection.head],
     upheldAdjudication: { head: rejection.head, reasoning: event.reasoning.trim() },
   };
   const feedback = adjudicationNotice(upheldState, rejection);

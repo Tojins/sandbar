@@ -48,7 +48,7 @@
 // that head is routed once per head to a cold adjudicator (#167). The judge
 // sees that report without implementer speech or prior-round wording, is held
 // to the same read-only snapshot contract, and either leaves its charged
-// rejection upheld or rewrites history to OVERRULED and refunds it.
+// rejection upheld or overrules it, which completes the issue as approved.
 //
 // The other deliberate runner-side exception is #127's off-branch repair.
 // `headMismatch` has already made the mechanical ancestry decision; when the

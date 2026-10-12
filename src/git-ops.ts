@@ -27,6 +27,12 @@
 // preflight, which runs it over every branch it keeps so a diverged one refuses
 // the run at the terminal rather than one cycle in.
 //
+// `settleQualityResidue` is the host-side end of the quality fixer (#185),
+// which emits no token: it brings whatever the pass left back to a clean tree
+// on the issue branch, reusing the #127 repair above, and reports what it
+// discarded. It lives here because every decision in it is one of the two
+// asserts this module owns.
+//
 // `hasNonMergeCommitOutside` is the shared safety test for retiring issue
 // branches (#177, #179). Chunk wrap-up applies it to origin's freshly fetched
 // copy; preflight applies it to a CLOSED issue's cache copy. Keeping the git

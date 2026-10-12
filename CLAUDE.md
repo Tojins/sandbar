@@ -103,43 +103,43 @@ default is unlimited, so existing hosts keep their prior concurrency.
    the **same** sandbox so commits accumulate on the issue branch. All transitions
    live in the pure state machine; `inner-loop.ts` is I/O glue. Neither classifier
    spends a convergence budget. Partition runs once per admission; the UI check
-   is rerun after a fresh HARD-ERROR cycle. Three independent consecutive-failure budgets bound the
-   loop (#129, #143). `maxQualityRounds` (default 4) counts quality rejection
-   and pre-gate re-prompts, then resets when quality approval leads to a
-   completed reviewer verdict. `maxGateRounds` (default 4) counts red gate-1
-   results, then resets whenever gate-1 is green. `maxReviewRounds` (default 4)
-   counts correctness rejections only. Reviewer harness failures spend none,
-   leave the convergence streaks unchanged, and the second failure anywhere in
-   one inner loop stops it under #41's guard. There is no total
-   implementer-attempt ceiling. `src/config.ts` owns all three defaults. The
-   partition classifier, UI classifier, reviewer and adjudicator are strictly advisory and read-only; each
-   invocation snapshots branch tip, status and HEAD, and any mutation parks the
-   issue with the managed clone preserved. After a clean, on-branch
-   COMPLETE, the rendered review prompts plus seed-anchored net diff are
-   measured against `maxContextChars` (default 600,000); an oversized branch
-   parks before gate or review dispatch. A resumed branch is measured at
-   admission. Otherwise gate-1 and the quality reviewer run concurrently against the same
-   commit (#123, #143). A reviewer write always parks; otherwise a red gate
-   keeps the quality verdict and its history, re-prompts with the gate trace and
-   the retained report labelled as approval or rejection, and prevents
-   correctness from being dispatched. A declared specification gap remains run
-   evidence (#108).
-   One review round
-   is up to two sequential COLD calls (#19, #121): tests/standards first on
-   `reviewerQualityAgent`/`reviewerQualityModelId`, then — only after its
-   approval — correctness/spec on `reviewerAgent`/`reviewerModelId`; the state
-   machine receives their single aggregate result, including which pass
-   rejected, and spends only that pass's count. The quality pass protects the
-   EXPENSIVE correctness pass and the deciding verdict
-   stays on the strongest model: measured, correctness approved 11 of 11 judged rounds after
-   #107 for two thirds of the reviewer minutes, and the second pass discarded 7
-   of those approvals inside the same round. `src/reviewer-run.ts` owns the
-   order, the aggregation and what a failed reviewer invocation means (#41).
-   After a rejection, a zero-commit implementer attempt at the same head routes
-   that head/pass once to the cold `adjudicatorAgent` (#167), defaulted to the
+   is rerun after a fresh HARD-ERROR cycle. Two independent consecutive-failure
+   budgets bound the loop (#129, #143, #185). `maxGateRounds` (default 4) counts
+   red gate-1 results and every attempt that produced no commit the gate could
+   judge (NO-SIGNAL, a dirty tree, an off-branch HEAD), then resets whenever
+   gate-1 is green. `maxReviewRounds` (default 4) counts correctness rejections
+   only. `maxQualityRounds` is gone and refused. Reviewer and adjudicator
+   harness failures spend neither, and the second one anywhere in one inner
+   loop stops it under #41's guard. There is no total implementer-attempt
+   ceiling. `src/config.ts` owns both defaults. The partition classifier, UI
+   classifier, correctness reviewer and adjudicator are strictly advisory and
+   read-only; each invocation snapshots branch tip, status and HEAD, and any
+   mutation parks the issue with the managed clone preserved.
+   After a clean, on-branch COMPLETE a round is SERIAL (#185): the quality
+   pass, then gate-1 on the head it left, then — only on a green gate there —
+   the cold correctness reviewer on `reviewerAgent`/`reviewerModelId`. The
+   quality pass is a FIXER, not a reviewer: routed through
+   `reviewerQualityAgent`/`reviewerQualityModelId`/`reviewerQualityEffort`, it
+   runs in the implementer's writable sandbox, brings the branch up to the
+   coding standards and conventions, writes missing tests and rewrites bad
+   ones, and commits under a `<botName> (quality)` author the host sets for
+   that invocation only. It emits no token and has no verdict, budget or
+   harness failure: on exit `settleQualityResidue` (`src/git-ops.ts`) discards
+   uncommitted residue, reattaches HEAD to the branch (#127's repair where it
+   applies), restores a branch it rewound, keeps every commit it made and
+   records what was discarded. A test it writes that fails is how it reports a
+   correctness defect — the red gate goes to the implementer, whose prompts
+   name the fixer's commits since its last attempt and say to make such a test
+   pass, changing or deleting it only when it contradicts the issue. Each of
+   the fixer and the reviewer measures its rendered prompt plus the
+   seed-anchored net diff against `maxContextChars` (default 600,000) before it
+   runs; a resumed branch is measured at admission. A reviewer write always
+   parks. A declared specification gap remains run evidence (#108).
+   `src/reviewer-run.ts` owns what a correctness invocation means (#41).
+   After a correctness rejection, a zero-commit implementer attempt at the same
+   head routes it once to the cold `adjudicatorAgent` (#167), defaulted to the
    correctness reviewer. UPHELD retains the rejection and its budget charge;
-   OVERRULED removes the report from history and refunds the charge, continuing
-   a quality round directly into correctness or completing a correctness round.
+   OVERRULED completes the issue as approved.
    Terminals: `DONE | NEEDS-INFO |
    NEEDS-UI-PROTOTYPE (#21) | NEEDS-PARTITION (#158) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
    CREDENTIAL | HARD-ERROR` (infra-only).
@@ -298,8 +298,9 @@ outcomes.
   implementer's code did not already exercise when the gate ran it, but can
   include a same-user runtime socket and the host paths that runtime can mount.
   Gate containers get an
-  empty tmpfs over `.git`, while UI-check and reviewer writes are detected and
-  parked for human inspection. The corollary: an attempt's commits live in the
+  empty tmpfs over `.git`, while UI-check, partition-check, reviewer and
+  adjudicator writes are detected and parked for human inspection; the quality
+  fixer is the one cold role that writes, and the host settles what it leaves. The corollary: an attempt's commits live in the
   clone until a host-side fetch publishes them, so removing a clone is where work can be
   destroyed — `reclaimIssueClone` (`src/agent-sandbox.ts`) is the ONE spelling
   of that removal, for the sandbox's `close()` and finalize alike: publish the
@@ -506,12 +507,13 @@ outcomes.
   several of them for itself — `HOME` is a rootless client's storage root and
   `CONTAINER_HOST` the service URL, which #48's gate container declares as a
   socket that exists only inside it. So every seam spawns podman with the
-  driver's environment untouched. The four builders that need any container
-  variable return `RuntimeInvocation` (argv and env together), and
+  driver's environment untouched. The five builders that need any container
+  variable — including the per-exec one that carries the quality fixer's
+  commit author (#185) — return `RuntimeInvocation` (argv and env together), and
   `withRuntimeEnv` in `src/runtime.ts` is the one place that writes the file,
   splices its path in and removes it when the command returns. A value podman's
   line-based format cannot represent is refused, not garbled. Two enforcers,
-  because a table over the four only covers a fifth builder its author
+  because a table over the five only covers a sixth builder its author
   remembered to add: one table test, plus a source scan pinning `runtime.ts` as
   the ONE production module that spells any of podman's environment flags.
   Nothing can fix a record already written; the `ps` exposure closes as a side
@@ -532,9 +534,9 @@ outcomes.
   `implementerAgent` / `reviewerAgent` / `mergerAgent`, all defaulting to
   `claude`, plus `uiCheckAgent` defaulting to `implementerAgent` and
   `reviewerQualityAgent` and `adjudicatorAgent` defaulting to `reviewerAgent`, beside
-  model ids that are per call: the reviewer's two passes are independently
-  routed since nothing resumes a session between them, while adjudication is a
-  third cold route. `assertRoleModelIdNamed` therefore runs against each
+  model ids that are per call: the quality fixer and the correctness reviewer
+  are independently routed since nothing resumes a session between them,
+  while adjudication is a third cold route. `assertRoleModelIdNamed` therefore runs against each
   route's own provider. The tiering knob and
   the vendor knob are independent, and
   every provider takes whatever id its role's field holds — which is why a role
@@ -542,8 +544,8 @@ outcomes.
   being a claude alias and a half-moved config otherwise asking codex for
   "opus" on every attempt. A third per-call knob, `*Effort` (#130), is the
   reasoning effort, a plain string each provider spells in its own argv
-  (`--effort`, `-c model_reasoning_effort=`) and the implementer/review-pass
-  event carries it as `effort`; unset emits no flag and stays absent, because
+  (`--effort`, `-c model_reasoning_effort=`) and the implementer,
+  quality-pass and review-pass events carry it as `effort`; unset emits no flag and stays absent, because
   the sandbox reads no host `config.toml` and a driver default would be the
   same invisible setting in a different place. These three per-role fields are
   also the unit one installation may override through #137's env split; the
@@ -613,8 +615,9 @@ outcomes.
   changed lines plus the dependency order. Implementer:
   `<promise>COMPLETE|NEEDS-INFO|NEEDS-UI-PROTOTYPE</promise>`; resolve loop:
   `COMMITTED|ABANDON`; anything
-  else re-prompts. Reviewer: optional free-text `<spec-gap>` (correctness pass
-  only), then `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`. The gap records
+  else re-prompts. Correctness reviewer: optional free-text `<spec-gap>`, then
+  `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`. The quality fixer has no
+  token at all (#185): its commits are its output. The gap records
   the unanswered specification question and the answer the reviewer applied;
   it is posted at finalise and never feeds a loop decision (#108).
   Adjudicator: `<ruling>UPHELD|OVERRULED</ruling>` after its reasoning.
@@ -631,9 +634,11 @@ outcomes.
   The orchestrator gates between attempts; agents never decide "green".
 - **Prompt prose lives in `prompts/*.md`**, loaded by `src/prompts.ts`; TS
   keeps only structure. No issue-loop prompt embeds a diff body (#158): the
-  implementer and both reviewer passes receive the commit list, diff stat and
-  exact seed-anchored command for reading hunks on demand; the first quality
-  pass must walk every file in the stat. `maxContextChars` bounds each rendered
+  implementer, the quality fixer and the correctness reviewer receive the
+  commit list, diff stat and exact seed-anchored command for reading hunks on
+  demand; the fixer's first pass in a sandbox cycle must walk every file in
+  the stat, and a later pass is also given what changed since the head the
+  previous one left (#185). `maxContextChars` bounds each rendered
   role prompt plus that on-demand net diff. Every git range a prompt renders
   anchors at the issue branch's SEED REF, never a bare branch name (#40, #61)
   — `src/prompt.ts`.
@@ -742,7 +747,8 @@ outcomes.
   invocation. Cumulative cache reads measure cost, not depth; depth is likewise
   a report only, never a budget, threshold, adaptive bound or completion input,
   and an unavailable measurement is absent rather than zero. The distinct
-  `contextChars=<int>` report on implementer and review-pass events is the
+  `contextChars=<int>` report on implementer, quality-pass and review-pass
+  events is the
   rendered prompt plus the net diff the role is instructed to read; unlike
   `peakContext`, it is also the declared `maxContextChars` decision input
   (#158).
