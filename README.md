@@ -2,6 +2,17 @@
 
 Issue-tracker-driven coding agent orchestrator. Plans unblocked issues, runs an inner-loop implementer (and reviewer) per issue inside an isolated sandbox, gates with the project's own **gate stack** — the containers and steps that produce a verdict about a commit — and merges DONE branches into the source branch.
 
+## Workflow principles
+
+From #131.
+
+- **Separate research and planning from implementation, and review the plan, not just the diff.** Anthropic's own guidance is Explore → Plan → Implement → Commit with plan mode; HumanLayer calls it Research → Plan → Implement; Harper Reed's older "brainstorm → plan → execute" is the ancestor; Spec Kit, OpenSpec, BMAD and Superpowers all encode it. HumanLayer's line captures why: "a bad line of a plan could lead to hundreds of bad lines of code."
+- **Give the agent a deterministic check it can run.** Tests (red/green TDD), build exit codes, linters, screenshots, curl against a running server. Willison: "tests are no longer even remotely optional" because they are nearly free. Anthropic's best-practices doc is built around this ("the trust-then-verify gap"). OpenAI's harness-engineering write-up relies on custom linters whose error messages carry remediation instructions.
+- **Treat the context window as the primary resource.** Fresh sessions per task, subagents for investigation so exploration doesn't pollute the main context, intentional compaction into artifacts (plan files, progress files), and short instruction files that act as a table of contents rather than a manual.
+- **A small, stable repo-level instruction file, plus progressive disclosure.** AGENTS.md / CLAUDE.md at ~100 lines that point into docs/, skills loaded on demand. Both OpenAI and Anthropic say explicitly that long instruction files get ignored.
+- **Isolation and parallelism via git worktrees**, with a writer/reviewer split using a fresh context for review.
+- **Long-running loops with an external stop condition** (the "Ralph loop" idea) — now absorbed into the harnesses themselves (Claude Code /goal, Stop hooks, /loop; Anthropic's initializer/coder pattern with feature_list.json and claude-progress.txt).
+
 ## Releasing
 
 Consumers pin to a `vX.Y.Z` tag, so every version bump **must** be tagged. Don't bump `package.json` by hand — run:
