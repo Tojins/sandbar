@@ -1,905 +1,111 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Read @AGENTS.md first: its rules apply to every commit (starting with: bump the
+version in the same commit). It is shared with the sandbar agents, which get it
+as an anchor doc directly.
 
-Read @AGENTS.md first. It holds the working rules that apply to every commit made
-here (starting with: bump the version in the same commit), and it is shared with
-the sandbar agents — the sandbar installation config names it as an anchor doc,
-so they get an `@ref` to it directly rather than through this import.
-
-This file is the architecture **map**. The authoritative design notes per module
-are the long header comments at the top of `src/*.ts` — read the header before
-changing a module, and update it when behavior changes. The full rationale for
-each decision lives in the GitHub issue it cites (`#N`) and the commit history;
-none of it is restated here.
+This file is a **map**. The authoritative design notes are the header comments
+at the top of each `src/*.ts` — read the header before changing a module and
+update it in the same commit when behavior changes. Rationale lives in the
+cited GitHub issue (`#N`) and the commit history.
 
 ## Commands
 
-- `npm run build` — compile `src/` → `dist/` via `tsc` (also runs on `prepare`).
-- `npm run check` — type-check only (`tsc --noEmit`). No lint tool is configured; this is the only static gate.
-- `npm test` — rebuild `dist/`, then run the Vitest suite (`vitest run`, non-watch).
-- `npx vitest run src/plan-resolver.test.ts` — run a single test file. Add `-t "<name>"` to filter by test name.
+- `npm run build` — compile `src/` → `dist/` (also runs on `prepare`).
+- `npm run check` — `tsc --noEmit`; the only static gate (no linter).
+- `npm test` — rebuild, then `vitest run`.
+- `npx vitest run src/<file>.test.ts [-t "<name>"]` — one file / one test.
 
-Node ≥ 20.6 is required. The package is ESM (`"type": "module"`); imports inside
-`src/` use the `.js` extension even when the on-disk file is `.ts` (NodeNext).
+Node ≥ 20.6, ESM, NodeNext: imports in `src/` use `.js` even for `.ts` files.
 
-**Whatever bounds a test run must kill the process GROUP, not the pid (#25).**
-Vitest forks a process per test file; a stuck worker killed only at the top of
-the tree reparents to init and silently burns a full core. Bare
-`timeout 90 npx vitest run <file>` is safe (GNU timeout signals the group);
-`timeout --foreground` and Python's `subprocess.run(..., timeout=N)` are not —
-from Python use `start_new_session=True` + `os.killpg`. After any interrupted
-run, check `ps -ef | grep [f]orks.js` for leftovers.
+**Bound test runs by killing the process GROUP, not the pid (#25).** Bare
+`timeout 90 npx vitest run …` is safe; `timeout --foreground` and Python's
+`subprocess.run(timeout=)` are not (use `start_new_session=True` + `os.killpg`).
+After an interrupted run, check `ps -ef | grep [f]orks.js`.
 
-## What this package is
+## What this is
 
-`sandbar` is a **library with a thin bin** (#38): `run(config)` is
-the contract (`src/index.ts`), and `src/cli.ts` resolves `--config` (default
-`./sandbar.config.mjs`) and hands the default export to `run()`. The bin also
-dispatches three subcommands: `sandbar gate` → `runGateCommand` (#45), exported
-from the package root beside `run`; `sandbar ui` (#132), the standalone
-host of the run UI for post-mortem browsing; and `sandbar pulled-images`, the
-images a host must pull because a run refuses to (the deploy role consumes it).
+A library with a thin bin (#38): `run(config)` in `src/index.ts` is the
+contract; `src/cli.ts` imports `--config` (default `./sandbar.config.mjs`) and
+dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132) and `pulled-images`.
+The config is a **program**, imported not parsed; `src/config.ts` is the one
+validation boundary and owns all defaults. Sandbar drives a GitHub-Issues coding
+agent loop against a consumer repo, which supplies Containerfiles, anchor docs
+and the gate stack (`config.gateStack`, #24).
 
-An installation supplies `sandbar.config.mjs`, credentials and a driver outside
-its consumer repository — an exact-tag install for an `npm i -D sandbar`
-consumer, the box's own build of `main` for the deployment this repo ships
-(#146). The consumer repo supplies neutral
-development inputs: its `Containerfile`(s), anchor docs (`CLAUDE.md`,
-`CONTEXT.md`, optional ADR dir), and everything its **gate stack**
-(`config.gateStack`, #24) evaluates. Coding standards for the quality pass
-ship built-in (`prompts/coding-standards.md`) and are deliberately withheld from
-the implementer; an installation may add
-per-role instructions via `config.promptExtensions`. Sandbar then drives a
-GitHub-Issues-driven coding-agent loop against that consumer.
+## Pipeline (`src/run.ts` orchestrates a continuous pool)
 
-**The config file is a PROGRAM, not data** — imported, never parsed, so computed
-values and top-level await survive. Exactly one configuration flag (`--config`),
-no search up the directory tree, `.mjs`, and the default export is the object,
-not a factory. Rationale in `src/cli.ts` and `src/config.ts` headers.
+1. **Plan** — deterministic, no LLM. `plan-resolver.ts` (queue label, actor
+   filter #136, `## Blocked by`), `lanes.ts`, `chunks.ts` (chunks are derived
+   components of review-gated issues), `chunk-follow-up.ts` (PR review →
+   re-queue members, #95), `chunk-reconcile.ts` (finish already-merged chunks).
+2. **Inner loop** — `inner-loop-machine.ts` (pure state machine) +
+   `inner-loop.ts` (I/O). One sandbox per issue: partition check (#158), UI
+   check (#126), then implementer attempts → quality fixer (writes commits,
+   #185) → gate-1 → correctness reviewer (`reviewer-run.ts`, #41) →
+   adjudicator on dispute (#167). Budgets `maxGateRounds`/`maxReviewRounds`.
+   Read-only roles that write park the issue.
+3. **Landing** — serialized, in an ephemeral worktree at `origin/<source>`
+   (#10): `merger.ts`, `merger-worktree.ts`, `resolve-loop.ts` (#67),
+   `version-conflict.ts` (#68), `forge-verify.ts` (`mergeMode`, #22),
+   `chunk-land.ts` / `chunk-pr.ts` / `forge-pr.ts` (chunk branches, draft PRs,
+   `land` label #64).
+4. **Finalise** — `finalize.ts` + `finalize-inputs.ts`: branch publish, bot
+   comments, label flips.
 
-## Architecture — continuous pool and serialized landing
+Daemon polling and the six exits (`stuck`, `quota`, `credential`, `storage`,
+`restart`, `halted`) live in `scheduler.ts`, `exit-conditions.ts`,
+`restart-request.ts` (#146), `disk-space.ts` (#169).
 
-The orchestrator (`src/run.ts`) recomputes the complete plan whenever an
-execution slot frees. Planner-visible **ongoing** work lasts from admission
-through landing or parking; an execution **slot** lasts only while the inner
-loop runs. DONE work therefore queues for the one serialized landing path
-without consuming one of `maxParallelIssues` slots.
-Gate-1 and gate-2 share one run-wide `maxConcurrentGates` semaphore; its
-default is unlimited, so existing hosts keep their prior concurrency.
+## Invariants — where they live
 
-1. **Plan** (`src/plan-resolver.ts` + `src/chunk-reconcile.ts`) — purely
-   deterministic, no LLM: lists issues labelled `ready-for-agent`, admits them
-   only when the label's latest recorded actor matches required
-   `config.developers` or the run token (`"anyone"` restores the unfiltered
-   queue, #136), parses `## Blocked by` sections, and selects up to
-   `maxParallelIssues` unblocked issues by number. Each candidate also gets a
-   **lane** (`src/lanes.ts`, #57) and, when
-   review-gated, a `chunk` target (#61) that tells execution what to seed from
-   and the landing path where to land. Ahead of the plan proper two passes make the
-   tracker agree with the forge and with git: the **chunk-review scan**
-   (`src/chunk-follow-up.ts`, #95) routes each changes-requested review on a
-   chunk PR to its landed member(s) and re-queues them, and the **reconciler**
-   (`src/chunk-reconcile.ts`, #64) finishes off any chunk branch already
-   contained in `origin/<sourceBranch>` — hand-merged, or landed by a run that
-   died before closing the members. The plan is rebuilt after either acts. All
-   inert under the default lane, `auto`; the blocker, chunk, follow-up and
-   wrap-up criteria are the `plan-resolver.ts`, `chunks.ts`,
-   `chunk-follow-up.ts` and `chunk-land.ts` headers to state.
-   A chunk's root issue number is its durable identity: one origin branch for
-   that root keeps its name across title edits; competing branches are
-   ambiguous and no new work is assigned to either (#176).
-   A chained chunk member that also relies on a blocker satisfied by CLOSED is
-   admitted only when the exact origin chunk branch contains the exact origin
-   source tip (#174). Otherwise it waits on a chunk refresh queued for the
-   serialized landing path.
+- **Pure decisions + adapters.** Table-test the pure layer; real git/podman
+  behavior is asserted by running it (`*-git.test.ts`, `*-podman.test.ts`).
+- **Never touch the operator's checkout** (#38): work happens in a bare cache
+  + worktrees under `<cwd>/<workDir>` (`repo-cache.ts`, `preflight.ts`). Every
+  shell-out names its repo; every `gh` call passes `--repo` (`repo-ref.ts`).
+- **Isolation**: per-issue hardlink clones, scoped resource names
+  (`naming.ts`, `containers.ts`); `reclaimIssueClone` in `agent-sandbox.ts` is
+  the one way to remove a clone. Branch shapes are owned by `naming.ts`.
+- **Origin owns issue and chunk branches** (`git-ops.ts`, `chunks.ts`).
+- **Locks**: per-workdir `lock.ts` (#32), repo-wide origin lease
+  `origin-lock.ts` (#139), host wake lock `keepawake.ts` (#117).
+- **Signals and exit** only via `cleanup.ts` (#35).
+- **Runtime is podman** (`runtime.ts`); no podman argv ever carries an env
+  value — `withRuntimeEnv` writes a 0600 env file (#154).
+- **Images**: `image-inputs.ts`, `ensure-images.ts`, `agent-tools.ts` (driver
+  appends git + agent CLIs, #75), `image-lifecycle.ts` (#169).
+- **Gate stack**: `gate-stack.ts`, `sandbox-stack.ts` (#44). A gate verdict
+  is about a clean, on-branch commit (D1, #27, #127).
+- **Providers**: `agent-providers.ts` (closed set, credentials), per-role
+  agent/model/effort routing (`env.ts`, `env-file.ts`), `codex-auth.ts`.
+- **Tokens**: literal-only scanning in `token-scan.ts` (#113); prompt prose in
+  `prompts/*.md`, structure in `prompt.ts`/`prompts.ts`. No prompt embeds a
+  diff body; ranges anchor at the seed ref (#40, #61).
+- **Event record** `events.ts` is the source of truth (#70/#132); the UI
+  (`run-state.ts`, `ui-server.ts`) is a pure projection of it.
+- **Timing/usage** are reports, never decision inputs, and absent ≠ 0 (#82):
+  `timing.ts`, `agent-usage.ts`.
+- **Identity/compat**: `driver-identity.ts` (#69), `requires-sandbar.ts` (#66).
 
-2. **Inner loop** (`src/inner-loop.ts` + `src/inner-loop-machine.ts`) — each
-   planned issue runs in parallel in its own agent sandbox + per-issue gate
-   stack. After setup, a default-on cold partition classifier runs once per
-   admission at the branch seed (#158), followed by the default-on cold UI
-   classifier (#126). Hosts that partition before queueing or ship no UI
-   disable them with `partitionCheck: false` or `uiPrototypeCheck: false`.
-   Either terminal stops before attempt 1; CLEAR enters the ralph-style loop in
-   the **same** sandbox so commits accumulate on the issue branch. All transitions
-   live in the pure state machine; `inner-loop.ts` is I/O glue. Neither classifier
-   spends a convergence budget. Partition runs once per admission; the UI check
-   is rerun after a fresh HARD-ERROR cycle. Two independent consecutive-failure
-   budgets bound the loop (#129, #143, #185). `maxGateRounds` (default 4) counts
-   red gate-1 results and every attempt that produced no commit the gate could
-   judge (NO-SIGNAL, a dirty tree, an off-branch HEAD), then resets whenever
-   gate-1 is green. `maxReviewRounds` (default 4) counts correctness rejections
-   only. `maxQualityRounds` is gone and refused. Reviewer and adjudicator
-   harness failures spend neither, and the second one anywhere in one inner
-   loop stops it under #41's guard. There is no total implementer-attempt
-   ceiling. `src/config.ts` owns both defaults. The partition classifier, UI
-   classifier, correctness reviewer and adjudicator are strictly advisory and
-   read-only; each invocation snapshots branch tip, status and HEAD, and any
-   mutation parks the issue with the managed clone preserved.
-   After a clean, on-branch COMPLETE a round is SERIAL (#185): the quality
-   pass, then gate-1 on the head it left, then — only on a green gate there —
-   the cold correctness reviewer on `reviewerAgent`/`reviewerModelId`. The
-   quality pass is a FIXER, not a reviewer: routed through
-   `reviewerQualityAgent`/`reviewerQualityModelId`/`reviewerQualityEffort`, it
-   runs in the implementer's writable sandbox, brings the branch up to the
-   coding standards and conventions, writes missing tests and rewrites bad
-   ones, and commits under a `<botName> (quality)` author the host sets for
-   that invocation only. It emits no token and has no verdict, budget or
-   harness failure: on exit `settleQualityResidue` (`src/git-ops.ts`) discards
-   uncommitted residue, reattaches HEAD to the branch (#127's repair where it
-   applies), restores a branch it rewound, keeps every commit it made and
-   records what was discarded. A test it writes that fails is how it reports a
-   correctness defect — the red gate goes to the implementer, whose prompts
-   name the fixer's commits since its last attempt and say to make such a test
-   pass, changing or deleting it only when it contradicts the issue. Each of
-   the fixer and the reviewer measures its rendered prompt plus the
-   seed-anchored net diff against `maxContextChars` (default 600,000) before it
-   runs; a resumed branch is measured at admission. A reviewer write always
-   parks. A declared specification gap remains run evidence (#108).
-   `src/reviewer-run.ts` owns what a correctness invocation means (#41).
-   After a correctness rejection, a zero-commit implementer attempt at the same
-   head routes it once to the cold `adjudicatorAgent` (#167), defaulted to the
-   correctness reviewer. UPHELD retains the rejection and its budget charge;
-   OVERRULED completes the issue as approved.
-   Terminals: `DONE | NEEDS-INFO |
-   NEEDS-UI-PROTOTYPE (#21) | NEEDS-PARTITION (#158) | NEEDS-HUMAN | NEEDS-HUMAN-REVIEW | QUOTA |
-   CREDENTIAL | HARD-ERROR` (infra-only).
+## This repo is an installation (#146)
 
-3. **Landing** (`src/merger.ts` + `src/resolve-loop.ts` + `src/merger-worktree.ts`
-   + `src/forge-verify.ts` + `src/chunk-land.ts`) — procedural, in a dedicated
-   ephemeral worktree detached at `origin/<sourceBranch>` (never the operator's
-   checkout, #10). Per DONE branch in issue order: `git merge --no-ff`, with
-   the agentic resolve loop on conflict or post-merge-gate-red.
-   `config.mergeMode` (#22): `direct` (default) or `verified` (CI gets the last
-   word); the check-reading safety argument — its invariant: no unknown verdict
-   ever lands — is in the `src/forge-verify.ts` and `src/merger.ts` headers. An
-   issue carrying a `chunk` lands on its chunk branch instead (#60) and each
-   pushed chunk gets a **draft PR** updated at each landing (#62): `src/chunk-pr.ts`
-   builds its member-list-only body, `src/forge-pr.ts` the `gh pr`
-   create-or-update both PR kinds share. A
-   **`land` label on that PR** (#64) makes the next landing merge
-   `origin/<chunk>` in the SAME source pass, ahead of the auto lane's branches,
-   so one gate-2 and one landing cover both; the wrap-up then closes the
-   members whose freshly fetched landing-only member refs the exact merged tip
-   brings beyond its merge base with the source branch (re-deriving
-   dependents-first/root-last order at the landing boundary, #175), drops
-   `needs-review`,
-   takes `land` back off the PR, closes it (or accepts the MERGED mark GitHub
-   itself puts on a PR whose head the landing push made reachable) and deletes
-   the chunk and member refs. It also retires each published member issue
-   branch whose non-merge commits are all contained in the landed source tip;
-   an issue branch with unlanded work is kept and reported. Reconciliation
-   emits the same structured chunk-on-source landing event as the live merger,
-   so the existing Finished chunk row represents either landing path and its
-   closed members do not reappear as parked Waiting rows.
-   A `land` request on a branch drifted by a graph edit, or made ambiguous by
-   another branch for the same root, is instead refused before the merger: the
-   PR is told which member refs it carries and how to repair it, and `land` is
-   removed (#176).
-   After source-branch landings, each queued chunk refresh is one ordinary
-   merger unit in the same worktree: source is merged into the fetched chunk
-   tip, the version collision and resolve loop run as usual, gate-2 decides,
-   and the existing chunk ref is pushed directly (#174). A failed conflict or
-   red-gate recovery parks every triggering dependent without touching the
-   chunk PR; origin or infrastructure failures halt with those dependents still
-   queued. Restart, provider, storage and no-progress drains do not run these
-   refreshes: they prepare future admissions rather than preserve committed
-   work, so the next process recomputes them from current refs.
-   `src/chunk-land.ts` owns the label, the
-   selection, the wrap-up and — as `chunkForgeWrites` — the one spelling of the
-   `gh`/`git` writes it makes, which the merge phase and the plan-time
-   reconciler both build their adapter from.
+A commit on `main` is the deploy: the box `ansible-pull`s every five minutes,
+builds into `/opt/sandbar/builds/<sha>` and requests restarts. Config and
+credentials live in the sandbar user's `~/installation/`; the source is
+`deploy/ansible/` (see its README). `mergeMode` stays `direct`. To exercise
+unlanded code: `npm run build && node dist/cli.js --config <path>`.
 
-4. **Finalise** (`src/finalize.ts` + `src/finalize-inputs.ts`) — per-issue
-   branch lifecycle, bot comments, label flips (`ready-for-agent` ↔
-   `labels.needsInfo`/`labels.agentStuck`, plus `needs-review` for a
-   chunk-landed member, are the only labels sandbar applies — `land` (#64) it only ever
-   REMOVES, from a pull request a human labelled).
-   Human parking comments contain only a stop line, their variable payload
-   (with traces collapsed), and a final branch/relabel action line (#170).
-   A terminal is finalised before its landing is attempted. Every non-DONE
-   terminal attempts to publish an issue branch that is structurally ahead of
-   its seed; this cache-derived check replaces per-sandbox-cycle commit
-   bookkeeping, so work from an earlier HARD-ERROR cycle is not lost (#158).
-   A server-refused branch push parks only that issue and names its surviving
-   host-cache ref (#163); races and transport failures still halt, except that
-   the reviewer-write evidence handoff retains its historical rule of parking
-   after any failed publish because its preserved clone is authoritative.
-   Handoffs that decide to remove `ready-for-agent` read that state back before
-   the issue ceases to be ongoing; quota, credential, and infrastructure
-   terminals deliberately remain queued unless their own branch publish is
-   refused.
-
-### Daemon polling and exits (`src/scheduler.ts`, `src/exit-conditions.ts`)
-
-An empty plan is idle, not terminal (#133). One cancellable wait races a freed
-slot with `pollIntervalMs` (default 60 seconds); a poll fetches source plus the
-issue, chunk and member namespaces, and every recompute fetches them again at
-the planning boundary so containment reads refs obtained after the preceding
-landing push (#174). A moved source tip refreshes
-image inputs whether sandbar or a human moved it; each admission captures one
-immutable agent/branch-image bundle, so in-flight work keeps its original pair.
-No-op polls write nothing; a queue-label actor exclusion is a required
-per-recompute diagnostic and therefore makes that poll reportable. A failed
-poll or planning fetch is reported and retried after another interval — unless
-a latched restart has nothing left to drain, the one state whose action needs
-none of the refs the fetch did not get (#146); only the startup fetch remains a
-preflight refusal.
-A planning `gh` read the forge never answered — a transport fault or a
-gateway 502/503/504, or a response body cut off mid-read — takes the same
-retry; any other forge answer still halts.
-The wake lock is released at quiescence unless `keepAwakeWhileIdle` is true.
-
-Provider closure by quota or a permanent credential refusal stops admissions
-and drains running and landing work before exit 4. Six consecutive issue
-terminals without a landing stop admissions and drain
-running work before exit 2. An unrelated running issue does not hold a
-non-deferred `land` request: the request starts a landing at that recompute
-(#168). An unchanged chunk-specific `land` deferral waits for another trigger
-and advances no counter. A `restart-requested` file in the
-installation directory (#146) drains exactly the same way and exits 75, the one
-code an installation unit turns back into a start: the converging deploy writes
-it, the daemon reads it at the top of every recompute — ahead of the poll, so a
-failed refresh cannot keep it off the record, and a refresh that keeps failing
-over a drained pool exits on it rather than waiting for refs the exit does not
-read — skips the source-image rebuild a moved source would otherwise trigger,
-since nothing more will be admitted, and
-removes at startup exactly the request it was started to answer, which is what
-keeps that exit from repeating without swallowing one the play wrote for a
-later commit while this startup ran. It outranks provider closure and the
-backstop because it is an
-instruction rather than a condition, and both of those are run-local state a
-fresh process re-derives in seconds. `src/restart-request.ts` owns the channel,
-including why it is a file beside the config rather than a signal or a per-poll
-commit compare. Remaining exits are `stuck`, `quota`,
-`credential`, `storage`, `restart` and `halted`; plan-empty, relaunch, budget, and the
-recompute ceiling are gone.
-
-After startup reconciliation and before image preparation, then at every
-recompute, sandbar checks the free bytes on the filesystem containing Podman's
-graphroot against a fixed 10 GiB floor (#169). A low reading latches admission
-closed and drains; active-cycle measurements cannot reopen it. At quiescence
-the owned-image reconciler runs and the filesystem is measured again.
-Source-image refresh work observed while low stays pending until that deciding
-measurement recovers, and is skipped entirely when the drain exits. If space
-remains low, the daemon exits 3 with the graphroot and exact byte count. All
-six exits are one type, `TerminalExit`, and the run ends with exactly one
-`exit` event whichever fired (#70/#132). `EXIT_TAGS` is exhaustive over the
-union and a table test asserts every tag has a code and reason. The pool owns
-run-wide starts, ongoing work, landings, and the terminal-without-landing
-backstop; `run.ts` selects one exit from that state and provider or landing
-outcomes.
-
-## Key invariants — where the details live
-
-- **Pure decision functions + adapters.** The SM, parsers, planners and
-  finalize logic are pure; I/O goes through `MergerAdapter`/`FinalizeAdapter`/
-  `ResolveAdapter` etc. Table-test the pure layer; don't mock `gh`/`git` if the
-  decision can be tested directly. Real-adapter argv is table-tested through
-  exec seams; what git/podman themselves define is asserted by *running* them
-  (`*-git.test.ts`, `*-podman.test.ts` — self-skip when the runtime is
-  missing, fail instead under `SANDBAR_REQUIRE_PODMAN_TESTS=1`).
-- **The repo sandbar operates on is not the repo the human stands in (#38).**
-  `config.cwd` is the operator's real checkout; sandbar works only inside
-  `<cwd>/<workDir>` — a **bare** object cache plus worktrees, threaded as one
-  `RepoLayout` — so destructive git ops provably cannot reach the operator's
-  refs. Nothing in the state directory is authoritative for repository
-  correctness. `rm -rf .sandbar` normally costs agent time, and since #134 may
-  also lose Codex's live token family and require one dedicated re-login. One
-  hazard: `run.lock` lives there, so
-  a `git clean -x` in the checkout during a run deletes the lock out from
-  under it — never clean while a run is in flight. `src/repo-cache.ts` and
-  `src/preflight.ts` headers.
-- **Every shell-out names its repo; nothing inherits `process.cwd()` (#34),**
-  and every `gh` call passes `--repo` (`src/repo-ref.ts`). Preflight verifies
-  the configured tracker and the git remote agree on host and `owner/name`.
-- **Per-issue git and podman isolation (#98, #28, #166).** Issue and merger trees are
-  hardlink clones of the host-only bare cache; no container mounts the cache,
-  and each sandbox's own repository mount names only its issue clone. It also
-  inherits the mounts and env of gate step runners: this adds no authority the
-  implementer's code did not already exercise when the gate ran it, but can
-  include a same-user runtime socket and the host paths that runtime can mount.
-  Gate containers get an
-  empty tmpfs over `.git`, while UI-check, partition-check, reviewer and
-  adjudicator writes are detected and parked for human inspection; the quality
-  fixer is the one cold role that writes, and the host settles what it leaves. The corollary: an attempt's commits live in the
-  clone until a host-side fetch publishes them, so removing a clone is where work can be
-  destroyed — `reclaimIssueClone` (`src/agent-sandbox.ts`) is the ONE spelling
-  of that removal, for the sandbox's `close()` and finalize alike: publish the
-  branch and pin an off-branch HEAD in the cache first, delete only once the
-  cache holds both, otherwise keep the clone and say why. Nothing decides
-  preservation by terminal kind. The origin lease is the one timing exception:
-  sandbox close silently defers reclamation until run.ts renews at the freed-slot
-  barrier, then finalization calls the same helper; loss leaves the clone in
-  place without manufacturing a human-inspection complaint. All resource
-  names carry `w`+8-hex of the *realpath'd* locked workdir; the orphan sweep
-  only ever touches its own scope, and unattributable debris is reported, never
-  removed. `src/containers.ts` and `src/naming.ts` headers. Configured image
-  **tags** are the one class the scope does not partition — on a shared host,
-  give each workdir its own tags. Driver-owned tools images are scoped and
-  persistent; startup keeps only the running driver's pin fingerprints.
-- **Runtime is podman**, hard-coded (`src/runtime.ts`). The agent sandbox runs
-  under `--init` (#42), and every container gets `--image-volume=ignore` (#50)
-  — see `src/agent-sandbox.ts` and `src/containers.ts` headers.
-- **Sandbar owns the lifecycle of images it builds (#169).** Every declared,
-  branch-variant, tools and augmented build labels both final and intermediate
-  images with its workdir scope. At startup and each quiescent boundary one
-  reconciler removes every labelled image ID outside the live declared/current
-  tag set while preserving anything an existing container references. This is
-  deliberately not blanket `podman prune`: pulled images and another tool's
-  images are outside sandbar's authority. `src/image-lifecycle.ts` owns the
-  inventory and live-set contract; `src/disk-space.ts` owns the graphroot floor.
-- **The gate stack is config-driven (#24)** and `resolveGateStack` validates it
-  before the lock. `src/gate-stack.ts`'s header is authoritative for the rest:
-  lifecycles, readiness, wedge detection, bounded podman calls, timeouts, one
-  pod per stack. The agent sandbox derives the mounts and env of each container
-  named by a step (#166); conflicting runner values/destinations and collisions
-  with `config.env` are config errors, not precedence rules.
-- **The sandbox stack (#44).** `inSandbox: true` gate containers get a second
-  copy beside the agent, in a netns chain off the sandbox container (a pod
-  cannot host keep-id). Logs are followed to read-only files at
-  `/sandbar/logs/<name>.log`; there is no restart. A derived runtime socket may
-  expose the gate's control plane, but the sibling and gate network namespaces
-  and verdicts remain separate. `src/sandbox-stack.ts`.
-- **An image that bakes dependencies is a function of the branch (#37, #46).**
-  `images[].rebuildOn` + fingerprint labels; an unbuildable image is a gate
-  red, not a HARD-ERROR. Appending the driver-owned tools is infrastructure and
-  does produce HARD-ERROR. `src/image-inputs.ts`, `src/ensure-images.ts` and
-  `src/agent-tools.ts` headers.
-- **`sandbar gate` (#45)** is the one standalone runner for the same stack; it
-  deliberately suspends D1, the lock, preflight and `sandboxHooks`.
-  `src/gate-run.ts` header.
-- **A gate verdict is about a commit.** The tree must be clean and ≡ HEAD
-  (D1, #24) and HEAD must be `refs/heads/<branch>` (#27) — both checked after
-  every implementer attempt. An off-branch HEAD whose issue branch is its
-  ancestor is repaired host-side without spending a correction (#127); an
-  older, diverged, or missing branch still takes #27's re-prompt. `sandbar gate`
-  is the only caller allowed to suspend D1. Corollary for consumers: gate steps
-  and sandbox siblings must write only into gitignored paths. `src/git-ops.ts`,
-  `src/inner-loop.ts`, `src/inner-loop-machine.ts`.
-- **Branch naming is load-bearing.** Three shapes under one prefix,
-  `sandbar/issue-<n>-<kebab-slug>` and `sandbar/chunk-<root>-<kebab-slug>`
-  (#58), plus origin-only `sandbar/member-<n>` records (#93). Preflight cleanup,
-  orphan sweep and worktree paths key off the first two; `src/naming.ts` owns all
-  builders, parsers and local/remote refglob lists. Issue branches seed from
-  origin, never local —
-  `origin/<sourceBranch>`, or the chunk tip for a chained chunk member (#61) —
-  and both prompt builders receive the same base `ensureIssueBranch` used.
-  A chained member with a CLOSED-only blocker reaches that seeding path only
-  after the planner proves `origin/<sourceBranch>` is contained by its exact
-  `origin/<chunk>`; the merger refreshes the origin-owned chunk rather than
-  manufacturing an issue-only seed merge (#174).
-  An issue branch that already exists is measured against ORIGIN'S copy first
-  and fast-forwarded to it, a diverged one refuses (that issue at plan time,
-  the run at preflight), and one the cache lacks is cut from origin's copy when
-  origin has one the base does not contain (#112) — the parking comment says
-  "push a fix on the branch", so origin owns the issue branch too, in both
-  directions: a branch origin carried and then lost is dropped from the cache
-  (deleting it on origin is how a parked issue's work is abandoned), unless
-  the cache holds more than origin ever had, which refuses instead.
-  A tracker-confirmed CLOSED issue is the non-refusing counterpart (#179):
-  preflight applies the same origin sync, then drops the cache branch and its
-  durable evidence ref when every non-merge commit is already on
-  `origin/<sourceBranch>`. A survivor is kept with a complaint naming the
-  unresolved origin or containment fact and is omitted from the UI's parked
-  Waiting rows; an unknown tracker state remains a startup refusal.
-  The seeding fallback guard, the origin sync and the re-rooting argument are
-  `src/git-ops.ts`'s.
-- **A chunk is derived, never declared (#54 §2, #58).** A chunk is a connected
-  component of the *review-gated* issues under the `## Blocked by` graph,
-  rooted at its parentless member; an issue straddling two chunks is blocked,
-  never a reason to merge them. `src/chunks.ts` is the pure derivation and its
-  header owns the argument; `NEEDS_REVIEW_LABEL` and `LAND_LABEL` (#93, #64) live
-  there too. **Origin owns the chunk branch** — every landing bases on
-  `origin/<chunk>`, preflight fetches that namespace to reason about it, and
-  the branch is deleted THERE when the chunk lands. Each member gets a dedicated
-  `sandbar/member-<n>` ref pushed atomically beside the chunk ref, and
-  containment is the membership record; commit subjects are cosmetic. What a chunk branch
-  carries at planning time is `PlanResolution.landedChunks`, the answer the whole
-  candidate graph can give: member refs contained by the exact chunk branch,
-  whose members and tips route review rework and reconciliation (#95) — never the whole
-  component, since a member that has never been worked has no commits
-  anywhere. De-queueing alone is broader and fail-safe: a member ref contained
-  by any fetched chunk branch is never reimplemented after title drift or re-rooting,
-  unless the authoritative issue batch says an actor admitted by
-  `config.developers` (or the run token) re-applied `ready-for-agent` to request
-  rework (#94). That member is planned back onto
-  the same chunk, and an outstanding `land` request is deferred until the
-  rework leaves the queue.
-  It also carries reconciliation's close order. A live landing takes its close
-  set and order from a fresh landing-boundary snapshot, as the `land` bullet
-  below states.
-- **The chunk's review surface is a DRAFT pull request (#62).** One per chunk,
-  created or updated after every landing push; sandbar never re-drafts a PR a
-  human made ready. Its body is only the complete member list;
-  `src/chunk-pr.ts` owns what it may claim.
-- **A changes-requested review on that PR re-queues its landed member(s)
-  (#95).** Each thread routes to the unique member whose merge brought its path
-  onto the chunk branch, or to the lowest-numbered tip when ownership is absent
-  or ambiguous. Sandbar posts one comment per (member, review), containing only
-  that member's threads, and creates no issue. The idempotence record remains a
-  LEDGER COMMENT on the PR, never the member's queue state, and sandbar never
-  resolves a thread;
-  `src/chunk-follow-up.ts`'s header owns both arguments and what the planner
-  has to supply the scan. The re-applied queue label is trusted as the run
-  token's own write under #136, without waiting for the listing index.
-- **`land` on the chunk PR is what lands it (#64).** A label rather than an
-  approval, so approve-now-land-later stays available, and on the PR because
-  that is where the reviewer is standing. It is a QUEUE: a merge the resolve
-  loop could not save takes the label off and says why, while anything that
-  says nothing ABOUT the chunk — a push race, an unreachable forge, an origin
-  that could not be asked — leaves it on for the next run. That last one is why
-  `fetchChunkRef` answers in three states (`ChunkRefLookup`), buying "origin
-  has no such branch" apart from "origin could not be asked" with an
-  `ls-remote` probe. A request is DEFERRED while any ongoing issue targets that
-  chunk: landing it could put commits a review never covered on the source
-  branch, so the label stays until the issue lands or parks. Tracker-visible
-  rework independently defers the same request until the member leaves
-  `ready-for-agent`. Members are closed EXPLICITLY (a `Closes #N` trailer only
-  fires on GitHub's own merge of that PR, and sandbar composes the merge
-  locally). Reconciliation uses `LandedChunk.closeOrder`; a live landing
-  freshly fetches the member namespace and closes only refs the exact chunk tip
-  brings beyond its merge base with the source branch, re-deriving the order
-  from current tracker edges. Both paths close dependents first, ROOT LAST, and
-  stop at the first failure. Git-derived members are fetched by number
-  without a state filter, so closing the root does not remove it from the graph
-  or change the derived branch name; dependents-first still leaves the safest
-  retry set if refs are repaired or changed by hand. The chunk branch
-  is deleted only once every close worked — a kept branch is what makes
-  `src/chunk-reconcile.ts` retry the remainder at the next recompute, and therefore what
-  `run.ts` halts on (`chunkResidue` splits a wrap-up's leftovers on exactly
-  that question, `unnamed` included; only the merge-phase report halts, since
-  the reconciler IS the retry). The reconciler is also the answer to a
-  hand-merged PR: it runs at plan time, tests containment in
-  `origin/<sourceBranch>` rather than intent, and does the identical wrap-up
-  without the merge. `src/chunk-land.ts`'s header owns the rest.
-- **Single-instance lock per workdir**, taken *before* preflight, with a
-  `run.pid` sidecar for stale-PID takeover (#32). `src/lock.ts`.
-- **One repository-wide origin lease**, acquired after forge reachability and
-  before preflight's ref work, renewed by one serialized heartbeat plus every
-  scheduler wake and remote-write barrier, and released by exact-sha CAS
-  (#139). Loss halts before admission or landing and preserves issue clones.
-  If another terminal already owns cleanup, loss rejects the pending write
-  barrier without adding a second complaint or exit event.
-  `src/origin-lock.ts` owns the argument and Git contract.
-- **One cleanup registry owns signals and the exit (#35).** No module but
-  `src/cleanup.ts` may trap a signal or exit on one. Anything created in a
-  loop registers with `registerDisposable` and withdraws itself when its
-  idempotence latch flips (#55). Cleanup reporting is best-effort: a rejected
-  event write cannot gate the drain, and one failed action or notice never
-  prevents the remaining resource teardowns.
-- **The host must not sleep while sandbar is working (#117, #133).** On WSL2
-   `run()` takes a host wake lock before the single-instance lock. It releases
-   that holder when the daemon becomes quiescent and retakes one when a poll
-  finds work; `keepAwakeWhileIdle: true` retains it for a dedicated machine.
-  #35's LIFO drain releases the current holder after later teardown. The origin
-  lease is released first, while the host is still forbidden to sleep; the wake
-  holder then stops before `run-end` is appended. A lock is
-  HELD only when the OS has confirmed it (the
-  script prints its marker after `SetThreadExecutionState` returns a non-zero
-  previous state), and it is released by EOF ON STDIN so it cannot outlive its
-  owner — which is also what makes the `process.exit` paths that run no cleanup
-   safe. Every held / refused / lost / released transition is a `wake-lock`
-  event. The wake teardown is registered immediately before the origin-lease
-  release so #35's LIFO drain puts both after every later teardown and before
-  `run-end`, and its event writes are awaited because `process.exit` grants no
-  event-loop turn.
-- **Credentials and per-installation routing enter as values (#38, #73, #134,
-  #137).**
-  `config.env` is an allowlist record (empty value ⇒ inherit from
-  `process.env`); `readEnvFile` is the opt-in loader. A host may keep
-  per-installation role routing in that same gitignored record:
-  `splitRoleRouting` consumes the eighteen
-  `SANDBAR_<ROLE>_{AGENT,MODEL_ID,EFFORT}` keys, omits absent/empty deviations,
-  and returns the remainder for `config.env`, so no routing key crosses into a
-  sandbox. The committed config remains a program and spreads `routing` over
-  its defaults; `resolveConfig` remains the one validation boundary.
-  `src/env-file.ts`, `src/env.ts`. **A podman argv never carries an environment
-  VALUE (#154).** Every container variable sandbar sets — `config.env`, `HOME`,
-  `CI=true`, the bot identity, the consumer's own `gateStack.containers[].env`
-  — reaches podman as a 0600 FILE, and the argv carries only that file's path.
-  One rule rather than a secret/non-secret split, because the failure it closes
-  is that every `Command failed:` wrapper quotes the argv: a failed sandbox
-  `podman run` put both tokens in a `hard-error` event `reason`, and the record
-  is the source of truth the UI serves (#132). A redaction pass would be the
-  weaker line — it has to know every key. Podman's other value-free form,
-  `-e KEY`, is not usable, and that is the second half of the rule: it copies
-  the value out of PODMAN'S OWN environment, and the podman child's environment
-  belongs to podman. These are names for the CONTAINER, and podman reads
-  several of them for itself — `HOME` is a rootless client's storage root and
-  `CONTAINER_HOST` the service URL, which #48's gate container declares as a
-  socket that exists only inside it. So every seam spawns podman with the
-  driver's environment untouched. The five builders that need any container
-  variable — including the per-exec one that carries the quality fixer's
-  commit author (#185) — return `RuntimeInvocation` (argv and env together), and
-  `withRuntimeEnv` in `src/runtime.ts` is the one place that writes the file,
-  splices its path in and removes it when the command returns. A value podman's
-  line-based format cannot represent is refused, not garbled. Two enforcers,
-  because a table over the five only covers a sixth builder its author
-  remembered to add: one table test, plus a source scan pinning `runtime.ts` as
-  the ONE production module that spells any of podman's environment flags.
-  Nothing can fix a record already written; the `ps` exposure closes as a side
-  effect.
-  Codex's ChatGPT subscription is `auth.json`,
-  so `CODEX_AUTH_JSON` carries its content. At preflight the driver reconciles
-  that value by `last_refresh` into one `<workDir>/codex-auth.json`; every Codex
-  sandbox and merger container mounts the run-owned file read-write at
-  `$CODEX_HOME/auth.json`, and the augmented image pre-creates that directory
-  owned by the uid-1000 agent so Codex can write its per-sandbox session state
-  beside the mount. This is the one deliberate exception to per-sandbox write
-  isolation: same-trust holders need Codex's reload-before-refresh cooperation
-  around one token family. The host config should read a dedicated login; this
-  repo's installation reads the dedicated `sandbar` Linux user's own
-  `~/.codex/auth.json`, so the operator's ordinary TUI never shares that family.
-  `src/codex-auth.ts`.
-- **A role names its CLI as well as its model (#19, #72, #74, #121, #126, #167).**
-  `implementerAgent` / `reviewerAgent` / `mergerAgent`, all defaulting to
-  `claude`, plus `uiCheckAgent` defaulting to `implementerAgent` and
-  `reviewerQualityAgent` and `adjudicatorAgent` defaulting to `reviewerAgent`, beside
-  model ids that are per call: the quality fixer and the correctness reviewer
-  are independently routed since nothing resumes a session between them,
-  while adjudication is a third cold route. `assertRoleModelIdNamed` therefore runs against each
-  route's own provider. The tiering knob and
-  the vendor knob are independent, and
-  every provider takes whatever id its role's field holds — which is why a role
-  routed off claude must NAME its model (`assertRoleModelIdNamed`), the default
-  being a claude alias and a half-moved config otherwise asking codex for
-  "opus" on every attempt. A third per-call knob, `*Effort` (#130), is the
-  reasoning effort, a plain string each provider spells in its own argv
-  (`--effort`, `-c model_reasoning_effort=`) and the implementer,
-  quality-pass and review-pass events carry it as `effort`; unset emits no flag and stays absent, because
-  the sandbox reads no host `config.toml` and a driver default would be the
-  same invisible setting in a different place. These three per-role fields are
-  also the unit one installation may override through #137's env split; the
-  ordinary pairing check rejects a half-moved non-claude role after the config
-  spreads those deviations. `AgentProvider`
-  (`src/agent-sandbox.ts`) was already the whole seam — argv plus a line parser,
-  with the explicitly named completion watch, the idle timeout and commit collection reading
-  parsed events and git — so `codex` is a second implementation of it and
-  nothing downstream knows which ran. `src/agent-providers.ts` owns the
-  NAME→factory map, each provider's credential and `requiredAgentProviders`;
-  its header owns why the set is CLOSED at what the driver can build (a config
-  is a program, so a name nothing implements is #66's silent failure).
-  Preflight refuses per provider a run will actually invoke; the UI-check
-  provider is omitted when `uiPrototypeCheck` is off, while the partition
-  check shares implementer routing. The resolve
-  invocation uses the same provider boundary for argv, credential env and
-  parsed output while keeping its raw streams verbatim in attempt logs. A
-  provider's parser answers in SEVEN registers and the rule no new one may break
-  is that they stay apart: `text`/`result` is the agent's SPEECH and the only
-  thing a run returns (#41 — "completed with output" is what `reviewer-run.ts`
-  reads as a verdict, so codex's `reasoning` is dropped and parsed speech keeps
-  raw JSONL out); `failure` is the provider naming a TERMINAL fault of its
-  own; everything else — including a fault it is still recovering from — is
-  transport. That last distinction is the sharp one, because `invokeAgent`
-  rejects on a `failure`: codex narrates its reconnects and a transport
-  downgrade over the same wire shape it uses for the fatal case, so only
-  `turn.failed` may be read, and a parser that spent a `failure` on a retry
-  would escalate a websocket blip to NEEDS-HUMAN. What the register buys is the
-  CAUSE leading the `AgentError` detail — a dead key exits 1 with the give-up
-  reason buried under a dozen tracing lines — and, since no CLI documents its
-  exit codes, #67's rule for a terminal failure under an exit-0 process: infra,
-  not an answer (read as an answer it is a nudge, an attempt, and eight more of
-  them). The sixth register is rate-limit state (#109), and the seventh is peak
-  context depth (#124); both are measurements that cannot themselves trip
-  completion: Claude supplies rate limits on stdout and Codex through
-  the still-live sandbox's rollout. A rejected measurement plus a failed
-  invocation closes that provider for the run and produces QUOTA without an
-  agent retry. **The branch owns the environment; the run owns the tools (#75).**
-  After resolving the declared sandbox image or a per-branch variant, the
-  driver appends git, the uid-1000 agent user and exactly the routed standalone
-  CLIs. `AGENT_PROVIDER_PACKAGES` owns each release artifact and per-architecture
-  digest; an old branch recipe can therefore change its dependencies but cannot
-  remove or replace this run's agent. A provider pins one or more BINARIES
-  (#120): a CLI that execs a sibling it resolves for itself — codex's
-  `codex-code-mode-host` — carries that sibling in the same pin, because the
-  capability is switched on SERVER-side (per-model `tool_mode` metadata, fetched
-  per session) and an image missing the helper has no command runner at all.
-  Installed unconditionally and never paired with a `features.code_mode` pin;
-  `agent-providers.ts`'s header owns the probe runs behind that. The
-  augmentation (`src/agent-tools.ts`) builds persistent, workdir-scoped tools
-  images with checksum-verified remote `ADD`s in podman's storage, then copies
-  their binaries into each base. It enforces a base contract of `/bin/sh`, CA
-  roots, and git or apt/apk/dnf — no Node/npm runtime. The
-  merger uses the same augmented declared image, while gate containers keep the
-  unaugmented base because they run no agent. Both pins move with the driver,
-  and codex's is specifically co-versioned with its load-bearing JSONL parser.
-  `PROVIDER_CREDENTIALS` is ANY-OF per provider, which is
-  what let #73 add codex's subscription as data; what a second accepted key
-  needed beyond data is `billingPrecedenceWarnings`, because a CLI handed both a
-  metered key and a subscription picks the metered one ITSELF (both vendors do)
-  and the only symptom is a bill. A warning, never a refusal — both configs run,
-  and sandbar cannot know which account the operator meant to spend.
-- **Token contracts.** UI check: `<ui-check>CLEAR|PROTOTYPE-NEEDED</ui-check>`,
-  with the latter followed by `<ui-impact>`. Partition check:
-  `<partition-check>CLEAR|PARTITION</partition-check>`, with PARTITION followed
-  by `<partition-reason>` carrying each proposed piece's estimated files and
-  changed lines plus the dependency order. Implementer:
-  `<promise>COMPLETE|NEEDS-INFO|NEEDS-UI-PROTOTYPE</promise>`; resolve loop:
-  `COMMITTED|ABANDON`; anything
-  else re-prompts. Correctness reviewer: optional free-text `<spec-gap>`, then
-  `<verdict>APPROVED|CHANGES-REQUESTED</verdict>`. The quality fixer has no
-  token at all (#185): its commits are its output. The gap records
-  the unanswered specification question and the answer the reviewer applied;
-  it is posted at finalise and never feeds a loop decision (#108).
-  Adjudicator: `<ruling>UPHELD|OVERRULED</ruling>` after its reasoning.
-  A run without a verdict token is a reviewer harness failure, never a
-  fabricated CHANGES-REQUESTED (#41, #83); a run without a ruling is the same
-  class of harness failure (#167). A token is one of those LITERAL strings and
-  nothing else (#113): a tag quoted in prose, an unclosed opener,
-  a mis-cased or empty tag are prose, the last well-formed token wins, and
-  the free-text blocks (`<questions>`, `<reason>`) cannot be swallowed by a
-  quoted opener. `src/token-scan.ts` is the one spelling of both scans and
-  owns the argument — the reviewer reviews the code that spells the token and
-  quotes what it reviews, which is how #88's approving round 8 parsed as a
-  rejection.
-  The orchestrator gates between attempts; agents never decide "green".
-- **Prompt prose lives in `prompts/*.md`**, loaded by `src/prompts.ts`; TS
-  keeps only structure. No issue-loop prompt embeds a diff body (#158): the
-  implementer, the quality fixer and the correctness reviewer receive the
-  commit list, diff stat and exact seed-anchored command for reading hunks on
-  demand; the fixer's first pass in a sandbox cycle must walk every file in
-  the stat, and a later pass is also given what changed since the head the
-  previous one left (#185). `maxContextChars` bounds each rendered
-  role prompt plus that on-demand net diff. Every git range a prompt renders
-  anchors at the issue branch's SEED REF, never a bare branch name (#40, #61)
-  — `src/prompt.ts`.
-- **One append-only event record is the run's source of truth (#70/#132).**
-  Immediately after both daemon locks are acquired, `src/events.ts` creates
-  `run-<stamp>/events.jsonl`; every event has monotonic `seq`, wall-clock `ts`
-  and a typed `kind`, and `run-start` declares the schema version. Readers
-  reject unknown schemas; older log-only runs are intentionally unreadable.
-  Appends are serialized, but a rejected append does not poison that latch or
-  consume a sequence number; a later write can resume with a contiguous record.
-  Finalization becomes complete only after its `run-end` append succeeds, so
-  concurrent calls share one write and a failed write remains retryable.
-  Every outcome or refusal after both daemon locks are held is an event.
-  Routine recovery is a `notice`, visible in the feed but never the header;
-  `complaint` is reserved for a condition a human may need to act on (#172).
-  Refused config, missing `GH_TOKEN`, forge unreachability before the origin
-  lease, and either startup lock refusal remain stderr-only because no record
-  can be owned safely. Every launched inner-loop agent invocation writes one
-  bounded record before its result is classified: a diagnostic header, parsed
-  speech, and raw stdout/stderr tails. The run-cached per-issue logger owns
-  invocation names, so they remain sequenced across fresh HARD-ERROR sandboxes
-  and later admissions of the same issue; an existing name is never
-  overwritten. Every gate-1 result is filed from that same sequence as the
-  attempt's `attempt-<n>-gate.log`, green as well as red, so the red a run
-  failed on can be read against the green before it (#153). Those records,
-  gate artefacts, merger logs and resolve transcripts stay as files through
-  `src/logs.ts`; they are artefacts, not a second event stream.
-  `run()` hosts the file-fed UI and writes its URL—and nothing else—to stdout.
-  The internal-failure banner is the sole post-record stderr rendering.
-- **The UI is a projection, never scheduler state (#132).** `src/run-state.ts`
-  purely reduces events into the pool timeline, waiting and parked rows, recent
-  events, landing requests, and finished issues and chunk landings across recent
-  run directories. The Landing section (#168) sits between Waiting and Finished,
-  lists only pull requests carrying `land`, and uses the waiting-row shape. Its
-  queued/deferred reason and merge/gate-2/push step are explicit event fields;
-  the reducer does not infer them from adjacent merger events. A chunk that
-  reaches the source branch joins Finished by timestamp with issue outcomes.
-  `src/ui-server.ts`
-  serves the shipped vanilla page and `/state.json`, rereading the record on
-  every request. Terminal causes stay full in the event feed and lead the
-  compact HARD-ERROR retry, parked and recently-finished projections. A pending
-  restart request stays on the header for the whole drain, so a pool that has
-  stopped admitting says why (#146). A CLOSED issue's retained cache branch is
-  represented only by its typed preflight complaint, not inferred as a parked
-  Waiting row (#179). A live
-  run hosts it in-process; `sandbar ui` hosts the same
-  module for post-mortem browsing. The page polls every two seconds. A growing
-  file plus live matching `run.pid` means working; a dead/missing PID without
-  `run-end` means crashed. `uiPort` is per-workdir host configuration and a
-  bind collision refuses the run; `sandbar ui --port` overrides it for a
-  standalone deployment reader. One Caddy site indexes the installations at
-  `/` and strips each installation project's `/<project>/` prefix before proxying
-  to that reader; the page's relative `state.json` fetch therefore works both
-  there and at its direct root. That site answers on the operator VPN's tunnel
-  address alone and logs every request (#155): the page has no authentication
-  by design, so what keeps a private consumer's issue titles, branch names,
-  agent speech and log paths off the internet is the interface it is bound to,
-  not a directive in front of it. Unreadable history is omitted, and any current
-  request or post-listen server failure stays inside the observing UI;
-  its best-effort complaint callback cannot stop a healthy run.
-- **Every outcome carries how long it took, and nothing decides on it (#82).**
-  `src/timing.ts` is the one measurement — `startTimer` on a MONOTONIC clock,
-  injectable because suites assert event objects exactly, and `durationMs` as
-  its elapsed-time field spelling. `startGapTimer` records
-  the largest leading, inter-line, or trailing stream silence as
-  `maxGapMs=<int>`; a line-less run reports its whole duration. It is likewise
-  evidence only, and absent stays absent rather than becoming zero. This closes
-  three defects the
-  first attempt to assemble a timing table found: a cohort's terminals all
-  carried the SETTLE instant in plan order (so "which issue held the cohort" and
-  "how long did the others idle" were unanswerable, and an outcome reached
-  eight minutes earlier existed in the record only if every sibling survived —
-  a #70 hole, fixed by having the task that terminated write its own event and
-  rethrow), the largest block of a run had nothing inside it (6m41s from
-  `plan:` to the first `gate-1` line), and an image rebuild — which changes what
-  every container in the run executes — was announced to a terminal and nowhere
-  else. `GateResult` carries `durationMs` plus a per-phase `steps` split filled
-  in `runStackGate`, the only place a step runs; run events retain that
-  structure. A `landed.durationMs` is one merge unit, while the distinct
-  `landing-batch.durationMs` is the whole serialized phase. `sandbar gate` is
-  the gate's only terminal renderer. All three image build entry
-  points hand an `ImageBuildRecord` to an `onImage` seam kept separate from the
-  CLI progress seam; `run()` suppresses progress and captures build output so
-  stdout remains the UI URL. Two
-  rules: a duration is a REPORT (no budget, no threshold, no adaptive bound —
-  `step.timeoutMs` stays the one bound `gate-stack.ts` has), and an absent
-  measurement is ABSENT, never `0`, because a stats reader averages a zero.
-  Container-backed durations also record cgroup-v2 `memory.peak` and the
-  `memory.events` OOM-kill counter at teardown (#141), OR-ed with Podman's
-  `State.OOMKilled` and with sampled stats only as a peak fallback; reused
-  containers attribute OOM kills by counter delta over each execution span.
-  These remain evidence and never become a limit or scheduling input.
-  Every deadline is computed on the monotonic clock (#122), so a wall-clock
-  step cannot move a readiness or forge-verification verdict. This is a
-  separate rule from durations being reports rather than decision inputs.
-  Agent invocations additionally record the provider-reported token usage
-  available on their terminal wire event (#85): fresh, cached and cache-write
-  input, output and reasoning tokens, plus Claude's API duration, resolved
-  model metadata, terminal reason and tool-call count. Usage and tool counts
-  occupy independent parser registers that never enter speech,
-  failure or completion; malformed or unavailable fields are omitted. A line
-  spanning multiple fresh CLI invocations sums like buckets across invocations,
-  while cached/fresh/output/reasoning buckets are never collapsed together.
-  Context depth is a seventh, separate parser register (#124), rendered as
-  `peakContext=<int>`: the maximum per-turn input footprint observed during an
-  invocation. Cumulative cache reads measure cost, not depth; depth is likewise
-  a report only, never a budget, threshold, adaptive bound or completion input,
-  and an unavailable measurement is absent rather than zero. The distinct
-  `contextChars=<int>` report on implementer, quality-pass and review-pass
-  events is the
-  rendered prompt plus the net diff the role is instructed to read; unlike
-  `peakContext`, it is also the declared `maxContextChars` decision input
-  (#158).
-  `timing.ts`, `agent-usage.ts`, `gate.ts`, `gate-stack.ts`,
-  `ensure-images.ts` and `events.ts` headers own the rest — `agent-usage.ts`
-  specifically owns why the two providers' input conventions are opposite and
-  are normalised to Claude's disjoint one.
-- **The resolve loop leaves a trace, and a container that never ran halts
-  (#67).** Every attempt's stdout AND stderr go to
-  `landing-N/resolve-<key>-attempt-<k>.log`, keyed like the gate artefact beside
-  it, and the merger log line carries the container, the exit code, the
-  duration and which of timeout / clean exit / signal ended it. An attempt that
-  captured NO agent speech is an infra failure, not an answer: the loop throws
-  rather than re-prompting, so an image that is gone or a refused socket cannot launder
-  itself into "the agent tried and failed" and spend the budget doing it. The
-  ONE exception is the ten-minute `RESOLVE_AGENT_TIMEOUT_MS`, which ran the
-  whole budget in the container and is a spent attempt named as one. What a
-  human reads afterwards — the abandon comment on the issue, or on the parked
-  chunk's PR — carries the conflicted paths, the per-attempt outcome and the
-  log paths. `src/resolve-loop.ts`'s header owns the argument.
-- **The version collision is settled before the agent is asked (#68).** Every
-  commit here moves `version` in `package.json` and its two mirrors in
-  `package-lock.json` (AGENTS.md), so two branches in one landing batch conflict
-  there BY CONSTRUCTION. `resolveVersionCollision` in `src/merger.ts` resolves
-  it mechanically ahead of `runResolveLoop`, at `max(ours, theirs)` bumped once
-  — a value neither side carries — and commits the merge itself when nothing
-  else was conflicted, so the clean path's `npmInstall` still owns lockfile
-  consistency. `src/version-conflict.ts` is the pure derivation and its header
-  owns the scope: PER FILE, root `package.json`/`package-lock.json` only, and
-  only when every hunk is a lone version line AND the two reconstructed sides
-  differ at nothing but the paths npm mirrors — the second check is what keeps
-  a dependency's identically-shaped `"version"` line out of it. Anything else
-  reaches the agent untouched; sandbar's merger-only prompt extension carries
-  the same `max + 1` rule without shipping that convention to consumers.
-- **A run opens by naming what is driving it (#69/#132).** The `run-start`
-  event carries the version, the tree `dist/` was built from, the config file's
-  path, workdir and whether either tree is dirty; the UI renders the identity.
-  Two trees because code and config are independent inputs: installed releases
-  report an unknown tree and use VERSION as identification, while local/ad-hoc
-  development may supply dirty code or config trees. A fact, never a warning,
-  never a refusal, and every field degrades to `unknown`.
-  `src/driver-identity.ts` owns the two-tree argument and
-  the `check-ignore` guard that keeps a driver under `node_modules` from being
-  attributed to the host repo's HEAD; `run(config, { configPath })` is how the
-  bin tells it which file it loaded.
-- **A config declares the oldest driver that can read it (#66).**
-  `requiresSandbar`, a plain `X.Y.Z` minimum; a driver below it refuses the run
-  naming both versions, inside `resolveConfig` and ahead of every other field.
-  The failure it closes is silent by construction — the config is imported, not
-  parsed, so a field written for a newer sandbar is spread through and never
-  looked at — and an unknown-key allowlist is the wrong instrument for it: the
-  config is a PROGRAM and may carry extra data. Optional, because requiring it
-  would break every config already written. `src/requires-sandbar.ts` owns the
-  argument, including why an unidentifiable driver fails the check.
-
-## This repo is an installation like any consumer (#39, #149, #151, #146)
-
-The repository contains the neutral development and test inputs its branches
-own, including the root `Containerfile`. Its daemon configuration and
-credentials live in the sandbar user's private `~/installation/` on the box;
-`deploy/ansible/installations/sandbar/` is the source copied to that private
-directory and `deploy/ansible/group_vars/all.yml` is the installation list both
-deploy channels read. A COMMIT ON MAIN IS THE DEPLOY (#146): the box runs
-`ansible-pull` every five minutes, builds that commit into
-`/opt/sandbar/builds/<sha>`, moves `current` only once the build succeeded, and
-asks each installation whose driver, files or unit changed to restart. Config
-and driver therefore arrive in the same commit, which retired the exact driver
-tag, `~/installation/driver/`, the unit's `ExecStartPre` and the rule that this
-installation's driver had to lag its checkout — a bad landing now costs one
-revert instead of a hand-timed repair. `requiresSandbar` stays for
-`npm i -D sandbar` consumers. `deploy/ansible/README.md` owns the rest.
-
-There is no second laptop path and no runtime config, env file, release pin or
-launcher at the repository root. To exercise unlanded driver code deliberately,
-build it and name an installation config explicitly:
-
-```sh
-npm run build && node dist/cli.js --config <path>
-```
-
-- **Hosting daemons is a contract this repo ships (#140, #149, #155, #146).**
-  `deploy/ansible/README.md` is the host contract in prose — Ubuntu 24.04 or 26.04,
-  rootless podman, swap, key-only SSH, no automatic reboot, and the box's own
-  OpenVPN as the only interface the run UI answers on — and
-  `roles/sandbar` provides it once per box. The server forwards nothing and
-  pushes no route, so a profile buys the tunnel subnet and nothing else, while
-  SSH stays public because a broken VPN must not lock the operator out of the
-  box that would repair it. The CA is initialised once on the box, guarded by
-  the server certificate it writes; `sandbar-vpn issue|revoke <person>-<machine>`
-  is the whole device lifecycle and devices are deliberately not inventory
-  data, since `deploy/ansible/` is committed to a public repository. Its
-  installation list gives every project a Linux user, consumer clone,
-  `~/installation/`, disjoint subuid range, Podman session and identically
-  named systemd user-unit pair, whose `ExecStart` runs `/opt/sandbar/current`'s
-  CLI against the installation config with no pre-start action and no consumer
-  `git pull` or `npm ci`. The one timer is root-level convergence, never a
-  daemon retry: the play writes `restart-requested` and the daemon decides
-  when, so exits 1, 2, 3 and 4 remain stops a human inspects. Every attempt
-  records a commit, time and result the Caddy index renders, so a box stuck on
-  an old commit is visible rather than journalled. The standalone reader is the
-  one unit the play restarts — it aborts no work, and a systemd auto-restart of
-  the daemon does not reach it — which is why it carries no `Requires=`. Unit
-  strings, the VPN reach, the driver build, the restart contract and the timer
-  are table-tested. Secrets are placed once per installation and only asserted;
-  the operator's public key is remembered on the box so an unattended pull
-  cannot strip it. Still no GitHub Actions deploy.
-- **One image, both roles** (agent sandbox and gate pod member): the driver's
-  augmentation supplies the sandbox's uid-1000 `agent` user, while the base
-  keeps default `USER` root — `checkWorktreeImageUids` refuses the run if that
-  changes. glibc, pinned to the host's node major,
-  because `node_modules` is installed on the host by the `onWorktreeReady` hook
-  and shared through the bind mount.
-- **The gate and implementer run the podman-layer tests over the host's socket
-  (#48, #166)** —
-  `CONTAINER_HOST` plus a read-only socket mount; test containers are scoped
-  siblings of the run's own (#47). The sandbox derives both declarations from
-  the gate runner, with no installation config field. What remains host-only is
-  exactly three files: `gate-stack-hostpodman.test.ts` (local-client and
-  systemd-session facts) and `sandbox-stack-podman.test.ts` (keep-id anchor
-  chain, #44), plus `container-resources-podman.test.ts` (the host-side cgroup
-  path returned by a local rootless Podman, #141).
-- **`mergeMode` stays `direct` (#39)** — personal project; tests run on host
-  machines, not hosted CI.
-- **One coherent deliverable per issue, however many modules it touches.** Do
-  not carve one coherent outcome into slices merely because it spans many
-  modules or looks large: a chain of slices lands N+1 on top of N without
-  either having driven anything, and each slice is reviewed without the half
-  that gives it its reason. The #158 classifier asks for a split only
-  when the whole issue plausibly exceeds `maxContextChars` AND it names
-  outcomes that each land alone; the per-piece estimates in its reason are for
-  the human reading the comment, never the reason to split. The measured
-  `maxContextChars` enforcer remains the authority once implementation begins:
-  when the actual branch picture is over budget, the work must be repartitioned
-  into an ordered `## Blocked by` chain whose members each fit. Genuinely
-  separate issues that both touch `run.ts`/`inner-loop`/`merger` use the same
-  chain, not parallel execution. Since #146 a landing on main IS the driver
-  within five minutes, blast radius alone is still not a reason to split: the
-  gate, reviewer and a `git revert` through the same channel bound it.
-- **The suite must not depend on ambient git config** (the gate runner has no
-  global identity) **nor on `process.cwd()` being a repository** (`/workspace/.git`
-  is not a repository inside gate containers — name the directory in every git
-  call a test makes).
+- One coherent deliverable per issue; split into a `## Blocked by` chain only
+  when it won't fit `maxContextChars`, never merely because it is large.
+- Podman-layer tests run over the host socket; only
+  `gate-stack-hostpodman`, `sandbox-stack-podman` and
+  `container-resources-podman` tests are host-only.
+- Tests must not depend on ambient git config or on `process.cwd()` being a
+  repository — name the directory in every git call.
 
 ## When making changes
 
-- **Strict TypeScript** — `strict`, `noUncheckedIndexedAccess`,
-  `noImplicitOverride`. Array/Map lookups are `T | undefined`.
-- **`*.test.ts` is excluded from `tsc`** (checked by vitest instead); the
-  strict gate covers production code only.
-- **Always import with `.js` extensions**, even from `.ts` files.
-- **Module headers are the authoritative architecture notes.** Read the header
-  first; update it in the same commit as the behavior it describes.
+- Strict TS (`strict`, `noUncheckedIndexedAccess`, `noImplicitOverride`);
+  `*.test.ts` is excluded from `tsc` and checked by vitest.
+- Update the module header in the same commit as the behavior it describes.
