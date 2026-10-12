@@ -46,14 +46,19 @@ export function isExitStatus(err: unknown, status: number): boolean {
 // a 502/503/504 from GitHub's gateway, which says the backend behind it did
 // not answer in time. Those three statuses were once kept fatal; a slow
 // GraphQL backend then served them to ordinary planning reads intermittently
-// and halted outdoor's daemon three times in one morning. Every other HTTP
-// status — 401, 404, a 500 — is the forge answering and stays out.
+// and halted outdoor's daemon three times in one morning. The same backend
+// also cut responses off: a 200 whose body ended early reaches `gh` as Go's
+// "unexpected end of JSON input" (or "unexpected EOF" when the read itself is
+// cut), a truncated non-answer rather than a reply. Every other HTTP status —
+// 401, 404, a 500 — is the forge answering and stays out.
 const FORGE_TRANSPORT_STDERR = [
   /\berror connecting to \S/,
   /\bconnection reset by peer\b/,
   /\bi\/o timeout\b/,
   /\bTLS handshake timeout\b/,
   /\bHTTP 50[234]\b/,
+  /\bunexpected end of JSON input\b/,
+  /\bunexpected EOF\b/,
 ];
 
 // True when a `gh` failure, or any error wrapping one as its `cause`, is a

@@ -42,6 +42,8 @@ describe("isForgeTransportFailure", () => {
       "<html>\n<head><title>502 Bad Gateway</title></head>\n</html>\ngh: HTTP 502\n",
       "HTTP 503: Service Unavailable (https://api.github.com/repos/o/r/issues)\n",
       "gh: HTTP 504\n",
+      "unexpected end of JSON input\n",
+      'Post "https://api.github.com/graphql": unexpected EOF\n',
     ]) {
       expect(isForgeTransportFailure(ghFailure(stderr))).toBe(true);
     }
@@ -59,6 +61,7 @@ describe("isForgeTransportFailure", () => {
       ghFailure("HTTP 401: Bad credentials (https://api.github.com/graphql)\n"),
       ghFailure("HTTP 500: Internal Server Error (https://api.github.com/graphql)\n"),
       new Error("Command failed: gh issue comment --body gh: HTTP 502"),
+      new Error("Command failed: gh issue comment --body unexpected end of JSON input"),
       ghFailure("GraphQL: Could not resolve to a Repository with the name 'o/r'.\n"),
       new Error("Command failed: gh issue comment --body error connecting to api.github.com"),
       new SyntaxError("Unexpected token"),

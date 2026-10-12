@@ -117,8 +117,8 @@
 // `decideAfterFailedRefresh` says this daemon is a drained restart whose exit
 // reads no refs at all (#146); startup preflight remains fatal. A planning
 // `gh` read the forge never answered (`isForgeTransportFailure`: transport
-// faults and gateway 502/503/504) takes the same notice-and-retry path; a
-// forge ANSWER still halts. A no-op poll is silent. A stable label-actor
+// faults, gateway 502/503/504 and truncated bodies) takes the same
+// notice-and-retry path; a forge ANSWER still halts. A no-op poll is silent. A stable label-actor
 // exclusion is recorded on each poll because its required diagnostic
 // makes that recompute reportable. Source movement from either
 // a human push or this process latches an image-input refresh; the next
@@ -1859,8 +1859,8 @@ export async function run(
   // A planning-time tracker read whose `gh` request never reached the forge is
   // the same non-answer a failed ref refresh is, and takes the same recovery:
   // the record gets a notice and the recompute is retried at the next wake.
-  // Only that class is caught (including a gateway 502/503/504, whose backend
-  // never answered); every other forge ANSWER (an HTTP status, a
+  // Only that class is caught (including a gateway 502/503/504 or a body cut
+  // off mid-read, whose backend never answered); every other forge ANSWER (an HTTP status, a
   // GraphQL error) and every non-gh fault still halts the run as before.
   const readTracker = async <T>(
     read: () => Promise<T>,
