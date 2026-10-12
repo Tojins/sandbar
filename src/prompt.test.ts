@@ -125,6 +125,10 @@ describe("renderAttemptSlot — the quality pass (#185)", () => {
     );
     const review = renderAttemptSlot({ ...implementerInputs, latestReviewerFeedback: "finding" });
     expect(review).toMatch(/Previous reviewer feedback[\s\S]*quality pass[\s\S]*not something to delete/);
+    for (const followUp of [gate, review]) {
+      const section = followUp.slice(followUp.indexOf("## Previous"), followUp.indexOf("## The quality pass"));
+      expect(section).toMatch(/only if it contradicts the\s+issue, and then\s+name the test and the reason in that commit's message/);
+    }
   });
 });
 
