@@ -474,7 +474,7 @@ describe("renderQualitySlot (#185)", () => {
     expect(slot).toContain("## Commits on this branch");
     expect(slot).toContain("## Branch diff stat");
     expect(slot).toContain("git diff origin/main...HEAD");
-    expect(slot).toMatch(/1\. Tests\.[\s\S]*2\. Standards\./);
+    expect(slot).toMatch(/1\. Read\.[\s\S]*2\. Tests\.[\s\S]*3\. Standards\./);
     expect(slot).toMatch(/by changing the code and committing, never by reporting/);
   });
 
@@ -515,7 +515,9 @@ describe("renderQualitySlot (#185)", () => {
 
   it("walks the whole stat on the first pass in a cycle", () => {
     const slot = renderQuality();
-    expect(slot).toContain("This is the first quality pass over this branch. Walk every changed file");
+    expect(slot).toContain("1. Read. This is the first quality pass over this branch.");
+    expect(slot).toMatch(/walk every file in the branch diff stat: read all of its\s+hunks with `git diff origin\/main\.\.\.HEAD -- <file>`/);
+    expect(slot).toContain("Steps 2 and 3 apply to every one of those files.");
     expect(slot).not.toContain("## Changed since your last pass");
   });
 
@@ -528,7 +530,8 @@ describe("renderQualitySlot (#185)", () => {
       changedSinceStat: " x | 1 +",
     });
     expect(slot).toContain("## Changed since your last pass\n\n```\n x | 1 +\n```");
-    expect(slot).toContain("git diff abc1234..HEAD");
+    expect(slot).toContain("1. Read. An earlier quality pass left this branch at `abc1234`.");
+    expect(slot).toContain("git diff abc1234..HEAD -- <file>");
     expect(slot).toContain("you may still fix anything on the branch");
     expect(slot).toContain("## Branch diff stat\n\n```\n whole | 1 +\n```");
     expect(slot).not.toContain("This is the first quality pass");

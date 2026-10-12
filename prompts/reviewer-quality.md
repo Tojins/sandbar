@@ -13,15 +13,16 @@ having — by changing the code and committing, never by reporting. Gate-1 runs
 on the head you leave, and a correctness reviewer reads the branch after a
 green gate there.
 
-{{chunkBase}}{{commits}}{{diffStat}}{{scope}}{{codingStandards}}
+{{chunkBase}}{{commits}}{{diffStat}}{{changedSince}}{{codingStandards}}
 
 {{projectStandards}}## What to do
 
-1. Tests. Write the tests the branch is missing and rewrite the ones that test
+1. Read. {{read}}
+2. Tests. Write the tests the branch is missing and rewrite the ones that test
    nothing. A test is missing when a production line the branch changes could
    be deleted and the suite would stay green. A test is bad when the test itself
    could be deleted and the suite would stay green.
-2. Standards. Fix every violation of the coding standards above and of the
+3. Standards. Fix every violation of the coding standards above and of the
    conventions in {{conventionsRef}}. Change production code only to meet a
    standard.
 

@@ -793,20 +793,26 @@ export function renderQualitySlot(inputs: QualitySlotRender): string {
         "an earlier quality pass left a head",
     );
   }
-  const scope = inputs.lastQualityHead === null
-    ? "This is the first quality pass over this branch. Walk every changed " +
-      "file named by the branch diff stat, reading its hunks with the " +
-      "full-diff command above and opening the surrounding code."
+  const changedSince = inputs.lastQualityHead === null
+    ? ""
     : `## Changed since your last pass\n\n` +
       (inputs.changedSinceStat
         ? `\`\`\`\n${inputs.changedSinceStat}\n\`\`\``
-        : `(empty — no changes since \`${inputs.lastQualityHead}\`)`) +
-      `\n\nAn earlier quality pass left this branch at \`${inputs.lastQualityHead}\`. ` +
-      `Focus on what changed since, read with \`git diff ${inputs.lastQualityHead}..HEAD\`; ` +
-      "you may still fix anything on the branch.";
+        : `(empty — no changes since \`${inputs.lastQualityHead}\`)`);
+  const read = inputs.lastQualityHead === null
+    ? "This is the first quality pass over this branch. Before changing " +
+      "anything, walk every file in the branch diff stat: read all of its " +
+      `hunks with \`git diff ${inputs.base.ref}...HEAD -- <file>\` and open ` +
+      "the code around them. Steps 2 and 3 apply to every one of those files."
+    : `An earlier quality pass left this branch at \`${inputs.lastQualityHead}\`. ` +
+      "Before changing anything, walk every file in the changed-since stat: " +
+      `read its hunks with \`git diff ${inputs.lastQualityHead}..HEAD -- <file>\` ` +
+      "and open the code around them. Focus steps 2 and 3 there; you may " +
+      "still fix anything on the branch.";
   return render(REVIEWER_QUALITY_TPL, {
     ...branchSlotVars(inputs),
-    scope: section(scope),
+    changedSince: section(changedSince),
+    read,
   });
 }
 
