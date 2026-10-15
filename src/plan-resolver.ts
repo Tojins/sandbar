@@ -17,7 +17,7 @@
 // the issue: absence de-queues it, presence is the explicit chunk-rework
 // override, and the lagging listing decides neither direction. In restricted
 // mode (#136), presence is not enough: the most recent `ready-for-agent`
-// LABELED_EVENT in the same batch must name a configured developer or the
+// LABELED_EVENT, read per issue after the batch, must name a configured developer or the
 // token's viewer login. A missing issue or an event outside the bounded
 // timeline window is an unknown verdict and fails closed. `"anyone"` keeps the
 // earlier batch-miss fallback unchanged.
@@ -928,16 +928,49 @@ export async function resolveReadyLabelPolicy(
   return { developers, viewerLogin: login };
 }
 
-// One GraphQL request PER ISSUE, a few in flight at a time. A single aliased
-// query over every issue was answered by GitHub's gateway with a 502/504
-// once it held several long timelines: a filtered `timelineItems` scans the
-// whole timeline, and outdoor issues with large ones took 6–7s each, so
-// sixteen of them in one request crossed the gateway's limit on every
-// attempt and halted the daemon at startup. Per issue, each request costs at
-// most one timeline.
-const ISSUE_READS_IN_FLIGHT = 4;
+// Two read shapes, and the split between them is GitHub's two limits. One
+// aliased query over every issue costs one point of the hourly GraphQL quota
+// however many issues it holds, and plain fields (state, labels, body) answer
+// fast, so those are always ONE batch. A filtered `timelineItems` is the
+// opposite: it scans the whole timeline, outdoor issues with large ones took
+// 6–7s each, and sixteen of them in one request crossed the gateway's limit
+// and came back 502/504 on every attempt. Timelines are therefore read one
+// issue per request, a few in flight — but only for the issues whose verdict
+// needs one (`fetchIssueStates`). Reading EVERY planning fact per issue spent a
+// point per issue per recompute and exhausted the quota, halting the daemon.
+const TIMELINE_READS_IN_FLIGHT = 4;
+
+function issueQuery(numbers: readonly number[], selection: string): string {
+  const fields = numbers
+    .map((n) => `i${n}: issue(number: ${n}) { ${selection} }`)
+    .join(" ");
+  return `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){${fields}}}`;
+}
+
+async function ghIssueQuery(
+  numbers: readonly number[],
+  repo: RepoRef,
+  selection: string,
+): Promise<Record<string, GhIssueRecord | null>> {
+  const { stdout } = await exec("gh", [
+    "api", "graphql", "-F", `owner=${repo.owner}`, "-F", `repo=${repo.name}`,
+    "-f", `query=${issueQuery(numbers, selection)}`,
+  ]);
+  return (JSON.parse(stdout) as {
+    data: { repository: Record<string, GhIssueRecord | null> };
+  }).data.repository;
+}
 
 async function ghIssueBatch(
+  numbers: readonly number[],
+  repo: RepoRef,
+  selection: string,
+): Promise<Record<string, GhIssueRecord | null>> {
+  const unique = [...new Set(numbers)];
+  return unique.length === 0 ? {} : ghIssueQuery(unique, repo, selection);
+}
+
+async function ghIssueEach(
   numbers: readonly number[],
   repo: RepoRef,
   selection: string,
@@ -946,48 +979,59 @@ async function ghIssueBatch(
   const records: Record<string, GhIssueRecord | null> = {};
   const readNext = async (): Promise<void> => {
     for (let n = pending.shift(); n !== undefined; n = pending.shift()) {
-      const query = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){` +
-        `i${n}: issue(number: ${n}) { ${selection} }}}`;
-      const { stdout } = await exec("gh", [
-        "api", "graphql", "-F", `owner=${repo.owner}`, "-F", `repo=${repo.name}`,
-        "-f", `query=${query}`,
-      ]);
-      Object.assign(records, (JSON.parse(stdout) as {
-        data: { repository: Record<string, GhIssueRecord | null> };
-      }).data.repository);
+      Object.assign(records, await ghIssueQuery([n], repo, selection));
     }
   };
   await Promise.all(
-    Array.from({ length: Math.min(ISSUE_READS_IN_FLIGHT, pending.length) }, readNext),
+    Array.from({ length: Math.min(TIMELINE_READS_IN_FLIGHT, pending.length) }, readNext),
   );
   return records;
 }
 
-// Authoritative facts for a set of issue numbers, via `ghIssueBatch`.
-// Used for both blockers (the dependency gate) and the candidates themselves
-// (the stale-listing CLOSED guard, #16). GraphQL node lookups are strongly
-// consistent, unlike the listing endpoint `fetchCandidates` uses.
+// Authoritative facts for a set of issue numbers: state and labels in one
+// `ghIssueBatch`, then — only when `readyProvenance` asks for it — the
+// `ready-for-agent` timeline of each OPEN issue that carries the label, one
+// `ghIssueEach` request apiece. No other issue's verdict reads the
+// application (`readyQueueVerdict` stops at closed / not-ready first), so its
+// `readyLabelApplication` is null without a read. Used for both blockers (the
+// dependency gate) and the candidates themselves (the stale-listing CLOSED
+// guard, #16). GraphQL node lookups are strongly consistent, unlike the
+// listing endpoint `fetchCandidates` uses.
 export async function fetchIssueStates(
   numbers: readonly number[],
   repo: RepoRef,
+  readyProvenance = true,
 ): Promise<ReadonlyMap<number, IssueFacts>> {
   const result = new Map<number, IssueFacts>();
   if (numbers.length === 0) return result;
   const records = await ghIssueBatch(
     numbers,
     repo,
-    `state labels(first: 100) { nodes { name } }
-     timelineItems(last: ${LABEL_EVENT_WINDOW}, itemTypes: [LABELED_EVENT]) {
+    "number state labels(first: 100) { nodes { name } }",
+  );
+  const labelsOf = (v: GhIssueRecord): string[] =>
+    (v.labels?.nodes ?? []).flatMap((l) => l?.name ? [l.name] : []);
+  const needsTimeline = readyProvenance
+    ? [...new Set(numbers)].filter((n) => {
+        const v = records[`i${n}`];
+        return v && v.state !== "CLOSED" && labelsOf(v).includes(READY_LABEL);
+      })
+    : [];
+  const timelines = await ghIssueEach(
+    needsTimeline,
+    repo,
+    `timelineItems(last: ${LABEL_EVENT_WINDOW}, itemTypes: [LABELED_EVENT]) {
        nodes { ... on LabeledEvent { actor { login } label { name } createdAt } }
      }`,
   );
   for (const n of numbers) {
     const v = records[`i${n}`];
     if (!v) continue;
+    const timeline = timelines[`i${n}`];
     result.set(n, {
       state: v.state === "CLOSED" ? "CLOSED" : "OPEN",
-      labels: (v.labels?.nodes ?? []).flatMap((l) => l?.name ? [l.name] : []),
-      readyLabelApplication: latestReadyLabelApplication(v),
+      labels: labelsOf(v),
+      readyLabelApplication: timeline ? latestReadyLabelApplication(timeline) : null,
     });
   }
   return result;
@@ -1055,7 +1099,7 @@ export async function buildPlan(
     if (!byNumber.has(issue.number)) byNumber.set(issue.number, issue);
   }
   const candidates = [...byNumber.values()];
-  // One GraphQL batch covers both the authoritative facts of every candidate
+  // One facts read covers both the authoritative facts of every candidate
   // (the #16 stale-listing CLOSED guard and #96 queue-label guard) and of every
   // blocker they reference.
   const wanted = new Set<number>();
@@ -1063,7 +1107,11 @@ export async function buildPlan(
     wanted.add(c.number);
     for (const n of parseBlockedBy(c.body)) wanted.add(n);
   }
-  const facts = await fetchIssueStates([...wanted], repo);
+  const facts = await fetchIssueStates(
+    [...wanted],
+    repo,
+    options.readyLabelPolicy !== "anyone",
+  );
   return resolvePlan(
     candidates,
     facts,

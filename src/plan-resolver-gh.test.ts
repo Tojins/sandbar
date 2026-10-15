@@ -72,17 +72,35 @@ describe("authoritative ready-for-agent provenance (#136)", () => {
     await rm(shimBin, { recursive: true, force: true });
   });
 
-  it("reads each issue in its own GraphQL request", async () => {
-    await fetchIssueStates([12, 13, 12, 14], CONFIGURED);
-    const reads = (await readFile(callsPath, "utf8"))
+  // The shim answers every query with #12 alone, OPEN and labelled
+  // ready-for-agent, so #13 and #14 come back missing from the batch.
+  const graphqlReads = async (): Promise<string[]> =>
+    (await readFile(callsPath, "utf8"))
       .split("\n")
       .filter((line) => line.startsWith("api graphql"));
-    expect(reads).toHaveLength(3);
-    for (const read of reads) {
-      expect(read.match(/issue\(number: /g)).toHaveLength(1);
-    }
-    expect(reads.map((read) => read.match(/issue\(number: (\d+)\)/)?.[1]).sort())
-      .toEqual(["12", "13", "14"]);
+
+  it("reads state and labels in one request, then one timeline per ready issue", async () => {
+    await fetchIssueStates([12, 13, 12, 14], CONFIGURED);
+    const [batch, ...timelines] = await graphqlReads();
+    expect(batch?.match(/issue\(number: (\d+)\)/g)).toEqual([
+      "issue(number: 12)",
+      "issue(number: 13)",
+      "issue(number: 14)",
+    ]);
+    expect(batch).not.toContain("timelineItems");
+    expect(timelines).toHaveLength(1);
+    expect(timelines[0]?.match(/issue\(number: (\d+)\)/g)).toEqual(["issue(number: 12)"]);
+    expect(timelines[0]).toContain("timelineItems");
+  });
+
+  it("reads no timeline when the policy needs no provenance", async () => {
+    const facts = await fetchIssueStates([12, 13], CONFIGURED, false);
+    expect(await graphqlReads()).toHaveLength(1);
+    expect(facts.get(12)).toEqual({
+      state: "OPEN",
+      labels: ["ready-for-agent"],
+      readyLabelApplication: null,
+    });
   });
 
   it("selects the most recent application of the queue label by createdAt", async () => {

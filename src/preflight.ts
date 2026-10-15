@@ -862,7 +862,11 @@ async function fetchOpenReadyIssueNumbers(
   if (policy === null) return { ok: false };
   try {
     const candidates = await fetchCandidates(repo);
-    const facts = await fetchIssueStates(candidates.map((c) => c.number), repo);
+    const facts = await fetchIssueStates(
+      candidates.map((c) => c.number),
+      repo,
+      policy !== "anyone",
+    );
     return {
       ok: true,
       numbers: new Set(candidates.flatMap((candidate) => {
@@ -893,7 +897,7 @@ async function fetchOpenIssueNumbers(
 ): Promise<IssueNumberLookup> {
   if (numbers.length === 0) return { ok: true, numbers: NO_NUMBERS };
   try {
-    const facts = await fetchIssueStates(numbers, repo);
+    const facts = await fetchIssueStates(numbers, repo, false);
     return {
       ok: true,
       numbers: new Set(
