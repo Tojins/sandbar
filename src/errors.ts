@@ -78,6 +78,31 @@ export function isForgeTransportFailure(err: unknown): boolean {
   return false;
 }
 
+// What `gh` writes to stderr when the forge refused the request for quota:
+// the primary hourly limit ("API rate limit exceeded", or "already exceeded"
+// once a request is turned away up front) and the secondary abuse limit. It is
+// a forge ANSWER, so it stays out of the transport class above, but it says
+// nothing about the tracker either: run.ts holds tracker reads until the
+// quota resets (`forge-rate-limit.ts`) instead of halting. Stderr only, for
+// the same reason as `isForgeTransportFailure`.
+const FORGE_RATE_LIMIT_STDERR = [
+  /\bAPI rate limit (?:already )?exceeded\b/,
+  /\bsecondary rate limit\b/,
+];
+
+export function isForgeRateLimit(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e !== undefined && depth < 8; depth += 1) {
+    if (typeof e !== "object" || e === null) return false;
+    const stderr = (e as { stderr?: unknown }).stderr;
+    if (
+      typeof stderr === "string" &&
+      FORGE_RATE_LIMIT_STDERR.some((pattern) => pattern.test(stderr))
+    ) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 // How a fault is rendered for an operator, wherever sandbar prints one and
 // stops: run.ts's top-level handler, the bin's, and `runGateCommand`'s (#45).
 // An operator-actionable SandbarError prints as its message alone; anything

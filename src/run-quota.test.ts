@@ -196,6 +196,9 @@ vi.mock("./image-lifecycle.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./image-lifecycle.js")>(),
   reconcileImages: vi.fn(async () => ({ removed: [] })),
 }));
+vi.mock("./forge-rate-limit.js", () => ({
+  fetchRateLimitResumeAt: vi.fn(async (nowMs: number) => nowMs),
+}));
 vi.mock("./disk-space.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./disk-space.js")>(),
   podmanGraphRoot: vi.fn(async () => "/podman/store"),
@@ -281,6 +284,7 @@ import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { agentToolsImageTags, createAgentImages } from "./agent-tools.js";
 import { reconcileImages } from "./image-lifecycle.js";
 import { graphRootSpace } from "./disk-space.js";
+import { fetchRateLimitResumeAt } from "./forge-rate-limit.js";
 import { cleanupOrphanContainers } from "./containers.js";
 import { UiPortInUseError, startUiServer } from "./ui-server.js";
 import {
@@ -1461,6 +1465,49 @@ describe("run quota orchestration (#109)", () => {
       message: "Tracker read failed; retrying in 1ms: " +
         `Command failed: gh issue list\n${stderr}`,
     });
+    expect(eventsOf("exit")).toEqual([expect.objectContaining({ tag: "quota" })]);
+  });
+
+  it("holds planning reads until a GitHub rate limit resets", async () => {
+    const arrived = issue("136");
+    const stderr = "gh: API rate limit already exceeded for user ID 326846765.\n";
+    let resumeAt = 0;
+    vi.mocked(fetchRateLimitResumeAt).mockImplementationOnce(async (nowMs) => {
+      resumeAt = nowMs + 50;
+      return resumeAt;
+    });
+    let replannedAt = 0;
+    seams.plan
+      .mockRejectedValueOnce(Object.assign(
+        new Error(`Command failed: gh api graphql\n${stderr}`),
+        { code: 1, stderr },
+      ))
+      .mockImplementation(async () => {
+        replannedAt ||= Date.now();
+        return resolution([arrived]);
+      });
+    vi.mocked(fetchOriginRefs).mockResolvedValue({
+      sourceChanged: false,
+      failures: [],
+    });
+    seams.innerLoop.mockResolvedValue({
+      type: "QUOTA", provider: "claude", window: "five_hour", resetsAt: 42,
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:4");
+
+    expect(exit).toHaveBeenCalledWith(4);
+    expect(replannedAt).toBeGreaterThanOrEqual(resumeAt);
+    const held = eventsOf("notice").filter((event) =>
+      String(event.message).startsWith("Tracker read failed"));
+    expect(held).toEqual([{
+      kind: "notice",
+      message: "Tracker read failed; holding tracker reads until " +
+        `${new Date(resumeAt).toISOString()}: ${stderr.trim()}`,
+    }]);
     expect(eventsOf("exit")).toEqual([expect.objectContaining({ tag: "quota" })]);
   });
 

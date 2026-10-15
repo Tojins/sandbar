@@ -118,7 +118,9 @@
 // reads no refs at all (#146); startup preflight remains fatal. A planning
 // `gh` read the forge never answered (`isForgeTransportFailure`: transport
 // faults, gateway 502/503/504 and truncated bodies) takes the same
-// notice-and-retry path; a forge ANSWER still halts. A no-op poll is silent. A stable label-actor
+// notice-and-retry path; a forge ANSWER still halts, except GitHub's rate
+// limit (`isForgeRateLimit`), which records one notice and holds planning
+// until the quota resets (`forge-rate-limit.ts`). A no-op poll is silent. A stable label-actor
 // exclusion is recorded on each poll because its required diagnostic
 // makes that recompute reportable. Source movement from either
 // a human push or this process latches an image-input refresh; the next
@@ -199,8 +201,10 @@ import {
 import {
   SandbarError,
   faultDetail,
+  isForgeRateLimit,
   isForgeTransportFailure,
 } from "./errors.js";
+import { fetchRateLimitResumeAt } from "./forge-rate-limit.js";
 import {
   runStampFromDate,
   startEventRecord,
@@ -1820,6 +1824,10 @@ export async function run(
     }
   }
 
+  // Until when tracker reads are held after GitHub refused one for quota
+  // (`forge-rate-limit.ts`); null when they are not.
+  let trackerHeldUntil: number | null = null;
+
   const recoverFromRefRefreshFailure = async (
     boundary: "Poll refresh" | "Planning ref refresh" | "Tracker read",
     failures: readonly string[],
@@ -1835,12 +1843,23 @@ export async function run(
     });
     const next = stalled.kind === "exit"
       ? "the pending restart needs none of it, so exiting"
-      : `retrying in ${config.pollIntervalMs}ms`;
-    const message =
-      `${boundary} failed; ${next}: ${failures.join("; ")}`;
-    await runRecord.emit(stalled.kind === "exit"
-      ? { kind: "complaint", severity: "warning", message }
-      : { kind: "notice", message });
+      : trackerHeldUntil !== null
+        ? `holding tracker reads until ${new Date(trackerHeldUntil).toISOString()}`
+        : `retrying in ${config.pollIntervalMs}ms`;
+    const message = failures.length === 0
+      ? null
+      : `${boundary} failed; ${next}: ${failures.join("; ")}`;
+    // No failures is a rate-limit hold already on the record: silent, unless
+    // it ends the run.
+    if (stalled.kind === "exit") {
+      await runRecord.emit({
+        kind: "complaint",
+        severity: "warning",
+        message: message ?? `${boundary} held; ${next}`,
+      });
+    } else if (message !== null) {
+      await runRecord.emit({ kind: "notice", message });
+    }
     if (stalled.kind === "exit") {
       terminalExit = await announceExit(
         schedulerExit(stalled.reason, {
@@ -1861,15 +1880,28 @@ export async function run(
   // the record gets a notice and the recompute is retried at the next wake.
   // Only that class is caught (including a gateway 502/503/504 or a body cut
   // off mid-read, whose backend never answered); every other forge ANSWER (an HTTP status, a
-  // GraphQL error) and every non-gh fault still halts the run as before.
+  // GraphQL error) and every non-gh fault still halts the run as before. The
+  // one exception is GitHub's rate limit: it is an answer, but about quota, not
+  // the tracker, so it sets `trackerHeldUntil` and the recompute waits it out
+  // (`forge-rate-limit.ts`) instead of halting into a restart that would only
+  // be refused again.
   const readTracker = async <T>(
     read: () => Promise<T>,
   ): Promise<{ readonly value: T } | { readonly failure: string }> => {
     try {
       return { value: await read() };
     } catch (err) {
-      if (!isForgeTransportFailure(err)) throw err;
-      return { failure: err instanceof Error ? err.message : String(err) };
+      if (!isForgeRateLimit(err) && !isForgeTransportFailure(err)) throw err;
+      if (!isForgeRateLimit(err)) {
+        return { failure: err instanceof Error ? err.message : String(err) };
+      }
+      trackerHeldUntil = await fetchRateLimitResumeAt(Date.now());
+      const stderr = (err as { stderr?: unknown }).stderr;
+      return {
+        failure: typeof stderr === "string" && stderr.trim() !== ""
+          ? stderr.trim()
+          : String(err),
+      };
     }
   };
 
@@ -2026,6 +2058,18 @@ export async function run(
       // ---------------------------------------------------------------------
       // Phase 1: Plan
       // ---------------------------------------------------------------------
+      // A rate-limit hold skips planning silently (its notice was recorded when
+      // it began) and takes the failed-read stall, so a drained restart still
+      // exits and every other wake still lands here to look again.
+      if (trackerHeldUntil !== null && Date.now() >= trackerHeldUntil) {
+        trackerHeldUntil = null;
+      }
+      if (trackerHeldUntil !== null) {
+        if (await recoverFromRefRefreshFailure("Tracker read", []) === "exit") {
+          break;
+        }
+        continue;
+      }
       const planOptions = {
         excluded: new Set([
           ...mergedThisRun,

@@ -55,7 +55,8 @@ and the gate stack (`config.gateStack`, #24).
 
 Daemon polling and the six exits (`stuck`, `quota`, `credential`, `storage`,
 `restart`, `halted`) live in `scheduler.ts`, `exit-conditions.ts`,
-`restart-request.ts` (#146), `disk-space.ts` (#169).
+`restart-request.ts` (#146), `disk-space.ts` (#169); a GitHub rate limit
+holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 
 ## Invariants — where they live
 
