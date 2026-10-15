@@ -1767,7 +1767,7 @@ export async function runQualityReview(
 ): Promise<Extract<LoopEvent, { kind: "quality-review-result" | "context-over-budget" }>> {
   const { issue, sandbox, opts, config, quality } = ctx;
   const mode: QualityReviewMode = action.kind === "run-quality-list"
-    ? { kind: "list", scope: action.scope, overrules: quality.overrules }
+    ? { kind: "list", scope: action.scope, overrules: [...quality.overrules] }
     : { kind: "verify", anchor: action.anchor, report: action.report };
   if (mode.kind === "list") {
     quality.openRound = { attempt: action.attempt, timer: startTimer(), quality: null };

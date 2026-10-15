@@ -83,7 +83,8 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./prompt.js")>(),
   buildPrompt: vi.fn(async () => "implement"),
   buildUiCheckPrompt: vi.fn(async () => "ui check"),
-  buildQualityPrompt: vi.fn(async () => "quality review"),
+  buildQualityReviewPrompt: vi.fn(async () => "quality review"),
+  buildQualityFixPrompt: vi.fn(async () => "quality fix"),
   buildCorrectnessPrompt: vi.fn(async () => "correctness review"),
   branchIsAheadOfSeed: seams.branchIsAheadOfSeed,
   measureNetDiffChars: seams.measureNetDiffChars,
@@ -152,6 +153,7 @@ const config = (
   uiCheckAgent,
   reviewerAgent: "claude",
   reviewerQualityAgent: "claude",
+  maxQualityRounds: 1,
   maxGateRounds: 1,
   maxReviewRounds: 1,
   sandboxImage: "image",
@@ -168,15 +170,17 @@ const config = (
   botEmail: "bot@example.test",
 });
 
-// What the quality fixer returns when it exits having committed nothing.
-const fixerRun = {
-  stdout: "",
+// A quality lister that approves the branch outright (#187).
+const listerRun = {
+  stdout: "<verdict>APPROVED</verdict>",
   durationMs: 5,
   maxGapMs: 1,
   toolCalls: 2,
   peakContext: 40,
   commits: [],
 };
+// A quality lister that hands the fixer a report.
+const rejectingListerRun = { ...listerRun, stdout: "### Tests\nx\n<verdict>CHANGES-REQUESTED</verdict>" };
 
 describe("runInnerLoop run-scoped quota closure (#109)", () => {
   beforeEach(() => {
@@ -460,7 +464,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(state.get("codex")).toEqual({ cause: "credential", detail });
   });
 
-  it("logs peak context for the fixer and for successful and failed reviewer invocations", async () => {
+  it("logs peak context for the quality lister and for successful and failed reviewer invocations", async () => {
     const events: EventInput[] = [];
     const reviewerFailure = new Error("reviewer disconnected");
     seams.partialUsage.set(reviewerFailure, {
@@ -478,7 +482,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
         peakContext: 23,
         commits: [{ sha: "implemented-sha" }],
       })
-      .mockResolvedValueOnce(fixerRun)
+      .mockResolvedValueOnce(listerRun)
       .mockRejectedValueOnce(reviewerFailure)
       .mockResolvedValueOnce({
         stdout: "<verdict>APPROVED</verdict>",
@@ -494,10 +498,11 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       onEvent: (event) => events.push(event),
     })).resolves.toMatchObject({ type: "DONE" });
 
-    expect(events.filter((event) => event.kind === "quality-pass")).toEqual([{
-      kind: "quality-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+    expect(events.filter((event) => event.kind === "quality-review")).toEqual([{
+      kind: "quality-review", issue: 125, title: "Issue 125", attempt: 1, round: 1,
+      invocation: 1, mode: "list", scope: "full",
       provider: "claude", model: "model", effort: null, result: "completed",
-      commits: [], discarded: { dirtyPaths: [], strandedHead: null, rewoundTip: null },
+      verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>",
       durationMs: 5, maxGapMs: 1,
       usage: { toolCalls: 2, peakContext: 40, contextChars: 14 },
     }]);
@@ -524,7 +529,8 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     ]);
     expect(events.filter((event) => event.kind === "review-round")).toEqual([{
       kind: "review-round", issue: 125, title: "Issue 125", attempt: 1, round: 1,
-      head: "implemented-sha", gateOk: true, correctness: "APPROVED",
+      head: "implemented-sha", quality: "APPROVED", qualityRounds: 0,
+      gateOk: true, correctness: "APPROVED",
       rejectingPass: null, gateFailures: 0, correctnessFailures: 0,
       durationMs: expect.any(Number),
     }]);
@@ -620,8 +626,9 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
   });
 
   it.each([
-    ["quality fixer", "quality-pass", 2, []],
-    ["correctness reviewer", "review-pass", 3, [fixerRun]],
+    ["quality lister", "quality-review", 2, []],
+    ["quality fixer", "quality-pass", 3, [rejectingListerRun]],
+    ["correctness reviewer", "review-pass", 3, [listerRun]],
   ] as const)("surfaces %s quota after one invocation without a retry", async (
     _role,
     eventKind,
@@ -670,7 +677,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(seams.sandboxRun).toHaveBeenCalledTimes(runs);
   });
 
-  it("closes a refused quality-fixer credential without a retry", async () => {
+  it("closes a refused quality-pass credential without a retry", async () => {
     const events: EventInput[] = [];
     const state = createRunProviderState();
     const detail = "Your access token could not be refreshed. Please log out and sign in again.";
@@ -703,10 +710,11 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     });
 
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
-    expect(events.filter((event) => event.kind === "quality-pass")).toEqual([{
-      kind: "quality-pass", issue: 136, title: "Issue 136", attempt: 1, round: 1,
+    expect(events.filter((event) => event.kind === "quality-review")).toEqual([{
+      kind: "quality-review", issue: 136, title: "Issue 136", attempt: 1, round: 1,
+      invocation: 1, mode: "list", scope: "full",
       provider: "codex", model: "model", effort: null, result: "credential",
-      durationMs: expect.any(Number), usage: { contextChars: 14 },
+      verdict: null, prose: "", durationMs: expect.any(Number), usage: { contextChars: 14 },
     }]);
     expect(state.get("codex")).toEqual({ cause: "credential", detail });
   });
@@ -727,9 +735,12 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
         toolCalls: 0,
         commits: [{ sha: "implemented-sha" }],
       })
-      .mockResolvedValueOnce(fixerRun)
+      .mockResolvedValueOnce(listerRun)
       .mockRejectedValueOnce(new AgentQuotaError("claude", measurement));
+    // The implementer's read, the lister's two snapshots, then the reviewer's.
     seams.dirtyWorktreePaths
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce(["review.txt"]);
