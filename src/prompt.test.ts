@@ -5,11 +5,13 @@ import {
   NO_PROTOTYPE_NEEDED_PHRASE,
 } from "./finalize.js";
 import { sourceBranchBase } from "./git-ops.js";
-import { reviewerHarnessFailedReprompt } from "./inner-loop-machine.js";
+import { type QualityScope, reviewerHarnessFailedReprompt } from "./inner-loop-machine.js";
 import {
   type PriorReviewRound,
+  type QualityOverrule,
   renderAttemptSlot,
-  renderQualitySlot,
+  renderQualityFixSlot,
+  renderQualityReviewSlot,
   renderReviewerSlot,
   renderSandboxStackSlot,
 } from "./prompt.js";
@@ -28,12 +30,9 @@ const baseInputs = {
   priorRounds: [],
 } as const;
 
-// The fixer's first pass in a cycle: no earlier head, so no focus stat (#185).
 const qualityInputs = {
   ...baseInputs,
   promptExtension: { path: "docs/CODING_STANDARDS.md" },
-  lastQualityHead: null,
-  changedSinceStat: null,
 } as const;
 
 const implementerInputs = {
@@ -447,17 +446,20 @@ describe("renderReviewerSlot", () => {
   });
 });
 
-describe("renderQualitySlot (#185)", () => {
-  const renderQuality = () =>
-    renderQualitySlot({
+describe("renderQualityFixSlot (#185, #187)", () => {
+  const report = "### Standards\nsrc/a.ts:3 duplicates the helper in b.ts\n<verdict>CHANGES-REQUESTED</verdict>";
+  const renderFix = (ruling: string | null = null) =>
+    renderQualityFixSlot({
       ...qualityInputs,
       contextMdPath: "CONTEXT.md",
       commits: "a1 first",
       stat: " x | 1 +",
+      report,
+      ruling,
     });
 
   it("is a self-sufficient fixer brief over the whole branch picture", () => {
-    const slot = renderQuality();
+    const slot = renderFix();
     expect(slot).toContain("## Commits on this branch");
     expect(slot).toContain("## Branch diff stat");
     expect(slot).toContain("git diff origin/main...HEAD");
@@ -465,124 +467,207 @@ describe("renderQualitySlot (#185)", () => {
     expect(slot).toMatch(/by changing the code and committing, never by reporting/);
   });
 
-  // The fixer's output is its commits: nothing in its prompt may ask for a
-  // token or a findings report, or a parser would have something to read.
-  it("asks for no verdict, no completion token and no findings headings", () => {
-    const slot = renderQuality();
-    expect(slot).toContain("There is no verdict and no completion token.");
+  // The latest report is the fixer's checklist; the token that ended it is
+  // the reviewer's, not something the fixer should see or echo.
+  it("hands over the latest report without its verdict token", () => {
+    const slot = renderFix();
+    expect(slot).toContain("## Quality report\n\n### Standards\nsrc/a.ts:3 duplicates the helper in b.ts");
     expect(slot).not.toContain("<verdict>");
     expect(slot).not.toContain("<promise>");
-    for (const heading of ["### Tests", "### Standards", "### Correctness", "### Non-blocking"]) {
-      expect(slot).not.toContain(`\`${heading}\``);
-    }
+  });
+
+  // Not told to fix only the listed items, and free to leave a wrong one.
+  it("lets the fixer leave a wrong finding and fix one the report missed", () => {
+    const slot = renderFix();
+    expect(slot).toMatch(/A finding that is wrong[\s\S]*leave as it is/);
+    expect(slot).toMatch(/A violation you find that the report missed, fix as well/);
+    expect(slot).toContain("Your text output is not read.");
+  });
+
+  it("attaches an upheld ruling only when there is one", () => {
+    expect(renderFix()).not.toContain("## Adjudicator's ruling");
+    const slot = renderFix("line 3 really is a copy");
+    expect(slot).toMatch(/## Adjudicator's ruling[\s\S]*UPHELD it:\n\nline 3 really is a copy/);
+    expect(slot.indexOf("## Quality report")).toBeLessThan(slot.indexOf("## Adjudicator's ruling"));
   });
 
   it("defines missing and bad tests by what the suite can detect", () => {
-    const slot = renderQuality();
-    expect(slot).toMatch(/production line the branch changes could\s+be deleted and the suite would stay green/);
-    expect(slot).toMatch(/the test itself\s+could be deleted and the suite would stay green/);
+    const slot = renderFix();
+    expect(slot).toMatch(/production line the branch\s+changes could be deleted and the suite would stay green/);
+    expect(slot).toMatch(/the test itself could be deleted and the suite would stay green/);
   });
 
   // A failing test is the one channel the fixer has for a correctness defect;
   // it must neither go hunting for them nor quietly change behaviour.
   it("routes correctness through a failing test and nowhere else", () => {
-    const slot = renderQuality();
+    const slot = renderFix();
     expect(slot).toMatch(/Do not look for correctness or spec defects, and write no text about them/);
     expect(slot).toMatch(/A test\s+you write that fails IS how a correctness defect is reported/);
-    expect(slot).toMatch(/Change production code only to meet a\s+standard/);
+    expect(slot).toMatch(/Change production\s+code only to meet a standard/);
   });
 
   it("asks for one on-branch commit carrying the repository's per-commit rituals", () => {
-    const slot = renderQuality();
+    const slot = renderFix();
     expect(slot).toContain("Commit on `sandbar/issue-42-do-the-thing` and stay on it");
     expect(slot).toMatch(/Make ONE commit for this\s+pass/);
     expect(slot).toMatch(/every per-commit ritual the conventions in @CLAUDE\.md \(and @CONTEXT\.md if it exists\)\s+require/);
     expect(slot).toMatch(/anything uncommitted is\s+discarded/);
   });
 
-  it("walks the whole stat on the first pass in a cycle", () => {
-    const slot = renderQuality();
-    expect(slot).toContain("1. Read. This is the first quality pass over this branch.");
-    expect(slot).toMatch(/walk every file in the branch diff stat: read all of its\s+hunks with `git diff origin\/main\.\.\.HEAD -- <file>`/);
-    expect(slot).toContain("Steps 2 and 3 apply to every one of those files.");
-    expect(slot).not.toContain("## Changed since your last pass");
+  it("puts standards and project references in the fixer prompt", () => {
+    const slot = renderFix();
+    expect(slot).toContain("## Coding standards");
+    expect(slot).toContain("@docs/CODING_STANDARDS.md");
+    expect(slot).not.toContain("{{");
+  });
+});
+
+describe("renderQualityReviewSlot (#187)", () => {
+  const picture = { commits: "a1 first", stat: " whole | 1 +" } as const;
+  const list = (
+    scope: QualityScope = { kind: "full" },
+    overrules: readonly QualityOverrule[] = [],
+  ) => ({ kind: "list", scope, overrules }) as const;
+  const renderList = (
+    scope?: QualityScope,
+    changedSinceStat: string | null = null,
+    overrules?: readonly QualityOverrule[],
+  ) =>
+    renderQualityReviewSlot({
+      ...qualityInputs,
+      ...picture,
+      mode: list(scope, overrules),
+      changedSinceStat,
+    });
+  const renderVerify = (changedSinceStat: string | null = " fixed | 2 +") =>
+    renderQualityReviewSlot({
+      ...qualityInputs,
+      ...picture,
+      mode: {
+        kind: "verify",
+        anchor: "fff0000",
+        report: "### Tests\nsrc/a.ts:3 is uncovered\n<verdict>CHANGES-REQUESTED</verdict>",
+      },
+      changedSinceStat,
+    });
+
+  it("is read-only and ends in exactly one verdict over two headings", () => {
+    const slot = renderList();
+    expect(slot).toContain("you must not modify the branch");
+    expect(slot).toContain("`### Tests` or\n`### Standards`");
+    expect(slot).toContain("`<verdict>APPROVED</verdict>`");
+    expect(slot).toContain("`<verdict>CHANGES-REQUESTED</verdict>`");
+    expect(slot).not.toContain("### Non-blocking");
+    expect(slot).not.toContain("### Correctness");
+    expect(slot).toMatch(/names its location as `path:line`/);
   });
 
-  it("focuses a later pass on what changed since the head it last left", () => {
-    const slot = renderQualitySlot({
-      ...qualityInputs,
-      lastQualityHead: "abc1234",
-      commits: "a1 first",
-      stat: " whole | 1 +",
-      changedSinceStat: " x | 1 +",
-    });
-    expect(slot).toContain("## Changed since your last pass\n\n```\n x | 1 +\n```");
-    expect(slot).toContain("1. Read. An earlier quality pass left this branch at `abc1234`.");
+  // A correctness defect reaches the implementer as a failing test the fixer
+  // writes, never as a quality finding of its own.
+  it("turns a noticed correctness defect into a test finding", () => {
+    expect(renderList()).toMatch(/raise it under `### Tests`\s+as the test that would fail on it/);
+  });
+
+  it("keeps the test-finding criterion", () => {
+    expect(renderList()).toMatch(/must name a line whose deletion\s+leaves the suite green/);
+  });
+
+  it("lists the whole branch exhaustively until a quality pass has approved a head", () => {
+    const slot = renderList();
+    expect(slot).toContain("Walk every changed file named by the branch diff stat");
+    expect(slot).toContain("Anything you do not raise now is not raised later.");
+    expect(slot).toContain("There is no limit on length.");
+    expect(slot).not.toContain("## Changed since");
+  });
+
+  it("lists only what changed since the last approved head, keeping the whole stat as context", () => {
+    const slot = renderList({ kind: "since", sha: "abc1234" }, " x | 1 +");
+    expect(slot).toContain("## Changed since `abc1234`\n\n```\n x | 1 +\n```");
+    expect(slot).toContain("approved this branch at `abc1234`");
     expect(slot).toContain("git diff abc1234..HEAD -- <file>");
-    expect(slot).toContain("you may still fix anything on the branch");
+    expect(slot).toContain("The branch diff stat is context");
     expect(slot).toContain("## Branch diff stat\n\n```\n whole | 1 +\n```");
-    expect(slot).not.toContain("This is the first quality pass");
+    expect(slot).toContain("There is no limit on length.");
   });
 
   it("renders an empty changed-since stat as no changes since the anchor", () => {
-    const slot = renderQualitySlot({
-      ...qualityInputs,
-      lastQualityHead: "abc1234",
-      commits: "a1 first",
-      stat: " whole | 1 +",
-      changedSinceStat: "",
-    });
-    expect(slot).toContain("(empty — no changes since `abc1234`)");
+    expect(renderList({ kind: "since", sha: "abc1234" }, "")).toContain(
+      "(empty — no changes since `abc1234`)",
+    );
   });
 
   it.each([
-    ["a later pass without its stat", "abc1234", null],
-    ["a first pass with a stat", null, " x | 1 +"],
-  ] as const)("refuses %s rather than claiming no changes", (_name, lastQualityHead, changedSinceStat) => {
-    expect(() =>
-      renderQualitySlot({
-        ...qualityInputs,
-        lastQualityHead,
-        changedSinceStat,
-        commits: "a1 first",
-        stat: " whole | 1 +",
-      }),
-    ).toThrow(/changed-since stat must be supplied exactly when/);
+    ["a scoped lister without its stat", { kind: "since", sha: "abc1234" } as const, null],
+    ["a whole-branch lister with a stat", { kind: "full" } as const, " x | 1 +"],
+  ] as const)("refuses %s rather than claiming no changes", (_name, scope, changedSinceStat) => {
+    expect(() => renderList(scope, changedSinceStat)).toThrow(
+      /changed-since stat must be supplied exactly/,
+    );
   });
 
-  it("carries the chunk base needed by a cold quality pass", () => {
-    const slot = renderQualitySlot({
+  it("shows a lister the overruled reports with their rulings, and nothing else", () => {
+    const slot = renderList({ kind: "full" }, null, [{
+      round: 2,
+      head: "bbb2222",
+      report: "### Standards\nsrc/a.ts:9 is a wrapper\n<verdict>CHANGES-REQUESTED</verdict>",
+      ruling: "the wrapper carries the retry",
+    }]);
+    expect(slot).toContain("## Prior review rounds");
+    expect(slot).toContain(
+      "### Round 2 — head=bbb2222\nquality: OVERRULED\n### Standards\nsrc/a.ts:9 is a wrapper\n\n" +
+        "Adjudicator's ruling:\nthe wrapper carries the retry",
+    );
+    expect(slot).toMatch(/do not raise them again unless the code they\s+cite has changed/);
+    expect(slot).not.toContain("<verdict>CHANGES-REQUESTED</verdict>\n\nAdjudicator");
+    expect(renderList()).not.toContain("## Prior review rounds");
+  });
+
+  it("verifies the report and the fixer's own lines, and nothing else", () => {
+    const slot = renderVerify();
+    expect(slot).toContain("## Changed since `fff0000`\n\n```\n fixed | 2 +\n```");
+    expect(slot).toContain("## Report under check");
+    expect(slot).toContain("starting from `fff0000`:\n\n### Tests\nsrc/a.ts:3 is uncovered\n\n");
+    expect(slot).toContain("git diff fff0000..HEAD");
+    expect(slot).toContain("1. Each finding in the report above: is it dealt with at this head?");
+    expect(slot).toContain("2. The lines the fixer changed, on both dimensions below.");
+    expect(slot).toContain("Raise nothing else");
+    // Self-contained: the next fixer sees only the latest report.
+    expect(slot).toMatch(/restate in full every finding still open/);
+    expect(slot).not.toContain("There is no limit on length.");
+    expect(slot).not.toContain("## Prior review rounds");
+  });
+
+  it("refuses a verify without its stat", () => {
+    expect(() => renderVerify(null)).toThrow(/changed-since stat must be supplied exactly/);
+  });
+
+  it("carries the chunk base and standards a cold review needs", () => {
+    const slot = renderQualityReviewSlot({
       ...qualityInputs,
+      ...picture,
       base: {
         ref: "refs/remotes/origin/sandbar/chunk-1-root",
         chunkBranch: "sandbar/chunk-1-root",
       },
-      commits: "a1 first",
-      stat: " x.ts | 1 +",
+      mode: list(),
+      changedSinceStat: null,
     });
     expect(slot).toContain("## This branch is part of a chunk");
-    expect(slot).toContain("sandbar/chunk-1-root");
-    expect(slot).not.toContain("{{");
-  });
-
-  it("puts standards and project references in the quality pass", () => {
-    const slot = renderQuality();
     expect(slot).toContain("## Coding standards");
     expect(slot).toContain("@docs/CODING_STANDARDS.md");
-    expect(slot).toContain("@CLAUDE.md");
-    expect(slot).toContain("@CONTEXT.md");
+    expect(slot).not.toContain("{{");
   });
 
   it("keeps built-in standards when no project standards file is provided", () => {
     const { promptExtension: _omitInput, ...noStandards } = qualityInputs;
-    const slot = renderQualitySlot({
+    const slot = renderQualityReviewSlot({
       ...noStandards,
-      commits: "a1 first",
-      stat: " x.ts | 1 +",
+      ...picture,
+      mode: list(),
+      changedSinceStat: null,
     });
     expect(slot).toContain("## Coding standards");
     expect(slot).not.toContain("### Project prompt extension");
-    expect(slot).not.toContain("CODING_STANDARDS");
   });
 });
 

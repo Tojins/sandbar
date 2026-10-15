@@ -14,6 +14,7 @@ import {
   DEFAULT_CONTAINERFILE_PATH,
   DEFAULT_CONTEXT_MD_PATH,
   DEFAULT_MAX_GATE_ROUNDS,
+  DEFAULT_MAX_QUALITY_ROUNDS,
   DEFAULT_MAX_REVIEW_ROUNDS,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_KEEP_AWAKE_WHILE_IDLE,
@@ -394,6 +395,7 @@ describe("resolveConfig", () => {
     // a host whose credentials all come from the process environment still has
     // to DECLARE the keys, because the fallback is per declared key.
     expect(r.env).toEqual({});
+    expect(r.maxQualityRounds).toBe(DEFAULT_MAX_QUALITY_ROUNDS);
     expect(r.maxGateRounds).toBe(DEFAULT_MAX_GATE_ROUNDS);
     expect(r.maxReviewRounds).toBe(DEFAULT_MAX_REVIEW_ROUNDS);
     expect(r.pollIntervalMs).toBe(DEFAULT_POLL_INTERVAL_MS);
@@ -459,16 +461,17 @@ describe("resolveConfig", () => {
     },
   );
 
-  // Present at all — even as undefined — is a config written for the quality
-  // budget the fixer no longer has (#185), refused like maxImplAttempts.
-  it.each([4, undefined])(
-    "refuses removed maxQualityRounds=%s with its migration",
-    (maxQualityRounds) => {
-      expect(() =>
-        resolveConfig({ ...minimal, maxQualityRounds } as RunConfig),
-      ).toThrow(/maxQualityRounds was removed \(#185\).*maxGateRounds.*delete the key/s);
-    },
-  );
+  // Refused by #185, accepted again since the quality pass has a verify to
+  // reject (#187).
+  it("defaults the per-pass quality budget to three and accepts a host's own", () => {
+    expect(DEFAULT_MAX_QUALITY_ROUNDS).toBe(3);
+    expect(resolveConfig(minimal).maxQualityRounds).toBe(3);
+    expect(resolveConfig({ ...minimal, maxQualityRounds: 5 }).maxQualityRounds).toBe(5);
+  });
+
+  it.each([0, -1, 1.5])("refuses a non-positive-integer maxQualityRounds of %s", (maxQualityRounds) => {
+    expect(() => resolveConfig({ ...minimal, maxQualityRounds })).toThrow(/maxQualityRounds/);
+  });
 
   it.each([0, -1, 1.5, 65_536, Number.NaN])(
     "refuses invalid uiPort %s",

@@ -28,14 +28,19 @@ const failed = (detail: string): ReviewerOutcome => ({
   invocations: 2,
 });
 
-describe("reviewerResult (#185)", () => {
-  // The correctness outcome is the whole review now: there is no quality
-  // verdict to compose with, so each outcome maps straight to the machine.
+describe("reviewerResult (#185, #187)", () => {
+  // Each pass's outcome maps straight to the machine; the harness detail
+  // names the pass it came from.
   it.each([
     {
       name: "harness failure",
       outcome: failed("crashed"),
       expected: { kind: "reviewer-harness-failed", detail: "correctness: crashed" },
+    },
+    {
+      name: "reviewer write",
+      outcome: { kind: "aborted", detail: "changed HEAD", transcript: "partial" },
+      expected: { kind: "reviewer-wrote", detail: "changed HEAD" },
     },
     {
       name: "rejection",
@@ -57,8 +62,14 @@ describe("reviewerResult (#185)", () => {
       },
     },
   ] as const)("maps a $name", ({ outcome, expected }) => {
-    if (outcome.kind === "aborted") throw new Error("fixture is a completed outcome");
-    expect(reviewerResult(outcome)).toEqual(expected);
+    expect(reviewerResult(outcome, "correctness")).toEqual(expected);
+  });
+
+  it("names the quality pass in its harness detail", () => {
+    expect(reviewerResult(failed("crashed"), "quality")).toEqual({
+      kind: "reviewer-harness-failed",
+      detail: "quality: crashed",
+    });
   });
 });
 
@@ -229,16 +240,15 @@ describe("runReviewerInvocations", () => {
   });
 
   it("returns an aborted reviewer write without retrying", async () => {
-    const event = { kind: "reviewer-wrote", detail: "changed HEAD" } as const;
     const asked: number[] = [];
     const outcome = await runReviewerInvocations(async (n) => {
       asked.push(n);
-      return { kind: "aborted", event, transcript: "partial output" };
+      return { kind: "aborted", detail: "changed HEAD", transcript: "partial output" };
     });
 
     expect(outcome).toEqual({
       kind: "aborted",
-      event,
+      detail: "changed HEAD",
       transcript: "partial output",
     });
     expect(asked).toEqual([1]);
