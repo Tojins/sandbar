@@ -15,10 +15,12 @@
 // a completed attempt; an OOM kill names that failure in the feed.
 // A retained CLOSED issue branch is represented only by its typed preflight
 // complaint, never inferred back into a parked Waiting row (#179).
-// A round's serial steps — quality fixer, gate-1, correctness (#185) — are
-// one review-coloured lane span each, labelled by phase, so a red gate or a
-// rejection marks its own bar; the fixer's feed row names its commits and
-// whatever the host discarded after it.
+// A round's serial steps — each quality role, gate-1, correctness (#185,
+// #187) — are one review-coloured lane span each, labelled by phase, so a red
+// gate or a rejection marks its own bar. A quality lister or verify row names
+// its mode and verdict; the fixer's row names its commits and whatever the
+// host discarded after it; a round's row names how its quality pass ended
+// when that was not an approval.
 
 import type {
   GateStepEvent,
@@ -255,11 +257,21 @@ function feedText(event: RunEvent): FeedEvent | null {
       }`;
       tone = event.result === "completed" || event.result === "failed" ? "" : "bad";
       break;
+    case "quality-review":
+      text = `round ${event.round} · quality ${event.mode} · invocation ${event.invocation} · ${
+        event.verdict ?? (event.result === "completed" ? "no verdict" : event.result)
+      }`;
+      tone = event.verdict === "APPROVED"
+        ? "good"
+        : event.verdict === null && event.result !== "completed" && event.result !== "failed"
+          ? "bad"
+          : "";
+      break;
     case "review-pass":
       text = `round ${event.round} · correctness pass · invocation ${event.invocation}`;
       break;
     case "adjudication":
-      text = `round ${event.round} · adjudication · ${event.ruling}`;
+      text = `round ${event.round} · ${event.pass} adjudication · ${event.ruling}`;
       tone = event.ruling === "UPHELD" ? "bad" : "good";
       break;
     case "resolve-attempt":
@@ -277,6 +289,8 @@ function feedText(event: RunEvent): FeedEvent | null {
           : event.rejectingPass
             ? `${event.rejectingPass} changes requested`
             : "approved"
+      }${
+        event.quality === "APPROVED" ? "" : ` · quality ${event.quality.toLowerCase()}`
       }`;
       tone = !event.gateOk || event.rejectingPass ? "bad" : "good";
       break;

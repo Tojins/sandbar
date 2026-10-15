@@ -9,8 +9,8 @@
 // and never changes the verdict.
 //
 // Convergence relies on a sharp bar. The correctness prompt requires a
-// located, concrete defect and otherwise APPROVES. Since #185 it is the only
-// verdict: the quality pass fixes what it finds and emits none.
+// located, concrete defect and otherwise APPROVES. The quality pass's lister
+// and verify (#187) use the same tokens; its fixer emits none.
 //
 // A token is one of those two literal strings and nothing else (#113). A
 // `<verdict>` quoted in prose without a closer, a mis-cased or empty tag, a

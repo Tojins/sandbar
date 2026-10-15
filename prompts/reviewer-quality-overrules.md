@@ -1,0 +1,1 @@
+Each prior round above is a quality report an independent adjudicator overruled at the head named, with its ruling. Its findings are not violations: do not raise them again unless the code they cite has changed since that head.

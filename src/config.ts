@@ -654,10 +654,11 @@ export type RunConfig = {
   // The correctness pass — the one that ends an issue (#121). `reviewerAgent`
   // is its CLI.
   readonly reviewerModelId?: string;
-  // The quality pass (#121, #185): a fixer that commits standards fixes and
-  // tests ahead of gate-1 and the correctness pass, with no verdict. It runs
-  // cold in the implementer's sandbox, so it may name another vendor's model,
-  // paired with `reviewerQualityAgent`.
+  // The quality pass (#121, #187): a read-only lister, a fixer that commits
+  // standards fixes and tests, and a read-only verify, ahead of gate-1 and
+  // the correctness pass. All three share this routing and run cold in the
+  // implementer's sandbox, so they may name another vendor's model, paired
+  // with `reviewerQualityAgent`.
   // Renamed from `reviewerFollowupModelId`, which is now refused by name.
   readonly reviewerQualityModelId?: string;
   // Independent judge for an unchanged rejected head (#167). Defaults to the
@@ -677,7 +678,7 @@ export type RunConfig = {
   readonly reviewerAgent?: AgentProviderName;
   // The quality pass's CLI (#121). Defaults to `reviewerAgent`, so a config
   // that says nothing keeps one reviewer vendor. Routing it elsewhere moves the
-  // fixer off the correctness vendor's rate window while the deciding verdict
+  // quality pass off the correctness vendor's rate window while the deciding verdict
   // stays where it was; it is only possible because no pass shares a session.
   readonly reviewerQualityAgent?: AgentProviderName;
   readonly adjudicatorAgent?: AgentProviderName;
@@ -735,14 +736,17 @@ export type RunConfig = {
   // leaks wholesale. Default: {}.
   readonly env?: Record<string, string>;
 
-  // Independent consecutive-failure budgets (#129/#143/#185).
-  // `maxGateRounds` counts red gate-1 results plus every attempt that failed
-  // to produce a commit the gate could judge (NO-SIGNAL, a dirty tree, an
-  // off-branch HEAD), and resets on green gate-1. `maxReviewRounds` counts
-  // correctness rejections only. The quality pass is a fixer with no verdict,
-  // so it has no budget. Reviewer harness failures spend none; their second
-  // occurrence anywhere in the inner loop is the separate #41 bound. There is
-  // deliberately no total attempt ceiling.
+  // Independent budgets (#129/#143/#185/#187). `maxQualityRounds` bounds one
+  // quality pass: it counts verify rejections and upheld quality
+  // adjudications, and running out continues the round to gate-1 with the
+  // open items recorded rather than stopping the loop. `maxGateRounds` counts
+  // red gate-1 results plus every attempt that failed to produce a commit the
+  // gate could judge (NO-SIGNAL, a dirty tree, an off-branch HEAD), and resets
+  // on green gate-1. `maxReviewRounds` counts correctness rejections only.
+  // Reviewer harness failures spend none; their second occurrence anywhere in
+  // the inner loop is the separate #41 bound. There is deliberately no total
+  // attempt ceiling.
+  readonly maxQualityRounds?: number;
   readonly maxGateRounds?: number;
   readonly maxReviewRounds?: number;
   // Maximum prompt characters plus the net branch diff a role is instructed
@@ -929,6 +933,10 @@ export const DEFAULT_MERGER_MODEL_ID = "opus";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
+// Three fixer rounds that a verify still rejects (or an adjudicator upholds)
+// are enough to show the fixer and the reviewer are not converging; the round
+// then goes on to gate-1 with the open items recorded (#187).
+export const DEFAULT_MAX_QUALITY_ROUNDS = 3;
 // A green gate completely answers earlier red gates, so only four consecutive
 // reds or ungateable attempts establish that the implementer cannot restore
 // the branch's own checks (#185 folded the pre-gate re-prompts in here).
@@ -2031,14 +2039,6 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
         "to bound correctness rejections.",
     );
   }
-  if ("maxQualityRounds" in config) {
-    throw new SandbarError(
-      "config.maxQualityRounds was removed (#185): the quality pass now fixes " +
-        "standards and tests by committing and never rejects, so it has no " +
-        "budget. Pre-gate re-prompts are bounded by config.maxGateRounds; " +
-        "delete the key.",
-    );
-  }
   if ("maxTotalIssues" in config) {
     throw new SandbarError(
       "config.maxTotalIssues was removed (#133); sandbar is a daemon and no longer has a lifetime admission cap.",
@@ -2251,6 +2251,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     // through the process environment still has to DECLARE the keys, because
     // the fallback is per declared key and never a wholesale leak.
     env,
+    maxQualityRounds: requirePositiveInteger(
+      "maxQualityRounds",
+      config.maxQualityRounds ?? DEFAULT_MAX_QUALITY_ROUNDS,
+    ),
     maxGateRounds: requirePositiveInteger(
       "maxGateRounds",
       config.maxGateRounds ?? DEFAULT_MAX_GATE_ROUNDS,

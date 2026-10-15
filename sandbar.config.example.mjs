@@ -105,11 +105,13 @@ export default {
   // host variables stay out.
   env,
 
-  // Independent consecutive-failure budgets. Gate counts red gate-1 plus
-  // NO-SIGNAL, dirty trees and off-branch HEADs, and resets on green. Review
-  // counts correctness rejections only. The quality pass fixes rather than
-  // rejects, so it has no budget. Harness failures spend none; their second
+  // Independent budgets. Quality bounds one quality pass — verify rejections
+  // and upheld quality adjudications — and running out goes on to gate-1 with
+  // the open items recorded. Gate counts red gate-1 plus NO-SIGNAL, dirty
+  // trees and off-branch HEADs, and resets on green. Review counts
+  // correctness rejections only. Harness failures spend none; their second
   // occurrence in one inner loop parks it.
+  // maxQualityRounds: 3,
   // maxGateRounds: 4,
   // maxReviewRounds: 4,
   // DONE work releases one of these concurrent inner-loop slots immediately.
