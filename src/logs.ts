@@ -40,7 +40,15 @@ export type AttemptLogger = {
 // would sit beside `attempt-7.log` calling itself attempt 1.
 export type AgentInvocationIdentity =
   | { readonly role: "implementer"; readonly attempt: number; readonly nudge: boolean }
-  | { readonly role: "quality"; readonly attempt: number }
+  // The quality pass (#187): one lister per attempt, then fixer, verify and
+  // quality adjudicator steps numbered by the fixer round they belong to.
+  | { readonly role: "quality-list"; readonly attempt: number; readonly invocation: number }
+  | {
+      readonly role: "quality-fix" | "quality-verify" | "quality-adjudicator";
+      readonly attempt: number;
+      readonly fixRound: number;
+      readonly invocation: number;
+    }
   | { readonly role: "reviewer"; readonly attempt: number; readonly invocation: number }
   | { readonly role: "adjudicator"; readonly attempt: number; readonly invocation: number }
   | { readonly role: "gate"; readonly attempt: number }
@@ -55,8 +63,12 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
   switch (identity.role) {
     case "implementer":
       return `attempt-${identity.attempt}${identity.nudge ? "-nudge" : ""}.log`;
-    case "quality":
-      return `attempt-${identity.attempt}-quality.log`;
+    case "quality-list":
+      return `attempt-${identity.attempt}-quality-list-${identity.invocation}.log`;
+    case "quality-fix":
+    case "quality-verify":
+    case "quality-adjudicator":
+      return `attempt-${identity.attempt}-${identity.role}-${identity.fixRound}-${identity.invocation}.log`;
     case "reviewer":
       return `attempt-${identity.attempt}-reviewer-${identity.invocation}.log`;
     case "adjudicator":

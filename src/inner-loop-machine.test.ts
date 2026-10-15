@@ -22,6 +22,7 @@ import type { ParseSignal } from "./promise-parser.js";
 
 const defaultOpts = {
   issueBranch: "sandbar/issue-1-x",
+  maxQualityRounds: 3,
   maxGateRounds: 4,
   maxReviewRounds: 3,
   uiPrototypeCheck: false,
@@ -31,7 +32,11 @@ const defaultOpts = {
 // Tiny driver: runs the machine to completion given a script of events.
 // Returns the verdict and the full action trace so each case can assert both.
 function drive(
-  opts: Partial<typeof defaultOpts> & { readonly maxGateRounds?: number; readonly maxReviewRounds?: number },
+  opts: Partial<typeof defaultOpts> & {
+    readonly maxQualityRounds?: number;
+    readonly maxGateRounds?: number;
+    readonly maxReviewRounds?: number;
+  },
   script: readonly LoopEvent[],
 ): { readonly actions: readonly LoopAction[]; readonly verdict: Verdict } {
   let state: LoopState = initialState({ ...defaultOpts, ...opts });
@@ -119,7 +124,30 @@ const impl = (
   head,
 });
 
-const quality: LoopEvent = { kind: "quality-result" };
+// The quality pass's three roles (#187).
+const listed = (review: ReviewerResult, head = "head"): LoopEvent => ({
+  kind: "quality-review-result",
+  mode: "list",
+  head,
+  review,
+});
+const verified = (review: ReviewerResult, head = "fixed"): LoopEvent => ({
+  kind: "quality-review-result",
+  mode: "verify",
+  head,
+  review,
+});
+const fixed = (
+  commits = 1,
+  { startHead = "head", head = commits === 0 ? startHead : "fixed", exited = "completed" }: {
+    readonly startHead?: string;
+    readonly head?: string;
+    readonly exited?: "completed" | "failed";
+  } = {},
+): LoopEvent => ({ kind: "quality-fix-result", startHead, head, commits, exited });
+// A quality pass whose lister approves outright.
+const quality: LoopEvent = listed(approved());
+const qualityApproved = { verdict: "APPROVED", rounds: 0 } as const;
 const gated = (gate: Gate1Result, head = "head"): LoopEvent => ({
   kind: "gate-result",
   gate,
@@ -138,7 +166,7 @@ const round = (
   reviewer: ReviewerResult | null = null,
   head = "head",
 ): readonly LoopEvent[] => [
-  quality,
+  listed(approved(), head),
   gated(gate, head),
   ...(reviewer === null ? [] : [reviewed(reviewer, head)]),
 ];
@@ -158,14 +186,14 @@ const asImpl = (a: LoopAction) => {
 };
 
 describe("inner-loop-machine — the serial round (#185)", () => {
-  it("runs the quality fixer, then gate-1, then correctness, then DONE", () => {
+  it("runs the quality pass, then gate-1, then correctness, then DONE", () => {
     const { actions, verdict } = drive(defaultOpts, [
       impl(complete),
       ...round(gate1Ok, approved()),
     ]);
     expect(actions.map((a) => a.kind)).toEqual([
       "run-implementer",
-      "run-quality",
+      "run-quality-list",
       "run-gate",
       "run-correctness",
       "terminate",
@@ -182,11 +210,11 @@ describe("inner-loop-machine — the serial round (#185)", () => {
     ]);
     expect(actions.filter((a) => a.kind !== "terminate")).toEqual([
       { kind: "run-implementer", attempt: 1, failureTrace: "", extraReprompt: null, latestReviewerFeedback: null },
-      { kind: "run-quality", attempt: 1 },
-      { kind: "run-gate", attempt: 1 },
+      { kind: "run-quality-list", attempt: 1, scope: { kind: "full" } },
+      { kind: "run-gate", attempt: 1, quality: qualityApproved },
       { kind: "run-implementer", attempt: 2, failureTrace: "red", extraReprompt: null, latestReviewerFeedback: null },
-      { kind: "run-quality", attempt: 2 },
-      { kind: "run-gate", attempt: 2 },
+      { kind: "run-quality-list", attempt: 2, scope: { kind: "since", sha: "head" } },
+      { kind: "run-gate", attempt: 2, quality: qualityApproved },
       { kind: "run-correctness", attempt: 2 },
     ]);
   });
@@ -200,13 +228,20 @@ describe("inner-loop-machine — the serial round (#185)", () => {
   });
 
   it("exposes one UI phase per serial step", () => {
-    expect(visiblePhases({ kind: "run-quality", attempt: 1 })).toEqual(["quality"]);
-    expect(visiblePhases({ kind: "run-gate", attempt: 1 })).toEqual(["gate-1"]);
+    expect(visiblePhases({ kind: "run-quality-list", attempt: 1, scope: { kind: "full" } }))
+      .toEqual(["quality"]);
+    expect(visiblePhases({ kind: "run-quality-fix", attempt: 1, fixRound: 1, report: "r", ruling: null }))
+      .toEqual(["quality"]);
+    expect(visiblePhases({ kind: "run-quality-verify", attempt: 1, fixRound: 1, anchor: "a", report: "r" }))
+      .toEqual(["quality"]);
+    expect(visiblePhases({ kind: "run-gate", attempt: 1, quality: qualityApproved })).toEqual(["gate-1"]);
     expect(visiblePhases({ kind: "run-correctness", attempt: 1 })).toEqual(["review"]);
   });
 
   it.each([
-    ["the quality fixer", [impl(complete)]],
+    ["the quality lister", [impl(complete)]],
+    ["the quality fixer", [impl(complete), listed(changes("### Tests\nx"))]],
+    ["the quality verify", [impl(complete), listed(changes("### Tests\nx")), fixed()]],
     ["the correctness pass", [impl(complete), quality, gated(gate1Ok)]],
   ] as const)("parks a context overage measured before %s", (_name, events) => {
     const state = stepAll(initialState(defaultOpts), events).state;
@@ -237,6 +272,272 @@ describe("inner-loop-machine — the serial round (#185)", () => {
   });
 });
 
+describe("inner-loop-machine — the quality pass (#187)", () => {
+  const report = "### Tests\nsrc/a.ts:3 is uncovered";
+  // A COMPLETE whose lister rejects: the pass is in front of the fixer.
+  const listedRejection = () =>
+    stepAll(initialState(defaultOpts), [impl(complete), listed(changes(report))]);
+  const asGate = (a: LoopAction) => {
+    if (a.kind !== "run-gate") throw new Error(`expected run-gate, got ${a.kind}`);
+    return a;
+  };
+
+  it("hands a rejecting lister's report to the fixer", () => {
+    expect(listedRejection().action).toEqual({
+      kind: "run-quality-fix",
+      attempt: 1,
+      fixRound: 1,
+      report,
+      ruling: null,
+    });
+  });
+
+  it("verifies a fixer's commits from the head before it, against the same report", () => {
+    const r = step(listedRejection().state, fixed(1, { startHead: "head", head: "fixed" }));
+    expect(r.action).toEqual({
+      kind: "run-quality-verify",
+      attempt: 1,
+      fixRound: 1,
+      anchor: "head",
+      report,
+    });
+  });
+
+  it("gates once on an approving verify and anchors the next lister at its head", () => {
+    const { actions } = drive(defaultOpts, [
+      impl(complete),
+      listed(changes(report)),
+      fixed(),
+      verified(approved(), "fixed"),
+      gated(gate1Red("red"), "fixed"),
+      impl(complete, [], null, null, 1, "next"),
+      listed(approved(), "next"),
+      gated(gate1Ok, "next"),
+      reviewed(approved(), "next"),
+    ]);
+    expect(actions.filter((a) => a.kind === "run-gate")).toEqual([
+      { kind: "run-gate", attempt: 1, quality: { verdict: "APPROVED", rounds: 0 } },
+      { kind: "run-gate", attempt: 2, quality: { verdict: "APPROVED", rounds: 0 } },
+    ]);
+    expect(actions.filter((a) => a.kind === "run-quality-list")).toEqual([
+      { kind: "run-quality-list", attempt: 1, scope: { kind: "full" } },
+      { kind: "run-quality-list", attempt: 2, scope: { kind: "since", sha: "fixed" } },
+    ]);
+  });
+
+  it("sends a verify rejection's restated report to the next fixer and charges the pass", () => {
+    const r = stepAll(listedRejection().state, [fixed(), verified(changes("still open"))]);
+    expect(r.action).toEqual({
+      kind: "run-quality-fix",
+      attempt: 1,
+      fixRound: 2,
+      report: "still open",
+      ruling: null,
+    });
+    expect(r.state.qualityFailures).toBe(1);
+  });
+
+  it("goes on to gate-1 with the items open when maxQualityRounds runs out", () => {
+    const { actions, verdict } = drive({ maxQualityRounds: 2 }, [
+      impl(complete),
+      listed(changes(report)),
+      fixed(),
+      verified(changes("open 1")),
+      fixed(1, { startHead: "fixed", head: "fixed2" }),
+      verified(changes("open 2"), "fixed2"),
+      gated(gate1Ok, "fixed2"),
+      reviewed(approved(), "fixed2"),
+    ]);
+    expect(actions.find((a) => a.kind === "run-gate")).toEqual({
+      kind: "run-gate",
+      attempt: 1,
+      quality: { verdict: "CHANGES-REQUESTED", rounds: 2 },
+    });
+    expect(verdict).toEqual({ type: "DONE" });
+  });
+
+  it("never hands a quality report to the implementer", () => {
+    const r = stepAll(initialState({ ...defaultOpts, maxQualityRounds: 1 }), [
+      impl(complete),
+      listed(changes(report)),
+      fixed(),
+      verified(changes("still open")),
+      gated(gate1Red("red"), "fixed"),
+    ]);
+    expect(asImpl(r.action)).toMatchObject({ latestReviewerFeedback: null, extraReprompt: null });
+  });
+
+  it("opens every pass with a fresh budget and lists the whole branch until one approves", () => {
+    const exhausted = stepAll(initialState({ ...defaultOpts, maxQualityRounds: 1 }), [
+      impl(complete),
+      listed(changes(report)),
+      fixed(),
+      verified(changes("still open")),
+      gated(gate1Red("red"), "fixed"),
+    ]);
+    const relisted = step(exhausted.state, impl(complete, [], null, null, 1, "next"));
+    expect(relisted.action).toEqual({ kind: "run-quality-list", attempt: 2, scope: { kind: "full" } });
+    expect(relisted.state.qualityFailures).toBe(0);
+    expect(relisted.state.qualityReport).toBeNull();
+  });
+
+  it.each([
+    ["lister", [] as readonly LoopEvent[], listed(harnessFailed()), 0],
+    ["verify", [listed(changes(report)), fixed()], verified(harnessFailed()), 0],
+  ] as const)("goes on to gate-1 when the %s produced no review", (_role, before, failed, rounds) => {
+    const r = stepAll(initialState(defaultOpts), [impl(complete), ...before, failed]);
+    expect(asGate(r.action).quality).toEqual({ verdict: "REVIEW-FAILED", rounds });
+    // Not a correctness harness failure: the #41 bound is untouched.
+    expect(r.state.reviewerHarnessFailures).toBe(0);
+  });
+
+  it.each([
+    ["lister", [] as readonly LoopEvent[], listed({ kind: "reviewer-wrote", detail: "it wrote" })],
+    ["verify", [listed(changes(report)), fixed()], verified({ kind: "reviewer-wrote", detail: "it wrote" })],
+  ] as const)("parks a %s that writes", (_role, before, wrote) => {
+    const r = stepAll(initialState(defaultOpts), [impl(complete), ...before, wrote]);
+    expect(r.action).toEqual({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "quality-reviewer-wrote",
+        latestReviewerProse: "it wrote",
+      },
+    });
+  });
+
+  it("goes on to gate-1 when the fixer crashed on its retry too, whatever it committed", () => {
+    const r = step(listedRejection().state, fixed(1, { exited: "failed" }));
+    expect(asGate(r.action).quality).toEqual({ verdict: "FIX-FAILED", rounds: 0 });
+  });
+
+  it("sends a fixer that commits nothing to the adjudicator with the latest report", () => {
+    const r = step(listedRejection().state, fixed(0));
+    expect(r.action).toEqual({
+      kind: "run-adjudicator",
+      attempt: 1,
+      pass: "quality",
+      fixRound: 1,
+      rejection: { round: 1, head: "head", report },
+    });
+  });
+
+  it("approves the head for the quality pass when the adjudicator overrules", () => {
+    const { actions } = drive(defaultOpts, [
+      impl(complete),
+      listed(changes(report)),
+      fixed(0),
+      { kind: "adjudicator-result", head: "head", ruling: "OVERRULED", reasoning: "covered" },
+      gated(gate1Red("red")),
+      impl(complete, [], null, null, 1, "next"),
+      listed(approved(), "next"),
+      gated(gate1Ok, "next"),
+      reviewed(approved(), "next"),
+    ]);
+    expect(actions.filter((a) => a.kind === "run-gate").map((a) => asGate(a).quality)).toEqual([
+      { verdict: "OVERRULED", rounds: 0 },
+      { verdict: "APPROVED", rounds: 0 },
+    ]);
+    expect(actions.filter((a) => a.kind === "run-quality-list").at(-1)).toEqual({
+      kind: "run-quality-list",
+      attempt: 2,
+      scope: { kind: "since", sha: "head" },
+    });
+  });
+
+  it("runs the fixer once more with an upheld ruling, charged to the pass", () => {
+    const upheld = stepAll(listedRejection().state, [
+      fixed(0),
+      { kind: "adjudicator-result", head: "head", ruling: "UPHELD", reasoning: " line 3 is uncovered " },
+    ]);
+    expect(upheld.action).toEqual({
+      kind: "run-quality-fix",
+      attempt: 1,
+      fixRound: 2,
+      report,
+      ruling: "line 3 is uncovered",
+    });
+    expect(upheld.state.qualityFailures).toBe(1);
+    // The ruling was for that fixer alone.
+    const afterFix = step(upheld.state, fixed());
+    expect(afterFix.state.qualityRuling).toBeNull();
+    expect(afterFix.action.kind).toBe("run-quality-verify");
+  });
+
+  it("takes the budget-exhausted path when the fixer refuses again after an upheld ruling", () => {
+    const r = stepAll(listedRejection().state, [
+      fixed(0),
+      { kind: "adjudicator-result", head: "head", ruling: "UPHELD", reasoning: "true" },
+      fixed(0),
+    ]);
+    expect(asGate(r.action).quality).toEqual({ verdict: "CHANGES-REQUESTED", rounds: 1 });
+  });
+
+  it("adjudicates a later refusal at a new head", () => {
+    const r = stepAll(listedRejection().state, [
+      fixed(0),
+      { kind: "adjudicator-result", head: "head", ruling: "UPHELD", reasoning: "true" },
+      fixed(1, { startHead: "head", head: "fixed" }),
+      verified(changes("still open")),
+      fixed(0, { startHead: "fixed" }),
+    ]);
+    expect(r.action).toMatchObject({
+      kind: "run-adjudicator",
+      pass: "quality",
+      fixRound: 3,
+      rejection: { head: "fixed", report: "still open" },
+    });
+  });
+
+  it("does not run the fixer again when an upheld ruling spends the last round", () => {
+    const r = stepAll(initialState({ ...defaultOpts, maxQualityRounds: 1 }), [
+      impl(complete),
+      listed(changes(report)),
+      fixed(0),
+      { kind: "adjudicator-result", head: "head", ruling: "UPHELD", reasoning: "true" },
+    ]);
+    expect(asGate(r.action).quality).toEqual({ verdict: "CHANGES-REQUESTED", rounds: 1 });
+  });
+
+  it("goes on to gate-1 when the quality adjudicator produced nothing", () => {
+    const r = stepAll(listedRejection().state, [
+      fixed(0),
+      { kind: "adjudicator-harness-failed", detail: "no ruling" },
+    ]);
+    expect(asGate(r.action).quality).toEqual({ verdict: "REVIEW-FAILED", rounds: 0 });
+    expect(r.state.reviewerHarnessFailures).toBe(0);
+  });
+
+  it("parks a quality adjudicator that writes", () => {
+    const r = stepAll(listedRejection().state, [
+      fixed(0),
+      { kind: "adjudicator-wrote", detail: "it committed" },
+    ]);
+    expect(r.action).toMatchObject({
+      kind: "terminate",
+      verdict: { type: "NEEDS-HUMAN-REVIEW", cause: "adjudicator-wrote" },
+    });
+  });
+
+  it("refuses a quality ruling about another head", () => {
+    const disputed = step(listedRejection().state, fixed(0));
+    expect(() =>
+      step(disputed.state, {
+        kind: "adjudicator-result",
+        head: "zzz",
+        ruling: "OVERRULED",
+        reasoning: "",
+      }),
+    ).toThrow(/other than the pending head/);
+  });
+
+  it("refuses a verify result while the fixer is pending", () => {
+    expect(() => step(listedRejection().state, verified(approved()))).toThrow(
+      /quality-review-result event in phase needs-quality-fix; expected needs-quality-verify/,
+    );
+  });
+});
+
 describe("inner-loop-machine — unchanged rejection adjudication (#167)", () => {
   const reachRejection = (head = "abc") =>
     stepAll(initialState(defaultOpts), [
@@ -249,13 +550,18 @@ describe("inner-loop-machine — unchanged rejection adjudication (#167)", () =>
     expect(disputed.action).toEqual({
       kind: "run-adjudicator",
       attempt: 2,
+      pass: "correctness",
       rejection: { round: 1, head: "abc", report: "finding" },
     });
   });
 
   it("does not adjudicate after the implementer changes the head", () => {
     const changed = step(reachRejection().state, impl(complete, [], null, null, 1, "def"));
-    expect(changed.action).toEqual({ kind: "run-quality", attempt: 2 });
+    expect(changed.action).toEqual({
+      kind: "run-quality-list",
+      attempt: 2,
+      scope: { kind: "since", sha: "abc" },
+    });
   });
 
   it("makes an overruled correctness rejection final approval", () => {
@@ -282,7 +588,11 @@ describe("inner-loop-machine — unchanged rejection adjudication (#167)", () =>
     expect(upheld.state.correctnessFailures).toBe(1);
     // The same zero-commit move at the same head now takes the ordinary round.
     const again = step(upheld.state, impl(complete, [], null, null, 0, "abc"));
-    expect(again.action).toEqual({ kind: "run-quality", attempt: 3 });
+    expect(again.action).toEqual({
+      kind: "run-quality-list",
+      attempt: 3,
+      scope: { kind: "since", sha: "abc" },
+    });
     // A repeated rejection at that head carries the ruling's reasoning.
     const rejectedAgain = stepAll(again.state, round(gate1Ok, changes("finding"), "abc"));
     expect(asImpl(rejectedAgain.action).latestReviewerFeedback).toContain(
@@ -698,7 +1008,8 @@ describe("inner-loop-machine — phase invariants", () => {
   });
 
   it.each([
-    ["a quality result before COMPLETE", quality, /quality-result event in phase needs-implementer/],
+    ["a quality review before COMPLETE", quality, /quality-review-result event in phase needs-implementer/],
+    ["a fixer result before COMPLETE", fixed(), /quality-fix-result event in phase needs-implementer/],
     ["a gate result before COMPLETE", gated(gate1Ok), /gate-result event in phase needs-implementer/],
     ["a correctness result before COMPLETE", reviewed(approved()), /correctness-result event in phase needs-implementer/],
   ] as const)("%s throws", (_name, event, message) => {
@@ -711,6 +1022,7 @@ describe("inner-loop-machine — phase invariants", () => {
   });
 
   it.each([
+    ["maxQualityRounds", 0],
     ["maxGateRounds", 0],
     ["maxReviewRounds", 1.5],
   ] as const)("initialState rejects non-positive %s", (field, value) => {
@@ -806,7 +1118,7 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
 
   it("starts the round normally once the tree is clean", () => {
     const r = stepAll(initialState(defaultOpts), [impl(complete, dirty), impl(complete)]);
-    expect(r.action.kind).toBe("run-quality");
+    expect(r.action.kind).toBe("run-quality-list");
   });
 
   it("spends the gate budget, and exhausting it on dirt is NEEDS-HUMAN", () => {
@@ -976,7 +1288,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
 
   it("starts the round normally once HEAD is back on the branch", () => {
     const r = stepAll(initialState(defaultOpts), [impl(complete, [], detached()), impl(complete)]);
-    expect(r.action.kind).toBe("run-quality");
+    expect(r.action.kind).toBe("run-quality-list");
   });
 
   it("terminates on a SECOND consecutive off-branch attempt, well inside the budget", () => {

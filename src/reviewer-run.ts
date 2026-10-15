@@ -1,5 +1,5 @@
-// Reviewer policy (#19, #41, #121, #185) — what counts as a review, and what to
-// do when nothing does.
+// Reviewer policy (#19, #41, #121, #185, #187) — what counts as a review, and
+// what to do when nothing does.
 //
 // A reviewer INVOCATION yields a verdict or it yields nothing, and this module
 // is the only place that decides which:
@@ -14,12 +14,13 @@
 // Repository mutation aborts the invocation loop as a typed value, so no
 // second reviewer runs against state the first reviewer altered (#98).
 //
-// Only the correctness pass reviews (#185). The quality pass became a fixer
-// that commits and emits no verdict, so there is no round to compose: the one
-// cold correctness outcome maps directly to the state machine's event. It runs
-// only on a green gate-1 at the head the fixer left, and stays COLD — nothing
-// resumes a session — which is what lets it sit on a different vendor from the
-// fixer (#121 §2).
+// Three read-only reviews share this policy: the correctness pass, and the
+// quality pass's lister and verify (#187). Each is COLD — nothing resumes a
+// session — which is what lets each sit on its own vendor (#121 §2). One
+// outcome maps directly to the state machine's event for its pass; the
+// machine decides what a review that produced nothing means for that pass.
+// The quality fixer is not a reviewer: it emits no verdict and its retry is
+// the runner's (inner-loop.ts).
 //
 // The correctness pass may also declare one `<spec-gap>` block (#108).
 // `parseVerdict` keeps it on the parsed verdict; the mapping does not place it
@@ -27,7 +28,7 @@
 // I/O runner reads it directly from the completed outcome and accumulates it
 // beside prior-round history.
 
-import type { ReviewerResult } from "./inner-loop-machine.js";
+import type { ReviewerResult, ReviewPass } from "./inner-loop-machine.js";
 import { type ParsedVerdict, parseVerdict } from "./verdict-parser.js";
 
 // One retry. A second flake in a row is not a flake, and each invocation can
@@ -55,7 +56,9 @@ export type ReviewerInvocation =
   | { readonly kind: "run"; readonly run: ReviewerRun }
   | {
       readonly kind: "aborted";
-      readonly event: Extract<ReviewerResult, { kind: "reviewer-wrote" }>;
+      // What the write changed, with the transcript (inner-loop.ts,
+      // `enforceReadOnlyAgentSnapshot`).
+      readonly detail: string;
       readonly transcript: string;
     };
 
@@ -78,22 +81,19 @@ export type ReviewerOutcome =
     }
   | Extract<ReviewerInvocation, { readonly kind: "aborted" }>;
 
-export type CompletedReviewerOutcome = Exclude<
-  ReviewerOutcome,
-  { readonly kind: "aborted" }
->;
-
-// The state machine's event for one completed correctness outcome. The detail
-// keeps its `correctness:` prefix so the human handoff names the pass even
-// though it is the only one that reviews.
-export function reviewerResult(outcome: CompletedReviewerOutcome): Extract<
-  ReviewerResult,
-  { kind: "reviewer-result" | "reviewer-harness-failed" }
-> {
+// The state machine's result for one outcome of a pass. The harness detail
+// carries the pass as a prefix so the human handoff names it.
+export function reviewerResult(
+  outcome: ReviewerOutcome,
+  pass: ReviewPass,
+): ReviewerResult {
+  if (outcome.kind === "aborted") {
+    return { kind: "reviewer-wrote", detail: outcome.detail };
+  }
   if (outcome.kind === "harness-failed") {
     return {
       kind: "reviewer-harness-failed",
-      detail: `correctness: ${outcome.detail}`,
+      detail: `${pass}: ${outcome.detail}`,
     };
   }
   return {

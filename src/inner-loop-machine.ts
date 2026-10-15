@@ -1,31 +1,50 @@
 // Pure inner-loop state machine — no I/O. The runner calls step(state, event)
 // and executes the returned action; `terminate` ends the loop. Every decision
 // (the pre-attempt partition and UI classifications, promise routing, the
-// serial quality → gate-1 → correctness order, per-budget exhaustion, and
-// context-budget parking) lives here and is table-driven tested in
-// inner-loop-machine.test.ts.
+// serial quality → gate-1 → correctness order, the quality pass's own
+// list → fix → verify loop, per-budget exhaustion, and context-budget parking)
+// lives here and is table-driven tested in inner-loop-machine.test.ts.
 //
-// After a clean, on-branch COMPLETE the round is SERIAL (#185): the quality
-// pass — a fixer that commits standards fixes and tests and has no verdict —
-// then gate-1 on the head the fixer left, then the correctness reviewer only
-// on a green gate there. Gate-1 mounts the worktree the fixer writes, so #123's
-// concurrent gate/quality dispatch is gone. A red gate goes back to the
-// implementer; a test the fixer wrote that fails is how a correctness defect
-// reaches it.
+// After a clean, on-branch COMPLETE the round is SERIAL (#185, #187): the
+// quality pass, then gate-1 ONCE on the head it left, then the correctness
+// reviewer only on a green gate there. A red gate goes back to the
+// implementer; a failing test the quality fixer committed is how a
+// correctness defect reaches it.
 //
-// Two independent consecutive-failure budgets bound non-convergence (#129,
-// #143, #185). `gateFailures` counts red gate-1 results AND every attempt that
-// failed to produce a commit the gate could judge — NO-SIGNAL, COMPLETE over a
-// dirty tree, an unrepaired off-branch HEAD — and every green gate-1 resets
-// it. `correctnessFailures` counts correctness rejections only. Neither
-// counter spends or resets the other. There is no implementer-attempt budget:
-// `attempt` remains only a sequence number.
+// The quality pass (#187) is three cold roles. A read-only LISTER walks the
+// branch — the whole branch until a quality pass has approved a head, then
+// only what changed since that head — and lists every tests/standards finding
+// above a verdict. APPROVED goes straight to gate-1. CHANGES-REQUESTED hands
+// the report to the writable FIXER, whose text is ignored. A read-only VERIFY
+// anchored at the head before the fixer then judges whether each listed item
+// was dealt with and whether the fixer's own lines meet the standards, and
+// restates every item still open, so the fixer only ever gets the latest
+// report. A verify rejection goes back to the fixer. `maxQualityRounds` bounds
+// one pass: verify rejections and upheld quality adjudications charge it, and
+// running out continues to gate-1 with the open items left in the record. No
+// quality outcome reaches the implementer, which does not see the coding
+// standards. A lister or verify that produced no review after its retry, or a
+// fixer that crashed on its retry too, also continues to gate-1; the runner
+// owns those retries.
 //
-// Reviewer harness failure keeps #41's separate rule: it charges neither
-// budget. `reviewerHarnessFailures` is a per-inner-loop total over the
-// correctness pass and the adjudicator that never resets; its second failure
-// terminates. The quality fixer has no harness failure: whatever it leaves, the
-// runner settles host-side and the round goes on to gate-1.
+// A fixer that exits normally with no commits disputes the latest report:
+// once per head, that report goes to the adjudicator. OVERRULED approves the
+// head for the quality pass and continues to gate-1. UPHELD charges
+// `maxQualityRounds` and runs the fixer once more with the ruling attached; a
+// second refusal at the same head takes the budget-exhausted path.
+//
+// Three independent budgets bound non-convergence (#129, #143, #185, #187).
+// `gateFailures` counts red gate-1 results AND every attempt that failed to
+// produce a commit the gate could judge — NO-SIGNAL, COMPLETE over a dirty
+// tree, an unrepaired off-branch HEAD — and every green gate-1 resets it.
+// `correctnessFailures` counts correctness rejections only. `qualityFailures`
+// is per quality pass and never stops the loop. No counter spends or resets
+// another. There is no implementer-attempt budget: `attempt` remains only a
+// sequence number.
+//
+// Reviewer harness failure keeps #41's separate rule for the correctness pass
+// and its adjudicator: it charges no budget. `reviewerHarnessFailures` is a
+// per-inner-loop total that never resets; its second failure terminates.
 //
 // A COMPLETE claim is routed on THREE inputs, not one: the promise token, a
 // clean worktree (#24 D1), and HEAD still being the issue branch (#27). The
@@ -41,8 +60,7 @@
 // A zero-commit COMPLETE at the head of a pending correctness rejection enters
 // one adjudication per head (#167). UPHELD keeps the original charge and makes
 // another zero-commit attempt take the ordinary round; OVERRULED finishes the
-// issue as approved. With no quality rejection, adjudication is
-// correctness-only (#185).
+// issue as approved.
 //
 // A reviewer that produced NO review is not a verdict (#41); that judgment is
 // reviewer-run.ts's. `reviewer-harness-failed` consumes no review round,
@@ -73,11 +91,36 @@ export type ContextSlot =
   | "review-quality"
   | "review-correctness";
 
-// The correctness rejection the next zero-commit attempt may dispute (#167).
+// The two reviewing passes an adjudicator can rule on (#167, #187).
+export type ReviewPass = "quality" | "correctness";
+
+// A rejected report at the head it judged: the correctness rejection the next
+// zero-commit attempt may dispute (#167), or the quality report a zero-commit
+// fixer disputed (#187).
 export type PendingRejection = {
   readonly round: number;
   readonly head: string;
   readonly report: string;
+};
+
+// What a quality lister reads (#187): the whole branch until a quality pass
+// has approved a head, then only what changed since that head.
+export type QualityScope =
+  | { readonly kind: "full" }
+  | { readonly kind: "since"; readonly sha: string };
+
+// How a round's quality pass ended (#187). CHANGES-REQUESTED means the budget
+// ran out with items open; REVIEW-FAILED that a lister, verify or quality
+// adjudicator produced nothing; FIX-FAILED that the fixer crashed on its retry.
+export type QualityOutcome = {
+  readonly verdict:
+    | "APPROVED"
+    | "OVERRULED"
+    | "CHANGES-REQUESTED"
+    | "REVIEW-FAILED"
+    | "FIX-FAILED";
+  // `qualityFailures` spent by the pass.
+  readonly rounds: number;
 };
 
 export const HARD_ERROR_MAX_RETRIES = 2;
@@ -87,7 +130,9 @@ export type LoopPhase =
   | "needs-partition-check"
   | "needs-ui-check"
   | "needs-implementer"
-  | "needs-quality"
+  | "needs-quality-list"
+  | "needs-quality-fix"
+  | "needs-quality-verify"
   | "needs-gate"
   | "needs-correctness"
   | "needs-adjudicator"
@@ -95,16 +140,19 @@ export type LoopPhase =
 
 export type LoopState = {
   readonly issueBranch: string;
+  readonly maxQualityRounds: number;
   readonly maxGateRounds: number;
   readonly maxReviewRounds: number;
   readonly attempt: number;
+  // Spent by the current quality pass; reset when a lister opens one.
+  readonly qualityFailures: number;
   readonly gateFailures: number;
   readonly correctnessFailures: number;
   readonly lastFailureTrace: string;
   readonly lastFailedStep: string | null;
   readonly extraReprompt: string | null;
   // The latest correctness rejection's prose, with any upheld adjudication
-  // prepended. Only correctness rejects since #185.
+  // prepended. The quality pass never hands the implementer feedback.
   readonly latestReviewerFeedback: string | null;
   // The dirty set that sent the PREVIOUS attempt back to commit its work, or
   // null if the last attempt didn't end that way. Only used to detect that an
@@ -119,11 +167,28 @@ export type LoopState = {
   // independently of convergence streaks.
   readonly reviewerHarnessFailures: number;
   readonly pendingRejection: PendingRejection | null;
-  // Heads whose rejection has already been adjudicated once.
+  // Heads whose correctness rejection has already been adjudicated once.
   readonly adjudicatedHeads: readonly string[];
   readonly upheldAdjudication: {
     readonly head: string;
     readonly reasoning: string;
+  } | null;
+  // The latest CHANGES-REQUESTED quality report — the lister's, or the
+  // verify's restatement of what is still open. The fixer's input.
+  readonly qualityReport: string | null;
+  // An upheld quality adjudication's reasoning, for the next fixer only.
+  readonly qualityRuling: string | null;
+  // Fixer dispatches in the current quality pass; numbers its steps.
+  readonly qualityFixRounds: number;
+  // The head a quality pass last approved, or whose quality report an
+  // adjudicator overruled. Anchors a later lister's scope.
+  readonly qualityApprovedHead: string | null;
+  // Heads whose quality report has already been adjudicated once.
+  readonly qualityAdjudicatedHeads: readonly string[];
+  // What the adjudicator now running was asked to judge.
+  readonly adjudicating: {
+    readonly pass: ReviewPass;
+    readonly rejection: PendingRejection;
   } | null;
   readonly uiPrototypeCheck: boolean;
   readonly phase: LoopPhase;
@@ -222,6 +287,7 @@ export type Verdict =
       readonly latestReviewerProse: string;
       readonly cause:
         | "reviewer-wrote"
+        | "quality-reviewer-wrote"
         | "adjudicator-wrote"
         | "ui-checker-wrote"
         | "partition-checker-wrote";
@@ -249,12 +315,45 @@ export type LoopAction =
       readonly extraReprompt: string | null;
       readonly latestReviewerFeedback: string | null;
     }
-  | { readonly kind: "run-quality"; readonly attempt: number }
-  | { readonly kind: "run-gate"; readonly attempt: number }
+  | {
+      readonly kind: "run-quality-list";
+      readonly attempt: number;
+      readonly scope: QualityScope;
+    }
+  | {
+      readonly kind: "run-quality-fix";
+      readonly attempt: number;
+      readonly fixRound: number;
+      readonly report: string;
+      readonly ruling: string | null;
+    }
+  | {
+      readonly kind: "run-quality-verify";
+      readonly attempt: number;
+      readonly fixRound: number;
+      // The head before the fixer ran: verify reads only what changed since.
+      readonly anchor: string;
+      readonly report: string;
+    }
+  | {
+      readonly kind: "run-gate";
+      readonly attempt: number;
+      // Record material for the round's `review-round` event; gate-1 runs
+      // whatever the pass ended with.
+      readonly quality: QualityOutcome;
+    }
   | { readonly kind: "run-correctness"; readonly attempt: number }
   | {
       readonly kind: "run-adjudicator";
       readonly attempt: number;
+      readonly pass: "correctness";
+      readonly rejection: PendingRejection;
+    }
+  | {
+      readonly kind: "run-adjudicator";
+      readonly attempt: number;
+      readonly pass: "quality";
+      readonly fixRound: number;
       readonly rejection: PendingRejection;
     }
   | { readonly kind: "terminate"; readonly verdict: Verdict };
@@ -276,7 +375,10 @@ export function visiblePhases(
     case "run-partition-check": return ["partition-check"];
     case "run-ui-check": return ["ui-check"];
     case "run-implementer": return ["implementer"];
-    case "run-quality": return ["quality"];
+    case "run-quality-list":
+    case "run-quality-fix":
+    case "run-quality-verify":
+      return ["quality"];
     case "run-gate": return ["gate-1"];
     case "run-correctness": return ["review"];
     case "run-adjudicator": return ["adjudication"];
@@ -323,9 +425,24 @@ export type LoopEvent =
       readonly commits: number;
       readonly head: string;
     }
-  // The fixer has no verdict; its commits and settled residue are run
-  // evidence the runner records, not decision inputs (#185).
-  | { readonly kind: "quality-result" }
+  | {
+      // A quality lister or verify outcome at `head` (#187). Same shape as a
+      // correctness outcome: a verdict, no review, or a write.
+      readonly kind: "quality-review-result";
+      readonly mode: "list" | "verify";
+      readonly head: string;
+      readonly review: ReviewerResult;
+    }
+  | {
+      // What the fixer left (#187). Its text is ignored; whether it committed
+      // and whether its process exited normally are the only inputs.
+      readonly kind: "quality-fix-result";
+      // The head before the fixer's first invocation, and after its last.
+      readonly startHead: string;
+      readonly head: string;
+      readonly commits: number;
+      readonly exited: "completed" | "failed";
+    }
   | {
       readonly kind: "gate-result";
       readonly gate: Gate1Result;
@@ -353,7 +470,8 @@ export type Gate1Result = {
   readonly failedStep: string | null;
 };
 
-// What one correctness pass yielded (#41, #98).
+// What one read-only review yielded: the correctness pass, or a quality lister
+// or verify (#41, #98, #187).
 export type ReviewerResult =
   | {
       readonly kind: "reviewer-result";
@@ -377,6 +495,7 @@ export type StepResult = {
 
 export type InitialStateOptions = {
   readonly issueBranch: string;
+  readonly maxQualityRounds: number;
   readonly maxGateRounds: number;
   readonly maxReviewRounds: number;
   readonly uiPrototypeCheck: boolean;
@@ -384,21 +503,18 @@ export type InitialStateOptions = {
 };
 
 export function initialState(opts: InitialStateOptions): LoopState {
-  if (!Number.isInteger(opts.maxGateRounds) || opts.maxGateRounds < 1) {
-    throw new Error(
-      `maxGateRounds must be a positive integer, got ${opts.maxGateRounds}`,
-    );
-  }
-  if (!Number.isInteger(opts.maxReviewRounds) || opts.maxReviewRounds < 1) {
-    throw new Error(
-      `maxReviewRounds must be a positive integer, got ${opts.maxReviewRounds}`,
-    );
+  for (const budget of ["maxQualityRounds", "maxGateRounds", "maxReviewRounds"] as const) {
+    if (!Number.isInteger(opts[budget]) || opts[budget] < 1) {
+      throw new Error(`${budget} must be a positive integer, got ${opts[budget]}`);
+    }
   }
   return {
     issueBranch: opts.issueBranch,
+    maxQualityRounds: opts.maxQualityRounds,
     maxGateRounds: opts.maxGateRounds,
     maxReviewRounds: opts.maxReviewRounds,
     attempt: 1,
+    qualityFailures: 0,
     gateFailures: 0,
     correctnessFailures: 0,
     lastFailureTrace: "",
@@ -411,6 +527,12 @@ export function initialState(opts: InitialStateOptions): LoopState {
     pendingRejection: null,
     adjudicatedHeads: [],
     upheldAdjudication: null,
+    qualityReport: null,
+    qualityRuling: null,
+    qualityFixRounds: 0,
+    qualityApprovedHead: null,
+    qualityAdjudicatedHeads: [],
+    adjudicating: null,
     uiPrototypeCheck: opts.uiPrototypeCheck,
     phase: opts.partitionCheck
       ? "needs-partition-check"
@@ -433,7 +555,7 @@ export function initialAction(state: LoopState): LoopAction {
 }
 
 const EVENT_PHASE: Readonly<Record<
-  Exclude<LoopEvent["kind"], "context-over-budget">,
+  Exclude<LoopEvent["kind"], "context-over-budget" | "quality-review-result">,
   LoopPhase
 >> = {
   "partition-check-result": "needs-partition-check",
@@ -441,7 +563,7 @@ const EVENT_PHASE: Readonly<Record<
   "ui-check-result": "needs-ui-check",
   "ui-checker-wrote": "needs-ui-check",
   "implementer-result": "needs-implementer",
-  "quality-result": "needs-quality",
+  "quality-fix-result": "needs-quality-fix",
   "gate-result": "needs-gate",
   "correctness-result": "needs-correctness",
   "adjudicator-result": "needs-adjudicator",
@@ -449,13 +571,22 @@ const EVENT_PHASE: Readonly<Record<
   "adjudicator-harness-failed": "needs-adjudicator",
 };
 
+const expectedPhase = (
+  event: Exclude<LoopEvent, { kind: "context-over-budget" }>,
+): LoopPhase =>
+  event.kind === "quality-review-result"
+    ? event.mode === "list" ? "needs-quality-list" : "needs-quality-verify"
+    : EVENT_PHASE[event.kind];
+
 // A role measures its own context before it runs (#158): the partition check
-// its anchor, and the fixer and the correctness reviewer the branch picture
-// they are about to read. Gate-1 reads no prompt and measures nothing.
+// its anchor, and the quality roles and the correctness reviewer the branch
+// picture they are about to read. Gate-1 reads no prompt and measures nothing.
 const CONTEXT_MEASURING_PHASES: readonly LoopPhase[] = [
   "needs-partition-check",
   "needs-implementer",
-  "needs-quality",
+  "needs-quality-list",
+  "needs-quality-fix",
+  "needs-quality-verify",
   "needs-correctness",
 ];
 
@@ -478,7 +609,7 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
     });
   }
 
-  const expected = EVENT_PHASE[event.kind];
+  const expected = expectedPhase(event);
   if (state.phase !== expected) {
     throw new Error(
       `${event.kind} event in phase ${state.phase}; expected ${expected}`,
@@ -533,11 +664,11 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
     case "implementer-result":
       return onImplementerResult(state, event);
 
-    case "quality-result":
-      return {
-        state: { ...state, phase: "needs-gate" },
-        action: { kind: "run-gate", attempt: state.attempt },
-      };
+    case "quality-review-result":
+      return onQualityReviewResult(state, event);
+
+    case "quality-fix-result":
+      return onQualityFixResult(state, event);
 
     case "gate-result":
       return onGateResult(state, event.gate);
@@ -555,13 +686,28 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
         latestReviewerProse: event.detail,
       });
 
-    case "adjudicator-harness-failed":
+    case "adjudicator-harness-failed": {
+      const adjudicating = requireAdjudicating(state);
+      const next: LoopState = { ...state, adjudicating: null };
+      // A quality adjudicator that produced nothing is a quality review that
+      // failed: the pass ends and the round goes on (#187).
+      if (adjudicating.pass === "quality") return toGate(next, "REVIEW-FAILED");
       return onReviewerHarnessFailed(
-        state,
+        next,
         `adjudicator: ${event.detail}`,
         ADJUDICATOR_HARNESS_FAILED_REPROMPT,
       );
+    }
   }
+}
+
+function requireAdjudicating(
+  state: LoopState,
+): NonNullable<LoopState["adjudicating"]> {
+  if (state.adjudicating === null) {
+    throw new Error("adjudicator event with no adjudication dispatched");
+  }
+  return state.adjudicating;
 }
 
 // How many dirty paths to name before eliding. The list is a prompt to an
@@ -814,21 +960,42 @@ function onImplementerResult(
       !state.adjudicatedHeads.includes(rejection.head)
     ) {
       return {
-        state: { ...state, phase: "needs-adjudicator" },
-        action: { kind: "run-adjudicator", attempt: state.attempt, rejection },
+        state: {
+          ...state,
+          phase: "needs-adjudicator",
+          adjudicating: { pass: "correctness", rejection },
+        },
+        action: {
+          kind: "run-adjudicator",
+          attempt: state.attempt,
+          pass: "correctness",
+          rejection,
+        },
       };
     }
+    // A new quality pass: its own budget, no report, no ruling.
+    const listing: LoopState = {
+      ...state,
+      phase: "needs-quality-list",
+      qualityFailures: 0,
+      qualityReport: null,
+      qualityRuling: null,
+      qualityFixRounds: 0,
+      // Keep the repair note only long enough to render it if the round
+      // produces another implementer attempt.
+      extraReprompt: fastForwardedNote,
+      lastDirtyPaths: null,
+      lastOffBranch: false,
+    };
     return {
-      state: {
-        ...state,
-        phase: "needs-quality",
-        // Keep the repair note only long enough to render it if the round
-        // produces another implementer attempt.
-        extraReprompt: fastForwardedNote,
-        lastDirtyPaths: null,
-        lastOffBranch: false,
+      state: listing,
+      action: {
+        kind: "run-quality-list",
+        attempt: state.attempt,
+        scope: state.qualityApprovedHead === null
+          ? { kind: "full" }
+          : { kind: "since", sha: state.qualityApprovedHead },
       },
-      action: { kind: "run-quality", attempt: state.attempt },
     };
   }
   // NO-SIGNAL — either re-prompt for next attempt or exhaust the budget. This
@@ -855,6 +1022,134 @@ function onImplementerResult(
       strandedHead: null,
     },
   );
+}
+
+function onQualityReviewResult(
+  state: LoopState,
+  event: Extract<LoopEvent, { kind: "quality-review-result" }>,
+): StepResult {
+  const { review } = event;
+  if (review.kind === "reviewer-wrote") {
+    return terminate(state, {
+      type: "NEEDS-HUMAN-REVIEW",
+      cause: "quality-reviewer-wrote",
+      latestReviewerProse: review.detail,
+    });
+  }
+  if (review.kind === "reviewer-harness-failed") {
+    return toGate(state, "REVIEW-FAILED");
+  }
+  if (review.verdict === "APPROVED") {
+    return toGate({ ...state, qualityApprovedHead: event.head }, "APPROVED");
+  }
+  if (event.mode === "list") {
+    return dispatchFixer({ ...state, qualityReport: review.prose });
+  }
+  return chargeQuality({ ...state, qualityReport: review.prose });
+}
+
+function onQualityFixResult(
+  state: LoopState,
+  event: Extract<LoopEvent, { kind: "quality-fix-result" }>,
+): StepResult {
+  // The ruling was for this fixer run only.
+  const next: LoopState = { ...state, qualityRuling: null };
+  // Retried by the runner already; a second crash ends the pass, and gate-1
+  // judges whatever it committed.
+  if (event.exited === "failed") return toGate(next, "FIX-FAILED");
+  const report = requireQualityReport(state);
+  if (event.commits === 0) {
+    // A fixer that changed nothing disputes the report. Once per head; a
+    // refusal after an upheld ruling at the same head is out of road.
+    if (state.qualityAdjudicatedHeads.includes(event.head)) {
+      return toGate(next, "CHANGES-REQUESTED");
+    }
+    const rejection: PendingRejection = {
+      round: state.attempt,
+      head: event.head,
+      report,
+    };
+    return {
+      state: {
+        ...next,
+        phase: "needs-adjudicator",
+        adjudicating: { pass: "quality", rejection },
+      },
+      action: {
+        kind: "run-adjudicator",
+        attempt: state.attempt,
+        pass: "quality",
+        fixRound: state.qualityFixRounds,
+        rejection,
+      },
+    };
+  }
+  return {
+    state: { ...next, phase: "needs-quality-verify" },
+    action: {
+      kind: "run-quality-verify",
+      attempt: state.attempt,
+      fixRound: state.qualityFixRounds,
+      anchor: event.startHead,
+      report,
+    },
+  };
+}
+
+function requireQualityReport(state: LoopState): string {
+  if (state.qualityReport === null) {
+    throw new Error("quality fixer step without a CHANGES-REQUESTED report");
+  }
+  return state.qualityReport;
+}
+
+// A rejection the pass is charged for — a verify that still finds items open,
+// or an upheld adjudication. Exhaustion continues the round rather than
+// stopping the loop (#187).
+function chargeQuality(state: LoopState): StepResult {
+  const charged: LoopState = {
+    ...state,
+    qualityFailures: state.qualityFailures + 1,
+  };
+  if (charged.qualityFailures >= charged.maxQualityRounds) {
+    return toGate(charged, "CHANGES-REQUESTED");
+  }
+  return dispatchFixer(charged);
+}
+
+function dispatchFixer(state: LoopState): StepResult {
+  const fixRound = state.qualityFixRounds + 1;
+  return {
+    state: { ...state, phase: "needs-quality-fix", qualityFixRounds: fixRound },
+    action: {
+      kind: "run-quality-fix",
+      attempt: state.attempt,
+      fixRound,
+      report: requireQualityReport(state),
+      ruling: state.qualityRuling,
+    },
+  };
+}
+
+// The quality pass is over, however it ended: gate-1 runs once on the head it
+// left.
+function toGate(
+  state: LoopState,
+  verdict: QualityOutcome["verdict"],
+): StepResult {
+  return {
+    state: {
+      ...state,
+      phase: "needs-gate",
+      qualityReport: null,
+      qualityRuling: null,
+    },
+    action: {
+      kind: "run-gate",
+      attempt: state.attempt,
+      quality: { verdict, rounds: state.qualityFailures },
+    },
+  };
 }
 
 function onGateResult(state: LoopState, gate: Gate1Result): StepResult {
@@ -970,14 +1265,25 @@ function onAdjudicatorResult(
   state: LoopState,
   event: Extract<LoopEvent, { kind: "adjudicator-result" }>,
 ): StepResult {
-  const rejection = state.pendingRejection;
-  if (rejection === null || rejection.head !== event.head) {
+  const { pass, rejection } = requireAdjudicating(state);
+  if (rejection.head !== event.head) {
     throw new Error("adjudicator ruled on a rejection other than the pending head");
   }
+  const ruled: LoopState = { ...state, adjudicating: null };
+  if (pass === "quality") {
+    if (event.ruling === "OVERRULED") {
+      return toGate({ ...ruled, qualityApprovedHead: event.head }, "OVERRULED");
+    }
+    return chargeQuality({
+      ...ruled,
+      qualityAdjudicatedHeads: [...state.qualityAdjudicatedHeads, event.head],
+      qualityRuling: event.reasoning.trim(),
+    });
+  }
   // Every finding in the only rejection the head carries is false: approved.
-  if (event.ruling === "OVERRULED") return terminate(state, { type: "DONE" });
+  if (event.ruling === "OVERRULED") return terminate(ruled, { type: "DONE" });
   const upheldState: LoopState = {
-    ...state,
+    ...ruled,
     adjudicatedHeads: [...state.adjudicatedHeads, rejection.head],
     upheldAdjudication: { head: rejection.head, reasoning: event.reasoning.trim() },
   };

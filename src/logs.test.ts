@@ -26,7 +26,13 @@ describe("agent invocation records (#135)", () => {
   it.each([
     [{ role: "implementer", attempt: 3, nudge: false }, "attempt-3.log"],
     [{ role: "implementer", attempt: 3, nudge: true }, "attempt-3-nudge.log"],
-    [{ role: "quality", attempt: 3 }, "attempt-3-quality.log"],
+    [{ role: "quality-list", attempt: 3, invocation: 2 }, "attempt-3-quality-list-2.log"],
+    [{ role: "quality-fix", attempt: 3, fixRound: 2, invocation: 1 }, "attempt-3-quality-fix-2-1.log"],
+    [{ role: "quality-verify", attempt: 3, fixRound: 2, invocation: 1 }, "attempt-3-quality-verify-2-1.log"],
+    [
+      { role: "quality-adjudicator", attempt: 3, fixRound: 2, invocation: 2 },
+      "attempt-3-quality-adjudicator-2-2.log",
+    ],
     [{ role: "reviewer", attempt: 3, invocation: 2 },
       "attempt-3-reviewer-2.log"],
     [{ role: "adjudicator", attempt: 3, invocation: 1 },

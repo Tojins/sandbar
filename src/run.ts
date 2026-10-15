@@ -45,7 +45,9 @@
 //                              gate-1 results and pre-gate re-prompts, and
 //                              resets on green. maxReviewRounds covers only
 //                              correctness rejection. Each round is the
-//                              quality fixer, gate-1, then correctness.
+//                              quality pass (lister, then fixer and verify
+//                              within maxQualityRounds, #187), gate-1, then
+//                              correctness.
 //                              APPROVED → DONE; CHANGES-REQUESTED loops back
 //                              to a new impl attempt carrying its prose.
 //                              Reviewer harness failure spends none, leaves the
@@ -1400,6 +1402,7 @@ export async function run(
     reviewerEffort: config.reviewerEffort,
     reviewerQualityEffort: config.reviewerQualityEffort,
     adjudicatorEffort: config.adjudicatorEffort,
+    maxQualityRounds: config.maxQualityRounds,
     maxGateRounds: config.maxGateRounds,
     maxReviewRounds: config.maxReviewRounds,
     sandboxImage: config.sandboxImage,

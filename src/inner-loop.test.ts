@@ -7,7 +7,8 @@ const innerLoopMocks = vi.hoisted(() => ({
   buildPrompt: vi.fn(async () => "implementer prompt"),
   buildPartitionCheckPrompt: vi.fn(async () => "partition check prompt"),
   buildUiCheckPrompt: vi.fn(async () => "ui check prompt"),
-  buildQualityPrompt: vi.fn(async () => "quality prompt"),
+  buildQualityReviewPrompt: vi.fn(async () => "quality review prompt"),
+  buildQualityFixPrompt: vi.fn(async () => "quality fix prompt"),
   buildCorrectnessPrompt: vi.fn(async () => "correctness prompt"),
   buildAdjudicatorPrompt: vi.fn(async () => "adjudicator prompt"),
   measureNetDiffChars: vi.fn(async () => 0),
@@ -33,7 +34,8 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   buildPrompt: innerLoopMocks.buildPrompt,
   buildPartitionCheckPrompt: innerLoopMocks.buildPartitionCheckPrompt,
   buildUiCheckPrompt: innerLoopMocks.buildUiCheckPrompt,
-  buildQualityPrompt: innerLoopMocks.buildQualityPrompt,
+  buildQualityReviewPrompt: innerLoopMocks.buildQualityReviewPrompt,
+  buildQualityFixPrompt: innerLoopMocks.buildQualityFixPrompt,
   buildCorrectnessPrompt: innerLoopMocks.buildCorrectnessPrompt,
   buildAdjudicatorPrompt: innerLoopMocks.buildAdjudicatorPrompt,
   measureNetDiffChars: innerLoopMocks.measureNetDiffChars,
@@ -80,8 +82,9 @@ import {
 } from "./agent-sandbox.js";
 import { AgentToolsImageError } from "./agent-tools.js";
 import {
+  QUALITY_FIXER_MAX_INVOCATIONS,
   closedReviewRound,
-  enforceReviewerSnapshot,
+  enforceReadOnlyAgentSnapshot,
   qualityAuthorEnv,
   readOnlyAgentSnapshotChanged,
   runCorrectness,
@@ -89,7 +92,8 @@ import {
   runImplementer,
   runInnerLoop,
   runPartitionCheck,
-  runQuality,
+  runQualityFix,
+  runQualityReview,
   runAdjudicator,
   runUiCheck,
   runSandboxAndPublish,
@@ -509,7 +513,7 @@ describe("silent implementer attempt policy (#116)", () => {
     latestReviewerFeedback: Parameters<
       typeof runImplementer
     >[0]["latestReviewerFeedback"] = null,
-    quality: QualityLedger = { lastHead: null, sinceImplementer: [], openRound: null },
+    quality: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null },
   ) => {
     innerLoopMocks.headMismatch.mockReset().mockResolvedValue(mismatch);
     innerLoopMocks.fastForwardOffBranchHead.mockReset().mockImplementation(
@@ -730,8 +734,8 @@ describe("silent implementer attempt policy (#116)", () => {
   it("hands the fixer's commits since the last attempt to the prompt once", async () => {
     innerLoopMocks.buildPrompt.mockClear();
     const quality: QualityLedger = {
-      lastHead: "q2",
       sinceImplementer: ["q1", "q2"],
+      overrules: [],
       openRound: null,
     };
     const { pending } = runPath(
@@ -748,7 +752,6 @@ describe("silent implementer attempt policy (#116)", () => {
       expect.anything(),
     );
     expect(quality.sinceImplementer).toEqual([]);
-    expect(quality.lastHead).toBe("q2");
   });
 
   it("repairs an ancestor mismatch before building the event and logs the ref move", async () => {
@@ -886,21 +889,30 @@ describe("role prompt-extension wiring (#91)", () => {
     base: { ref: "origin/main" },
     accumulated: [{ sha: "abc123" }],
     priorReviewRounds: [],
-    quality: { lastHead: null, sinceImplementer: [], openRound: null },
+    quality: { sinceImplementer: [], overrules: [], openRound: null },
+  });
+
+  it("hands the quality lister and verify only their own extension", async () => {
+    const stop = new Error("stop after prompt construction");
+    innerLoopMocks.buildQualityReviewPrompt.mockRejectedValueOnce(stop);
+    await expect(runQualityReview(
+      { kind: "run-quality-list", attempt: 1, scope: { kind: "full" } },
+      ctxWith() as unknown as Parameters<typeof runQualityReview>[1],
+    )).rejects.toBe(stop);
+    expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ promptExtension: { text: "quality only" } }),
+    );
   });
 
   it("hands the quality fixer only its own extension", async () => {
     const stop = new Error("stop after prompt construction");
-    innerLoopMocks.buildQualityPrompt.mockRejectedValueOnce(stop);
-    await expect(runQuality(
-      { kind: "run-quality", attempt: 1 },
-      ctxWith() as unknown as Parameters<typeof runQuality>[1],
+    innerLoopMocks.buildQualityFixPrompt.mockRejectedValueOnce(stop);
+    await expect(runQualityFix(
+      { kind: "run-quality-fix", attempt: 1, fixRound: 1, report: "r", ruling: null },
+      ctxWith() as unknown as Parameters<typeof runQualityFix>[1],
     )).rejects.toBe(stop);
-    expect(innerLoopMocks.buildQualityPrompt).toHaveBeenCalledWith(
-      expect.objectContaining({
-        promptExtension: { text: "quality only" },
-        lastQualityHead: null,
-      }),
+    expect(innerLoopMocks.buildQualityFixPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ promptExtension: { text: "quality only" } }),
     );
   });
 
@@ -1114,19 +1126,224 @@ describe("runCorrectness (#121, #185)", () => {
   });
 });
 
-describe("runQuality (#185)", () => {
-  const residue = { dirtyPaths: [], strandedHead: null, rewoundTip: null };
-  const fixer = (
-    outcome:
-      | { readonly kind: "exit"; readonly stdout?: string }
-      | { readonly kind: "error"; readonly error: Error },
-    ledger: QualityLedger = { lastHead: null, sinceImplementer: [], openRound: null },
+describe("runQualityReview (#187)", () => {
+  const reviewer = (
+    outputs: readonly (string | Error)[],
+    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null },
   ) => {
-    innerLoopMocks.buildQualityPrompt.mockReset().mockResolvedValue("quality prompt");
+    innerLoopMocks.buildQualityReviewPrompt.mockReset().mockResolvedValue("quality review prompt");
+    innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("review-head");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue("refs/heads/sandbar/issue-187");
+    const filenames: string[] = [];
+    const events: EventInput[] = [];
+    const queue = [...outputs];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async (options: Parameters<Sandbox["run"]>[0]) => {
+        await options.onInvocationEnd?.({
+          agent: options.name ?? options.agent.name,
+          provider: options.agent.name,
+          model: options.model ?? null,
+          end: "exit",
+          detail: null,
+          exitCode: 0,
+          durationMs: 4,
+          speech: "",
+          stdout: "",
+          stderr: "",
+        });
+        const next = queue.shift()!;
+        if (next instanceof Error) throw withPartialDurationMs(next, 4);
+        return {
+          stdout: next,
+          commits: [],
+          durationMs: 4,
+          silent: false,
+          maxGapMs: 1,
+          toolCalls: 2,
+        };
+      }),
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(),
+    } as unknown as Sandbox;
+    const ctx = {
+      issue: { id: "187", title: "quality", branch: "sandbar/issue-187" },
+      sandbox,
+      worktreePath: "/worktree",
+      opts: {
+        attemptLogger: {
+          writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
+        },
+        onEvent: (event: EventInput) => events.push(event),
+      },
+      config: {
+        repo: { owner: "owner", name: "repo" },
+        layout: { repoDir: "/repo" },
+        sourceBranch: "main",
+        claudeMdPath: "CLAUDE.md",
+        reviewerQualityAgent: "codex",
+        reviewerQualityModelId: "quality-model",
+        reviewerQualityEffort: "high",
+        maxContextChars: 600_000,
+        promptExtensions: { reviewerQuality: { text: "quality only" } },
+      },
+      base: { ref: "origin/main" },
+      quality: ledger,
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+    };
+    const run = (action: Parameters<typeof runQualityReview>[0]) => runQualityReview(action, ctx as unknown as Parameters<typeof runQualityReview>[1]);
+    return { ctx, sandbox, events, filenames, run };
+  };
+  const listAction = {
+    kind: "run-quality-list",
+    attempt: 3,
+    scope: { kind: "full" },
+  } as const;
+  const verifyAction = {
+    kind: "run-quality-verify",
+    attempt: 3,
+    fixRound: 2,
+    anchor: "fix-start",
+    report: "### Tests\nsrc/a.ts:3",
+  } as const;
+
+  it("opens the round and lists cold, read-only, on the quality routing", async () => {
+    const overrule = { round: 1, head: "h0", report: "r", ruling: "fine" };
+    const { ctx, sandbox, events, filenames, run } = reviewer(
+      ["### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>"],
+      { sinceImplementer: [], overrules: [overrule], openRound: null },
+    );
+    await expect(run(listAction)).resolves.toEqual({
+      kind: "quality-review-result",
+      mode: "list",
+      head: "review-head",
+      review: {
+        kind: "reviewer-result",
+        verdict: "CHANGES-REQUESTED",
+        prose: "### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>",
+      },
+    });
+    expect(ctx.quality.openRound).toMatchObject({ attempt: 3, quality: null });
+    expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      promptExtension: { text: "quality only" },
+      mode: { kind: "list", scope: { kind: "full" }, overrules: [overrule] },
+    }));
+    const invocation = vi.mocked(sandbox.run).mock.calls[0]![0];
+    expect(invocation).toMatchObject({
+      name: "quality-list-187-attempt-3",
+      model: "quality-model",
+      completionSignal: [],
+    });
+    expect(invocation.env).toBeUndefined();
+    expect(filenames).toEqual(["attempt-3-quality-list-1.log"]);
+    expect(events).toEqual([expect.objectContaining({
+      kind: "quality-review",
+      attempt: 3,
+      round: 3,
+      invocation: 1,
+      mode: "list",
+      scope: "full",
+      provider: "codex",
+      model: "quality-model",
+      effort: "high",
+      result: "completed",
+      verdict: "CHANGES-REQUESTED",
+      prose: "### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>",
+      usage: { toolCalls: 2, contextChars: "quality review prompt".length },
+    })]);
+  });
+
+  it("names a scoped lister's anchor in its record", async () => {
+    const { events, run } = reviewer(["<verdict>APPROVED</verdict>"]);
+    await run({ ...listAction, scope: { kind: "since", sha: "approved-head" } });
+    expect(events).toEqual([expect.objectContaining({ scope: "since:approved-head" })]);
+  });
+
+  it("verifies the fixer's step from its anchor without opening a round", async () => {
+    const { ctx, events, filenames, sandbox, run } = reviewer(["<verdict>APPROVED</verdict>"]);
+    await expect(run(verifyAction)).resolves.toMatchObject({
+      kind: "quality-review-result",
+      mode: "verify",
+      review: { kind: "reviewer-result", verdict: "APPROVED" },
+    });
+    expect(ctx.quality.openRound).toBeNull();
+    expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      mode: { kind: "verify", anchor: "fix-start", report: "### Tests\nsrc/a.ts:3" },
+    }));
+    expect(vi.mocked(sandbox.run).mock.calls[0]![0].name).toBe("quality-verify-187-attempt-3-fix-2");
+    expect(filenames).toEqual(["attempt-3-quality-verify-2-1.log"]);
+    expect(events).toEqual([expect.objectContaining({
+      mode: "verify", scope: "since:fix-start", verdict: "APPROVED",
+    })]);
+  });
+
+  it("retries a review with no verdict once, then reports the quality pass's harness failure", async () => {
+    const { events, run } = reviewer(["no token", new AgentError("codex exited 1")]);
+    await expect(run(listAction)).resolves.toMatchObject({
+      review: { kind: "reviewer-harness-failed", detail: expect.stringMatching(/^quality: /) },
+    });
+    expect(events.filter((event) => event.kind === "quality-review")).toEqual([
+      expect.objectContaining({ invocation: 1, result: "completed", verdict: null, prose: "no token" }),
+      expect.objectContaining({ invocation: 2, result: "failed", verdict: null }),
+    ]);
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: "notice",
+      message: expect.stringContaining("quality list invocation=1/2 no-review — retrying"),
+    }));
+  });
+
+  it("returns a write as the review's result and keeps the clone", async () => {
+    const { sandbox, run } = reviewer(["<verdict>APPROVED</verdict>"]);
+    innerLoopMocks.branchTip
+      .mockResolvedValueOnce("review-head")
+      .mockResolvedValueOnce("review-head")
+      .mockResolvedValueOnce("moved");
+    await expect(run(verifyAction)).resolves.toMatchObject({
+      review: { kind: "reviewer-wrote", detail: expect.stringContaining("Quality reviewer changed git state") },
+    });
+    expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
+      expect.stringContaining("quality reviewer changed the repository"),
+    );
+  });
+
+  it("classifies a provider size refusal as a partition terminal", async () => {
+    const { run } = reviewer([new AgentInputTooLargeError("input_too_large")]);
+    await expect(run(listAction)).rejects.toMatchObject({
+      verdict: { type: "NEEDS-PARTITION", cause: "provider-refused", slot: "review-quality" },
+    });
+  });
+
+  it("parks an oversized branch before the review runs", async () => {
+    const { sandbox, run } = reviewer([]);
+    innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(600_000);
+    await expect(run(verifyAction)).resolves.toEqual({
+      kind: "context-over-budget",
+      slot: "review-quality",
+      size: 600_000 + "quality review prompt".length,
+      budget: 600_000,
+      detail: "The completed branch exceeds the configured context budget before the quality verify.",
+    });
+    expect(sandbox.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("runQualityFix (#185, #187)", () => {
+  type Outcome =
+    | { readonly kind: "exit"; readonly stdout?: string }
+    | { readonly kind: "error"; readonly error: Error };
+  const fixer = (
+    outcomes: Outcome | readonly Outcome[],
+    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null },
+  ) => {
+    const queue = Array.isArray(outcomes) ? [...outcomes] : null;
+    innerLoopMocks.buildQualityFixPrompt.mockReset().mockResolvedValue("quality fix prompt");
     innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
     innerLoopMocks.branchTip.mockReset()
       .mockResolvedValueOnce("impl-head")
-      .mockResolvedValueOnce("fixer-head");
+      .mockResolvedValueOnce("impl-head")
+      .mockResolvedValue("fixer-head");
     innerLoopMocks.settleQualityResidue.mockReset().mockResolvedValue({
       commits: [{ sha: "q1" }, { sha: "q2" }],
       residue: { dirtyPaths: [" M scratch.ts"], strandedHead: null, rewoundTip: null },
@@ -1148,6 +1365,7 @@ describe("runQuality (#185)", () => {
           stdout: "",
           stderr: "",
         });
+        const outcome = queue === null ? outcomes as Outcome : queue.shift()!;
         if (outcome.kind === "error") {
           throw withPartialDurationMs(
             withPartialContainerResources(outcome.error, { peakMemoryBytes: 9 }),
@@ -1200,21 +1418,21 @@ describe("runQuality (#185)", () => {
       sandbox,
       events,
       filenames,
-      run: () => runQuality(
-        { kind: "run-quality", attempt: 3 },
-        ctx as unknown as Parameters<typeof runQuality>[1],
+      run: (ruling: string | null = null) => runQualityFix(
+        { kind: "run-quality-fix", attempt: 3, fixRound: 2, report: "the report", ruling },
+        ctx as unknown as Parameters<typeof runQualityFix>[1],
       ),
     };
   };
 
   it("runs a cold fixer on its own routing under the quality author", async () => {
     const { sandbox, filenames, run } = fixer({ kind: "exit" });
-    await expect(run()).resolves.toEqual({ kind: "quality-result" });
+    await run("upheld because");
     const invocation = vi.mocked(sandbox.run).mock.calls[0]![0];
     expect(invocation).toMatchObject({
-      name: "quality-185-attempt-3",
+      name: "quality-fix-185-attempt-3-fix-2",
       model: "quality-model",
-      prompt: "quality prompt",
+      prompt: "quality fix prompt",
       completionSignal: [],
       env: {
         GIT_AUTHOR_NAME: "sandbar-bot (quality)",
@@ -1224,12 +1442,22 @@ describe("runQuality (#185)", () => {
     expect(invocation.agent.name).toBe("codex");
     expect(invocation.agent.buildPrintCommand({ prompt: "p" }).command)
       .toContain("-c 'model_reasoning_effort=high'");
-    expect(filenames).toEqual(["attempt-3-quality.log"]);
+    expect(filenames).toEqual(["attempt-3-quality-fix-2-1.log"]);
+    expect(innerLoopMocks.buildQualityFixPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      report: "the report",
+      ruling: "upheld because",
+    }));
   });
 
-  it("settles what the pass left from the head it was handed, then publishes", async () => {
+  it("settles what it left from the head it was handed, publishes, and reports its commits", async () => {
     const { ctx, sandbox, events, run } = fixer({ kind: "exit" });
-    await run();
+    await expect(run()).resolves.toEqual({
+      kind: "quality-fix-result",
+      startHead: "impl-head",
+      head: "fixer-head",
+      commits: 2,
+      exited: "completed",
+    });
     expect(innerLoopMocks.settleQualityResidue).toHaveBeenCalledWith(
       "/worktree",
       "sandbar/issue-185",
@@ -1238,8 +1466,6 @@ describe("runQuality (#185)", () => {
     expect(sandbox.syncBranchToCache).toHaveBeenCalledTimes(1);
     expect(ctx.accumulated).toEqual([{ sha: "impl-head" }, { sha: "q1" }, { sha: "q2" }]);
     expect(ctx.quality.sinceImplementer).toEqual(["q1", "q2"]);
-    expect(ctx.quality.lastHead).toBe("fixer-head");
-    expect(ctx.quality.openRound?.attempt).toBe(3);
     expect(events).toEqual([expect.objectContaining({
       kind: "quality-pass",
       issue: 185,
@@ -1254,39 +1480,48 @@ describe("runQuality (#185)", () => {
       durationMs: 7,
       maxGapMs: 2,
       peakMemoryBytes: 5,
-      usage: { toolCalls: 3, contextChars: "quality prompt".length },
+      usage: { toolCalls: 3, contextChars: "quality fix prompt".length },
     })]);
   });
 
-  it("focuses a later pass on the head the previous one left", async () => {
-    const { run } = fixer({ kind: "exit" }, {
-      lastHead: "earlier-fixer-head",
-      sinceImplementer: [],
-      openRound: null,
-    });
-    await run();
-    expect(innerLoopMocks.buildQualityPrompt).toHaveBeenCalledWith(
-      expect.objectContaining({ lastQualityHead: "earlier-fixer-head" }),
-    );
-  });
-
-  // No fixer outcome is a harness failure: a run that exits badly or goes
-  // idle has still ended, and what it committed is still the round's input.
+  // A crash is not a refusal: the invocation has still ended, what it
+  // committed is settled and kept, and it gets one cold retry.
   it.each([
     ["a failed exit", new AgentError("codex exited with code 1")],
     ["an idle timeout", new AgentIdleTimeoutError("Agent idle for 600 seconds", 600_000)],
-  ])("treats %s as the end of the pass", async (_name, error) => {
-    const { sandbox, events, run } = fixer({ kind: "error", error });
-    await expect(run()).resolves.toEqual({ kind: "quality-result" });
-    expect(innerLoopMocks.settleQualityResidue).toHaveBeenCalled();
-    expect(sandbox.syncBranchToCache).toHaveBeenCalled();
-    expect(events).toEqual([expect.objectContaining({
-      kind: "quality-pass",
-      result: "failed",
-      commits: ["q1", "q2"],
-      durationMs: 7,
-      peakMemoryBytes: 9,
-    })]);
+  ])("settles %s and retries it once", async (_name, error) => {
+    const { sandbox, events, filenames, run } = fixer({ kind: "error", error });
+    await expect(run()).resolves.toEqual({
+      kind: "quality-fix-result",
+      startHead: "impl-head",
+      head: "fixer-head",
+      commits: 4,
+      exited: "failed",
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(QUALITY_FIXER_MAX_INVOCATIONS);
+    expect(vi.mocked(sandbox.run).mock.calls[1]![0].name)
+      .toBe("quality-fix-185-attempt-3-fix-2-invocation-2");
+    expect(filenames).toEqual(["attempt-3-quality-fix-2-1.log", "attempt-3-quality-fix-2-2.log"]);
+    expect(innerLoopMocks.settleQualityResidue.mock.calls.map(([, , from]) => from))
+      .toEqual(["impl-head", "fixer-head"]);
+    expect(sandbox.syncBranchToCache).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event.kind === "quality-pass")).toEqual([
+      expect.objectContaining({ result: "failed", commits: ["q1", "q2"], peakMemoryBytes: 9 }),
+      expect.objectContaining({ result: "failed", commits: ["q1", "q2"] }),
+    ]);
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: "notice",
+      message: expect.stringContaining("quality fixer invocation=1/2 failed — retrying"),
+    }));
+  });
+
+  it("stops retrying once an invocation exits normally", async () => {
+    const { sandbox, run } = fixer([
+      { kind: "error", error: new AgentError("codex exited with code 1") },
+      { kind: "exit" },
+    ]);
+    await expect(run()).resolves.toMatchObject({ exited: "completed", commits: 4 });
+    expect(sandbox.run).toHaveBeenCalledTimes(2);
   });
 
   it("closes the provider on quota without settling or retrying", async () => {
@@ -1370,7 +1605,21 @@ describe("closedReviewRound (#132, #185)", () => {
       correctness({ kind: "reviewer-wrote", detail: "" }),
       null,
     ],
-    ["the quality result", { kind: "quality-result" as const }, null],
+    [
+      "a quality review",
+      {
+        kind: "quality-review-result" as const,
+        mode: "list" as const,
+        head: "h",
+        review: { kind: "reviewer-result" as const, verdict: "APPROVED" as const, prose: "" },
+      },
+      null,
+    ],
+    [
+      "a fixer result",
+      { kind: "quality-fix-result" as const, startHead: "h", head: "h", commits: 1, exited: "completed" as const },
+      null,
+    ],
   ] as const)("closes on %s", (_name, event, expected) => {
     expect(closedReviewRound(event)).toEqual(expected);
   });
@@ -1380,6 +1629,7 @@ describe("runAdjudicator (#167)", () => {
   const action = {
     kind: "run-adjudicator" as const,
     attempt: 2,
+    pass: "correctness" as const,
     rejection: { round: 1, head: "head123", report: "false report" },
   };
 
@@ -1403,6 +1653,7 @@ describe("runAdjudicator (#167)", () => {
       adjudicatorModelId: "judge-model",
     },
     base: { ref: "origin/main" },
+    quality: { sinceImplementer: [], overrules: [], openRound: null },
     invocationSequence: createAgentInvocationSequencer().startCycle(),
   } as unknown as Parameters<typeof runAdjudicator>[1]);
 
@@ -1464,7 +1715,70 @@ describe("runAdjudicator (#167)", () => {
       durationMs: expect.any(Number),
       usage: expect.objectContaining({ toolCalls: 3 }),
     }));
-    expect(events.find((event) => event.kind === "adjudication")).not.toHaveProperty("pass");
+    expect(events.find((event) => event.kind === "adjudication")).toMatchObject({
+      pass: "correctness",
+    });
+    expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ pass: "correctness" }),
+    );
+    expect(ctx.quality.overrules).toEqual([]);
+  });
+
+  // #187: a quality ruling is named for its fixer round, and an overrule is
+  // kept for later listers.
+  it("keeps an overruled quality report with its ruling", async () => {
+    unchangedAdjudicatorSnapshot();
+    const filenames: string[] = [];
+    const events: EventInput[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async (options: Parameters<Sandbox["run"]>[0]) => {
+        await options.onInvocationEnd?.({
+          agent: options.name ?? options.agent.name,
+          provider: options.agent.name,
+          model: options.model ?? null,
+          end: "exit",
+          detail: null,
+          exitCode: 0,
+          durationMs: 3,
+          speech: "",
+          stdout: "",
+          stderr: "",
+        });
+        return {
+          stdout: "the test exists\n<ruling>OVERRULED</ruling>",
+          commits: [],
+          durationMs: 3,
+          silent: false,
+          maxGapMs: 1,
+          toolCalls: 1,
+        };
+      }),
+    } as unknown as Sandbox;
+    const ctx = context(sandbox, events);
+    vi.mocked(ctx.opts.attemptLogger.writeInvocation).mockImplementation(
+      async (filename) => { filenames.push(filename); },
+    );
+    const quality = {
+      ...action,
+      pass: "quality" as const,
+      fixRound: 2,
+      rejection: { round: 2, head: "head123", report: "### Tests\nmissing" },
+    };
+
+    await expect(runAdjudicator(quality, ctx)).resolves.toMatchObject({ ruling: "OVERRULED" });
+    expect(vi.mocked(sandbox.run).mock.calls[0]![0].name)
+      .toBe("quality-adjudicator-167-round-2-fix-2");
+    expect(filenames).toEqual(["attempt-2-quality-adjudicator-2-1.log"]);
+    expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ pass: "quality", head: "head123", report: "### Tests\nmissing" }),
+    );
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: "adjudication", pass: "quality", round: 2, ruling: "OVERRULED",
+    }));
+    expect(ctx.quality.overrules).toEqual([{
+      round: 2, head: "head123", report: "### Tests\nmissing", ruling: "the test exists",
+    }]);
   });
 
   it.each([
@@ -1673,18 +1987,19 @@ describe("runGate admission (#142)", () => {
         onEvent: (event: EventInput) => events.push(event),
       },
       gateStack: { runGate },
+      quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 1, timer: () => 0, quality: null } },
       invocationSequence: createAgentInvocationSequencer().startCycle(),
     }) as unknown as Parameters<typeof runGate>[1];
 
     const first = runGate(
-      { kind: "run-gate", attempt: 1 },
+      { kind: "run-gate", attempt: 1, quality: { verdict: "APPROVED", rounds: 0 } },
       context("1", async () => {
         starts.push("attempt-1");
         return await firstGate.promise;
       }),
     );
     const second = runGate(
-      { kind: "run-gate", attempt: 1 },
+      { kind: "run-gate", attempt: 1, quality: { verdict: "APPROVED", rounds: 0 } },
       context("2", async () => {
         starts.push("attempt-2");
         return result;
@@ -1741,10 +2056,17 @@ describe("runGate admission (#142)", () => {
         onEvent: () => undefined,
       },
       gateStack: { runGate: async () => gate },
+      quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 2, timer: () => 0, quality: null } },
       invocationSequence: sequencer.startCycle(),
     } as unknown as Parameters<typeof runGate>[1];
 
-    const result = await runGate({ kind: "run-gate", attempt: 2 }, ctx);
+    const result = await runGate({
+      kind: "run-gate",
+      attempt: 2,
+      quality: { verdict: "CHANGES-REQUESTED", rounds: 3 },
+    }, ctx);
+    // How the quality pass ended is kept for the round's record.
+    expect(ctx.quality.openRound?.quality).toEqual({ verdict: "CHANGES-REQUESTED", rounds: 3 });
     expect(result.gate.ok).toBe(false);
     expect(result.gate.failedStep).toBe("test");
     expect(result.gate.failureTrace).toContain("db tail");
@@ -1833,6 +2155,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         uiPrototypeCheck: false,
         partitionCheck: false,
         maxContextChars: 600_000,
+        maxQualityRounds: 3,
         maxGateRounds: 4,
         maxReviewRounds: 4,
         botName: "sandbar-bot",
@@ -1872,7 +2195,8 @@ describe("runInnerLoop context terminals (#158)", () => {
     innerLoopMocks.buildPartitionCheckPrompt.mockReset()
       .mockResolvedValue("partition check prompt");
     innerLoopMocks.buildUiCheckPrompt.mockReset().mockResolvedValue("ui check prompt");
-    innerLoopMocks.buildQualityPrompt.mockReset().mockResolvedValue("quality prompt");
+    innerLoopMocks.buildQualityReviewPrompt.mockReset().mockResolvedValue("quality review prompt");
+    innerLoopMocks.buildQualityFixPrompt.mockReset().mockResolvedValue("quality fix prompt");
     innerLoopMocks.buildCorrectnessPrompt.mockReset().mockResolvedValue("correctness prompt");
     innerLoopMocks.settleQualityResidue.mockReset().mockResolvedValue({
       commits: [],
@@ -1896,7 +2220,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       return "/worktree";
     });
     const { opts, events } = harness(async (options) =>
-      (options.name ?? "").includes("reviewer-") ? approvedReview : completeRun
+      /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : completeRun
     );
 
     await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
@@ -1914,7 +2238,7 @@ describe("runInnerLoop context terminals (#158)", () => {
     const message =
       "Issue clone preserved at /worktree: failed to publish branch (packed-refs.lock)";
     const { sandbox, opts, events } = harness(async (options) =>
-      (options.name ?? "").includes("reviewer-") ? approvedReview : completeRun
+      /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : completeRun
     );
     innerLoopMocks.createSandbox.mockImplementationOnce(async (options) => {
       sandbox.close = vi.fn(async () => {
@@ -1941,7 +2265,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       return "sandbox-image";
     });
     const { opts, events } = harness(async (options) =>
-      (options.name ?? "").includes("reviewer-") ? approvedReview : completeRun
+      /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : completeRun
     );
 
     await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
@@ -1970,7 +2294,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       }[slot];
       const { sandbox, opts, events } = harness(async (options) => {
         if ((options.name ?? "").startsWith(prefix)) throw refused;
-        return completeRun;
+        return (options.name ?? "").startsWith("quality-list-") ? approvedReview : completeRun;
       }, overrides);
 
       await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
@@ -2007,8 +2331,9 @@ describe("runInnerLoop context terminals (#158)", () => {
     expect(innerLoopMocks.buildPartitionCheckPrompt).not.toHaveBeenCalled();
   });
 
-  // #185: each round is fixer → gate-1 → correctness, recorded once when it
-  // closes, and the fixer's commits reach the next implementer prompt.
+  // #185/#187: each round is the quality pass → gate-1 → correctness,
+  // recorded once when it closes with how its quality pass ended, and the
+  // fixer's commits reach the next implementer prompt.
   it("records each closed round and hands the fixer's commits forward", async () => {
     innerLoopMocks.settleQualityResidue
       .mockResolvedValueOnce({
@@ -2031,7 +2356,11 @@ describe("runInnerLoop context terminals (#158)", () => {
           commits: [],
         };
       }
-      if (name.startsWith("quality-")) return { ...completeRun, stdout: "fixed" };
+      if (name === "quality-list-158-attempt-1") {
+        return { ...approvedReview, stdout: "### Tests\nmissing\n<verdict>CHANGES-REQUESTED</verdict>" };
+      }
+      if (name.startsWith("quality-fix-")) return { ...completeRun, stdout: "fixed" };
+      if (name.startsWith("quality-")) return approvedReview;
       if (name === "reviewer-158-round-2") {
         return { ...approvedReview, stdout: "finding\n<verdict>CHANGES-REQUESTED</verdict>" };
       }
@@ -2054,37 +2383,157 @@ describe("runInnerLoop context terminals (#158)", () => {
     });
     expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
       "implementer-158-attempt-1",
-      "quality-158-attempt-1",
+      "quality-list-158-attempt-1",
+      "quality-fix-158-attempt-1-fix-1",
+      "quality-verify-158-attempt-1-fix-1",
       "implementer-158-attempt-2",
-      "quality-158-attempt-2",
+      "quality-list-158-attempt-2",
       "reviewer-158-round-2",
       "implementer-158-attempt-3",
     ]);
     const rounds = events.filter((event) => event.kind === "review-round");
     expect(rounds).toEqual([
       expect.objectContaining({
-        attempt: 1, round: 1, head: "head123", gateOk: false, correctness: "SKIPPED",
+        attempt: 1, round: 1, head: "head123", quality: "APPROVED", qualityRounds: 0,
+        gateOk: false, correctness: "SKIPPED",
         rejectingPass: null, gateFailures: 1, correctnessFailures: 0,
       }),
       expect.objectContaining({
-        attempt: 2, round: 2, head: "head123", gateOk: true, correctness: "CHANGES-REQUESTED",
+        attempt: 2, round: 2, head: "head123", quality: "APPROVED", qualityRounds: 0,
+        gateOk: true, correctness: "CHANGES-REQUESTED",
         rejectingPass: "correctness", gateFailures: 0, correctnessFailures: 1,
       }),
     ]);
+    expect(events.filter((event) => event.kind === "quality-review").map((event) =>
+      event.kind === "quality-review" ? [event.attempt, event.mode, event.scope, event.verdict] : [],
+    )).toEqual([
+      [1, "list", "full", "CHANGES-REQUESTED"],
+      [1, "verify", "since:head123", "APPROVED"],
+      [2, "list", "since:head123", "APPROVED"],
+    ]);
     expect(events.filter((event) => event.kind === "quality-pass")).toEqual([
       expect.objectContaining({ attempt: 1, result: "completed", commits: ["q1"] }),
-      expect.objectContaining({ attempt: 2, result: "completed", commits: [] }),
     ]);
     expect(events.filter((event) => event.kind === "phase").map((event) =>
       event.kind === "phase" ? event.phases : [],
     )).toEqual([
-      ["implementer"], ["quality"], ["gate-1"],
+      ["implementer"], ["quality"], ["quality"], ["quality"], ["gate-1"],
       ["implementer"], ["quality"], ["gate-1"], ["review"],
       ["implementer"], [],
     ]);
     expect(innerLoopMocks.buildPrompt.mock.calls.map(([inputs]) => inputs.qualityCommits)).toEqual([
       [], ["q1"], [],
     ]);
+  });
+
+  // #187: running out of quality rounds is not a stop. Gate-1 runs, and the
+  // open items are the last verify's record — never the implementer's input.
+  it("goes on to gate-1 with the open items recorded when the quality budget runs out", async () => {
+    innerLoopMocks.settleQualityResidue.mockResolvedValue({
+      commits: [{ sha: "q1" }],
+      residue: { dirtyPaths: [], strandedHead: null, rewoundTip: null },
+    });
+    const open = "### Standards\nsrc/a.ts:1 still duplicated\n<verdict>CHANGES-REQUESTED</verdict>";
+    const { sandbox, opts, events } = harness(async (options) => {
+      const name = options.name ?? "";
+      if (name.startsWith("implementer-")) return completeRun;
+      if (name.startsWith("quality-list-") || name.startsWith("quality-verify-")) {
+        return { ...approvedReview, stdout: open };
+      }
+      if (name.startsWith("quality-fix-")) return { ...completeRun, stdout: "fixed" };
+      return approvedReview;
+    }, { maxQualityRounds: 1 });
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+    expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
+      "implementer-158-attempt-1",
+      "quality-list-158-attempt-1",
+      "quality-fix-158-attempt-1-fix-1",
+      "quality-verify-158-attempt-1-fix-1",
+      "reviewer-158-round-1",
+    ]);
+    expect(events.filter((event) => event.kind === "quality-review").at(-1)).toMatchObject({
+      mode: "verify", verdict: "CHANGES-REQUESTED", prose: open,
+    });
+    expect(events.filter((event) => event.kind === "review-round")).toEqual([
+      expect.objectContaining({ quality: "CHANGES-REQUESTED", qualityRounds: 1, correctness: "APPROVED" }),
+    ]);
+  });
+
+  // #187: a fixer that commits nothing disputes the report; an overrule ends
+  // the pass approved and is the history a later lister is shown.
+  it("adjudicates a refused quality report and shows the overrule to the next lister", async () => {
+    const report = "### Tests\nnothing to add\n<verdict>CHANGES-REQUESTED</verdict>";
+    let listings = 0;
+    const { sandbox, stack, opts, events } = harness(async (options) => {
+      const name = options.name ?? "";
+      if (name === "implementer-158-attempt-3") {
+        return { ...completeRun, stdout: "<promise>NEEDS-INFO</promise><questions>q</questions>", commits: [] };
+      }
+      if (name.startsWith("implementer-")) return completeRun;
+      if (name.startsWith("quality-list-")) {
+        listings += 1;
+        return listings === 1 ? { ...approvedReview, stdout: report } : approvedReview;
+      }
+      if (name.startsWith("quality-fix-")) return { ...completeRun, stdout: "nothing", commits: [] };
+      if (name.startsWith("quality-adjudicator-")) {
+        return { ...approvedReview, stdout: "the test exists\n<ruling>OVERRULED</ruling>" };
+      }
+      if (name.startsWith("reviewer-")) {
+        return { ...approvedReview, stdout: "bug\n<verdict>CHANGES-REQUESTED</verdict>" };
+      }
+      throw new Error(`unexpected agent invocation ${name}`);
+    });
+    stack.runGate.mockResolvedValueOnce({
+      ok: false, stdout: "red", stderr: "", exitCode: 1, failedStep: "test",
+      durationMs: 1, steps: [], containerLogs: "",
+    });
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
+    expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
+      "implementer-158-attempt-1",
+      "quality-list-158-attempt-1",
+      "quality-fix-158-attempt-1-fix-1",
+      "quality-adjudicator-158-round-1-fix-1",
+      "implementer-158-attempt-2",
+      "quality-list-158-attempt-2",
+      "reviewer-158-round-2",
+      "implementer-158-attempt-3",
+    ]);
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: "adjudication", pass: "quality", round: 1, head: "head123", ruling: "OVERRULED",
+    }));
+    expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      pass: "quality", head: "head123", report,
+    }));
+    expect(innerLoopMocks.buildQualityReviewPrompt.mock.calls.map(([inputs]) => inputs.mode)).toEqual([
+      { kind: "list", scope: { kind: "full" }, overrules: [] },
+      {
+        kind: "list",
+        scope: { kind: "since", sha: "head123" },
+        overrules: [{ round: 1, head: "head123", report, ruling: "the test exists" }],
+      },
+    ]);
+    expect(events.filter((event) => event.kind === "review-round")[0]).toMatchObject({
+      quality: "OVERRULED", qualityRounds: 0, gateOk: false,
+    });
+  });
+
+  // #187: the lister is held read-only like every other reviewer.
+  it("parks when the quality lister writes", async () => {
+    const { opts } = harness(async (options) => {
+      if ((options.name ?? "").startsWith("quality-list-")) {
+        innerLoopMocks.branchTip.mockResolvedValue("moved");
+        return approvedReview;
+      }
+      return completeRun;
+    });
+
+    await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+      type: "NEEDS-HUMAN-REVIEW",
+      cause: "quality-reviewer-wrote",
+      latestReviewerProse: expect.stringContaining("Quality reviewer changed git state"),
+    });
   });
 
   it("admits a resumed branch at budget and skips the partition classifier", async () => {
@@ -2274,7 +2723,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
           record,
         );
         await opts.attemptLogger.writeInvocation(
-          sequence.filename({ role: "quality", attempt: 1 }),
+          sequence.filename({ role: "quality-list", attempt: 1, invocation: 1 }),
           record,
         );
         // The gate artefact comes from the same sequence as the invocations
@@ -2334,19 +2783,19 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       expect((await readdir(issueLogger.dir)).sort()).toEqual([
         "attempt-1-gate.log",
         "attempt-1-nudge.log",
-        "attempt-1-quality.log",
+        "attempt-1-quality-list-1.log",
         "attempt-1.log",
         "attempt-2-gate.log",
         "attempt-2-nudge.log",
-        "attempt-2-quality.log",
+        "attempt-2-quality-list-1.log",
         "attempt-2.log",
         "attempt-3-gate.log",
         "attempt-3-nudge.log",
-        "attempt-3-quality.log",
+        "attempt-3-quality-list-1.log",
         "attempt-3.log",
         "attempt-4-gate.log",
         "attempt-4-nudge.log",
-        "attempt-4-quality.log",
+        "attempt-4-quality-list-1.log",
         "attempt-4.log",
         "ui-check-1.log",
         "ui-check-2.log",
@@ -2464,16 +2913,14 @@ describe("reviewer write detection", () => {
       syncBranchToCache: vi.fn(),
     };
 
-    const event = await enforceReviewerSnapshot(
+    const detail = await enforceReadOnlyAgentSnapshot(
       sandbox,
       snapshot(),
       snapshot({ tip: null }),
+      "Reviewer",
       "partial reviewer output",
     );
-    expect(event).toEqual(expect.objectContaining({
-      kind: "reviewer-wrote",
-      detail: expect.stringContaining("Reviewer changed git state"),
-    }));
+    expect(detail).toContain("Reviewer changed git state");
     expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
       expect.stringContaining("human inspection"),
     );

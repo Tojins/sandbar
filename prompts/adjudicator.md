@@ -1,6 +1,6 @@
 # Adjudication
 
-Independently judge the rejected correctness review report below against the code
+Independently judge the rejected {{pass}} review report below against the code
 at head `{{head}}` on branch `{{branch}}` (seeded from `{{baseRef}}`).
 
 Do not assume the report is true. Read every cited line and enough surrounding

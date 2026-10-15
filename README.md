@@ -333,33 +333,53 @@ alone. Disable it only when work is partitioned before it reaches Sandbar.
 `maxContextChars` (default 600,000) bounds the complete working picture for an
 issue-loop role: its rendered prompt plus the seed-anchored net diff it is told
 to read from the worktree. Sandbar measures resumed work at admission, and the
-branch again before the quality pass and before the correctness review. An oversize issue parks as
+branch again before each quality role and before the correctness review. An oversize issue parks as
 `NEEDS-PARTITION` under `labels.needsInfo`; the comment asks for a `## Blocked
 by` chain whose independently landable members each fit the budget. This is a
 useful-context budget, not a provider input limit. A provider size refusal maps
 to the same terminal instead of rebuilding a sandbox and replaying the prompt.
 
 After the implementer reports COMPLETE, each round is serial. First the
-**quality pass** — routed by `reviewerQualityAgent`, `reviewerQualityModelId`
-and `reviewerQualityEffort` — runs in the implementer's writable sandbox as a
-fixer: it brings the branch up to the coding standards and conventions and
-writes or rewrites tests, committing under a `<botName> (quality)` author. It
-has no verdict and cannot reject; a test it writes that fails is how it reports
-a correctness defect. Whatever it leaves uncommitted or off the branch is
-discarded and recorded. Then gate-1 runs on the head it left, and the
+**quality pass**, whose three cold roles are all routed by
+`reviewerQualityAgent`, `reviewerQualityModelId` and `reviewerQualityEffort`
+and all get `promptExtensions.reviewerQuality`:
+
+1. A read-only **lister** walks every changed file and lists every tests and
+   standards finding under a verdict. Until a quality pass has approved a head
+   it reads the whole branch; after that, only what changed since that head.
+   `APPROVED` ends the pass.
+2. On `CHANGES-REQUESTED`, a **fixer** gets the report and makes one commit in
+   the implementer's writable sandbox under a `<botName> (quality)` author. Its
+   text is ignored; whatever it leaves uncommitted or off the branch is
+   discarded and recorded. A test it writes that fails is how a correctness
+   defect reaches the implementer.
+3. A read-only **verify** then judges only whether each listed item was dealt
+   with and the fixer's own changed lines, restating every item still open. A
+   rejection goes back to the fixer.
+
+A fixer that commits nothing disputes the report: an independent adjudicator
+rules on it once per head. Overruled, the pass ends approved and later listers
+are shown the ruling; upheld, the fixer runs once more with the ruling
+attached. The lister and verify are held read-only — a write parks the issue —
+and each gets one cold retry when it produces no verdict; a fixer that crashes
+is retried once. Then gate-1 runs once on the head the pass left, and the
 correctness reviewer runs only on a green gate there. Per-commit rules the
 quality pass must follow (a version bump, say) reach it through the anchor
-docs; `promptExtensions.reviewerQuality` adds anything else.
+docs.
 
-The two convergence budgets are independent:
+The three convergence budgets are independent:
+
+`maxQualityRounds` (default 3) bounds one quality pass: verify rejections and
+upheld quality adjudications. When it runs out, or a quality role fails on its
+retry too, the round still goes on to gate-1, and the open items stay in the
+event record — they are never handed to the implementer.
 
 `maxGateRounds` (default 4) bounds consecutive attempts without a green
 gate-1: red gate-1 results and pre-gate re-prompts (NO-SIGNAL, a dirty tree,
 or HEAD off the issue branch). Any green gate-1 result resets that count.
-`maxQualityRounds` was removed; a config that still sets it is refused.
 
 `maxReviewRounds` (default 4) separately bounds correctness rejections.
-Reviewer harness failures spend neither budget, and the second harness
+Reviewer harness failures spend no budget, and the second harness
 failure anywhere in one inner loop stops it. There is no total implementer-attempt
 ceiling: each attempt is charged only to the condition that sent it back.
 

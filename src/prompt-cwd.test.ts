@@ -41,7 +41,7 @@ import {
   buildPrompt,
   buildProjectAnchor,
   buildCorrectnessPrompt,
-  buildQualityPrompt,
+  buildQualityReviewPrompt,
   buildUiCheckPrompt,
 } from "./prompt.js";
 
@@ -223,6 +223,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     expect(prompt).not.toContain("commit-from-launch-dir");
     expect(prompt).toContain("Issue #1: acme/app");
     expect(prompt).toContain("The rejected report's one blocking finding.");
+    expect(prompt).toContain("judge the rejected quality review report");
     expect(prompt).toContain("head `reviewed-head-123`");
     expect(prompt).toContain("branch `sandbar/issue-1-t`");
     expect(prompt).toContain("seeded from `origin/main`");
@@ -296,7 +297,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("points the quality pass at standards the BRANCH adds", async () => {
     await writeFile(join(launchedFrom, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = await buildQualityPrompt({
+    const prompt = await buildQualityReviewPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -305,7 +306,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       promptExtension: { path: "CODING_STANDARDS.md" },
-      lastQualityHead: null,
+      mode: { kind: "list", scope: { kind: "full" }, overrules: [] },
     });
 
     expect(prompt).toContain("@CODING_STANDARDS.md");
@@ -316,7 +317,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     // review — so probing the wrong one emits an @ref the reviewer cannot open.
     await writeFile(join(target, "CODING_STANDARDS.md"), "# std\n");
 
-    const prompt = await buildQualityPrompt({
+    const prompt = await buildQualityReviewPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
@@ -325,7 +326,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       promptExtension: { path: "CODING_STANDARDS.md" },
-      lastQualityHead: null,
+      mode: { kind: "list", scope: { kind: "full" }, overrules: [] },
     });
 
     expect(prompt).not.toContain("@CODING_STANDARDS.md");

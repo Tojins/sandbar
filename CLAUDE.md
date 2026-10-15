@@ -41,9 +41,10 @@ and the gate stack (`config.gateStack`, #24).
    re-queue members, #95), `chunk-reconcile.ts` (finish already-merged chunks).
 2. **Inner loop** — `inner-loop-machine.ts` (pure state machine) +
    `inner-loop.ts` (I/O). One sandbox per issue: partition check (#158), UI
-   check (#126), then implementer attempts → quality fixer (writes commits,
-   #185) → gate-1 → correctness reviewer (`reviewer-run.ts`, #41) →
-   adjudicator on dispute (#167). Budgets `maxGateRounds`/`maxReviewRounds`.
+   check (#126), then implementer attempts → quality pass (read-only lister →
+   fixer that writes commits → read-only verify, #187) → gate-1 → correctness
+   reviewer (`reviewer-run.ts`, #41) → adjudicator on dispute of either pass
+   (#167). Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`.
    Read-only roles that write park the issue.
 3. **Landing** — serialized, in an ephemeral worktree at `origin/<source>`
    (#10): `merger.ts`, `merger-worktree.ts`, `resolve-loop.ts` (#67),

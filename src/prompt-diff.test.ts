@@ -26,7 +26,8 @@ import {
   branchIsAheadOfSeed,
   buildPrompt,
   buildCorrectnessPrompt,
-  buildQualityPrompt,
+  buildQualityFixPrompt,
+  buildQualityReviewPrompt,
   contextChars,
   measureNetDiffChars,
   readGit,
@@ -146,10 +147,19 @@ const correctnessInputs = (base = sourceBranchBase("main"), sourceBranch = "main
   ...reviewerInputs(base, sourceBranch),
   priorRounds: [],
 });
-const qualityInputs = (lastQualityHead: string | null = null) => ({
+const listerInputs = (approvedHead: string | null = null) => ({
   ...reviewerInputs(),
-  lastQualityHead,
-});
+  mode: {
+    kind: "list",
+    scope: approvedHead === null ? { kind: "full" } : { kind: "since", sha: approvedHead },
+    overrules: [],
+  },
+} as const);
+const verifyInputs = (anchor: string) => ({
+  ...reviewerInputs(),
+  mode: { kind: "verify", anchor, report: "### Tests\nmissing" },
+} as const);
+const fixerInputs = () => ({ ...reviewerInputs(), report: "### Tests\nmissing", ruling: null });
 
 describe("prompt slots resolve their base ref in a worktree of the bare cache (#40)", () => {
   // The local head namespace is the whole bug in one assertion: `main` is not
@@ -200,7 +210,8 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
 
     const implementer = await buildPrompt(implementerInputs(), anchorOpts());
     expect(implementer).toContain(LONG_PATH);
-    expect(await buildQualityPrompt(qualityInputs())).toContain(LONG_PATH);
+    expect(await buildQualityReviewPrompt(listerInputs())).toContain(LONG_PATH);
+    expect(await buildQualityFixPrompt(fixerInputs())).toContain(LONG_PATH);
     expect(await buildCorrectnessPrompt(correctnessInputs())).toContain(LONG_PATH);
     expect(implementer).not.toContain(".../components/visit-version-diff");
 
@@ -211,9 +222,9 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     await git(worktree, "add", "-A");
     await git(worktree, "commit", "-qm", "long-path-after-listing");
 
-    const later = await buildQualityPrompt(qualityInputs(listingHead));
+    const later = await buildQualityReviewPrompt(listerInputs(listingHead));
     const changedSince = later.slice(
-      later.indexOf("## Changed since your last pass"),
+      later.indexOf("## Changed since"),
       later.indexOf("## Coding standards"),
     );
     expect(changedSince).toContain(laterPath);
@@ -230,20 +241,24 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     expect(contextChars("prompt", diff.length)).toBe(6 + diff.length);
   });
 
-  // #185: a later fixer pass is focused on what changed since the head the
-  // previous pass left, read from git at that anchor.
-  it("anchors the focus stat at the head the last quality pass left", async () => {
+  // #187: a later lister reads what changed since the last approved quality
+  // head, and a verify what changed since the head before the fixer, both
+  // read from git at that anchor.
+  it.each([
+    ["a later lister", listerInputs],
+    ["a verify", verifyInputs],
+  ] as const)("anchors %s's changed-since stat at its head", async (_role, inputs) => {
     await commitOnBranch();
-    const lastQualityHead = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
+    const anchor = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
     const laterLine = "the-line-added-after-the-listing";
     await writeFile(join(worktree, "c.txt"), `${laterLine}\n`);
     await git(worktree, "add", "-A");
     await git(worktree, "commit", "-qm", "fix-after-listing");
 
-    const prompt = await buildQualityPrompt(qualityInputs(lastQualityHead));
+    const prompt = await buildQualityReviewPrompt(inputs(anchor));
 
     const changedSince = prompt.slice(
-      prompt.indexOf("## Changed since your last pass"),
+      prompt.indexOf(`## Changed since \`${anchor}\``),
       prompt.indexOf("## Coding standards"),
     );
     expect(changedSince).toContain("c.txt");
@@ -292,7 +307,10 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
     await expect(buildCorrectnessPrompt(correctnessInputs())).rejects.toThrow(
       /refusing to launch a correctness reviewer/,
     );
-    await expect(buildQualityPrompt(qualityInputs())).rejects.toThrow(
+    await expect(buildQualityReviewPrompt(listerInputs())).rejects.toThrow(
+      /refusing to launch a quality lister/,
+    );
+    await expect(buildQualityFixPrompt(fixerInputs())).rejects.toThrow(
       /refusing to launch the quality fixer/,
     );
   });
