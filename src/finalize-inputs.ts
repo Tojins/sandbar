@@ -27,6 +27,15 @@ import type { IssueRef, MergerSummary, SkipReason } from "./merger.js";
 
 import { SILENT_NOOP_RETRY_LIMIT } from "./exit-conditions.js";
 
+// The read-only role a `read-only-agent-wrote` park names, by terminal cause.
+const READ_ONLY_WRITER = {
+  "reviewer-wrote": "reviewer",
+  "quality-reviewer-wrote": "quality reviewer",
+  "adjudicator-wrote": "adjudicator",
+  "ui-checker-wrote": "UI checker",
+  "partition-checker-wrote": "partition checker",
+} as const;
+
 export type IssueOutcome = {
   readonly issue: IssueRef;
   readonly terminal: Terminal;
@@ -140,15 +149,7 @@ export function terminalFinalizeInputs(
             kind: "read-only-agent-wrote",
             issue: o.issue,
             latestReviewerProse: t.latestReviewerProse,
-            actor: t.cause === "reviewer-wrote"
-              ? "reviewer"
-              : t.cause === "quality-reviewer-wrote"
-                ? "quality reviewer"
-              : t.cause === "adjudicator-wrote"
-                ? "adjudicator"
-              : t.cause === "ui-checker-wrote"
-                ? "UI checker"
-                : "partition checker",
+            actor: READ_ONLY_WRITER[t.cause],
             specGaps: t.specGaps,
           });
         }
