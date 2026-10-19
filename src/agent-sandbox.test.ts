@@ -31,6 +31,7 @@ import {
   type AgentInvocationRecord,
   type AgentProvider,
   type Mount,
+  type ParsedStreamEvent,
   type ProviderCreateOptions,
   type SandboxProvider,
   SANDBOX_REPO_DIR,
@@ -62,6 +63,7 @@ import {
   sandboxRemoveArgs,
   sandboxExecArgs,
   sandboxRunArgs,
+  turnEndedAfter,
 } from "./agent-sandbox.js";
 import { createTranscriptTree } from "./logs.js";
 import { readPodmanCalls, writePodmanShim } from "./podman-shim.test-util.js";
@@ -938,6 +940,51 @@ describe("defaultImageName", () => {
     expect(defaultImageName("/home/unixuser/sandbar")).toBe("sandbar:sandbar");
     expect(defaultImageName("/x/My Repo!")).toBe("sandbar:my-repo-");
     expect(defaultImageName("/")).toBe("sandbar:local");
+  });
+});
+
+describe("turnEndedAfter (#189)", () => {
+  const ok = { type: "turn_end", ok: true } as const;
+  const failed = { type: "turn_end", ok: false } as const;
+  const text = { type: "text", text: "more" } as const;
+  const neutral: ParsedStreamEvent[] = [
+    { type: "control" },
+    { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } as never },
+    { type: "session_id", sessionId: "s" },
+    { type: "result", result: "r" },
+  ];
+  const reopening: ParsedStreamEvent[] = [
+    text,
+    { type: "tool_call", name: "Bash", args: "ls" },
+    { type: "tool_calls", count: 2 },
+    { type: "context_depth", tokens: 5 },
+  ];
+
+  it("sets the state on a successful turn end and clears it on a failed one", () => {
+    expect(turnEndedAfter(false, [ok])).toBe(true);
+    expect(turnEndedAfter(true, [failed])).toBe(false);
+    expect(turnEndedAfter(false, [failed])).toBe(false);
+  });
+
+  it.each(reopening.map((e) => [e.type, e] as const))(
+    "reopens the turn on %s after a turn end",
+    (_name, event) => {
+      expect(turnEndedAfter(true, [event])).toBe(false);
+      expect(turnEndedAfter(false, [ok, event])).toBe(false);
+    },
+  );
+
+  it.each(neutral.map((e) => [e.type, e] as const))(
+    "leaves the state alone on %s",
+    (_name, event) => {
+      expect(turnEndedAfter(true, [event])).toBe(true);
+      expect(turnEndedAfter(false, [event])).toBe(false);
+    },
+  );
+
+  it("is order-sensitive within one batch", () => {
+    expect(turnEndedAfter(false, [ok, text])).toBe(false);
+    expect(turnEndedAfter(false, [text, ok])).toBe(true);
   });
 });
 
@@ -2753,6 +2800,112 @@ describe("createSandbox integration (local provider)", () => {
         await sandbox.close();
       }
     }, 15_000);
+
+    it("accepts a signal followed by a successful result and silence, keeping signalMs", async () => {
+      const sandbox = await sandboxFor("sandbar/issue-189-signal-result");
+      try {
+        const run = await sandbox.run({
+          agent: scriptedAgent(
+            `${line({ type: "assistant", message: { content: [{ type: "text", text: "<promise>COMPLETE</promise>" }] } })} && ` +
+              `${success("done <promise>COMPLETE</promise>")} && sleep 30`,
+          ),
+          prompt: "go",
+          completionSignal: ["<promise>COMPLETE</promise>"],
+          completionTimeoutSeconds: 0.2,
+          idleTimeoutSeconds: 30,
+        });
+        expect(run.endedBy).toBe("result-then-silence");
+        expect(typeof run.signalMs).toBe("number");
+      } finally {
+        await sandbox.close();
+      }
+    }, 15_000);
+
+    describe("when the reap itself fails", () => {
+      // The reap is the only exec whose command starts with `f=`.
+      const providerWithReap = (
+        reap: () => Promise<{ stdout: string; stderr: string; exitCode: number }>,
+      ): SandboxProvider => {
+        const inner = makeLocalProvider();
+        return {
+          ...inner,
+          create: async (opts) => {
+            const handle = await inner.create(opts);
+            return {
+              ...handle,
+              exec: (command, execOpts) =>
+                command.startsWith("f=") ? reap() : handle.exec(command, execOpts),
+            };
+          },
+        };
+      };
+      const silentAfterSignal = () =>
+        scriptedAgent(
+          `${line({ type: "assistant", message: { content: [{ type: "text", text: "<promise>COMPLETE</promise>" }] } })} && sleep 30`,
+        );
+
+      it("records a non-zero exit in the detail and keeps the original verdict", async () => {
+        const branch = "sandbar/issue-189-reap-exit";
+        await git(["branch", branch], dir);
+        const sandbox = await createSandbox({
+          env: {},
+          branch,
+          sandbox: providerWithReap(async () => ({ stdout: "", stderr: "no kill\n", exitCode: 1 })),
+          layout: layoutFor(dir),
+        });
+        try {
+          const records: AgentInvocationRecord[] = [];
+          const err = await sandbox.run({
+            agent: silentAfterSignal(),
+            prompt: "go",
+            completionSignal: ["<promise>COMPLETE</promise>"],
+            completionTimeoutSeconds: 0.2,
+            idleTimeoutSeconds: 30,
+            onInvocationEnd: async (record) => {
+              records.push(record);
+            },
+          }).then(() => null, (e: unknown) => e);
+          expect(err).toBeInstanceOf(AgentError);
+          expect((err as Error).message).toContain("without exiting");
+          expect(records[0]?.end).toBe("completion-timeout");
+          expect(records[0]?.detail).toContain(
+            "reaping the agent's process group failed: exit 1: no kill",
+          );
+        } finally {
+          await sandbox.close();
+        }
+      }, 15_000);
+
+      it("records a reap that hangs as a timeout and keeps the original verdict", async () => {
+        const branch = "sandbar/issue-189-reap-hang";
+        await git(["branch", branch], dir);
+        const sandbox = await createSandbox({
+          env: {},
+          branch,
+          sandbox: providerWithReap(() => new Promise(() => undefined)),
+          layout: layoutFor(dir),
+        });
+        try {
+          const records: AgentInvocationRecord[] = [];
+          const err = await sandbox.run({
+            agent: silentAfterSignal(),
+            prompt: "go",
+            completionSignal: ["<promise>COMPLETE</promise>"],
+            completionTimeoutSeconds: 0.2,
+            idleTimeoutSeconds: 30,
+            onInvocationEnd: async (record) => {
+              records.push(record);
+            },
+          }).then(() => null, (e: unknown) => e);
+          expect(err).toBeInstanceOf(AgentError);
+          expect(records[0]?.detail).toContain(
+            "reaping the agent's process group failed: timed out after 10000ms",
+          );
+        } finally {
+          await sandbox.close();
+        }
+      }, 30_000);
+    });
 
     it("leaves a clean exit's end as `exit`, even after a successful result", async () => {
       const sandbox = await sandboxFor("sandbar/issue-189-exit");

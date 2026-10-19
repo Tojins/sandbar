@@ -2289,6 +2289,8 @@ const shellLiteral = (value: string): string => `'${value.replaceAll("'", `'\\''
 
 const REAP_TIMEOUT_MS = 10_000;
 
+class ReapTimeoutError extends Error {}
+
 // The agent CLI's own process group (#189). `setsid` makes the inner `sh` a
 // session and group leader whose pid — the pgid — goes to `pidfile`; the CLI
 // and every descendant that does not leave the group inherit it. `setsid` is
@@ -2473,17 +2475,21 @@ const invokeAgent = async (
     // Every end but a clean exit kills the agent's process group inside the
     // container (#189): killing the exec client reaps nothing there, and a
     // CLI left alive in the issue's sandbox can commit under a later role.
-    // The reap's own failure is hygiene, so it is reported in the record's
-    // detail and never replaces the run's verdict.
+    // A reap that exits non-zero or times out is reported in the record's
+    // detail and does not replace the run's verdict; any other error
+    // propagates.
     const reap = async (detail: string): Promise<string> => {
       const reaper = new AbortController();
       const failure = await withTimeout(
         handle.exec(reapProcessGroupCommand(pidfile), { signal: reaper.signal }),
         REAP_TIMEOUT_MS,
-        () => new Error(`timed out after ${REAP_TIMEOUT_MS}ms`),
+        () => new ReapTimeoutError(`timed out after ${REAP_TIMEOUT_MS}ms`),
       ).then(
         (r) => r.exitCode === 0 ? null : `exit ${r.exitCode}: ${r.stderr.trim()}`,
-        (err: unknown) => err instanceof Error ? err.message : String(err),
+        (err: unknown) => {
+          if (err instanceof ReapTimeoutError) return err.message;
+          throw err;
+        },
       );
       reaper.abort();
       return failure === null
