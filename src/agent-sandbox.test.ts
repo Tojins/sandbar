@@ -91,6 +91,21 @@ describe("agent failure message (#135)", () => {
 
 const execFileP = promisify(execFile);
 
+// Whether a pid no longer names a running process. A killed orphan stays a
+// zombie until its reaper waits for it, and `kill(pid, 0)` still succeeds on
+// a zombie: under a PID 1 or subreaper that never waits (a gate container
+// without --init), a reaped group would look alive forever.
+const processExited = async (pid: number): Promise<boolean> => {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return true;
+  }
+  // Field 3 of /proc/<pid>/stat, after the `)` closing comm, is the state.
+  const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => null);
+  return stat === null || stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
+};
+
 describe("sandboxExecArgs", () => {
   it("passes an ordinary command unchanged", () => {
     expect(sandboxExecArgs("box", "echo ok")).toEqual({
@@ -1056,11 +1071,7 @@ describe("the agent's process group (#189)", () => {
       await exited;
       const gone = async (): Promise<boolean> => {
         for (let i = 0; i < 100; i += 1) {
-          try {
-            process.kill(child, 0);
-          } catch {
-            return true;
-          }
+          if (await processExited(child)) return true;
           await new Promise((r) => setTimeout(r, 20));
         }
         return false;
@@ -2649,11 +2660,7 @@ describe("createSandbox integration (local provider)", () => {
       const pid = Number((await readFile(join(markers, name), "utf8")).trim());
       const deadline = Date.now() + 3000;
       for (;;) {
-        try {
-          process.kill(pid, 0);
-        } catch {
-          return true;
-        }
+        if (await processExited(pid)) return true;
         if (Date.now() >= deadline) return false;
         await new Promise((r) => setTimeout(r, 25));
       }
