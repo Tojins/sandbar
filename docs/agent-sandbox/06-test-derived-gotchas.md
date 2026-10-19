@@ -152,7 +152,8 @@ Source: `Orchestrator.ts`, `invokeAgent`.
   stream-json and verbose flags"* (1770), *"buildPrintCommand delivers prompt via
   stdin, not argv"* (AgentProvider.test.ts:31).
 - ⚪ **Completion match is a plain substring `includes`** of parsed speech
-  against the caller's explicit signal list. An empty list never enters grace.
+  against the caller's explicit signal list. An empty list never enters grace
+  by a signal; in sandbar a successful Claude `result` arms it too (#189).
 
 ## (C) Commit capture & git setup (`withSandboxLifecycle`)
 
