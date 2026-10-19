@@ -10,6 +10,7 @@ import {
   ChunkBaseMissingError,
   IssueBranchDeletedOnOriginError,
   IssueBranchDivergedError,
+  branchCommitsSinceSeed,
   dirtyWorktreePaths,
   ensureIssueBranch,
   fastForwardOffBranchHead,
@@ -1318,6 +1319,23 @@ describe("ensureIssueBranch — origin's copy of the branch (#112)", () => {
 
     expect(base.originSync).toMatchObject({ kind: "origin-unreadable" });
     expect(await tip(cache, `refs/heads/${B}`)).toBe(before);
+  });
+
+  // #188: a re-queued issue resumes a branch that already holds its work, and
+  // the cycle's commit evidence starts from that work, oldest first.
+  it("counts a resumed branch's commits beyond its seed, and none for a fresh one", async () => {
+    const c1 = await pushOnBranch();
+    const c2 = await pushOnBranch();
+
+    const resumed = await ensureIssueBranch(cache, B, "main");
+    expect(await branchCommitsSinceSeed(cache, B, resumed.ref)).toEqual([
+      { sha: c1 },
+      { sha: c2 },
+    ]);
+
+    const fresh = "sandbar/issue-13-fresh";
+    const seeded = await ensureIssueBranch(cache, fresh, "main");
+    expect(await branchCommitsSinceSeed(cache, fresh, seeded.ref)).toEqual([]);
   });
 
   // `rm -rf .sandbar` costs agent time, never correctness (#38): a parked

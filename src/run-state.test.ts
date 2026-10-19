@@ -117,6 +117,23 @@ describe("run event reducer", () => {
     },
   );
 
+  // #188: a failed run whose commits the sandbox could not count records none,
+  // and the row says nothing about commits rather than "0 commits".
+  it("renders a failed attempt with uncounted commits without a commit count", () => {
+    const state = reduceRunEvents([
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-07T09:01:00Z", {
+        kind: "implementer", issue: 2, attempt: 1, signal: "FAILED",
+        provider: "codex", model: "m", effort: null, durationMs: 5,
+      }),
+    ], { now: new Date("2026-09-07T09:03:00Z"), pidAlive: false });
+
+    expect(state.events[0]).toMatchObject({ text: "attempt 1 failed · invocation failed", tone: "bad" });
+  });
+
   it("projects every event kind into a newest-first, attributed feed", () => {
     const rows: object[] = [
       { kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,

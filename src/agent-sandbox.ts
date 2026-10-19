@@ -58,8 +58,10 @@
 //        (`agentPartialUsage`, #85/#109/#124 — an invocation that burned ten
 //        minutes and then died must not lose its usage, depth or quota
 //        evidence), and both timeout paths kill the exec they stop waiting for
-//        (#41).
-//        See invokeAgent.
+//        (#41). See invokeAgent. After that abort, `run` also counts what the
+//        issue branch gained (`agentPartialCommits`, #188), so a run killed
+//        after it committed is not recorded as zero commits; a count that
+//        fails is reported and left absent, never written as zero.
 //   F10 — `agent-run-end.ts` owns end classification. This wrapper supplies
 //         `retryable` for silence because its same-session nudge can recover;
 //         it maps the classifier's exit diagnostic into AgentError.
@@ -707,6 +709,28 @@ export const withPartialDurationMs = (err: unknown, durationMs: number): unknown
 export const agentPartialDurationMs = (err: unknown): number | undefined =>
   typeof err === "object" && err !== null
     ? AGENT_PARTIAL_DURATION_MS.get(err)
+    : undefined;
+
+// What the issue branch gained during a run that failed (#188): the same range
+// a successful run returns as `commits`, counted after the abort. A report
+// only; undefined when it could not be counted, never a guessed empty list.
+const AGENT_PARTIAL_COMMITS = new WeakMap<object, readonly { sha: string }[]>();
+
+export const withPartialCommits = (
+  err: unknown,
+  commits: readonly { sha: string }[],
+): unknown => {
+  if (typeof err === "object" && err !== null) {
+    AGENT_PARTIAL_COMMITS.set(err, commits);
+  }
+  return err;
+};
+
+export const agentPartialCommits = (
+  err: unknown,
+): readonly { sha: string }[] | undefined =>
+  typeof err === "object" && err !== null
+    ? AGENT_PARTIAL_COMMITS.get(err)
     : undefined;
 
 class WorktreeError extends Error {
@@ -2833,21 +2857,9 @@ export const createSandbox = async (
       await execGit(["rev-parse", "--verify", `refs/heads/${branch}`], worktreePath)
     ).trim();
 
-    const { result, signalMs, maxGapMs, usage, toolCalls, peakContext, rateLimit, silent } =
-      await invokeAgent(
-        providerHandle,
-        sandboxRepoDir,
-        prompt,
-        agent,
-        idleTimeoutMs,
-        completionTimeoutMs,
-        completionSignals,
-        invocation,
-      );
-
     // Explicit-branch commit capture: fully-qualified ref, the cache repo,
     // --reverse (oldest-first). Zero commits is an empty list; git faults throw.
-    const commits = await withTimeout(
+    const collectCommits = (): Promise<{ sha: string }[]> => withTimeout(
       execGit(
         ["rev-list", `${baseHead}..refs/heads/${branch}`, "--reverse"],
         worktreePath,
@@ -2860,6 +2872,40 @@ export const createSandbox = async (
       () =>
         new Error(`Commit collection timed out after ${COMMIT_COLLECTION_TIMEOUT_MS}ms`),
     );
+
+    let invoked: Awaited<ReturnType<typeof invokeAgent>>;
+    try {
+      invoked = await invokeAgent(
+        providerHandle,
+        sandboxRepoDir,
+        prompt,
+        agent,
+        idleTimeoutMs,
+        completionTimeoutMs,
+        completionSignals,
+        invocation,
+      );
+    } catch (err) {
+      // A run that fails after committing — the agent emitted COMPLETE and
+      // then never exited — still moved the branch (#188). Count that range
+      // after the abort so the failure's record states it; a count that
+      // cannot be taken is reported and left absent rather than written as
+      // zero (#82). The rejection itself is unchanged.
+      throw await collectCommits().then(
+        (commits) => withPartialCommits(err, commits),
+        async (countError: unknown) => {
+          await notice(
+            "warning",
+            `Could not count the commits of a failed agent run on ${branch}: ${String(countError)}`,
+          );
+          return err;
+        },
+      );
+    }
+    const { result, signalMs, maxGapMs, usage, toolCalls, peakContext, rateLimit, silent } =
+      invoked;
+
+    const commits = await collectCommits();
 
     return {
       result,

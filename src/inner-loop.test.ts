@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const innerLoopMocks = vi.hoisted(() => ({
@@ -21,6 +23,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   createSandbox: vi.fn(),
   resolveSandboxImage: vi.fn(async () => "sandbox-image"),
   startStack: vi.fn(),
+  branchCommitsSinceSeed: vi.fn(async () => [] as { sha: string }[]),
   branchTip: vi.fn(async () => "tip-a" as string | null),
   dirtyWorktreePaths: vi.fn(async () => [] as string[]),
   fastForwardOffBranchHead: vi.fn(),
@@ -66,6 +69,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   headMismatch: innerLoopMocks.headMismatch,
   symbolicHeadRef: innerLoopMocks.symbolicHeadRef,
   settleQualityResidue: innerLoopMocks.settleQualityResidue,
+  branchCommitsSinceSeed: innerLoopMocks.branchCommitsSinceSeed,
   ensureIssueBranch: innerLoopMocks.ensureIssueBranch,
 }));
 
@@ -75,6 +79,7 @@ import {
   AgentIdleTimeoutError,
   AgentInputTooLargeError,
   AgentQuotaError,
+  withPartialCommits,
   withPartialContainerResources,
   withPartialDurationMs,
   withPartialOutput,
@@ -666,9 +671,27 @@ describe("silent implementer attempt policy (#116)", () => {
 
     await expect(pending).rejects.toThrow("agent exited 137");
     expect(lines.at(-1)).toMatchObject({
-      kind: "implementer", signal: "FAILED", commits: 0,
+      kind: "implementer", signal: "FAILED",
       durationMs: 7,
       peakMemoryBytes: 4096, oomKilled: true,
+    });
+    // Nothing counted the failed run's commits (#188): absent, not 0.
+    expect(lines.at(-1)).not.toHaveProperty("commits");
+  });
+
+  it("adds a failed nudge's counted commits to the first run's (#188)", async () => {
+    const { pending, lines } = runPath(
+      sandboxResult("no signal", false, ["a"]),
+      {
+        error: withPartialCommits(new Error("nudge exited 137"), [{ sha: "b" }]) as Error,
+        resources: {},
+        durationMs: 9,
+      },
+    );
+
+    await expect(pending).rejects.toThrow("nudge exited 137");
+    expect(lines.at(-1)).toMatchObject({
+      kind: "implementer", signal: "FAILED", commits: 2,
     });
   });
 
@@ -687,10 +710,13 @@ describe("silent implementer attempt policy (#116)", () => {
 
     await expect(pending).rejects.toThrow("nudge exited 137");
     expect(lines.at(-1)).toMatchObject({
-      kind: "implementer", signal: "FAILED", commits: 1,
+      kind: "implementer", signal: "FAILED",
       durationMs: 10,
       peakMemoryBytes: 8192, oomKilled: true,
     });
+    // Nothing counted the nudge's commits (#188), so the attempt's total is
+    // unknown: absent, not the first run's 1 (#82).
+    expect(lines.at(-1)).not.toHaveProperty("commits");
   });
 
   it("hands only the implementer extension to the implementer prompt", async () => {
@@ -2640,6 +2666,121 @@ describe("runInnerLoop context terminals (#158)", () => {
     });
     expect(innerLoopMocks.resolveSandboxImage).toHaveBeenCalledTimes(3);
     expect(events.filter((event) => event.kind === "hard-error")).toHaveLength(2);
+  });
+
+  // #188: a fresh sandbox cycle credits the work its branch already carries.
+  // Real git for the branch seed, the clone and the commit evidence; the
+  // agent is fake and says COMPLETE with nothing new to add.
+  describe("a branch already ahead of its seed (#188)", () => {
+    const exec = promisify(execFile);
+    const git = (cwd: string, ...args: string[]) =>
+      exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd });
+    const commitIn = async (cwd: string, message: string): Promise<string> => {
+      await git(cwd, "commit", "-q", "--allow-empty", "-m", message);
+      return (await git(cwd, "rev-parse", "HEAD")).stdout.trim();
+    };
+    let root: string;
+    let origin: string;
+    let cache: string;
+    let worktree: string;
+
+    beforeEach(async () => {
+      root = await mkdtemp(join(tmpdir(), "sandbar-188-"));
+      origin = join(root, "origin.git");
+      cache = join(root, "cache.git");
+      worktree = join(root, "worktree");
+      const work = join(root, "work");
+      await git(root, "init", "-q", "--bare", "-b", "main", origin);
+      await git(root, "clone", "-q", origin, work);
+      await commitIn(work, "init");
+      await git(work, "push", "-q", "origin", "HEAD:main");
+      await git(root, "init", "-q", "--bare", cache);
+      await git(cache, "remote", "add", "origin", origin);
+      await git(cache, "fetch", "-q", "origin");
+      const gitOps = await vi.importActual<typeof import("./git-ops.js")>("./git-ops.js");
+      const prompt = await vi.importActual<typeof import("./prompt.js")>("./prompt.js");
+      innerLoopMocks.ensureIssueBranch.mockImplementation(gitOps.ensureIssueBranch as never);
+      innerLoopMocks.branchCommitsSinceSeed.mockImplementation(gitOps.branchCommitsSinceSeed);
+      innerLoopMocks.branchIsAheadOfSeed.mockImplementation(prompt.branchIsAheadOfSeed);
+      // The clone the sandbox works in, reused by a later cycle as it is.
+      innerLoopMocks.prepareWorktree.mockImplementation(async (options) => {
+        const { stdout } = await git(cache, "worktree", "list", "--porcelain");
+        if (!stdout.includes(worktree)) {
+          await git(cache, "worktree", "add", "-q", worktree, options.branch);
+        }
+        return worktree;
+      });
+      return async () => {
+        innerLoopMocks.branchCommitsSinceSeed.mockReset().mockResolvedValue([]);
+        await rm(root, { recursive: true, force: true });
+      };
+    });
+
+    const layout = () => ({
+      layout: { repoDir: cache, worktreesDir: root, logsDir: join(root, "logs") },
+    });
+    const zeroCommitComplete = { ...completeRun, commits: [] };
+
+    it("takes a HARD-ERROR retry's COMPLETE to the quality pass on the killed cycle's commits", async () => {
+      let cycle = 0;
+      const { sandbox, stack, opts, events } = harness(async (options) => {
+        const name = options.name ?? "";
+        if (/^(reviewer|quality-list)-/.test(name)) return approvedReview;
+        if (name.startsWith("implementer-") && cycle === 0) {
+          cycle += 1;
+          // Commits, says COMPLETE, then never exits.
+          const shas = [
+            await commitIn(worktree, "one"),
+            await commitIn(worktree, "two"),
+          ];
+          throw withPartialCommits(
+            new AgentError("claude emitted completion signal, then produced no output for 60000ms without exiting."),
+            shas.map((sha) => ({ sha })),
+          );
+        }
+        return zeroCommitComplete;
+      }, layout());
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(events.filter((event) => event.kind === "hard-error")).toHaveLength(1);
+      expect(events.filter((event) => event.kind === "implementer")).toEqual([
+        expect.objectContaining({ attempt: 1, signal: "FAILED", commits: 2 }),
+        expect.objectContaining({ attempt: 1, signal: "COMPLETE", commits: 0 }),
+      ]);
+      expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
+        "implementer-158-attempt-1",
+        "implementer-158-attempt-1",
+        expect.stringMatching(/^quality-list-/),
+        expect.stringMatching(/^reviewer-/),
+      ]);
+      expect(stack.runGate).toHaveBeenCalledTimes(1);
+    });
+
+    it("takes a re-queued branch resumed from origin straight to the quality pass", async () => {
+      const work = join(root, "work");
+      await git(work, "checkout", "-q", "-b", issue.branch);
+      await commitIn(work, "earlier admission");
+      await git(work, "push", "-q", "origin", issue.branch);
+      const { sandbox, stack, opts, events } = harness(async (options) =>
+        /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : zeroCommitComplete,
+      layout());
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(events).toContainEqual(expect.objectContaining({
+        kind: "origin-sync",
+        outcome: "resumed-from-origin",
+      }));
+      expect(events).not.toContainEqual(expect.objectContaining({
+        kind: "repair",
+        action: "re-prompt",
+      }));
+      expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
+        "implementer-158-attempt-1",
+        expect.stringMatching(/^quality-list-/),
+        expect.stringMatching(/^reviewer-/),
+      ]);
+      expect(stack.runGate).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

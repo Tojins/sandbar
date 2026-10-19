@@ -19,7 +19,8 @@
 // `oomKilled` (an increase in cgroup-v2 `memory.events` `oom_kill` over a
 // reused execution span, OR-ed with Podman's State.OOMKilled; a whole-container
 // teardown reports any non-zero count). Both are measurements only. An
-// unavailable fact is omitted rather than encoded as zero (#141).
+// unavailable fact is omitted rather than encoded as zero (#141). So is a
+// failed implementer run's `commits` when they could not be counted (#188).
 // Schema 6 (#187): the quality pass is a read-only lister, a fixer and a
 // read-only verify. Each lister or verify invocation is a `quality-review`
 // event carrying its mode, scope, verdict and prose; the fixer's
@@ -250,7 +251,7 @@ export type EventInput =
   | (EventIssue & { readonly kind: "setup"; readonly durationMs: number; readonly worktreeMs?: number; readonly sandboxMs?: number; readonly stackMs?: number; readonly detail?: string })
   | (EventIssue & ContainerResources & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "partition-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly result: "CLEAR" | "PARTITION" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
-  | (EventIssue & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits?: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventIssue & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventIssue & ContainerResources & QualityReviewEvent & { readonly kind: "quality-review"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly maxGapMs?: number; readonly usage?: UsageFields })

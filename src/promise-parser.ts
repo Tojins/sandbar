@@ -36,6 +36,9 @@ export type ParseSignal =
   | { readonly kind: "NO-SIGNAL"; readonly reprompt: string; readonly missingTag: false };
 
 export type ParseContext = {
+  // Commits the issue branch carries beyond its seed, including those an
+  // earlier sandbox cycle or admission left there (#188) — not only this
+  // invocation's.
   readonly commitsAccumulated: number;
 };
 
@@ -62,9 +65,9 @@ const STILL_WORKING =
   "work turns out to imply user-visible UI with no prototype to build from.";
 
 const COMPLETE_NO_COMMITS =
-  "You declared `<promise>COMPLETE</promise>` but made no commits this run. " +
-  "Implement the change — don't just analyze. Commit your work and re-emit " +
-  "the promise.";
+  "You declared `<promise>COMPLETE</promise>` but the issue branch has no " +
+  "commits beyond its base. Implement the change — don't just analyze. " +
+  "Commit your work and re-emit the promise.";
 
 const NEEDS_INFO_NO_QUESTIONS =
   "You declared `<promise>NEEDS-INFO</promise>` but no `<questions>` block " +

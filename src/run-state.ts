@@ -241,9 +241,13 @@ function feedText(event: RunEvent): FeedEvent | null {
       break;
     case "implementer": {
       const failure = implementerFailure(event);
+      // A failed run whose commits could not be counted omits them (#188).
+      const commits = event.commits === undefined
+        ? ""
+        : ` · ${event.commits} commit${event.commits === 1 ? "" : "s"}`;
       text = failure === null
-        ? `attempt ${event.attempt} complete · ${event.commits} commit${event.commits === 1 ? "" : "s"}`
-        : `attempt ${event.attempt} failed · ${failure} · ${event.commits} commit${event.commits === 1 ? "" : "s"}`;
+        ? `attempt ${event.attempt} complete${commits}`
+        : `attempt ${event.attempt} failed · ${failure}${commits}`;
       if (failure !== null) tone = "bad";
       break;
     }
