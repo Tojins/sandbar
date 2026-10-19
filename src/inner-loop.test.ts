@@ -710,10 +710,13 @@ describe("silent implementer attempt policy (#116)", () => {
 
     await expect(pending).rejects.toThrow("nudge exited 137");
     expect(lines.at(-1)).toMatchObject({
-      kind: "implementer", signal: "FAILED", commits: 1,
+      kind: "implementer", signal: "FAILED",
       durationMs: 10,
       peakMemoryBytes: 8192, oomKilled: true,
     });
+    // Nothing counted the nudge's commits (#188), so the attempt's total is
+    // unknown: absent, not the first run's 1 (#82).
+    expect(lines.at(-1)).not.toHaveProperty("commits");
   });
 
   it("hands only the implementer extension to the implementer prompt", async () => {

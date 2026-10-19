@@ -2097,12 +2097,13 @@ export async function runImplementer(
       measuredContextChars,
     );
     // What the failed invocation left on the branch, as the sandbox counted it
-    // after the abort (#188). Absent when that count failed (#82); a prior
-    // invocation's commits are known either way.
+    // after the abort (#188), plus a prior invocation's commits. Absent when
+    // that count failed (#82): the attempt's total is unknown then, even if
+    // the prior invocation's share is not.
     const failedCommits = agentPartialCommits(err)?.length;
-    const commits = prior === undefined
-      ? failedCommits
-      : prior.commits.length + (failedCommits ?? 0);
+    const commits = failedCommits === undefined
+      ? undefined
+      : (prior?.commits.length ?? 0) + failedCommits;
     await opts.onEvent({
       kind: "implementer",
       issue: Number(issue.id),
