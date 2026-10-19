@@ -62,6 +62,7 @@ describe("raw transcript tree", () => {
       speech: "implementer speech",
       stdout: "implementer stdout",
       stderr: "implementer stderr",
+      controlLines: ["{\"type\":\"system\"}", "{\"type\":\"result\"}"],
     });
     expect((await readdir(tree.runDir)).sort()).toEqual(["issue-47"]);
     expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8")).toBe(
@@ -71,7 +72,8 @@ describe("raw transcript tree", () => {
       "resources:  peakMemoryBytes=931000000 oomKilled=true\n\n" +
       "--- speech ---\nimplementer speech\n" +
       "--- stdout tail ---\nimplementer stdout\n" +
-      "--- stderr tail ---\nimplementer stderr\n",
+      "--- stderr tail ---\nimplementer stderr\n" +
+      "--- control lines ---\n{\"type\":\"system\"}\n{\"type\":\"result\"}\n",
     );
     await expect(issue.writeInvocation("attempt-2.log", {
       agent: "replacement",
@@ -84,6 +86,7 @@ describe("raw transcript tree", () => {
       speech: "replacement",
       stdout: "replacement",
       stderr: "",
+      controlLines: [],
     })).rejects.toMatchObject({ code: "EEXIST" });
     expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8"))
       .toContain("implementer speech");

@@ -43,12 +43,20 @@
 // both directions: naming this file still sends a human to re-run what the gate
 // now runs every attempt, and dropping either of the other two leaves its
 // assertions exercised by nobody, with nothing saying so.
+//
+// The second suite (#189) asks the same kind of question of the agent's process
+// group: whether an end that kills only the exec client leaves the agent and
+// its background children alive in the container, and whether the reap does
+// not. It has a control for the same reason the first one does.
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { afterAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 
 import { scopedResourcePrefix } from "./naming.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
@@ -56,7 +64,18 @@ import {
   podmanTestScope,
   removeFixtureContainerOnTestFinished,
 } from "./podman-test-scope.test-util.js";
-import { sandboxRunArgs } from "./agent-sandbox.js";
+import {
+  AgentError,
+  AgentIdleTimeoutError,
+  type AgentProvider,
+  type SandboxProvider,
+  agentProcessGroupCommand,
+  createSandbox,
+  parseStreamJsonLine,
+  podmanExec,
+  reapProcessGroupCommand,
+  sandboxRunArgs,
+} from "./agent-sandbox.js";
 import { withRuntimeEnv } from "./runtime.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -245,4 +264,170 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     },
     60_000,
   );
+});
+
+// #189: what the in-container reap does, asserted where only podman can say —
+// killing the `podman exec` client is all `invokeAgent` used to do, and that
+// reaps nothing inside the container. The control runs the same wrapped agent
+// and kills only the client; the three runs drive the real `invokeAgent` over
+// the real exec wiring (`podmanExec`), so each of its forced ends is asserted
+// by what is left in the container's /proc. No bind mount: the issue clone
+// stays on the runner, and git setup — the one thing this image cannot do —
+// is answered on the host side of the provider.
+describe.runIf(available)("an agent's process group against real podman (#189)", () => {
+  let name: string;
+  let repo: string;
+
+  beforeAll(async () => {
+    name = `${scopedResourcePrefix(SCOPE)}pgroup-${randomUUID()}`;
+    const { argv, env } = sandboxRunArgs({
+      containerName: name,
+      imageName: IMAGE,
+      workdir: "/tmp",
+      env: {},
+      volumeMounts: [],
+      userns: "keep-id",
+      containerUid: 1000,
+      containerGid: 1000,
+      networks: [],
+      groups: [],
+      devices: [],
+      cpus: undefined,
+    });
+    await withRuntimeEnv({ argv, env }, (a) => exec(RUNTIME, a));
+    repo = await mkdtemp(join(tmpdir(), "asb-podman-189-"));
+    const git = (...args: string[]) =>
+      exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: repo });
+    await git("init", "-b", "main");
+    await git("commit", "--allow-empty", "-m", "seed");
+    await git("branch", "sandbar/issue-189-podman");
+  }, 120_000);
+
+  afterAll(async () => {
+    if (name) await exec(RUNTIME, ["rm", "-f", "-t", "0", name]).catch(() => undefined);
+    if (repo) await rm(repo, { recursive: true, force: true });
+  }, 60_000);
+
+  // Field 5 of /proc/<pid>/stat is the process group, after the `)` that
+  // closes comm; zombies are excluded because --init reaps them.
+  const groupMembers = async (pgid: string): Promise<number> => {
+    const { stdout } = await exec(RUNTIME, ["exec", name, "sh", "-c", "cat /proc/[0-9]*/stat 2>/dev/null"]);
+    return stdout.split("\n").filter((l) => {
+      const fields = l.slice(l.lastIndexOf(")") + 2).split(" ");
+      return fields[0] !== "Z" && fields[2] === pgid;
+    }).length;
+  };
+  const readPgid = async (tag: string): Promise<string> => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const { stdout } = await exec(RUNTIME, ["exec", name, "sh", "-c", `cat /tmp/${tag}.pgid 2>/dev/null || true`]);
+      if (stdout.trim() !== "" || Date.now() >= deadline) return stdout.trim();
+      await delay(100);
+    }
+  };
+  const settlesEmpty = async (pgid: string): Promise<number> => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const n = await groupMembers(pgid);
+      if (n === 0 || Date.now() >= deadline) return n;
+      await delay(100);
+    }
+  };
+  // The agent records its own group, leaves a background child in it, emits
+  // what the path needs, then holds the exec open.
+  const agentScript = (tag: string, emit: string): string =>
+    `sed 's/.*) //' /proc/$$/stat | cut -d' ' -f3 > /tmp/${tag}.pgid; ` +
+    `sleep 300 & ${emit}; sleep 300`;
+  const line = (obj: unknown): string => `printf '%s\\n' '${JSON.stringify(obj)}'`;
+
+  it("survives a killed exec client: the control", async ({ expect }) => {
+    const pidfile = "/tmp/control-reap.pgid";
+    const client = spawn(RUNTIME, [
+      "exec", name, "sh", "-c",
+      agentProcessGroupCommand(agentScript("control", "true"), pidfile),
+    ], { stdio: "ignore" });
+    const pgid = await readPgid("control");
+    expect(pgid).toMatch(/^\d+$/);
+    client.kill("SIGKILL");
+    await new Promise((r) => client.on("close", r));
+    await delay(1000);
+    expect(await groupMembers(pgid)).toBeGreaterThan(1);
+
+    await exec(RUNTIME, ["exec", name, "sh", "-c", reapProcessGroupCommand(pidfile)]);
+    expect(await settlesEmpty(pgid)).toBe(0);
+  }, 60_000);
+
+  it("leaves nothing of the group alive on the accepted, idle and completion ends", async ({ expect }) => {
+    const containerExec = podmanExec(name);
+    const provider: SandboxProvider = {
+      tag: "bind-mount",
+      name: "podman",
+      env: {},
+      sandboxHomedir: "/home/agent",
+      create: async (o) => ({
+        worktreePath: o.worktreePath,
+        containerName: name,
+        exec: (command, opts) => command.startsWith("git config")
+          ? Promise.resolve({ stdout: "", stderr: "", exitCode: 0 })
+          : containerExec(command, { ...opts, cwd: "/tmp" }),
+        close: async () => {},
+      }),
+    };
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-189-podman",
+      sandbox: provider,
+      layout: {
+        hostCwd: repo,
+        stateDir: join(repo, ".sandbar"),
+        repoDir: repo,
+        worktreesDir: join(repo, ".sandbar", "worktrees"),
+        sourceWorktree: join(repo, ".sandbar", "worktrees", "source"),
+        logsDir: join(repo, ".sandbar", "logs"),
+      },
+    });
+    const agent = (script: string): AgentProvider => ({
+      name: "claude-code",
+      env: {},
+      buildPrintCommand: () => ({ command: script, stdin: "" }),
+      parseStreamLine: parseStreamJsonLine,
+    });
+    try {
+      const accepted = await sandbox.run({
+        agent: agent(agentScript("accepted", line({
+          type: "result", subtype: "success", is_error: false, result: "done",
+        }))),
+        prompt: "go",
+        completionSignal: [],
+        completionTimeoutSeconds: 1,
+        idleTimeoutSeconds: 60,
+      });
+      expect(accepted.endedBy).toBe("result-then-silence");
+      expect(await settlesEmpty(await readPgid("accepted"))).toBe(0);
+
+      const idle = await sandbox.run({
+        agent: agent(agentScript("idle", "true")),
+        prompt: "go",
+        completionSignal: [],
+        idleTimeoutSeconds: 1,
+      }).then(() => null, (e: unknown) => e);
+      expect(idle).toBeInstanceOf(AgentIdleTimeoutError);
+      expect(await settlesEmpty(await readPgid("idle"))).toBe(0);
+
+      const completion = await sandbox.run({
+        agent: agent(agentScript("completion", line({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "<promise>COMPLETE</promise>" }] },
+        }))),
+        prompt: "go",
+        completionSignal: ["<promise>COMPLETE</promise>"],
+        completionTimeoutSeconds: 1,
+        idleTimeoutSeconds: 60,
+      }).then(() => null, (e: unknown) => e);
+      expect(completion).toBeInstanceOf(AgentError);
+      expect(await settlesEmpty(await readPgid("completion"))).toBe(0);
+    } finally {
+      await sandbox.close();
+    }
+  }, 120_000);
 });

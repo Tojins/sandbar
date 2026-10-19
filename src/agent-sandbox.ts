@@ -27,7 +27,10 @@
 // a human as NEEDS-HUMAN. The fourth and fifth, `usage` and the additive tool
 // count, rate-limit state and peak context depth are measurements only: none
 // is speech or failure and none can trip completion (#85, #109, #124). See
-// `ParsedStreamEvent` and `parseCodexJsonLine`.
+// `ParsedStreamEvent` and `parseCodexJsonLine`. Two lifecycle registers sit
+// beside them (#189): `turn_end` is Claude's `result` line closing a turn,
+// which can precede the process's exit by any amount, and `control` marks a
+// raw lifecycle line that the invocation record keeps uncapped.
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -37,8 +40,15 @@
 //   F3 — ONE process-wide shutdown registration (an `onCleanup` entry, #35)
 //        fans out to a Set of teardowns; not a listener per sandbox.
 //   F4 — a failure after worktree create removes the worktree before rethrowing.
-//   F5 — two-phase timeout: after a named completion signal, failure to exit
-//        within the grace period rejects and preserves the partial speech.
+//   F5 — two-phase timeout: a named completion signal or a successful
+//        `turn_end` arms the completion grace, and every later line re-arms
+//        it. Grace that expires while the last turn-shaped event is a
+//        successful `turn_end` ACCEPTS the run as completed (end
+//        `result-then-silence`, #189): Claude Code `--print` outlives its
+//        final turn while a background task it started is pending. Without
+//        one, failure to exit within the grace rejects and preserves the
+//        partial speech (#83). Activity after a turn end reopens the turn;
+//        with no signal matched, that run is back on the idle timer.
 //   F7 — every host git invocation runs under LC_ALL=C (locale-stable stderr).
 //   F8 — the container runs with `--init`: the entrypoint is `sleep infinity`,
 //        which reaps nothing (#42). See `sandboxRunArgs`.
@@ -62,13 +72,22 @@
 //        issue branch gained (`agentPartialCommits`, #188), so a run killed
 //        after it committed is not recorded as zero commits; a count that
 //        fails is reported and left absent, never written as zero.
+//   F9b — the agent CLI runs as the leader of its own process group, its
+//        pgid in a per-invocation pidfile inside the container
+//        (`agentProcessGroupCommand`). Every end but a clean exit — accepted,
+//        idle, completion, stream or exec error — kills that group in the
+//        container (#189); killing the exec client reaps nothing there, and a
+//        CLI left alive could commit under a later role in the same sandbox.
+//        A base without `setsid` writes no pidfile and is not reaped.
 //   F10 — `agent-run-end.ts` owns end classification. This wrapper supplies
 //         `retryable` for silence because its same-session nudge can recover;
 //         it maps the classifier's exit diagnostic into AgentError.
 //   F11 — each run-owned invocation record is written HERE, before F10 judges
 //         the exit. It contains parsed speech and both bounded raw stream tails;
 //         timeout paths retain their own tails so recording never waits for a
-//         descendant that kept an exec pipe open (#135).
+//         descendant that kept an exec pipe open (#135). Every `control` line
+//         rides beside the tails, uncapped, because large thinking signatures
+//         can push all of them out of 64 KiB (#189).
 //   F12 — at every invocation end, before the long-lived sandbox can disappear,
 //         the record and returned result carry cgroup memory.peak and the
 //         cgroup/Podman OOM-kill evidence available over that invocation
@@ -225,7 +244,17 @@ export type ParsedStreamEvent =
   // provider's own words, ahead of whatever its stderr happens to hold — and,
   // where a CLI's exit code does not answer the question, #67's rule that an
   // attempt which captured no answer is an infra failure rather than an answer.
-  | ({ type: "failure" } & AgentFailure);
+  | ({ type: "failure" } & AgentFailure)
+  // The CLI closing one turn (#189): Claude's `result` line, `ok` when its
+  // subtype is `success`. Not speech and not a failure — it only tells
+  // `invokeAgent` that silence after it is a finished run rather than a hung
+  // one. Claude Code `--print` stays alive while a `run_in_background` task is
+  // pending and turns each task completion into another turn, so a turn end is
+  // not a process end. Codex emits none and keeps #83's verdict on silence.
+  | { type: "turn_end"; ok: boolean }
+  // The line is a lifecycle line (Claude's `system`, `task_*` and `result`)
+  // that the invocation record keeps whole, beside its bounded tail (#189).
+  | { type: "control" };
 
 export type AgentProvider = {
   readonly name: string;
@@ -340,9 +369,10 @@ export type ExecOptions = {
   // from the other side: killing the client reaps nothing in the container, and
   // the only total handle podman offers is the container itself. Here that
   // handle belongs to the issue, not to one agent run, so the in-container
-  // process outlives an abort and dies with the sandbox at `close()`. What the
-  // abort buys is that sandbar stops holding a process, three fds and a growing
-  // output buffer for a run whose result it has already discarded.
+  // process outlives an abort; `invokeAgent` reaps an agent's process group
+  // itself (#189). What the abort buys is that sandbar stops holding a
+  // process, three fds and a growing output buffer for a run whose result it
+  // has already discarded.
   signal?: AbortSignal;
   // Variables for this exec only, on top of the container's own. Handed to
   // podman as a file like every other container variable (#154): the quality
@@ -424,8 +454,9 @@ export type RunOptions = {
   // standalone sandbox API has no run transcript tree; sandbar's inner loop
   // supplies it for every role invocation.
   readonly onInvocationEnd?: (record: AgentInvocationRecord) => Promise<void>;
-  // Required because a role's signal is its contract, never a default. `[]`
-  // ends only on process exit or idle timeout; grace is unreachable (#83).
+  // Required because a role's signal is its contract, never a default. With
+  // `[]`, only a provider's successful turn end enters the grace phase (#83,
+  // #189); otherwise the run ends on process exit or idle timeout.
   readonly completionSignal: readonly string[];
   // Variables for this invocation only (see ExecOptions.env).
   readonly env?: Readonly<Record<string, string>>;
@@ -439,6 +470,9 @@ export type AgentInvocationRecord = ContainerResources & {
   readonly model: string | null;
   readonly end:
     | "exit"
+    // A successful turn end followed by a whole completion grace of silence
+    // (#189): accepted as completed, and the process group reaped.
+    | "result-then-silence"
     | "idle-timeout"
     | "completion-timeout"
     | "stream-error"
@@ -449,6 +483,9 @@ export type AgentInvocationRecord = ContainerResources & {
   readonly speech: string;
   readonly stdout: string;
   readonly stderr: string;
+  // Every raw line the provider's parser marked `control`, uncapped and in
+  // order (#189). The tails above can lose them to large neighbours.
+  readonly controlLines: readonly string[];
 };
 
 export type SandboxRunResult = ContainerResources & {
@@ -475,11 +512,17 @@ export type SandboxRunResult = ContainerResources & {
   // same invocation clock and excluding resource measurement.
   readonly signalMs?: number;
   readonly maxGapMs: number;
+  // How a completed invocation ended (#189): its process exited, or it
+  // reported a successful turn end and then stayed silent for the whole
+  // completion grace. A report, never a decision input (#82).
+  readonly endedBy: AgentRunEndedBy;
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
   readonly peakContext?: number;
   readonly rateLimit?: RateLimitMeasurement;
 };
+
+export type AgentRunEndedBy = "exit" | "result-then-silence";
 
 export interface Sandbox {
   readonly branch: string;
@@ -810,9 +853,21 @@ const parseTransportJson = (
   }
 };
 
+// Claude's lifecycle lines (#189): what a hang has to be diagnosed from, and
+// what a 64 KiB tail of large thinking signatures loses first.
+const isClaudeControlLine = (obj: Record<string, unknown>): boolean =>
+  obj.type === "system" ||
+  obj.type === "result" ||
+  (typeof obj.type === "string" && obj.type.startsWith("task_"));
+
 export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   const parsed = parseTransportJson(line);
   if (parsed === undefined) return [];
+  const events = parseStreamJsonObject(parsed);
+  return isClaudeControlLine(parsed) ? [...events, { type: "control" }] : events;
+};
+
+const parseStreamJsonObject = (parsed: Record<string, unknown>): ParsedStreamEvent[] => {
   // JSON.parse yields `any`; the upstream parser is intentionally untyped.
   const obj = parsed as any;
   if (obj.type === "rate_limit_event") {
@@ -893,6 +948,10 @@ export const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
       ...(measurement === undefined
         ? []
         : [{ type: "usage" as const, usage: measurement }]),
+      {
+        type: "turn_end" as const,
+        ok: obj.subtype === "success" && obj.is_error !== true,
+      },
     ];
   }
   if (
@@ -2069,77 +2128,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
       const handle: SandboxHandle = {
         worktreePath: sandboxWorktreePath,
         containerName,
-        exec: (command, opts) => withRuntimeEnv(
-          sandboxExecArgs(containerName, command, opts),
-          (args) => new Promise<ExecResult>((resolveExec, rejectExec) => {
-            const proc = spawn("podman", args, {
-              stdio: [opts?.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
-            });
-            if (opts?.stdin !== undefined && proc.stdin) {
-              // Unlistened, a write to a child that already exited raises an
-              // UNCAUGHT EPIPE and kills the run rather than failing this one
-              // exec. EPIPE only means podman went away before reading stdin —
-              // its exit code is the real verdict and the close handler below
-              // reports it. Any other write error is genuine and rejects.
-              proc.stdin.on("error", (error: NodeJS.ErrnoException) => {
-                if (error.code !== "EPIPE") {
-                  rejectExec(
-                    new Error(`podman exec stdin failed: ${error.message}`),
-                  );
-                }
-              });
-              proc.stdin.write(opts.stdin);
-              proc.stdin.end();
-            }
-            proc.on("error", (error) => {
-              rejectExec(new Error(`podman exec failed: ${error.message}`));
-            });
-            killOnAbort(proc, opts?.signal);
-            // stdout/stderr are always piped above, so they are non-null here.
-            const stdout = proc.stdout as NonNullable<typeof proc.stdout>;
-            const stderr = proc.stderr as NonNullable<typeof proc.stderr>;
-            if (opts?.onLine) {
-              const onLine = opts.onLine;
-              const stdoutTail = new BoundedTail(maxOutputTailChars, "\n");
-              const stderrTail = new BoundedTail(maxOutputTailChars, "");
-              const rl = createInterface({ input: stdout });
-              stdout.on("data", (chunk) => opts.onStdout?.(chunk.toString()));
-              rl.on("line", (line) => {
-                stdoutTail.push(line);
-                onLine(line);
-              });
-              stderr.on("data", (chunk) => {
-                opts.onStderr?.(chunk.toString());
-                stderrTail.push(chunk.toString());
-              });
-              proc.on("close", (code) => {
-                resolveExec({
-                  stdout: stdoutTail.toString(),
-                  stderr: stderrTail.toString(),
-                  exitCode: code ?? 0,
-                });
-              });
-            } else {
-              const stdoutChunks: string[] = [];
-              const stderrChunks: string[] = [];
-              stdout.on("data", (chunk) => {
-                opts?.onStdout?.(chunk.toString());
-                stdoutChunks.push(chunk.toString());
-              });
-              stderr.on("data", (chunk) => {
-                opts?.onStderr?.(chunk.toString());
-                stderrChunks.push(chunk.toString());
-              });
-              proc.on("close", (code) => {
-                resolveExec({
-                  stdout: stdoutChunks.join(""),
-                  stderr: stderrChunks.join(""),
-                  exitCode: code ?? 0,
-                });
-              });
-            }
-          }),
-        ),
+        exec: podmanExec(containerName, maxOutputTailChars),
         close: async () => {
           unregisterShutdown();
           await new Promise<void>((resolveClose, rejectClose) => {
@@ -2154,6 +2143,83 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
     },
   };
 };
+
+// The podman provider's exec, outside its closure so a podman-layer test can
+// drive `invokeAgent` through it against a container it started itself (#189).
+export const podmanExec = (
+  containerName: string,
+  maxOutputTailChars: number = MAX_TAIL_CHARS,
+) => (command: string, opts?: ExecOptions): Promise<ExecResult> => withRuntimeEnv(
+  sandboxExecArgs(containerName, command, opts),
+  (args) => new Promise<ExecResult>((resolveExec, rejectExec) => {
+    const proc = spawn("podman", args, {
+      stdio: [opts?.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+    });
+    if (opts?.stdin !== undefined && proc.stdin) {
+      // Unlistened, a write to a child that already exited raises an
+      // UNCAUGHT EPIPE and kills the run rather than failing this one
+      // exec. EPIPE only means podman went away before reading stdin —
+      // its exit code is the real verdict and the close handler below
+      // reports it. Any other write error is genuine and rejects.
+      proc.stdin.on("error", (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EPIPE") {
+          rejectExec(
+            new Error(`podman exec stdin failed: ${error.message}`),
+          );
+        }
+      });
+      proc.stdin.write(opts.stdin);
+      proc.stdin.end();
+    }
+    proc.on("error", (error) => {
+      rejectExec(new Error(`podman exec failed: ${error.message}`));
+    });
+    killOnAbort(proc, opts?.signal);
+    // stdout/stderr are always piped above, so they are non-null here.
+    const stdout = proc.stdout as NonNullable<typeof proc.stdout>;
+    const stderr = proc.stderr as NonNullable<typeof proc.stderr>;
+    if (opts?.onLine) {
+      const onLine = opts.onLine;
+      const stdoutTail = new BoundedTail(maxOutputTailChars, "\n");
+      const stderrTail = new BoundedTail(maxOutputTailChars, "");
+      const rl = createInterface({ input: stdout });
+      stdout.on("data", (chunk) => opts.onStdout?.(chunk.toString()));
+      rl.on("line", (line) => {
+        stdoutTail.push(line);
+        onLine(line);
+      });
+      stderr.on("data", (chunk) => {
+        opts.onStderr?.(chunk.toString());
+        stderrTail.push(chunk.toString());
+      });
+      proc.on("close", (code) => {
+        resolveExec({
+          stdout: stdoutTail.toString(),
+          stderr: stderrTail.toString(),
+          exitCode: code ?? 0,
+        });
+      });
+    } else {
+      const stdoutChunks: string[] = [];
+      const stderrChunks: string[] = [];
+      stdout.on("data", (chunk) => {
+        opts?.onStdout?.(chunk.toString());
+        stdoutChunks.push(chunk.toString());
+      });
+      stderr.on("data", (chunk) => {
+        opts?.onStderr?.(chunk.toString());
+        stderrChunks.push(chunk.toString());
+      });
+      proc.on("close", (code) => {
+        resolveExec({
+          stdout: stdoutChunks.join(""),
+          stderr: stderrChunks.join(""),
+          exitCode: code ?? 0,
+        });
+      });
+    }
+  }),
+);
 
 // Wiring for ExecOptions.signal, extracted from the podman provider so it can
 // be asserted at all: that provider needs a real podman and a real image, so
@@ -2245,6 +2311,48 @@ type CodexRolloutCursor =
 
 const shellLiteral = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
+const REAP_TIMEOUT_MS = 10_000;
+
+class ReapTimeoutError extends Error {}
+
+// The agent CLI's own process group (#189). `setsid` makes the inner `sh` a
+// session and group leader whose pid — the pgid — goes to `pidfile`; the CLI
+// and every descendant that does not leave the group inherit it. `setsid` is
+// never the last command of the outer `sh -c`, so no shell can exec it
+// directly: a group leader's `setsid` forks and returns at once, and the exec
+// would end with the agent still running. A base without `setsid` runs the
+// CLI as before and leaves no pidfile, so its reap is a no-op.
+export const agentProcessGroupCommand = (command: string, pidfile: string): string =>
+  "if command -v setsid >/dev/null 2>&1; then " +
+  `setsid sh -c ${shellLiteral(`echo $$ > ${shellLiteral(pidfile)}; ${command}`)}; ` +
+  `else sh -c ${shellLiteral(command)}; fi; exit $?`;
+
+// Kills that group inside the container. A missing pidfile or an emptied group
+// is not a failure: the point is that nothing of the run is left.
+export const reapProcessGroupCommand = (pidfile: string): string =>
+  `f=${shellLiteral(pidfile)}; test -s "$f" || exit 0; g=$(cat "$f"); rm -f "$f"; ` +
+  `kill -s KILL -- "-$g" 2>/dev/null; exit 0`;
+
+// A turn end sets the state; agent activity after it reopens the turn. Every
+// other event — usage, rate limits, session ids, control lines — leaves it be.
+const TURN_ACTIVITY: ReadonlySet<ParsedStreamEvent["type"]> = new Set([
+  "text",
+  "tool_call",
+  "tool_calls",
+  "context_depth",
+]);
+
+export const turnEndedAfter = (
+  ended: boolean,
+  events: readonly ParsedStreamEvent[],
+): boolean =>
+  events.reduce(
+    (state, event) => event.type === "turn_end"
+      ? event.ok
+      : TURN_ACTIVITY.has(event.type) ? false : state,
+    ended,
+  );
+
 const captureCodexRolloutCursor = async (
   handle: SandboxHandle,
   sandboxRepoDir: string,
@@ -2276,6 +2384,18 @@ const captureCodexRolloutCursor = async (
     : { kind: "unknown" };
 };
 
+type InvokeAgentResult = {
+  result: string;
+  silent: boolean;
+  signalMs?: number;
+  maxGapMs: number;
+  endedBy: AgentRunEndedBy;
+  usage?: AgentUsage;
+  toolCalls: number;
+  peakContext?: number;
+  rateLimit?: RateLimitMeasurement;
+};
+
 const invokeAgent = async (
   handle: SandboxHandle,
   sandboxRepoDir: string,
@@ -2290,16 +2410,7 @@ const invokeAgent = async (
     readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
     readonly env?: Readonly<Record<string, string>>;
   },
-): Promise<{
-  result: string;
-  silent: boolean;
-  signalMs?: number;
-  maxGapMs: number;
-  usage?: AgentUsage;
-  toolCalls: number;
-  peakContext?: number;
-  rateLimit?: RateLimitMeasurement;
-}> => {
+): Promise<InvokeAgentResult> => {
   // A resumed Codex session appends to an existing rollout. Snapshot its byte
   // boundary before starting the process so this invocation cannot inherit an
   // earlier invocation's larger depth or stale rate-limit evidence (#124).
@@ -2312,6 +2423,8 @@ const invokeAgent = async (
     const speech = createAgentSpeechAccumulator();
     let matchedSignal: string | undefined;
     let signalMs: number | undefined;
+    // The last turn-shaped event was a successful turn end (#189).
+    let turnEnded = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
     let forcedEnd = false;
@@ -2322,6 +2435,9 @@ const invokeAgent = async (
     const gaps = startGapTimer();
     const stdoutTail = new BoundedTail(MAX_TAIL_CHARS, "");
     const stderrTail = new BoundedTail(MAX_TAIL_CHARS, "");
+    const controlLines: string[] = [];
+    // Inside the container, outside the worktree: one per invocation.
+    const pidfile = `/tmp/${RESOURCE_PREFIX}agent-${randomUUID()}.pgid`;
 
     const clearTimer = (): void => {
       if (timer !== null) {
@@ -2329,16 +2445,7 @@ const invokeAgent = async (
         timer = null;
       }
     };
-    const settleResolve = (val: {
-      result: string;
-      silent: boolean;
-      signalMs?: number;
-      maxGapMs: number;
-      usage?: AgentUsage;
-      toolCalls: number;
-      peakContext?: number;
-      rateLimit?: RateLimitMeasurement;
-    }): void => {
+    const settleResolve = (val: InvokeAgentResult): void => {
       if (settled) return;
       settled = true;
       clearTimer();
@@ -2381,7 +2488,37 @@ const invokeAgent = async (
         speech: speech.spoken,
         stdout: execResult.stdout,
         stderr: execResult.stderr,
+        controlLines,
       });
+    };
+    const tails = () => ({
+      stdout: stdoutTail.toString(),
+      stderr: stderrTail.toString(),
+      exitCode: null,
+    });
+    // Every end but a clean exit kills the agent's process group inside the
+    // container (#189): killing the exec client reaps nothing there, and a
+    // CLI left alive in the issue's sandbox can commit under a later role.
+    // A reap that exits non-zero or times out is reported in the record's
+    // detail and does not replace the run's verdict; any other error
+    // propagates.
+    const reap = async (detail: string): Promise<string> => {
+      const reaper = new AbortController();
+      const failure = await withTimeout(
+        handle.exec(reapProcessGroupCommand(pidfile), { signal: reaper.signal }),
+        REAP_TIMEOUT_MS,
+        () => new ReapTimeoutError(`timed out after ${REAP_TIMEOUT_MS}ms`),
+      ).then(
+        (r) => r.exitCode === 0 ? null : `exit ${r.exitCode}: ${r.stderr.trim()}`,
+        (err: unknown) => {
+          if (err instanceof ReapTimeoutError) return err.message;
+          throw err;
+        },
+      );
+      reaper.abort();
+      return failure === null
+        ? detail
+        : `${detail} (reaping the agent's process group failed: ${failure})`;
     };
     const stopWith = (
       end: AgentInvocationRecord["end"],
@@ -2392,18 +2529,35 @@ const invokeAgent = async (
       clearTimer();
       abort.abort();
       const detail = error instanceof Error ? error.message : String(error);
-      void recordEnd(end, detail, {
-        stdout: stdoutTail.toString(),
-        stderr: stderrTail.toString(),
-        exitCode: null,
-      }).then(
-        () => settleReject(error),
-        (recordError) => settleReject(recordError),
-      );
+      void reap(detail)
+        .then((recorded) => recordEnd(end, recorded, tails()))
+        .then(
+          () => settleReject(error),
+          (recordError) => settleReject(recordError),
+        );
+    };
+    // A successful turn end and then a whole grace of silence is a finished
+    // run that its CLI has not exited (#189). It is judged exactly as a clean
+    // exit would have been, from the same speech, usage and tails.
+    const acceptAfterGrace = (): void => {
+      if (settled || forcedEnd) return;
+      forcedEnd = true;
+      clearTimer();
+      abort.abort();
+      void reap(
+        `${agent.name} reported a successful result, then produced no output for ` +
+          `${completionTimeoutMs}ms without exiting.`,
+      )
+        .then((detail) => finish("result-then-silence", detail, tails(), 0))
+        .then(
+          () => undefined,
+          (err) => settleReject(err),
+        );
     };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
-    // timer that rejects: announcing completion without exiting is an
+    // timer. A grace that expires right after a successful turn end accepts the
+    // run (#189); otherwise announcing completion without exiting is an
     // infrastructure failure, not a clean result (#83).
     const resetTimer = (): void => {
       // Nothing is waiting any more, so nothing should be armed: `onLine` still
@@ -2413,10 +2567,14 @@ const invokeAgent = async (
       // minutes of an event loop held open on the exit-0 path, which returns
       // rather than calling process.exit. The same "stop what you stopped
       // waiting for" thought as the abort below.
-      if (settled) return;
+      if (settled || forcedEnd) return;
       clearTimer();
-      if (matchedSignal !== undefined) {
+      if (matchedSignal !== undefined || turnEnded) {
         timer = setTimeout(() => {
+          if (turnEnded) {
+            acceptAfterGrace();
+            return;
+          }
           // Abort makes the exec return its bounded stream tails. Rejection is
           // deliberately deferred until those tails have been recorded: the
           // record precedes judgement on timeout paths just as it does on an
@@ -2447,6 +2605,120 @@ const invokeAgent = async (
       }
     };
 
+    // The judgement of a completed invocation: its process exited, or it was
+    // accepted after a successful turn end. `exitCode` is what the classifier
+    // reads — the process's own, or 0 for the CLI's reported success.
+    const finish = async (
+      end: "exit" | "result-then-silence",
+      detail: string | null,
+      execResult: {
+        readonly stdout: string;
+        readonly stderr: string;
+        readonly exitCode: number | null;
+      },
+      exitCode: number,
+    ): Promise<void> => {
+      if (agent.name === "codex") {
+        // The rollout is inside this still-live sandbox. Missing files or
+        // malformed lines or a post-run exec failure preserve the invocation's
+        // old classification. An unknown cursor omits depth while retaining
+        // rate-limit evidence (#109, #124).
+        try {
+          const readNewRecords = rolloutCursor.kind === "empty" || rolloutCursor.kind === "unknown"
+            ? "test -n \"$f\" && tail -n 200 \"$f\" || true"
+            : `if test \"$f\" = ${shellLiteral(rolloutCursor.path)}; then ` +
+              `tail -c +${rolloutCursor.bytes + 1} \"$f\" | tail -n 200; ` +
+              "else test -n \"$f\" && tail -n 200 \"$f\" || true; fi";
+          const rollout = await withTimeout(
+            handle.exec(
+              "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
+                "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
+                readNewRecords,
+              { cwd: sandboxRepoDir },
+            ),
+            CODEX_ROLLOUT_PROBE_TIMEOUT_MS,
+            () => new Error(
+              `Codex rollout probe timed out after ${CODEX_ROLLOUT_PROBE_TIMEOUT_MS}ms`,
+            ),
+          );
+          for (const line of rollout.stdout.split("\n")) {
+            const events = parseCodexRolloutLine(line);
+            speech.ingest(rolloutCursor.kind === "unknown"
+              ? events.filter((event) => event.type !== "context_depth")
+              : events);
+          }
+        } catch {
+          // The agent result remains authoritative when its optional side
+          // channel cannot be inspected.
+        }
+      }
+      await recordEnd(end, detail, execResult);
+      // The persistent sandbox can cheaply re-ask in the same provider
+      // session, so a silent successful exit is retryable here (#114).
+      const classification = classifyAgentRunEnd({
+        end: "exit",
+        exitCode,
+        spoken: speech.spoken,
+        failure: speech.failure,
+        stderr: execResult.stderr,
+        stdout: execResult.stdout,
+        silentRunRecovery: "retryable",
+        rateLimit: speech.rateLimit,
+      });
+      if (classification.verdict === "quota" && classification.rateLimit) {
+        settleReject(new AgentQuotaError(
+          agent.name === "codex" ? "codex" : "claude",
+          classification.rateLimit,
+        ));
+        return;
+      }
+      if (classification.verdict === "credential") {
+        settleReject(new AgentCredentialError(
+          classification.detail ?? "credential refresh failed",
+        ));
+        return;
+      }
+      if (classification.verdict === "input-too-large") {
+        settleReject(new AgentInputTooLargeError(
+          classification.detail ?? "input exceeds the provider limit",
+        ));
+        return;
+      }
+      if (exitCode !== 0 || classification.verdict === "infra") {
+        // Four-tier detail: the reported failure → stderr → parsed speech →
+        // last 20 stdout lines. The reported failure leads because it is the
+        // provider naming its own give-up cause, and this is the path a codex
+        // credential failure actually takes (it exits 1) — whose stderr is a
+        // dozen timestamped `ERROR codex_api::…` retry lines that bury the
+        // one sentence a human needs. A provider that reports nothing in-band
+        // is unaffected: Claude emits `failure` only for #158's two
+        // prompt-size terminal reasons, so stderr still leads for its other
+        // failures, exactly as before #72.
+        settleReject(
+          new AgentError(
+            agentFailureMessage(
+              agent.name,
+              exitCode,
+              classification.diagnostic,
+              classification.cause === "provider-failure",
+            ),
+          ),
+        );
+        return;
+      }
+      settleResolve({
+        result: speech.spoken,
+        silent: classification.cause === "silent",
+        maxGapMs: gaps.finish(),
+        endedBy: end,
+        ...(signalMs === undefined ? {} : { signalMs }),
+        ...(speech.usage === undefined ? {} : { usage: speech.usage }),
+        ...(speech.peakContext === undefined ? {} : { peakContext: speech.peakContext }),
+        ...(speech.rateLimit === undefined ? {} : { rateLimit: speech.rateLimit }),
+        toolCalls: speech.toolCalls,
+      });
+    };
+
     resetTimer();
 
     const printCmd = agent.buildPrintCommand({
@@ -2455,7 +2727,7 @@ const invokeAgent = async (
     });
 
     handle
-      .exec(printCmd.command, {
+      .exec(agentProcessGroupCommand(printCmd.command, pidfile), {
         cwd: sandboxRepoDir,
         stdin: printCmd.stdin,
         ...(invocation.env === undefined ? {} : { env: invocation.env }),
@@ -2464,8 +2736,10 @@ const invokeAgent = async (
         onStderr: (chunk) => stderrTail.push(chunk),
         onLine: (line) => {
           gaps.line();
+          let events: ParsedStreamEvent[];
           try {
-            speech.ingest(agent.parseStreamLine(line));
+            events = agent.parseStreamLine(line);
+            speech.ingest(events);
           } catch (err) {
             const detail = err instanceof Error ? err.message : String(err);
             stopWith(
@@ -2474,6 +2748,8 @@ const invokeAgent = async (
             );
             return;
           }
+          if (events.some((event) => event.type === "control")) controlLines.push(line);
+          turnEnded = turnEndedAfter(turnEnded, events);
           if (matchedSignal === undefined) {
             matchedSignal = completionSignals.find((sig) =>
               speech.accumulated.includes(sig),
@@ -2492,118 +2768,18 @@ const invokeAgent = async (
         // optional post-run evidence read below (#109).
         clearTimer();
         if (forcedEnd) {
-          // stopWith owns both the record and the rejection. The exec may
+          // A forced end owns both the record and the settlement. The exec may
           // close first or much later depending on which descendants retain
           // its pipes; neither timing may duplicate the invocation record.
           return;
         }
-        if (agent.name === "codex") {
-          // The rollout is inside this still-live sandbox. Missing files or
-          // malformed lines or a post-run exec failure preserve the invocation's
-          // old classification. An unknown cursor omits depth while retaining
-          // rate-limit evidence (#109, #124).
-          try {
-            const readNewRecords = rolloutCursor.kind === "empty" || rolloutCursor.kind === "unknown"
-              ? "test -n \"$f\" && tail -n 200 \"$f\" || true"
-              : `if test \"$f\" = ${shellLiteral(rolloutCursor.path)}; then ` +
-                `tail -c +${rolloutCursor.bytes + 1} \"$f\" | tail -n 200; ` +
-                "else test -n \"$f\" && tail -n 200 \"$f\" || true; fi";
-            const rollout = await withTimeout(
-              handle.exec(
-                "d=${CODEX_HOME:-$HOME/.codex}/sessions; " +
-                  "f=$(find \"$d\" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort | tail -n 1); " +
-                  readNewRecords,
-                { cwd: sandboxRepoDir },
-              ),
-              CODEX_ROLLOUT_PROBE_TIMEOUT_MS,
-              () => new Error(
-                `Codex rollout probe timed out after ${CODEX_ROLLOUT_PROBE_TIMEOUT_MS}ms`,
-              ),
-            );
-            for (const line of rollout.stdout.split("\n")) {
-              const events = parseCodexRolloutLine(line);
-              speech.ingest(rolloutCursor.kind === "unknown"
-                ? events.filter((event) => event.type !== "context_depth")
-                : events);
-            }
-          } catch {
-            // The agent result remains authoritative when its optional side
-            // channel cannot be inspected.
-          }
-        }
-        await recordEnd("exit", null, execResult);
-        // The persistent sandbox can cheaply re-ask in the same provider
-        // session, so a silent successful exit is retryable here (#114).
-        const classification = classifyAgentRunEnd({
-          end: "exit",
-          exitCode: execResult.exitCode,
-          spoken: speech.spoken,
-          failure: speech.failure,
-          stderr: execResult.stderr,
-          stdout: execResult.stdout,
-          silentRunRecovery: "retryable",
-          rateLimit: speech.rateLimit,
-        });
-        if (classification.verdict === "quota" && classification.rateLimit) {
-          settleReject(new AgentQuotaError(
-            agent.name === "codex" ? "codex" : "claude",
-            classification.rateLimit,
-          ));
-          return;
-        }
-        if (classification.verdict === "credential") {
-          settleReject(new AgentCredentialError(
-            classification.detail ?? "credential refresh failed",
-          ));
-          return;
-        }
-        if (classification.verdict === "input-too-large") {
-          settleReject(new AgentInputTooLargeError(
-            classification.detail ?? "input exceeds the provider limit",
-          ));
-          return;
-        }
-        if (execResult.exitCode !== 0 || classification.verdict === "infra") {
-          // Four-tier detail: the reported failure → stderr → parsed speech →
-          // last 20 stdout lines. The reported failure leads because it is the
-          // provider naming its own give-up cause, and this is the path a codex
-          // credential failure actually takes (it exits 1) — whose stderr is a
-          // dozen timestamped `ERROR codex_api::…` retry lines that bury the
-          // one sentence a human needs. A provider that reports nothing in-band
-          // is unaffected: Claude emits `failure` only for #158's two
-          // prompt-size terminal reasons, so stderr still leads for its other
-          // failures, exactly as before #72.
-          settleReject(
-            new AgentError(
-              agentFailureMessage(
-                agent.name,
-                execResult.exitCode,
-                classification.diagnostic,
-                classification.cause === "provider-failure",
-              ),
-            ),
-          );
-          return;
-        }
-        settleResolve({
-          result: speech.spoken,
-          silent: classification.cause === "silent",
-          maxGapMs: gaps.finish(),
-          ...(signalMs === undefined ? {} : { signalMs }),
-          ...(speech.usage === undefined ? {} : { usage: speech.usage }),
-          ...(speech.peakContext === undefined ? {} : { peakContext: speech.peakContext }),
-          ...(speech.rateLimit === undefined ? {} : { rateLimit: speech.rateLimit }),
-          toolCalls: speech.toolCalls,
-        });
+        await finish("exit", null, execResult, execResult.exitCode);
       }, async (err) => {
         clearTimer();
         if (forcedEnd) return;
+        forcedEnd = true;
         const detail = err instanceof Error ? err.message : String(err);
-        await recordEnd("exec-error", detail, {
-          stdout: stdoutTail.toString(),
-          stderr: stderrTail.toString(),
-          exitCode: null,
-        });
+        await recordEnd("exec-error", await reap(detail), tails());
         settleReject(err);
       })
       .catch((err) => settleReject(err));
@@ -2798,17 +2974,7 @@ export const createSandbox = async (
       readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
     readonly env?: Readonly<Record<string, string>>;
     },
-  ): Promise<{
-    result: string;
-    commits: { sha: string }[];
-    silent: boolean;
-    signalMs?: number;
-    maxGapMs: number;
-    usage?: AgentUsage;
-    toolCalls: number;
-    peakContext?: number;
-    rateLimit?: RateLimitMeasurement;
-  }> => {
+  ): Promise<InvokeAgentResult & { commits: { sha: string }[] }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
     // sandbar's common case has no onSandboxReady hooks).
@@ -2902,7 +3068,7 @@ export const createSandbox = async (
         },
       );
     }
-    const { result, signalMs, maxGapMs, usage, toolCalls, peakContext, rateLimit, silent } =
+    const { result, signalMs, maxGapMs, endedBy, usage, toolCalls, peakContext, rateLimit, silent } =
       invoked;
 
     const commits = await collectCommits();
@@ -2912,6 +3078,7 @@ export const createSandbox = async (
       commits,
       silent,
       maxGapMs,
+      endedBy,
       ...(signalMs === undefined ? {} : { signalMs }),
       ...(usage === undefined ? {} : { usage }),
       ...(peakContext === undefined ? {} : { peakContext }),
@@ -2975,6 +3142,7 @@ export const createSandbox = async (
         durationMs,
         silent: iter.silent,
         maxGapMs: iter.maxGapMs,
+        endedBy: iter.endedBy,
         ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
         ...(iter.usage === undefined ? {} : { usage: iter.usage }),
         ...(iter.peakContext === undefined ? {} : { peakContext: iter.peakContext }),

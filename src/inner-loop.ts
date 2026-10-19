@@ -137,7 +137,7 @@ import {
   withPartialOutput,
 } from "./agent-sandbox.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
-import type { AgentInvocationRecord, Sandbox, SandboxHooks } from "./agent-sandbox.js";
+import type { AgentInvocationRecord, AgentRunEndedBy, Sandbox, SandboxHooks } from "./agent-sandbox.js";
 import { maxContextDepth, sumAgentUsage } from "./agent-usage.js";
 import type { AgentUsage } from "./agent-usage.js";
 
@@ -1485,6 +1485,7 @@ export async function runPartitionCheck(
       toolCalls: number | undefined,
       peakContext: number | undefined,
       resources: ContainerResources,
+      endedBy?: AgentRunEndedBy,
     ): Promise<void> => {
       const usageFields = eventUsage(
         usage,
@@ -1502,6 +1503,7 @@ export async function runPartitionCheck(
         model: config.implementerModelId,
         effort: config.implementerEffort ?? null,
         durationMs,
+        ...(endedBy === undefined ? {} : { endedBy }),
         result,
         ...(usageFields === undefined ? {} : { usage: usageFields }),
         ...resources,
@@ -1571,12 +1573,12 @@ export async function runPartitionCheck(
     );
     if (wrote !== null) {
       await log("wrote", run.durationMs, run.usage, run.toolCalls, run.peakContext,
-        containerResourcesOf(run));
+        containerResourcesOf(run), run.endedBy);
       return { kind: "partition-checker-wrote", detail: wrote };
     }
     const result = parsePartitionCheck(run.stdout);
     await log(result.kind, run.durationMs, run.usage, run.toolCalls, run.peakContext,
-      containerResourcesOf(run));
+      containerResourcesOf(run), run.endedBy);
     if (result.kind !== "NO-SIGNAL") {
       return {
         kind: "partition-check-result",
@@ -1607,7 +1609,8 @@ export async function runUiCheck(
   let prompt = basePrompt;
 
   // One correction at most. Neither invocation owns a completion signal:
-  // process exit is the honest end of this role's single classification.
+  // process exit — or a successful result and then silence (#189) — is the
+  // honest end of this role's single classification.
   for (let invocation = 1; invocation <= 2; invocation += 1) {
     const beforeInvocation = await snapshotReadOnlyAgent(
       sandbox.worktreePath,
@@ -1623,6 +1626,7 @@ export async function runUiCheck(
       peakContext: number | undefined,
       rateLimit: RateLimitMeasurement | undefined,
       resources: ContainerResources,
+      endedBy?: AgentRunEndedBy,
     ): Promise<void> => {
       await opts.onEvent({
         kind: "ui-check",
@@ -1633,6 +1637,7 @@ export async function runUiCheck(
         model: config.uiCheckModelId,
         effort: config.uiCheckEffort ?? null,
         durationMs,
+        ...(endedBy === undefined ? {} : { endedBy }),
         ...(maxGapMs === undefined ? {} : { maxGapMs }),
         result,
         ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
@@ -1711,6 +1716,7 @@ export async function runUiCheck(
         run.peakContext,
         run.rateLimit,
         containerResourcesOf(run),
+        run.endedBy,
       );
       return { kind: "ui-checker-wrote", detail: wrote };
     }
@@ -1724,6 +1730,7 @@ export async function runUiCheck(
       run.peakContext,
       run.rateLimit,
       containerResourcesOf(run),
+      run.endedBy,
     );
     if (result.kind !== "NO-SIGNAL") {
       return { kind: "ui-check-result", result };
@@ -1847,6 +1854,7 @@ export async function runQualityReview(
       verdict: parseVerdict(r.output)?.verdict ?? null,
       prose: r.output,
       durationMs: r.durationMs,
+      ...(r.endedBy === undefined ? {} : { endedBy: r.endedBy }),
       ...(r.maxGapMs === undefined ? {} : { maxGapMs: r.maxGapMs }),
       ...(r.usage === undefined ? {} : { usage: r.usage }),
       ...r.resources,
@@ -1867,7 +1875,8 @@ export const QUALITY_FIXER_MAX_INVOCATIONS = 2;
 // The quality fixer (#185, #187): a cold, writable run in the implementer's
 // sandbox that gets the latest CHANGES-REQUESTED report and commits. It emits
 // nothing the loop parses. Process exit — clean, non-zero, idle or completion
-// timeout alike (`AgentError`/`AgentIdleTimeoutError`) — is the end of an
+// timeout alike (`AgentError`/`AgentIdleTimeoutError`), or a successful result
+// and then silence (#189) — is the end of an
 // invocation, and the host then settles whatever it left. Only a provider
 // closure or size refusal stops the step, with the same meaning as for every
 // other role; anything else is infrastructure and propagates to HARD-ERROR.
@@ -1916,6 +1925,7 @@ export async function runQualityFix(
     const timer = startTimer();
     type Measurements = {
       readonly durationMs: number;
+      readonly endedBy?: AgentRunEndedBy;
       readonly maxGapMs?: number;
       readonly usage?: AgentUsage;
       readonly toolCalls?: number;
@@ -1942,6 +1952,7 @@ export async function runQualityFix(
         effort: config.reviewerQualityEffort ?? null,
         ...outcome,
         durationMs: m.durationMs,
+        ...(m.endedBy === undefined ? {} : { endedBy: m.endedBy }),
         ...(m.maxGapMs === undefined ? {} : { maxGapMs: m.maxGapMs }),
         ...(usageFields === undefined ? {} : { usage: usageFields }),
         ...m.resources,
@@ -1975,6 +1986,7 @@ export async function runQualityFix(
       exited = "completed";
       measurements = {
         durationMs: run.durationMs,
+        endedBy: run.endedBy,
         maxGapMs: run.maxGapMs,
         ...(run.usage === undefined ? {} : { usage: run.usage }),
         toolCalls: run.toolCalls,
@@ -2232,7 +2244,7 @@ export async function runImplementer(
       title: issue.title,
       attempt: action.attempt,
       action: "promise-nudge",
-      detail: `signal=${signal.kind} durationMs=${nudge.durationMs} maxGapMs=${nudge.maxGapMs}`,
+      detail: `signal=${signal.kind} durationMs=${nudge.durationMs} maxGapMs=${nudge.maxGapMs} endedBy=${nudge.endedBy}`,
     });
     // The nudge was the same-session re-ask. If both calls were silent and
     // this attempt committed nothing, there is no evidence that the provider
@@ -2322,6 +2334,7 @@ export async function runImplementer(
     model: config.implementerModelId,
     effort: config.implementerEffort ?? null,
     durationMs: implementerMs,
+    endedBy: run.endedBy,
     ...(run.signalMs === undefined ? {} : { signalMs: run.signalMs }),
     maxGapMs: attemptMaxGapMs,
     ...(eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit, measuredContextChars) === undefined
@@ -2638,6 +2651,7 @@ export async function runAdjudicator(
         model: config.adjudicatorModelId,
         effort: config.adjudicatorEffort ?? null,
         durationMs: timer(),
+        ...(completed === null ? {} : { endedBy: completed.endedBy }),
         ...(completed?.maxGapMs === undefined ? {} : { maxGapMs: completed.maxGapMs }),
         ...(measuredUsage === undefined ? {} : { usage: measuredUsage }),
         ...resources,
@@ -2736,6 +2750,7 @@ export async function runCorrectness(
       effort: config.reviewerEffort ?? null,
       result: r.result,
       durationMs: r.durationMs,
+      ...(r.endedBy === undefined ? {} : { endedBy: r.endedBy }),
       ...(r.maxGapMs === undefined ? {} : { maxGapMs: r.maxGapMs }),
       ...(r.usage === undefined ? {} : { usage: r.usage }),
       ...r.resources,
@@ -2765,6 +2780,7 @@ type ReviewInvocationRecord = {
   // The agent's stdout, or its partial output when the run failed.
   readonly output: string;
   readonly durationMs: number;
+  readonly endedBy?: AgentRunEndedBy;
   readonly maxGapMs?: number;
   readonly usage?: UsageFields;
   readonly resources: ContainerResources;
@@ -2826,8 +2842,9 @@ async function runReadOnlyReview(
           // self-sufficient and may run on a different vendor from the fixer.
           agent: buildAgentProvider(spec.agent, spec.modelId, { effort: spec.effort }),
           prompt: spec.prompt,
-          // A reviewer owns no completion signal. Process exit is the honest
-          // end of its single artefact; inherited role contracts are banned.
+          // A reviewer owns no completion signal. Process exit, or a
+          // successful result and then silence (#189), is the honest end of
+          // its single artefact; inherited role contracts are banned.
           completionSignal: [],
           ...invocationLog(opts.attemptLogger, spec.filename(invocation)),
         }));
@@ -2843,6 +2860,7 @@ async function runReadOnlyReview(
           result: "completed",
           output: run.stdout,
           durationMs: run.durationMs,
+          endedBy: run.endedBy,
           maxGapMs: run.maxGapMs,
           ...(usage === undefined ? {} : { usage }),
           resources: containerResourcesOf(run),
