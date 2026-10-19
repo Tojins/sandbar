@@ -2104,77 +2104,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
       const handle: SandboxHandle = {
         worktreePath: sandboxWorktreePath,
         containerName,
-        exec: (command, opts) => withRuntimeEnv(
-          sandboxExecArgs(containerName, command, opts),
-          (args) => new Promise<ExecResult>((resolveExec, rejectExec) => {
-            const proc = spawn("podman", args, {
-              stdio: [opts?.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
-            });
-            if (opts?.stdin !== undefined && proc.stdin) {
-              // Unlistened, a write to a child that already exited raises an
-              // UNCAUGHT EPIPE and kills the run rather than failing this one
-              // exec. EPIPE only means podman went away before reading stdin —
-              // its exit code is the real verdict and the close handler below
-              // reports it. Any other write error is genuine and rejects.
-              proc.stdin.on("error", (error: NodeJS.ErrnoException) => {
-                if (error.code !== "EPIPE") {
-                  rejectExec(
-                    new Error(`podman exec stdin failed: ${error.message}`),
-                  );
-                }
-              });
-              proc.stdin.write(opts.stdin);
-              proc.stdin.end();
-            }
-            proc.on("error", (error) => {
-              rejectExec(new Error(`podman exec failed: ${error.message}`));
-            });
-            killOnAbort(proc, opts?.signal);
-            // stdout/stderr are always piped above, so they are non-null here.
-            const stdout = proc.stdout as NonNullable<typeof proc.stdout>;
-            const stderr = proc.stderr as NonNullable<typeof proc.stderr>;
-            if (opts?.onLine) {
-              const onLine = opts.onLine;
-              const stdoutTail = new BoundedTail(maxOutputTailChars, "\n");
-              const stderrTail = new BoundedTail(maxOutputTailChars, "");
-              const rl = createInterface({ input: stdout });
-              stdout.on("data", (chunk) => opts.onStdout?.(chunk.toString()));
-              rl.on("line", (line) => {
-                stdoutTail.push(line);
-                onLine(line);
-              });
-              stderr.on("data", (chunk) => {
-                opts.onStderr?.(chunk.toString());
-                stderrTail.push(chunk.toString());
-              });
-              proc.on("close", (code) => {
-                resolveExec({
-                  stdout: stdoutTail.toString(),
-                  stderr: stderrTail.toString(),
-                  exitCode: code ?? 0,
-                });
-              });
-            } else {
-              const stdoutChunks: string[] = [];
-              const stderrChunks: string[] = [];
-              stdout.on("data", (chunk) => {
-                opts?.onStdout?.(chunk.toString());
-                stdoutChunks.push(chunk.toString());
-              });
-              stderr.on("data", (chunk) => {
-                opts?.onStderr?.(chunk.toString());
-                stderrChunks.push(chunk.toString());
-              });
-              proc.on("close", (code) => {
-                resolveExec({
-                  stdout: stdoutChunks.join(""),
-                  stderr: stderrChunks.join(""),
-                  exitCode: code ?? 0,
-                });
-              });
-            }
-          }),
-        ),
+        exec: podmanExec(containerName, maxOutputTailChars),
         close: async () => {
           unregisterShutdown();
           await new Promise<void>((resolveClose, rejectClose) => {
@@ -2189,6 +2119,83 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
     },
   };
 };
+
+// The podman provider's exec, outside its closure so a podman-layer test can
+// drive `invokeAgent` through it against a container it started itself (#189).
+export const podmanExec = (
+  containerName: string,
+  maxOutputTailChars: number = MAX_TAIL_CHARS,
+) => (command: string, opts?: ExecOptions): Promise<ExecResult> => withRuntimeEnv(
+  sandboxExecArgs(containerName, command, opts),
+  (args) => new Promise<ExecResult>((resolveExec, rejectExec) => {
+    const proc = spawn("podman", args, {
+      stdio: [opts?.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+    });
+    if (opts?.stdin !== undefined && proc.stdin) {
+      // Unlistened, a write to a child that already exited raises an
+      // UNCAUGHT EPIPE and kills the run rather than failing this one
+      // exec. EPIPE only means podman went away before reading stdin —
+      // its exit code is the real verdict and the close handler below
+      // reports it. Any other write error is genuine and rejects.
+      proc.stdin.on("error", (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EPIPE") {
+          rejectExec(
+            new Error(`podman exec stdin failed: ${error.message}`),
+          );
+        }
+      });
+      proc.stdin.write(opts.stdin);
+      proc.stdin.end();
+    }
+    proc.on("error", (error) => {
+      rejectExec(new Error(`podman exec failed: ${error.message}`));
+    });
+    killOnAbort(proc, opts?.signal);
+    // stdout/stderr are always piped above, so they are non-null here.
+    const stdout = proc.stdout as NonNullable<typeof proc.stdout>;
+    const stderr = proc.stderr as NonNullable<typeof proc.stderr>;
+    if (opts?.onLine) {
+      const onLine = opts.onLine;
+      const stdoutTail = new BoundedTail(maxOutputTailChars, "\n");
+      const stderrTail = new BoundedTail(maxOutputTailChars, "");
+      const rl = createInterface({ input: stdout });
+      stdout.on("data", (chunk) => opts.onStdout?.(chunk.toString()));
+      rl.on("line", (line) => {
+        stdoutTail.push(line);
+        onLine(line);
+      });
+      stderr.on("data", (chunk) => {
+        opts.onStderr?.(chunk.toString());
+        stderrTail.push(chunk.toString());
+      });
+      proc.on("close", (code) => {
+        resolveExec({
+          stdout: stdoutTail.toString(),
+          stderr: stderrTail.toString(),
+          exitCode: code ?? 0,
+        });
+      });
+    } else {
+      const stdoutChunks: string[] = [];
+      const stderrChunks: string[] = [];
+      stdout.on("data", (chunk) => {
+        opts?.onStdout?.(chunk.toString());
+        stdoutChunks.push(chunk.toString());
+      });
+      stderr.on("data", (chunk) => {
+        opts?.onStderr?.(chunk.toString());
+        stderrChunks.push(chunk.toString());
+      });
+      proc.on("close", (code) => {
+        resolveExec({
+          stdout: stdoutChunks.join(""),
+          stderr: stderrChunks.join(""),
+          exitCode: code ?? 0,
+        });
+      });
+    }
+  }),
+);
 
 // Wiring for ExecOptions.signal, extracted from the podman provider so it can
 // be asserted at all: that provider needs a real podman and a real image, so
