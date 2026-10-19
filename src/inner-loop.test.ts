@@ -224,6 +224,7 @@ describe("runUiCheck (#126)", () => {
       durationMs: 17,
       silent: false,
       maxGapMs: 9,
+      endedBy: "result-then-silence",
       usage: {
         inputTokens: 1,
         cachedInputTokens: 2,
@@ -250,7 +251,7 @@ describe("runUiCheck (#126)", () => {
     expect(successEvents).toEqual([{
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
-      durationMs: 17, maxGapMs: 9, result: "CLEAR",
+      durationMs: 17, endedBy: "result-then-silence", maxGapMs: 9, result: "CLEAR",
       peakMemoryBytes: 344_000_000, oomKilled: true,
       usage: { inputTokens: 1, cachedInputTokens: 2, cacheWriteInputTokens: 3,
         outputTokens: 4, reasoningTokens: 5, apiMs: 6, resolvedModel: "resolved",
@@ -979,6 +980,7 @@ describe("runCorrectness (#121, #185)", () => {
           durationMs: result.durationMs,
           silent: false,
           maxGapMs: 1,
+          endedBy: "result-then-silence",
           toolCalls: 0,
           ...result.resources,
         };
@@ -1064,7 +1066,13 @@ describe("runCorrectness (#121, #185)", () => {
     }));
     expect(ctx.opts.onEvent).toHaveBeenCalledWith(expect.objectContaining({
       kind: "review-pass", invocation: 2, result: "completed", durationMs: 33,
+      endedBy: "result-then-silence",
     }));
+    // A failed invocation measured no end, so it reports none (#189).
+    const failedPass = vi.mocked(ctx.opts.onEvent).mock.calls
+      .map(([event]) => event)
+      .find((event) => event.kind === "review-pass" && event.result === "failed");
+    expect(failedPass).not.toHaveProperty("endedBy");
     expect(ctx.priorReviewRounds).toEqual([{
       round: 2,
       head: "head123",
