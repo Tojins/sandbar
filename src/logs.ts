@@ -16,7 +16,9 @@
 // used to survive only inside the next implementer's prompt.
 // Duration headers for container-backed invocations and resolve attempts also
 // render their available peak-memory/OOM facts (#141), so the raw artefact a
-// human opens says OOMKilled even without consulting events.jsonl.
+// human opens says OOMKilled even without consulting events.jsonl. An
+// invocation file ends with its uncapped control lines (#189), the lifecycle
+// evidence a hang is diagnosed from, which the bounded tails can lose.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -215,7 +217,8 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
         join(dir, filename),
         `${header}\n--- speech ---\n${record.speech}\n` +
           `--- stdout tail ---\n${record.stdout}\n` +
-          `--- stderr tail ---\n${record.stderr}\n`,
+          `--- stderr tail ---\n${record.stderr}\n` +
+          `--- control lines ---\n${record.controlLines.map((line) => `${line}\n`).join("")}`,
         { flag: "wx" },
       );
     },

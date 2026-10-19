@@ -40,6 +40,7 @@ import {
   AgentQuotaError,
   AgentIdleTimeoutError,
   agentFailureMessage,
+  agentProcessGroupCommand,
   agentPartialContainerResources,
   agentPartialDurationMs,
   agentPartialOutput,
@@ -55,6 +56,7 @@ import {
   parseStreamJsonLine,
   podman,
   prepareWorktree,
+  reapProcessGroupCommand,
   reclaimIssueClone,
   registerShutdown,
   sandboxRemoveArgs,
@@ -138,6 +140,13 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 // parseStreamJsonLine (obligation 1)
 // ---------------------------------------------------------------------------
+
+// What every Claude `result` line closes with since #189: the turn boundary,
+// then the mark that keeps the raw line in the invocation record.
+const unsuccessfulTurnEnd = [
+  { type: "turn_end", ok: false },
+  { type: "control" },
+] as const;
 
 describe("parseStreamJsonLine", () => {
   it("returns [] for non-{ lines, empty, and non-object JSON", () => {
@@ -235,6 +244,7 @@ describe("parseStreamJsonLine", () => {
     const line = JSON.stringify({ type: "result", result: "done <promise>COMPLETE</promise>" });
     expect(parseStreamJsonLine(line)).toEqual([
       { type: "result", result: "done <promise>COMPLETE</promise>" },
+      ...unsuccessfulTurnEnd,
     ]);
   });
 
@@ -263,6 +273,7 @@ describe("parseStreamJsonLine", () => {
           models: 2,
         },
       },
+      ...unsuccessfulTurnEnd,
     ]);
   });
 
@@ -278,6 +289,7 @@ describe("parseStreamJsonLine", () => {
         inputTokens: 910,
         resolvedModel: "claude-haiku-4-5",
       } },
+      ...unsuccessfulTurnEnd,
     ]);
   });
 
@@ -302,6 +314,7 @@ describe("parseStreamJsonLine", () => {
         apiMs: 1143,
         resolvedModel: "claude-opus",
       } },
+      ...unsuccessfulTurnEnd,
     ]);
   });
 
@@ -316,6 +329,7 @@ describe("parseStreamJsonLine", () => {
     }))).toEqual([
       { type: "result", result: "done" },
       { type: "usage", usage: { outputTokens: 10, resolvedModel: "older-turn", models: 2 } },
+      ...unsuccessfulTurnEnd,
     ]);
   });
 
@@ -325,7 +339,7 @@ describe("parseStreamJsonLine", () => {
       result: "done",
       usage: { input_tokens: "1200", output_tokens: null },
       duration_api_ms: "4321",
-    }))).toEqual([{ type: "result", result: "done" }]);
+    }))).toEqual([{ type: "result", result: "done" }, ...unsuccessfulTurnEnd]);
   });
 
   it("reads usage and terminal reason independently of error result speech", () => {
@@ -334,7 +348,7 @@ describe("parseStreamJsonLine", () => {
       errors: ["limit"], modelUsage: { "claude-opus": { inputTokens: 4 } },
     }))).toEqual([{ type: "usage", usage: {
       inputTokens: 4, resolvedModel: "claude-opus", terminalReason: "blocking_limit",
-    } }]);
+    } }, ...unsuccessfulTurnEnd]);
   });
 
   it("classifies Claude prompt-size refusals as terminal provider failures", () => {
@@ -356,14 +370,48 @@ describe("parseStreamJsonLine", () => {
   // #85 reads usage independently of the speech guard; the guard itself is
   // unchanged, so a non-string `result` still contributes no speech.
   it("requires result to be a string", () => {
-    expect(parseStreamJsonLine(JSON.stringify({ type: "result", result: 1 }))).toEqual([]);
+    expect(parseStreamJsonLine(JSON.stringify({ type: "result", result: 1 })))
+      .toEqual(unsuccessfulTurnEnd);
+  });
+
+  // #189: only a `success` subtype that is not an error closes a turn
+  // successfully — a prompt-size refusal arrives as `success` + `is_error`.
+  it.each([
+    [{ subtype: "success" }, true],
+    [{ subtype: "success", is_error: false }, true],
+    [{ subtype: "success", is_error: true }, false],
+    [{ subtype: "error_during_execution" }, false],
+    [{}, false],
+  ])("closes the turn from a result line %j (ok=%s)", (fields, ok) => {
+    expect(parseStreamJsonLine(JSON.stringify({ type: "result", result: "r", ...fields })))
+      .toContainEqual({ type: "turn_end", ok });
+  });
+
+  it.each([
+    { type: "system", subtype: "background_tasks_changed", tasks: [] },
+    { type: "system", subtype: "task_notification" },
+    { type: "task_started", task_id: "t1" },
+    { type: "result", subtype: "success", result: "done" },
+  ])("marks lifecycle line %j for the invocation record", (obj) => {
+    expect(parseStreamJsonLine(JSON.stringify(obj))).toContainEqual({ type: "control" });
+  });
+
+  it.each([
+    { type: "assistant", message: { content: [{ type: "text", text: "hi" }] } },
+    { type: "user", message: { content: [] } },
+    { type: "rate_limit_event", rate_limit_info: { status: "allowed", rateLimitType: "five_hour" } },
+  ])("leaves turn content %j out of the control lines", (obj) => {
+    expect(parseStreamJsonLine(JSON.stringify(obj))).not.toContainEqual({ type: "control" });
   });
 
   it("parses session_id only from system/init with a string session_id", () => {
     const ok = JSON.stringify({ type: "system", subtype: "init", session_id: "abc" });
-    expect(parseStreamJsonLine(ok)).toEqual([{ type: "session_id", sessionId: "abc" }]);
+    expect(parseStreamJsonLine(ok)).toEqual([
+      { type: "session_id", sessionId: "abc" },
+      { type: "control" },
+    ]);
     const wrongSubtype = JSON.stringify({ type: "system", subtype: "other", session_id: "abc" });
-    expect(parseStreamJsonLine(wrongSubtype)).toEqual([]);
+    expect(parseStreamJsonLine(wrongSubtype)).toEqual([{ type: "control" }]);
   });
 
   it("returns [] for an unknown top-level type", () => {
@@ -896,6 +944,87 @@ describe("defaultImageName", () => {
 // ---------------------------------------------------------------------------
 // Shutdown registry (F3, obligation 16)
 // ---------------------------------------------------------------------------
+
+describe("the agent's process group (#189)", () => {
+  let tmp: string;
+  beforeAll(async () => {
+    tmp = await mkdtemp(join(tmpdir(), "asb-pgroup-"));
+  });
+  afterAll(async () => {
+    await rm(tmp, { recursive: true, force: true });
+  });
+  const runSh = (command: string, env: NodeJS.ProcessEnv = process.env) =>
+    new Promise<{ stdout: string; code: number | null }>((resolveRun) => {
+      execFile("sh", ["-c", command], { env }, (error, stdout) => {
+        resolveRun({ stdout, code: error ? (error as { code?: number }).code ?? null : 0 });
+      });
+    });
+  // Field 5 of /proc/<pid>/stat, after the `)` closing comm.
+  const ownPgid = `sed 's/.*) //' /proc/$$/stat | cut -d' ' -f3`;
+
+  it("leads its own group, names it in the pidfile, and keeps the exit code", async () => {
+    const pidfile = join(tmp, "leader.pgid");
+    const out = await runSh(agentProcessGroupCommand(`${ownPgid}; echo $$; exit 3`, pidfile));
+    const [pgid, pid] = out.stdout.trim().split("\n");
+    expect(out.code).toBe(3);
+    expect(pgid).toBe(pid);
+    expect((await readFile(pidfile, "utf8")).trim()).toBe(pid);
+  });
+
+  it("still runs the command, unreaped, on a base without setsid", async () => {
+    const bin = join(tmp, "bin");
+    await mkdir(bin, { recursive: true });
+    for (const tool of ["sh", "cat"]) {
+      const found = (await execFileP("sh", ["-c", `command -v ${tool}`])).stdout.trim();
+      await symlink(found, join(bin, tool)).catch(() => undefined);
+    }
+    const pidfile = join(tmp, "absent.pgid");
+    const out = await runSh(
+      agentProcessGroupCommand("echo ran; exit 4", pidfile),
+      { PATH: bin },
+    );
+    expect(out).toEqual({ stdout: "ran\n", code: 4 });
+    expect(existsSync(pidfile)).toBe(false);
+    // And the reap of an absent pidfile is a quiet no-op.
+    expect(await runSh(reapProcessGroupCommand(pidfile))).toEqual({ stdout: "", code: 0 });
+  });
+
+  it("reaps the whole group, a background child included", async () => {
+    const pidfile = join(tmp, "reap.pgid");
+    const childFile = join(tmp, "reap.child");
+    const agent = spawn(
+      "sh",
+      ["-c", agentProcessGroupCommand(`sleep 31 & echo $! > ${childFile}; sleep 32`, pidfile)],
+      { stdio: "ignore" },
+    );
+    try {
+      const deadline = Date.now() + 3000;
+      while (!existsSync(childFile) || (await readFile(childFile, "utf8")).trim() === "") {
+        if (Date.now() >= deadline) throw new Error("background child never started");
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const child = Number((await readFile(childFile, "utf8")).trim());
+      const exited = new Promise((r) => agent.on("close", r));
+      expect(await runSh(reapProcessGroupCommand(pidfile))).toEqual({ stdout: "", code: 0 });
+      await exited;
+      const gone = async (): Promise<boolean> => {
+        for (let i = 0; i < 100; i += 1) {
+          try {
+            process.kill(child, 0);
+          } catch {
+            return true;
+          }
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        return false;
+      };
+      expect(await gone()).toBe(true);
+      expect(existsSync(pidfile)).toBe(false);
+    } finally {
+      agent.kill("SIGKILL");
+    }
+  });
+});
 
 describe("killOnAbort (#41)", () => {
   const fakeChild = () => {
@@ -2455,7 +2584,224 @@ describe("createSandbox integration (local provider)", () => {
     }
   }, 15_000);
 
-  it("an empty completion-signal list never enters the grace phase (#83)", async () => {
+  // #189: Claude Code `--print` stays alive while a background task it started
+  // is pending, after it has already reported its turn finished.
+  describe("a successful result followed by silence (#189)", () => {
+    const line = (obj: unknown): string => `printf '%s\\n' '${JSON.stringify(obj)}'`;
+    const success = (result: string) =>
+      line({ type: "result", subtype: "success", is_error: false, result });
+    let markers: string;
+    beforeAll(async () => {
+      markers = await mkdtemp(join(tmpdir(), "asb-189-"));
+      cleanups.push(markers);
+    });
+    // The agent's background child, as a pid file the test can watch.
+    const backgroundChild = (name: string) =>
+      `sleep 31 & echo $! > ${join(markers, name)}`;
+    const reaped = async (name: string): Promise<boolean> => {
+      const pid = Number((await readFile(join(markers, name), "utf8")).trim());
+      const deadline = Date.now() + 3000;
+      for (;;) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          return true;
+        }
+        if (Date.now() >= deadline) return false;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    };
+    const sandboxFor = async (branch: string) => {
+      await git(["branch", branch], dir);
+      return createSandbox({
+        env: {},
+        branch,
+        sandbox: makeLocalProvider(),
+        layout: layoutFor(dir),
+      });
+    };
+
+    it("is accepted as completed after the grace, with commits, and its group reaped", async () => {
+      const sandbox = await sandboxFor("sandbar/issue-189-accepted");
+      try {
+        const records: AgentInvocationRecord[] = [];
+        const run = await sandbox.run({
+          agent: scriptedAgent(
+            `${backgroundChild("accepted")}; ` +
+              `git commit --allow-empty -m "finished" >/dev/null 2>&1 && ` +
+              `${success("done <promise>COMPLETE</promise>")} && ` +
+              `${line({ type: "system", subtype: "background_tasks_changed", tasks: [] })} && ` +
+              `sleep 30`,
+          ),
+          prompt: "go",
+          completionSignal: ["<promise>COMPLETE</promise>"],
+          completionTimeoutSeconds: 0.3,
+          idleTimeoutSeconds: 30,
+          onInvocationEnd: async (record) => {
+            records.push(record);
+          },
+        });
+
+        expect(run.endedBy).toBe("result-then-silence");
+        expect(run.stdout).toBe("done <promise>COMPLETE</promise>");
+        expect(run.commits).toHaveLength(1);
+        expect(run.silent).toBe(false);
+        expect(records).toHaveLength(1);
+        expect(records[0]).toMatchObject({
+          end: "result-then-silence",
+          exitCode: null,
+          speech: "done <promise>COMPLETE</promise>",
+        });
+        expect(records[0]?.detail).toContain("reported a successful result");
+        expect(records[0]?.detail).not.toContain("reaping");
+        expect(records[0]?.controlLines).toHaveLength(2);
+        expect(await reaped("accepted")).toBe(true);
+      } finally {
+        await sandbox.close();
+      }
+    }, 15_000);
+
+    it("needs no completion signal: a role with none is accepted the same way", async () => {
+      const sandbox = await sandboxFor("sandbar/issue-189-no-signal");
+      try {
+        const run = await sandbox.run({
+          agent: scriptedAgent(`${success("listed")} && sleep 30`),
+          prompt: "go",
+          completionSignal: [],
+          completionTimeoutSeconds: 0.2,
+          idleTimeoutSeconds: 30,
+        });
+        expect(run).toMatchObject({ endedBy: "result-then-silence", stdout: "listed" });
+      } finally {
+        await sandbox.close();
+      }
+    }, 15_000);
+
+    it("re-arms on later lines, so a notification turn runs and its result counts", async () => {
+      const sandbox = await sandboxFor("sandbar/issue-189-rearm");
+      try {
+        const start = Date.now();
+        const run = await sandbox.run({
+          agent: scriptedAgent(
+            `${success("first")} && sleep 0.3 && ` +
+              `${line({ type: "system", subtype: "task_notification" })} && ` +
+              `${line({ type: "assistant", message: { content: [{ type: "text", text: "more" }] } })} && ` +
+              `sleep 0.3 && ${success("second <promise>COMPLETE</promise>")} && sleep 30`,
+          ),
+          prompt: "go",
+          completionSignal: ["<promise>COMPLETE</promise>"],
+          completionTimeoutSeconds: 0.5,
+          idleTimeoutSeconds: 30,
+        });
+        expect(run.endedBy).toBe("result-then-silence");
+        expect(run.stdout).toBe("second <promise>COMPLETE</promise>");
+        expect(Date.now() - start).toBeGreaterThanOrEqual(1100);
+      } finally {
+        await sandbox.close();
+      }
+    }, 15_000);
+
+    it("lets a later unsuccessful result decide: silence after it is not accepted", async () => {
+      const sandbox = await sandboxFor("sandbar/issue-189-later-error");
+      try {
+        const records: AgentInvocationRecord[] = [];
+        const err = await sandbox.run({
+          agent: scriptedAgent(
+            `${backgroundChild("later-error")}; ${success("first")} && sleep 0.1 && ` +
+              `${line({ type: "result", subtype: "error_during_execution", is_error: true })} && ` +
+              `sleep 30`,
+          ),
+          prompt: "go",
+          completionSignal: [],
+          completionTimeoutSeconds: 0.3,
+          idleTimeoutSeconds: 0.6,
+          onInvocationEnd: async (record) => {
+            records.push(record);
+          },
+        }).then(() => null, (e: unknown) => e);
+        expect(err).toBeInstanceOf(AgentIdleTimeoutError);
+        expect(records[0]?.end).toBe("idle-timeout");
+        expect(await reaped("later-error")).toBe(true);
+      } finally {
+        await sandbox.close();
+      }
+    }, 15_000);
+
+    it("keeps #83's verdict for a signal with no result, and reaps the group", async () => {
+      const sandbox = await sandboxFor("sandbar/issue-189-signal-only");
+      try {
+        const records: AgentInvocationRecord[] = [];
+        const err = await sandbox.run({
+          agent: scriptedAgent(
+            `${backgroundChild("signal-only")}; ` +
+              `${line({ type: "assistant", message: { content: [{ type: "text", text: "<promise>COMPLETE</promise>" }] } })} && ` +
+              `sleep 30`,
+          ),
+          prompt: "go",
+          completionSignal: ["<promise>COMPLETE</promise>"],
+          completionTimeoutSeconds: 0.2,
+          idleTimeoutSeconds: 30,
+          onInvocationEnd: async (record) => {
+            records.push(record);
+          },
+        }).then(() => null, (e: unknown) => e);
+        expect(err).toBeInstanceOf(AgentError);
+        expect((err as Error).message).toContain("without exiting");
+        expect(records[0]?.end).toBe("completion-timeout");
+        expect(await reaped("signal-only")).toBe(true);
+      } finally {
+        await sandbox.close();
+      }
+    }, 15_000);
+
+    it("leaves a clean exit's end as `exit`, even after a successful result", async () => {
+      const sandbox = await sandboxFor("sandbar/issue-189-exit");
+      try {
+        const run = await sandbox.run({
+          agent: scriptedAgent(success("done")),
+          prompt: "go",
+          completionSignal: [],
+          completionTimeoutSeconds: 5,
+        });
+        expect(run.endedBy).toBe("exit");
+      } finally {
+        await sandbox.close();
+      }
+    }, 15_000);
+
+    it("records every control line even when the stdout tail overflowed", async () => {
+      const sandbox = await sandboxFor("sandbar/issue-189-control");
+      try {
+        const records: AgentInvocationRecord[] = [];
+        const early = { type: "system", subtype: "init", session_id: "s-189" };
+        await sandbox.run({
+          agent: scriptedAgent(
+            `${line(early)} && ` +
+            // Generated in the shell: as a literal it would overflow one argv string.
+            `printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\\n' ` +
+            `"$(head -c ${MAX_TAIL_CHARS} /dev/zero | tr '\\0' x)" && ` +
+            `${success("done")} && sleep 30`,
+          ),
+          prompt: "go",
+          completionSignal: [],
+          // The accepted end records this module's own bounded tail.
+          completionTimeoutSeconds: 0.2,
+          onInvocationEnd: async (record) => {
+            records.push(record);
+          },
+        });
+        expect(records[0]?.stdout).not.toContain("s-189");
+        expect(records[0]?.controlLines).toEqual([
+          JSON.stringify(early),
+          JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done" }),
+        ]);
+      } finally {
+        await sandbox.close();
+      }
+    }, 15_000);
+  });
+
+  it("an empty completion-signal list enters no grace phase without a successful result (#83)", async () => {
     await git(["branch", "sandbar/issue-83-no-grace"], dir);
     const provider = makeLocalProvider();
     const sandbox = await createSandbox({
@@ -2584,7 +2930,16 @@ describe("createSandbox integration (local provider)", () => {
 
   it("the idle timeout carries out what the agent emitted, and kills the exec (#41)", async () => {
     await git(["branch", "sandbar/issue-41-idle"], dir);
-    const live = new Set<ChildProcess>();
+    // Every exec ever started, not only the live ones: since #189 the reap
+    // also takes the orphan holding the pipe, so a killed client closes and
+    // leaves `live` before it can be looked at there.
+    const started: ChildProcess[] = [];
+    const live = new (class extends Set<ChildProcess> {
+      override add(child: ChildProcess): this {
+        started.push(child);
+        return super.add(child);
+      }
+    })();
     const provider = makeLocalProvider(live);
     const sandbox = await createSandbox({
       env: {},
@@ -2668,13 +3023,10 @@ describe("createSandbox integration (local provider)", () => {
       const killed = await Promise.race([
         new Promise<boolean>((r) => {
           const t = setInterval(() => {
-            // `signalCode`, not an empty `live`: node fires 'close' only once
-            // the child's STDIO has closed, and the `sleep` this command
-            // orphans holds that pipe for its full 30s. Which is the local
-            // shape of the production point — killing a client does not reap
-            // what it started, and the provider's group kill at `close()` is
-            // what finally takes the orphan (see makeLocalProvider's header).
-            if ([...live].some((c) => c.signalCode === "SIGKILL")) {
+            // `signalCode`, not an empty `live`: killing a client does not
+            // reap what it started, so an empty set says nothing about the
+            // client. The orphan is the reap's, asserted on its own below.
+            if (started.some((c) => c.signalCode === "SIGKILL")) {
               clearInterval(t);
               r(true);
             }

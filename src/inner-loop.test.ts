@@ -2709,6 +2709,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
           speech: `speech-${cycle}`,
           stdout: `stdout-${cycle}`,
           stderr: `stderr-${cycle}`,
+          controlLines: [],
         };
         await opts.attemptLogger.writeInvocation(
           sequence.filename({ role: "ui-check", invocation: 1 }),
