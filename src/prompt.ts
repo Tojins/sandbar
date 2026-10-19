@@ -65,6 +65,7 @@ const exec = promisify(execFile);
 // Prose templates, loaded once at import (see prompts.ts). The render functions
 // below substitute into these in-memory strings and stay pure.
 const CODING_STANDARDS = loadTemplate("coding-standards");
+const BACKGROUND_TASKS = loadTemplate("background-tasks");
 const REVIEWER_TPL = loadTemplate("reviewer");
 const REVIEWER_QUALITY_TPL = loadTemplate("reviewer-quality");
 const REVIEWER_QUALITY_LISTING_TPL = loadTemplate("reviewer-quality-listing");
@@ -576,6 +577,9 @@ export async function buildProjectAnchor(
     lines.push("(unavailable)");
   }
   lines.push("```");
+  // Every role that runs tools reads this layer (#189): a background task left
+  // running keeps the agent CLI alive after its final answer.
+  lines.push("", BACKGROUND_TASKS);
   return lines.join("\n");
 }
 

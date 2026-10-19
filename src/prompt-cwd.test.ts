@@ -160,6 +160,22 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     expect(anchor).not.toContain("commit-from-launch-dir");
   });
 
+  // #189: the anchor is the layer every tool-running role shares.
+  it("tells the role to stop its background tasks before its final answer", async () => {
+    const anchor = await buildProjectAnchor(
+      {
+        repo: CONFIGURED,
+        repoDir: target,
+        claudeMdPath: "CLAUDE.md",
+        sourceBranch: "main",
+      },
+      target,
+    );
+
+    expect(anchor).toContain("stop every background task you started");
+    expect(anchor).toContain("`pgrep -f`");
+  });
+
   it("marks history unavailable when the named source ref is absent", async () => {
     const anchor = await buildProjectAnchor(
       {

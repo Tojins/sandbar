@@ -1,0 +1,1 @@
+Before you declare a promise, verdict or final answer, stop every background task you started (servers, watchers, backgrounded shells), and never wait on a process with `pgrep -f`, which matches its own command line and so never finishes waiting.
