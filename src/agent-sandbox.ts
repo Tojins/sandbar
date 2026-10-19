@@ -2519,7 +2519,10 @@ const invokeAgent = async (
           `${completionTimeoutMs}ms without exiting.`,
       )
         .then((detail) => finish("result-then-silence", detail, tails(), 0))
-        .catch((err) => settleReject(err));
+        .then(
+          () => undefined,
+          (err) => settleReject(err),
+        );
     };
 
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
