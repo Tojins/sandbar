@@ -1321,8 +1321,6 @@ describe("ensureIssueBranch — origin's copy of the branch (#112)", () => {
     expect(await tip(cache, `refs/heads/${B}`)).toBe(before);
   });
 
-  // `rm -rf .sandbar` costs agent time, never correctness (#38): a parked
-  // branch the cache has lost is on origin, and that is where it resumes from.
   // #188: a re-queued issue resumes a branch that already holds its work, and
   // the cycle's commit evidence starts from that work, oldest first.
   it("counts a resumed branch's commits beyond its seed, and none for a fresh one", async () => {
@@ -1340,6 +1338,8 @@ describe("ensureIssueBranch — origin's copy of the branch (#112)", () => {
     expect(await branchCommitsSinceSeed(cache, fresh, seeded.ref)).toEqual([]);
   });
 
+  // `rm -rf .sandbar` costs agent time, never correctness (#38): a parked
+  // branch the cache has lost is on origin, and that is where it resumes from.
   it("cuts a missing branch from origin's copy when origin has one", async () => {
     const c1 = await pushOnBranch();
 
