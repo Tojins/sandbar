@@ -1033,6 +1033,11 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).not.toContain("no gate ran");
     expect(calls.comments[0]!.body).not.toContain("Last failure trace");
     expect(calls.comments[0]!.body).toContain("stopped after 4 consecutive attempts without a green gate-1");
+    // #188: never a red gate it did not see.
+    expect(calls.comments[0]!.body).toContain(
+      "The final attempt had no actionable signal, so it never reached gate-1; " +
+        "unless the summary below names a gate failure, no attempt did.",
+    );
   });
 
   it("needs-human reviewer-harness-failed, nothing ever reviewed: says so in the strongest form (#41)", async () => {

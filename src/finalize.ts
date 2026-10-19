@@ -306,8 +306,12 @@ const noGreenGate = (roundsUsed: number): string =>
 const gateRedStop = (failedStep: string, roundsUsed: number): string =>
   `${noGreenGate(roundsUsed)}; latest failing step: \`${failedStep}\`.`;
 
+// Not a red gate (#188): the deciding attempt never reached gate-1, and an
+// earlier one did only if the summary carries its gate failure.
 const noSignalStop = (roundsUsed: number): string =>
-  `${noGreenGate(roundsUsed)}; the final attempt had no actionable signal.`;
+  `${noGreenGate(roundsUsed)}. The final attempt had no actionable signal, ` +
+  `so it never reached gate-1; unless the summary below names a gate ` +
+  `failure, no attempt did.`;
 
 const needsHumanNoSignalExplanation = (failureTrace: string): string =>
   `<details><summary>Attempt summary</summary>\n\n` +

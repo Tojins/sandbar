@@ -33,6 +33,10 @@
 // discarded. It lives here because every decision in it is one of the two
 // asserts this module owns.
 //
+// `branchCommitsSinceSeed` is where a sandbox cycle's commit evidence starts
+// (#188): the work its branch already carries beyond the seed, so a retry or a
+// resumed branch is not told it made no commits.
+//
 // `hasNonMergeCommitOutside` is the shared safety test for retiring issue
 // branches (#177, #179). Chunk wrap-up applies it to origin's freshly fetched
 // copy; preflight applies it to a CLOSED issue's cache copy. Keeping the git
@@ -898,6 +902,27 @@ export async function branchTip(
     if (isExitCode(err, 128)) return null;
     throw err;
   }
+}
+
+// Every commit `refs/heads/<branch>` carries beyond the ref it was seeded from,
+// oldest first (#188). Read from the branch ref rather than HEAD, the same edge
+// per-invocation commit capture reads, so the two ranges describe one ref. A
+// fresh sandbox cycle starts its commit evidence here: a HARD-ERROR retry, or a
+// re-queued issue resuming its branch, already holds the work an earlier
+// cycle committed, and a COMPLETE with nothing new to add must not be told it
+// made no commits.
+export async function branchCommitsSinceSeed(
+  worktreePath: string,
+  branch: string,
+  baseRef: string,
+): Promise<{ sha: string }[]> {
+  const { stdout } = await exec(
+    "git",
+    ["rev-list", "--reverse", `${baseRef}..refs/heads/${branch}`],
+    { cwd: worktreePath },
+  );
+  const range = stdout.trim();
+  return range === "" ? [] : range.split("\n").map((sha) => ({ sha }));
 }
 
 // The symbolic position of HEAD, including an unborn branch whose ref does not

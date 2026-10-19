@@ -10,6 +10,7 @@ const seams = vi.hoisted(() => ({
     ref: "origin/main",
     sha: "base-sha",
   })),
+  branchCommitsSinceSeed: vi.fn(async () => [] as { sha: string }[]),
   branchIsAheadOfSeed: vi.fn(async () => false),
   measureNetDiffChars: vi.fn(async () => 0),
   preserveWorktree: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
     commits: [],
     residue: { dirtyPaths: [], strandedHead: null, rewoundTip: null },
   })),
+  branchCommitsSinceSeed: seams.branchCommitsSinceSeed,
   ensureIssueBranch: seams.ensureIssueBranch,
 }));
 
@@ -191,6 +193,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       sha: "base-sha",
     });
     seams.branchIsAheadOfSeed.mockReset().mockResolvedValue(false);
+    seams.branchCommitsSinceSeed.mockReset().mockResolvedValue([]);
     seams.measureNetDiffChars.mockReset().mockResolvedValue(0);
     seams.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     seams.preserveWorktree.mockReset();
@@ -557,7 +560,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
     expect(events.filter((event) => event.kind === "implementer")).toEqual([{
       kind: "implementer", issue: 109, title: "Issue 109", attempt: 1,
-      signal: "QUOTA", commits: 0, provider: "claude", model: "model",
+      signal: "QUOTA", provider: "claude", model: "model",
       effort: null, durationMs: expect.any(Number),
       usage: { quota: measurement, contextChars: 9 },
     }]);
@@ -611,7 +614,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(seams.sandboxRun).toHaveBeenCalledOnce();
     expect(events.filter((event) => event.kind === "implementer")).toEqual([{
       kind: "implementer", issue: 134, title: "Issue 134", attempt: 1,
-      signal: "CREDENTIAL", commits: 0, provider: "codex", model: "model",
+      signal: "CREDENTIAL", provider: "codex", model: "model",
       effort: null, durationMs: expect.any(Number), usage: { contextChars: 9 },
     }]);
 

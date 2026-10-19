@@ -5,6 +5,11 @@
 // sandbox and restart from attempt 1 with a fresh one (up to
 // HARD_ERROR_MAX_RETRIES times). Every retry is a `hard-error` event; if
 // retries are exhausted, run.ts records the surfaced terminal's full reason.
+// Each cycle seeds its commit evidence from `<seedRef>..refs/heads/<branch>`
+// rather than starting empty (#188), so the zero-commit COMPLETE guard means
+// "the branch carries no work beyond its base". A retry after a killed cycle
+// that committed, and a re-queued issue resuming its branch, take a COMPLETE
+// with nothing new to add on to the quality pass and gate-1.
 //
 // Setup ordering is load-bearing: the issue worktree comes FIRST, then agent
 // sandbox + gate stack in parallel (#20 — mount sources are read at container
@@ -122,6 +127,7 @@ import {
   AgentIdleTimeoutError,
   AgentInputTooLargeError,
   AgentQuotaError,
+  agentPartialCommits,
   agentPartialContainerResources,
   agentPartialDurationMs,
   agentPartialOutput,
@@ -165,6 +171,7 @@ import {
 import {
   type HeadMismatch,
   type IssueBranchBase,
+  branchCommitsSinceSeed,
   branchTip,
   describeIssueBranchOriginSync,
   dirtyWorktreePaths,
@@ -1097,6 +1104,15 @@ async function runSandboxCycle(
       sourceBranch: config.sourceBranch,
     };
 
+    // The cycle's commit evidence starts from what the branch already carries
+    // beyond its seed, not from nothing (#188). A HARD-ERROR retry inherits
+    // the commits its killed predecessor left on the branch, and a re-queued
+    // issue resumes a branch holding earlier admissions' work; counted per
+    // cycle, either one's COMPLETE with nothing new to add was downgraded to
+    // NO-SIGNAL until the gate budget ran out, with gate-1 never run.
+    accumulated.push(
+      ...(await branchCommitsSinceSeed(worktreePath, issue.branch, base.ref)),
+    );
     const branchAhead = await branchIsAheadOfSeed(worktreePath, base.ref);
     if (branchAhead) {
       const admissionPrompt = await buildPrompt({
@@ -1262,9 +1278,11 @@ async function runSandboxCycle(
     // Surface as HARD-ERROR so the outer loop can decide whether to retry
     // with a fresh sandbox. Whatever the attempt left in the clone — commits
     // the publish never reached, a HEAD off the branch — is not this
-    // terminal's to classify: `sandbox.close()` below reclaims the clone
-    // through `reclaimIssueClone`, which publishes before it deletes and keeps
-    // the clone when it cannot (#98).
+    // terminal's to classify: `sandbox.close()` below defers reclamation, so
+    // the clone stays where it is (#139). A fresh cycle's `prepareWorktree`
+    // reuses it and seeds its commit evidence from the branch (#188); the
+    // clone is removed only later, by run.ts's `reclaimIssueClone`, which
+    // publishes before it deletes and keeps the clone when it cannot (#98).
     return {
       verdict: {
         type: "HARD-ERROR",
@@ -2078,6 +2096,13 @@ export async function runImplementer(
         (err instanceof AgentQuotaError ? err.measurement : undefined),
       measuredContextChars,
     );
+    // What the failed invocation left on the branch, as the sandbox counted it
+    // after the abort (#188). Absent when that count failed (#82); a prior
+    // invocation's commits are known either way.
+    const failedCommits = agentPartialCommits(err)?.length;
+    const commits = prior === undefined
+      ? failedCommits
+      : prior.commits.length + (failedCommits ?? 0);
     await opts.onEvent({
       kind: "implementer",
       issue: Number(issue.id),
@@ -2088,7 +2113,7 @@ export async function runImplementer(
         : err instanceof AgentCredentialError
           ? "CREDENTIAL"
           : "FAILED",
-      commits: prior?.commits.length ?? 0,
+      ...(commits === undefined ? {} : { commits }),
       provider: config.implementerAgent,
       model: config.implementerModelId,
       effort: config.implementerEffort ?? null,
@@ -2333,8 +2358,9 @@ export async function runSandboxAndPublish(
     // A failed invocation may still have committed. Try to publish it, but a
     // second failure must not replace the agent/provider error that selects
     // and explains the HARD-ERROR path (#41, #67, #98). The commits are not
-    // lost either way: close() retries the publish before it removes the
-    // clone, and keeps the clone if that fails too.
+    // lost either way: close() defers reclaiming the clone, and the eventual
+    // `reclaimIssueClone` publishes before it removes it and keeps the clone
+    // if that fails too.
     try {
       await sandbox.syncBranchToCache();
     } catch (publishError) {

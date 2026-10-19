@@ -40,6 +40,7 @@ import {
   AgentQuotaError,
   AgentIdleTimeoutError,
   agentFailureMessage,
+  agentPartialCommits,
   agentPartialContainerResources,
   agentPartialDurationMs,
   agentPartialOutput,
@@ -2452,6 +2453,84 @@ describe("createSandbox integration (local provider)", () => {
       expect(records[0]?.stderr).toContain("completion stderr tail");
     } finally {
       await sandbox.close();
+    }
+  }, 15_000);
+
+  // #188: the observed run committed, emitted COMPLETE and never exited. Its
+  // FAILED record said `commits: 0`; the failure must carry what the branch
+  // gained instead.
+  it("carries the commits a run made before it failed to exit", async () => {
+    const branch = "sandbar/issue-188-killed";
+    await git(["branch", branch], dir);
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+    });
+    try {
+      const err = await sandbox.run({
+        agent: scriptedAgent(
+          `git commit --allow-empty -m "one" >/dev/null 2>&1 && ` +
+            `git commit --allow-empty -m "two" >/dev/null 2>&1 && ` +
+            `printf '%s\\n' '${JSON.stringify({ type: "result", result: "<promise>COMPLETE</promise>" })}' && ` +
+            `sleep 30`,
+        ),
+        prompt: "go",
+        completionSignal: ["<promise>COMPLETE</promise>"],
+        completionTimeoutSeconds: 0.2,
+        idleTimeoutSeconds: 30,
+      }).then(() => null, (e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AgentError);
+      const log = await git(
+        ["log", "--reverse", "--format=%H", "-2", `refs/heads/${branch}`],
+        sandbox.worktreePath,
+      );
+      expect(agentPartialCommits(err)).toEqual(
+        log.stdout.trim().split("\n").map((sha) => ({ sha })),
+      );
+    } finally {
+      await sandbox.close();
+    }
+  }, 15_000);
+
+  // Absent ≠ 0 (#82): a count that cannot be taken is reported, and the
+  // failure carries no commit list rather than an empty one.
+  it("leaves a failed run's commits absent when they cannot be counted", async () => {
+    const branch = "sandbar/issue-188-uncounted";
+    await git(["branch", branch], dir);
+    const notices: { severity: string; message: string }[] = [];
+    const sandbox = await createSandbox({
+      env: {},
+      branch,
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+      onNotice: (severity, message) => { notices.push({ severity, message }); },
+    });
+    try {
+      const err = await sandbox.run({
+        agent: scriptedAgent(
+          `git checkout -q --detach && git update-ref -d refs/heads/${branch} && ` +
+            `printf '%s\\n' '${JSON.stringify({ type: "result", result: "<promise>COMPLETE</promise>" })}' && ` +
+            `sleep 30`,
+        ),
+        prompt: "go",
+        completionSignal: ["<promise>COMPLETE</promise>"],
+        completionTimeoutSeconds: 0.2,
+        idleTimeoutSeconds: 30,
+      }).then(() => null, (e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AgentError);
+      expect(agentPartialCommits(err)).toBeUndefined();
+      expect(notices).toContainEqual({
+        severity: "warning",
+        message: expect.stringContaining(`Could not count the commits of a failed agent run on ${branch}`),
+      });
+    } finally {
+      sandbox.preserveWorktree("test removes it");
+      await sandbox.close();
+      await rm(sandbox.worktreePath, { recursive: true, force: true });
     }
   }, 15_000);
 
