@@ -98,12 +98,19 @@ const execFileP = promisify(execFile);
 const processExited = async (pid: number): Promise<boolean> => {
   try {
     process.kill(pid, 0);
-  } catch {
-    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ESRCH") return true;
+    throw e;
   }
   // Field 3 of /proc/<pid>/stat, after the `)` closing comm, is the state.
-  const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => null);
-  return stat === null || stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
+  let stat: string;
+  try {
+    stat = await readFile(`/proc/${pid}/stat`, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw e;
+  }
+  return stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
 };
 
 describe("sandboxExecArgs", () => {
