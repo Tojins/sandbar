@@ -22,7 +22,9 @@ The user's private `~/installation/` holds:
 - `sandbar.config.mjs`, which imports helpers from `"sandbar"` and explicitly
   sets `cwd` to the consumer clone;
 - `sandbar.env`, mode `0600`;
-- any files the config maps into worktrees with `{ from, to }` entries; and
+- any files the config maps into worktrees with `{ from, to }` entries;
+- `config-digest`, mode `0600`, which the play writes: the gate stack and
+  images its daemon was last asked to restart into (see below); and
 - `restart-requested`, only while a restart the play asked for is pending.
 
 `installations/outdoor/`, `installations/outdoorpub/` and `installations/sandbar/`
@@ -80,8 +82,25 @@ applies to `npm i -D sandbar` consumers.
 
 The play never restarts a daemon itself: a restart while an issue is running or
 landing aborts that work. Whenever it changed the built driver, an
-installation's files or either of its units, it writes the applied commit to
+installation's files, either of its units or what its config evaluates to as a
+gate stack and images, it writes the applied commit to
 `~/installation/restart-requested` instead.
+
+That last trigger exists because a daemon fixes its gate stack and images when
+it imports its config, while every per-issue sandbox is built from a source
+worktree at `origin/main` (#190). A consumer change to either — an image tag
+rename, an added sibling container, a new pulled tag — otherwise leaves the
+daemon building the old graph until its sandbox build cannot find the new one.
+After refreshing the clone and pulling images, the play runs the driver's
+`sandbar config-digest` over the installation config, as the installation user.
+It prints a sha256 of the evaluated `gateStack` and `images` with keys in
+canonical order, so a config that computes its stack is covered and keys sandbar
+ignores (`anchor`, `half`, `comment`) are not. When that differs from
+`~/installation/config-digest`, or the file is missing, the play requests a
+restart and then records the new digest — in that order, so a play that fails
+between the two asks again. A missing file counts as changed, so the first play
+after this landed requested one restart per installation. An ordinary consumer
+landing changes neither field and restarts nothing.
 
 The daemon reads that file at the top of every recompute. It then **drains** —
 stops admitting, keeps landing every pending terminal and every landable `land`
@@ -104,10 +123,18 @@ and it would couple the installations' queues.
 `sandbar-pull.timer` that runs it every five minutes as root. The script runs
 `git ls-remote` against `main`, compares that tip with
 `/var/lib/sandbar/converged`, and runs `ansible-pull` into
-`/var/lib/sandbar/deploy` only when they differ. The marker advances to the pull
-checkout's `HEAD` only after `deploy/ansible/site.yml` succeeds, so a failed play
-is retried at every tick even though the checkout already moved. A missing marker
-means one play. No credential is needed: the repository is public. A push channel
+`/var/lib/sandbar/deploy` when they differ. It also looks up every
+installation's consumer `main` (`git ls-remote <clone_url> refs/heads/main`,
+run as that installation's user so its own credentials reach a private
+consumer) and runs the play when any of those tips differs from
+`/var/lib/sandbar/consumer-tips` (#190): the play is what refreshes a clone,
+pulls its images and notices a gate-stack change, so a consumer-only landing
+must reach it too. A consumer whose tip cannot be looked up never counts as
+converged; the play runs and its clone task names the failure. Both records
+advance only after `deploy/ansible/site.yml` succeeds — `converged` to the pull
+checkout's `HEAD`, `consumer-tips` to the tips looked up before the play — so a
+failed play is retried at every tick even though the checkout already moved. A
+missing record means one play. No credential is needed: the repository is public. A push channel
 was rejected because root-level changes are in scope and a push would need a root
 key in Actions secrets; the reconciler is deliberately not sandbar, so a landed
 regression that bricks a daemon cannot also disable the thing that applies the
@@ -133,8 +160,9 @@ config does not build — the images a run refuses to start without and never
 pulls itself (#24 D7). The list is the driver's `sandbar pulled-images` over the
 installation config, because the config is a program that may read its gate
 stack from the consumer clone; only images podman lacks are pulled. The pull
-channel follows landings on THIS repository, so an image a consumer commit adds
-is pulled at the next sandbar landing. A failed play retries every tick until it
+channel follows landings on this repository and on every consumer's `main`, so
+an image a consumer commit adds is pulled within one tick of its landing, and
+the same play asks that daemon to restart into it. A failed play retries every tick until it
 succeeds; running the play by hand is not recorded and therefore costs one extra
 idempotent play at the next tick. Until that convergence succeeds, the daemon's
 next start refuses at preflight and names the `podman pull` line.

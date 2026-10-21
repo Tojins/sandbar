@@ -4,7 +4,12 @@
 // builds it into the driver every installation's unit executes. What it cannot
 // do is swap the code under a daemon that is mid-issue, so the converging play
 // leaves a REQUEST FILE behind instead and the daemon restarts itself once it
-// is safe. `deploy/ansible` owns the writing end.
+// is safe. `deploy/ansible` owns the writing end, and writes a request when
+// the play changed the built driver, an installation's files or units, or what
+// the installation's config evaluates to as a gate stack and images (#190). The
+// play detects that last case with `sandbar config-digest` after it refreshes
+// the consumer clone, because a daemon fixes both at import while its sandboxes
+// build from `origin/<source>`. Nothing else a consumer lands asks for one.
 //
 // A FILE, not a signal: a signal would need a second trap outside cleanup.ts
 // (#35 allows exactly one owner) and would be lost entirely whenever the

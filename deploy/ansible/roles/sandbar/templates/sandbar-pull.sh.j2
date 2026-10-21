@@ -3,7 +3,16 @@
 # (#146, #173). The pull checkout is only work space: ansible-pull advances it
 # before a play can fail, so only a successful play advances `converged`.
 # Failed plays remain the last real attempt and retry on every timer tick; a
-# tick whose remote tip is already converged only refreshes the checked time.
+# tick whose remote tip is already converged, and whose consumer tips are the
+# ones the last successful play saw, only refreshes the checked time.
+#
+# The consumer tips are there because the play is also what refreshes each
+# installation's clone and decides whether its daemon must restart for a gate
+# stack or image change (#190). Without them a consumer-only landing never
+# reached the box until sandbar itself moved. Each is looked up as its
+# installation's user, whose own credentials clone a private consumer; a tip
+# that cannot be looked up is never treated as converged, so the play runs and
+# its clone task reports the failure.
 set -u
 
 pull_dir={{ sandbar_pull_dir }}
@@ -11,11 +20,34 @@ state_dir=${pull_dir%/*}
 converged_file=$state_dir/converged
 last_attempt_file=$state_dir/last-attempt
 remote_file=$state_dir/remote-tip
+consumer_tips_file=$state_dir/consumer-tips
 status={{ sandbar_ui_root }}/{{ sandbar_deploy_status_file }}
 
 record_attempt() {
   printf '%s\n%s\n' "$attempted" "$outcome" > "$last_attempt_file.new" &&
     mv "$last_attempt_file.new" "$last_attempt_file"
+}
+
+# One line per installation: its user and its consumer's `main` tip, or
+# `unknown` when the lookup failed.
+consumer_tip() {
+  tip=$(cd / && /usr/sbin/runuser -u "$1" -- /usr/bin/env GIT_TERMINAL_PROMPT=0 \
+    /usr/bin/git ls-remote --exit-code "$2" refs/heads/main) || tip=unknown
+  printf '%s %s\n' "$1" "${tip%%[[:space:]]*}"
+}
+
+look_up_consumer_tips() {
+{% for installation in sandbar_installations %}
+  consumer_tip {{ installation.user }} {{ installation.clone_url }}
+{% endfor %}
+}
+
+consumers_converged() {
+  case $consumer_tips in
+    *" unknown"*) return 1 ;;
+  esac
+  [ -r "$consumer_tips_file" ] &&
+    [ "$(cat "$consumer_tips_file")" = "$consumer_tips" ]
 }
 
 write_status() {
@@ -50,10 +82,11 @@ if [ "$result" -ne 0 ]; then
 fi
 read -r remote_tip _ < "$remote_file"
 rm -f "$remote_file"
+consumer_tips=$(look_up_consumer_tips)
 
 if [ -r "$converged_file" ]; then
   converged=$(sed -n '1p' "$converged_file")
-  if [ "$remote_tip" = "$converged" ]; then
+  if [ "$remote_tip" = "$converged" ] && consumers_converged; then
     write_status || exit $?
     exit 0
   fi
@@ -76,6 +109,10 @@ if [ "$result" -eq 0 ] && [ "$head_result" -eq 0 ]; then
   record_attempt || exit $?
   printf '%s\n' "$attempted" > "$converged_file.new" &&
     mv "$converged_file.new" "$converged_file" || exit $?
+  # The tips looked up before the play: one that moved during it is simply
+  # seen as moved at the next tick, which costs one idempotent play.
+  printf '%s\n' "$consumer_tips" > "$consumer_tips_file.new" &&
+    mv "$consumer_tips_file.new" "$consumer_tips_file" || exit $?
 elif [ "$result" -ne 0 ]; then
   outcome="failed (exit $result)"
   record_attempt || exit $?
