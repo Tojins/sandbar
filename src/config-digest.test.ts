@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { configDigest, configDigestSubject } from "./config-digest.js";
+import { configDigest } from "./config-digest.js";
 import { resolveGateStack, resolveImages, type BuiltImage, type GateStackConfig } from "./config.js";
 
 // Each case evaluates a stack.json-shaped document the way an installation
@@ -117,11 +117,40 @@ describe("configDigest", () => {
     expect(digestOf(stack)).not.toBe(digestOf(base));
   });
 
-  it("keeps none of anchor, half or comment in what it hashes", () => {
-    const hashed = JSON.stringify(configDigestSubject(evaluate(annotated)));
-    for (const key of ["anchor", "half", "comment"]) {
-      expect(hashed).not.toContain(`"${key}"`);
-    }
-    expect(configDigestSubject(evaluate(annotated))).toEqual(configDigestSubject(evaluate(base)));
+  it.each<[string, Partial<BuiltImage>]>([
+    ["context", { context: "gate/php" }],
+    ["target", { target: "runtime" }],
+    ["stdinContext", { stdinContext: true }],
+    ["buildArgs", { buildArgs: { PHP_VERSION: "8.4" } }],
+    ["rebuildOn", { rebuildOn: ["gate/php/composer.lock"] }],
+    ["buildTimeoutMs", { buildTimeoutMs: 60_000 }],
+  ])("changes for an image's %s", (_field, change) => {
+    const changed: StackJson = {
+      ...base,
+      images: base.images.map((i) => ({ ...i, ...change })),
+    };
+    expect(digestOf(changed)).not.toBe(digestOf(base));
+  });
+
+  it("changes for different content in the same image field", () => {
+    const withArgs = (v: string): StackJson => ({
+      ...base,
+      images: base.images.map((i) => ({ ...i, buildArgs: { V: v } })),
+    });
+    expect(digestOf(withArgs("1"))).not.toBe(digestOf(withArgs("2")));
+  });
+
+  it("is unchanged by a key on an image that sandbar has no concept of", () => {
+    const unknown: StackJson = {
+      ...base,
+      images: base.images.map((i) => ({ ...i, sandbarFutureField: "x" })),
+    };
+    expect(digestOf(unknown)).toBe(digestOf(base));
+  });
+
+  it("refuses a config member it cannot serialise", () => {
+    const { gateStack, images } = evaluate(base);
+    const withFunction = { gateStack: { ...gateStack, extra: () => 1 }, images };
+    expect(() => configDigest(withFunction as never)).toThrow(/cannot serialise/);
   });
 });

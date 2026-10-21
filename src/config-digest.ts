@@ -42,21 +42,17 @@ const IMAGE_FIELDS = [
   "buildTimeoutMs",
 ] as const satisfies readonly (keyof BuiltImage)[];
 
-function projectImage(image: BuiltImage): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const field of IMAGE_FIELDS) {
-    if (image[field] !== undefined) out[field] = image[field];
-  }
-  return out;
-}
-
 // `undefined` members are dropped, as `JSON.stringify` drops them, so an
 // explicit `target: undefined` and an absent one hash alike.
 function canonical(value: unknown): Json {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    typeof value === "number"
+  ) {
     return value;
   }
-  if (typeof value === "number") return value;
   if (Array.isArray(value)) return value.map(canonical);
   if (typeof value === "object") {
     const out: Record<string, Json> = {};
@@ -69,23 +65,18 @@ function canonical(value: unknown): Json {
   throw new TypeError(`config-digest: cannot serialise a ${typeof value}`);
 }
 
-// What `configDigest` hashes, exported so a test can read it: the canonical
-// form of the evaluated gate stack and the projected images.
-export function configDigestSubject(config: {
+type DigestInput = {
   readonly gateStack: ResolvedGateStack;
   readonly images: readonly BuiltImage[];
-}): Json {
-  return canonical({
-    gateStack: config.gateStack,
-    images: config.images.map(projectImage),
-  });
-}
+};
 
-export function configDigest(config: {
-  readonly gateStack: ResolvedGateStack;
-  readonly images: readonly BuiltImage[];
-}): string {
-  return createHash("sha256")
-    .update(JSON.stringify(configDigestSubject(config)))
-    .digest("hex");
+// The hashed subject is the canonical form of the evaluated gate stack and the
+// images projected onto IMAGE_FIELDS.
+export function configDigest(config: DigestInput): string {
+  const subject = canonical({
+    gateStack: config.gateStack,
+    images: config.images.map((image) =>
+      Object.fromEntries(IMAGE_FIELDS.map((field) => [field, image[field]]))),
+  });
+  return createHash("sha256").update(JSON.stringify(subject)).digest("hex");
 }
