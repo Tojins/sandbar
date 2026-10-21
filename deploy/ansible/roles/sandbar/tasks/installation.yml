@@ -93,6 +93,39 @@
     label: "{{ item.item }}"
   changed_when: true
 
+# A daemon fixes its gate stack and images when it imports its config (#190),
+# so a consumer change to them — a renamed image tag, an added sibling, a new
+# pulled tag — reaches it only through a restart, while every per-issue sandbox
+# is already built from the new graph. The digest is the driver's, over the
+# evaluated config, so a computed stack counts and keys sandbar ignores do not.
+# It is compared without writing, and recorded only after the restart request:
+# a play that dies between the two asks again at its next run instead of
+# forgetting. A missing record counts as a change, so the first play that runs
+# this requests one restart per installation.
+- name: Digest the gate stack and images this installation's config evaluates to
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/node
+      - "{{ sandbar_driver_current }}/dist/cli.js"
+      - config-digest
+      - --config
+      - "{{ sandbar_installation_dir }}/sandbar.config.mjs"
+    chdir: "{{ sandbar_checkout }}"
+  become: true
+  become_user: "{{ sandbar_user }}"
+  register: sandbar_config_digest
+  changed_when: false
+
+- name: Compare that digest with the one recorded at the last restart request
+  ansible.builtin.copy:
+    content: "{{ sandbar_config_digest.stdout }}\n"
+    dest: "{{ sandbar_installation_dir }}/{{ sandbar_config_digest_file }}"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0600"
+  check_mode: true
+  register: sandbar_config_digest_drift
+
 - name: Install the daemon unit
   ansible.builtin.include_tasks: service.yml
 
@@ -123,3 +156,12 @@
     or sandbar_installation_files_changed[sandbar_user] | default(false)
     or sandbar_daemon_unit is changed
     or sandbar_ui_unit is changed
+    or sandbar_config_digest_drift is changed
+
+- name: Record the config digest the daemon was asked to restart into
+  ansible.builtin.copy:
+    content: "{{ sandbar_config_digest.stdout }}\n"
+    dest: "{{ sandbar_installation_dir }}/{{ sandbar_config_digest_file }}"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0600"

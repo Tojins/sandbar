@@ -41,6 +41,10 @@ sandbar_operator_keys_file: /etc/sandbar/operator-ssh-keys
 # pins all three together.
 sandbar_restart_request_file: restart-requested
 sandbar_restart_exit_status: 75
+# What the play last asked an installation's daemon to restart into, as the
+# driver's `sandbar config-digest` of its gate stack and images (#190). A
+# different digest after the clone moved is a restart request of its own.
+sandbar_config_digest_file: config-digest
 
 sandbar_stop_timeout_sec: 900
 

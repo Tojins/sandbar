@@ -103,7 +103,9 @@ function renderPerInstallation(
 ): string {
   const expanded = template.replace(INSTALLATION_LOOP, (_match, body: string) =>
     rows.map((row) => render(body, {
+      "installation.user": row.user,
       "installation.project": row.project,
+      "installation.clone_url": row.clone_url,
       "installation.reader_port": String(row.reader_port),
     })).join(""));
   return render(expanded, vars);
@@ -219,6 +221,9 @@ type PullBox = {
   readonly lsExit: string;
   readonly ansibleExit: string;
   readonly checkoutHead: string;
+  // One file per installation user holding its consumer's `main` tip; a
+  // missing file is a lookup that fails.
+  readonly consumers: string;
 };
 
 function writeStub(path: string, body: string): void {
@@ -282,14 +287,23 @@ function pullBox(): PullBox {
     lsExit: join(root, "ls-exit"),
     ansibleExit: join(root, "ansible-exit"),
     checkoutHead: join(root, "checkout-head"),
+    consumers: join(root, "consumers"),
   };
-  for (const dir of [state, join(state, "deploy"), ui, bin]) mkdirSync(dir);
+  for (const dir of [state, join(state, "deploy"), ui, bin, box.consumers]) mkdirSync(dir);
+  for (const row of installations) writeFileSync(join(box.consumers, row.user), `${row.user}-tip\n`);
   writeFileSync(box.remote, "new-tip\n");
   writeFileSync(box.lsExit, "0\n");
   writeFileSync(box.ansibleExit, "0\n");
   writeFileSync(box.checkoutHead, "new-tip\n");
   writeFileSync(join(bin, "git"), `#!/bin/sh
 set -eu
+if [ -n "\${SANDBAR_PULL_STUB_AS:-}" ]; then
+  echo "as $SANDBAR_PULL_STUB_AS: git $*" >>"$SANDBAR_PULL_STUB_LOG"
+  [ "$1" = ls-remote ] || exit 90
+  [ -r "$SANDBAR_PULL_CONSUMERS/$SANDBAR_PULL_STUB_AS" ] || exit 2
+  printf '%s\\trefs/heads/main\\n' "$(cat "$SANDBAR_PULL_CONSUMERS/$SANDBAR_PULL_STUB_AS")"
+  exit 0
+fi
 echo "git $*" >>"$SANDBAR_PULL_STUB_LOG"
 if [ "$1" = ls-remote ]; then
   result=$(cat "$SANDBAR_PULL_LS_EXIT")
@@ -306,16 +320,32 @@ set -eu
 echo "ansible-pull $*" >>"$SANDBAR_PULL_STUB_LOG"
 exit "$(cat "$SANDBAR_PULL_ANSIBLE_EXIT")"
 `, { mode: 0o755 });
-  const script = render(pullScriptTemplate, {
+  // Runs the command as given, telling the git stub whose lookup it is.
+  writeFileSync(join(bin, "runuser"), `#!/bin/sh
+set -eu
+[ "$1" = -u ] && [ "$3" = -- ] || exit 91
+user=$2
+shift 3
+SANDBAR_PULL_STUB_AS=$user exec "$@"
+`, { mode: 0o755 });
+  const script = renderPerInstallation(pullScriptTemplate, installations, {
     sandbar_ui_root: ui,
     sandbar_deploy_status_file: DEPLOY_STATUS,
     sandbar_driver_repo: DRIVER_REPO,
     sandbar_driver_branch: DRIVER_BRANCH,
     sandbar_pull_dir: join(state, "deploy"),
   }).replaceAll("/usr/bin/git", join(bin, "git"))
-    .replaceAll("/usr/bin/ansible-pull", join(bin, "ansible-pull"));
+    .replaceAll("/usr/bin/ansible-pull", join(bin, "ansible-pull"))
+    .replaceAll("/usr/sbin/runuser", join(bin, "runuser"));
   writeFileSync(box.script, script, { mode: 0o755 });
   return box;
+}
+
+// What the script records for the stub consumers, one `<user> <tip>` line each.
+function consumerTips(overrides: Readonly<Record<string, string>> = {}): string {
+  return installations
+    .map((row) => `${row.user} ${overrides[row.user] ?? `${row.user}-tip`}\n`)
+    .join("");
 }
 
 function runPull(box: PullBox) {
@@ -328,6 +358,7 @@ function runPull(box: PullBox) {
       SANDBAR_PULL_LS_EXIT: box.lsExit,
       SANDBAR_PULL_ANSIBLE_EXIT: box.ansibleExit,
       SANDBAR_PULL_CHECKOUT_HEAD: box.checkoutHead,
+      SANDBAR_PULL_CONSUMERS: box.consumers,
     },
   });
 }
@@ -504,12 +535,59 @@ describe("continuous deployment (#146)", () => {
       "sandbar_installation_files_changed[sandbar_user] | default(false)",
       "sandbar_daemon_unit is changed",
       "sandbar_ui_unit is changed",
+      "sandbar_config_digest_drift is changed",
     ]) {
       expect(request).toContain(trigger);
     }
     // The play never starts or restarts a daemon itself.
     expect(installationTasks).not.toContain("state: restarted");
     expect(installationTasks).not.toContain("state: started");
+  });
+
+  // A consumer's gate stack or image change is a restart of its own (#190):
+  // the daemon fixed both at import, and its sandboxes build the new ones.
+  it("asks for a restart when the config digest moved, and records it only afterwards", () => {
+    expect(roleDefaults["sandbar_config_digest_file"]).toBe("config-digest");
+    const digest = taskNamed(
+      installationTasks,
+      "Digest the gate stack and images this installation's config evaluates to",
+    );
+    expect(digest).toContain('- "{{ sandbar_driver_current }}/dist/cli.js"');
+    expect(digest).toContain("- config-digest");
+    expect(digest).toContain('- "{{ sandbar_installation_dir }}/sandbar.config.mjs"');
+    expect(digest).toContain('become_user: "{{ sandbar_user }}"');
+    expect(digest).toContain("register: sandbar_config_digest");
+    expect(digest).toContain("changed_when: false");
+    const compare = taskNamed(
+      installationTasks,
+      "Compare that digest with the one recorded at the last restart request",
+    );
+    const record = taskNamed(
+      installationTasks,
+      "Record the config digest the daemon was asked to restart into",
+    );
+    for (const task of [compare, record]) {
+      expect(task).toContain('content: "{{ sandbar_config_digest.stdout }}\\n"');
+      expect(task).toContain(
+        'dest: "{{ sandbar_installation_dir }}/{{ sandbar_config_digest_file }}"',
+      );
+      expect(task).toContain('owner: "{{ sandbar_user }}"');
+      expect(task).toContain('mode: "0600"');
+    }
+    // The comparison writes nothing; a missing file is a would-be change.
+    expect(compare).toContain("check_mode: true");
+    expect(compare).toContain("register: sandbar_config_digest_drift");
+    expect(record).not.toContain("check_mode");
+    const order = [
+      "- name: Clone the consumer repository",
+      "- name: Pull the gate images podman lacks",
+      "- name: Digest the gate stack and images",
+      "- name: Compare that digest with the one recorded",
+      "- name: Ask the daemon to restart into what this play changed",
+      "- name: Record the config digest the daemon was asked to restart into",
+    ].map((marker) => installationTasks.indexOf(marker));
+    expect(order).not.toContain(-1);
+    expect([...order].sort((x, y) => x - y)).toEqual(order);
   });
 
   it("restarts only the reader, and only when its code or unit moved", () => {
@@ -533,20 +611,20 @@ describe("continuous deployment (#146)", () => {
   });
 
   it("retries failed plays until the remote tip is recorded as converged", () => {
-    const script = render(pullScriptTemplate, {
+    const script = renderPerInstallation(pullScriptTemplate, installations, {
       sandbar_ui_root: UI_ROOT,
       sandbar_deploy_status_file: DEPLOY_STATUS,
       sandbar_driver_repo: DRIVER_REPO,
       sandbar_driver_branch: DRIVER_BRANCH,
       sandbar_pull_dir: PULL_DIR,
     });
-    expect(script).not.toMatch(/\{\{|\}\}/);
+    expect(script).not.toMatch(/\{\{|\}\}|\{%|%\}/);
     expect(script).not.toContain("--only-if-changed");
     expect(script).toContain("/usr/bin/git ls-remote --exit-code");
     expect(script).toContain(`refs/heads/${DRIVER_BRANCH}`);
     expect(script).toContain("converged_file=$state_dir/converged");
     expect(script).toContain("last_attempt_file=$state_dir/last-attempt");
-    expect(script).toContain('if [ "$remote_tip" = "$converged" ]; then');
+    expect(script).toContain('if [ "$remote_tip" = "$converged" ] && consumers_converged; then');
     expect(script).toContain(`--url ${DRIVER_REPO}`);
     expect(script).toContain(`--checkout ${DRIVER_BRANCH}`);
     expect(script).toContain(`pull_dir=${PULL_DIR}`);
@@ -635,6 +713,7 @@ describe("continuous deployment (#146)", () => {
   it("preserves a saved failure when an already-converged tick skips", () => {
     const box = pullBox();
     writeFileSync(join(box.state, "converged"), "new-tip\n");
+    writeFileSync(join(box.state, "consumer-tips"), consumerTips());
     writeFileSync(join(box.state, "last-attempt"), "failed-tip\nfailed (exit 9)\n");
     writeFileSync(box.status, JSON.stringify({
       converged: "stale",
@@ -656,6 +735,75 @@ describe("continuous deployment (#146)", () => {
       result: "failed (exit 9)",
       at: expect.not.stringMatching(/^2000-/),
     });
+  });
+
+  // A consumer-only landing has to reach the play too, or a daemon keeps a gate
+  // stack its sandboxes no longer agree with (#190).
+  it("looks up every consumer's main as its installation's user", () => {
+    const script = renderPerInstallation(pullScriptTemplate, installations, {
+      sandbar_ui_root: UI_ROOT,
+      sandbar_deploy_status_file: DEPLOY_STATUS,
+      sandbar_driver_repo: DRIVER_REPO,
+      sandbar_driver_branch: DRIVER_BRANCH,
+      sandbar_pull_dir: PULL_DIR,
+    });
+    expect(script).toContain("consumer_tips_file=$state_dir/consumer-tips");
+    expect(script).toContain(
+      '/usr/sbin/runuser -u "$1" -- /usr/bin/env GIT_TERMINAL_PROMPT=0',
+    );
+    expect(script).toContain('/usr/bin/git ls-remote --exit-code "$2" refs/heads/main');
+    for (const row of installations) {
+      expect(script).toContain(`  consumer_tip ${row.user} ${row.clone_url}\n`);
+    }
+  });
+
+  it("runs the play when only a consumer moved, recording the tips only after success", () => {
+    const box = pullBox();
+    writeFileSync(join(box.state, "converged"), "new-tip\n");
+
+    // No record yet, as on the first tick after this landed: one play.
+    expect(runPull(box).status).toBe(0);
+    expect(readFileSync(join(box.state, "consumer-tips"), "utf8")).toBe(consumerTips());
+    expect(pullInvocations(box).filter((line) => line.startsWith("ansible-pull ")))
+      .toHaveLength(1);
+    for (const row of installations) {
+      expect(pullInvocations(box)).toContain(
+        `as ${row.user}: git ls-remote --exit-code ${row.clone_url} refs/heads/main`,
+      );
+    }
+
+    expect(runPull(box).status).toBe(0);
+    expect(pullInvocations(box).filter((line) => line.startsWith("ansible-pull ")))
+      .toHaveLength(1);
+
+    const moved = installations[0]!.user;
+    writeFileSync(join(box.consumers, moved), "moved-tip\n");
+    writeFileSync(box.ansibleExit, "5\n");
+    expect(runPull(box).status).toBe(5);
+    expect(readFileSync(join(box.state, "consumer-tips"), "utf8")).toBe(consumerTips());
+    expect(readFileSync(join(box.state, "converged"), "utf8")).toBe("new-tip\n");
+
+    writeFileSync(box.ansibleExit, "0\n");
+    expect(runPull(box).status).toBe(0);
+    expect(readFileSync(join(box.state, "consumer-tips"), "utf8"))
+      .toBe(consumerTips({ [moved]: "moved-tip" }));
+    expect(runPull(box).status).toBe(0);
+    expect(pullInvocations(box).filter((line) => line.startsWith("ansible-pull ")))
+      .toHaveLength(3);
+  });
+
+  it("never counts a consumer it cannot look up as converged", () => {
+    const box = pullBox();
+    const lost = installations[0]!.user;
+    rmSync(join(box.consumers, lost));
+    writeFileSync(join(box.state, "converged"), "new-tip\n");
+    // Even a record that saw the same failure does not skip the play.
+    writeFileSync(join(box.state, "consumer-tips"), consumerTips({ [lost]: "unknown" }));
+
+    expect(runPull(box).status).toBe(0);
+
+    expect(pullInvocations(box).filter((line) => line.startsWith("ansible-pull ")))
+      .toHaveLength(1);
   });
 
   it("activates that script from a timer and never from the unit itself", () => {

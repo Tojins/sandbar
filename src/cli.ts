@@ -14,8 +14,8 @@
 // second installation. The hook belongs here, rather than in `index.ts`,
 // because `run(config)` receives an object that its library caller has already
 // imported; changing that caller's module resolution would be an unrelated
-// global side effect. All four bin modes use `loadConfig`, so run, gate, ui and
-// pulled-images share the same hook.
+// global side effect. All five bin modes use `loadConfig`, so run, gate, ui,
+// pulled-images and config-digest share the same hook.
 //
 // The four constraints, written down so they are decisions and not drift:
 //   - EXACTLY ONE flag that carries configuration: `--config`. Every flag that
@@ -45,6 +45,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveConfig, type RunConfig } from "./config.js";
 import { onCleanup, installCleanupTraps } from "./cleanup.js";
 import { SandbarError, faultDetail, isErrno } from "./errors.js";
+import { configDigest } from "./config-digest.js";
 import { pulledImagesOf } from "./ensure-images.js";
 import { GATE_EXIT_NO_VERDICT, runGateCommand } from "./gate-run.js";
 import { run } from "./run.js";
@@ -73,11 +74,18 @@ const UI_SUBCOMMAND = "ui";
 // This prints them, one per line, for a host's provisioning to pull; the
 // deployment role in deploy/ansible is that host here.
 const PULLED_IMAGES_SUBCOMMAND = "pulled-images";
+// A daemon fixes its gate stack and images when it imports its config, so a
+// consumer change to them needs a restart the daemon cannot ask for itself
+// (#190). This prints a stable sha256 of exactly those two evaluated fields
+// (config-digest.ts); the deployment role compares it with the digest it
+// recorded and writes the restart request when it moved.
+const CONFIG_DIGEST_SUBCOMMAND = "config-digest";
 
 const USAGE = `Usage: sandbar [--config <path>]
        sandbar gate [--config <path>] [--worktree <path>] [--keep]
        sandbar ui [--config <path>] [--port <n>]
        sandbar pulled-images [--config <path>]
+       sandbar config-digest [--config <path>]
 
   --config <path>   Config file to load. Default: ./${DEFAULT_CONFIG_FILE}
                     (resolved against the current directory). The file is an
@@ -94,6 +102,9 @@ exits 0 green, 1 red, 2 if it could not reach a verdict. It is what a laptop and
 a CI job run, so the gate has one implementation. \`sandbar pulled-images\`
 prints, one per line, the images config.gateStack runs that config.images does
 not build — the ones a run refuses to start without and never pulls itself.
+\`sandbar config-digest\` prints a sha256 of the evaluated config.gateStack and
+config.images, independent of key order: it changes exactly when what a daemon
+would build and run changes.
 
   --worktree <path> The tree to gate. Default: the current directory.
   --keep            Leave the stack up afterwards, to inspect a red gate. The
@@ -106,6 +117,7 @@ export type ParsedArgs =
   | { readonly kind: "run"; readonly configPath: string }
   | { readonly kind: "ui"; readonly configPath: string; readonly port: number | null }
   | { readonly kind: "pulled-images"; readonly configPath: string }
+  | { readonly kind: "config-digest"; readonly configPath: string }
   | {
       readonly kind: "gate";
       readonly configPath: string;
@@ -128,7 +140,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const isGate = argv[0] === GATE_SUBCOMMAND;
   const isUi = argv[0] === UI_SUBCOMMAND;
   const isPulledImages = argv[0] === PULLED_IMAGES_SUBCOMMAND;
-  const rest = isGate || isUi || isPulledImages ? argv.slice(1) : argv;
+  const isConfigDigest = argv[0] === CONFIG_DIGEST_SUBCOMMAND;
+  const rest = isGate || isUi || isPulledImages || isConfigDigest
+    ? argv.slice(1)
+    : argv;
 
   let configPath: string | null = null;
   let worktree: string | null = null;
@@ -207,6 +222,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const resolvedConfigPath = configPath ?? DEFAULT_CONFIG_FILE;
   if (isUi) return { kind: "ui", configPath: resolvedConfigPath, port };
   if (isPulledImages) return { kind: "pulled-images", configPath: resolvedConfigPath };
+  if (isConfigDigest) return { kind: "config-digest", configPath: resolvedConfigPath };
   return isGate
     ? {
         kind: "gate",
@@ -284,6 +300,13 @@ export async function main(
       withDefaultCwd(await loadConfig(configPath), configPath),
     );
     for (const image of pulledImagesOf(config)) console.log(image);
+    return 0;
+  }
+  if (parsed.kind === "config-digest") {
+    const config = resolveConfig(
+      withDefaultCwd(await loadConfig(configPath), configPath),
+    );
+    console.log(configDigest(config));
     return 0;
   }
   if (parsed.kind === "ui") {
