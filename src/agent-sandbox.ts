@@ -32,7 +32,8 @@
 // which can precede the process's exit by any amount, and `control` marks a
 // raw lifecycle line that the invocation record keeps uncapped. A third,
 // `background_tasks`, carries the count Claude's last `background_tasks_changed`
-// listed onto the run result, for the inner loop's nudge choice (#191).
+// listed: it holds off the completion grace while tasks are pending (#192)
+// and rides onto the run result for the inner loop's nudge choice (#191).
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -50,7 +51,13 @@
 //        final turn while a background task it started is pending. Without
 //        one, failure to exit within the grace rejects and preserves the
 //        partial speech (#83). Activity after a turn end reopens the turn;
-//        with no signal matched, that run is back on the idle timer.
+//        with no signal matched, that run is back on the idle timer. A turn
+//        end while the latest `background_tasks_changed` lists tasks does not
+//        arm the grace (#192): that session is alive, waiting for them, and
+//        turns each completion into a new turn. While tasks are listed the
+//        idle wait is at least Claude's ten-minute background limit plus a
+//        margin (`idleWaitMs`), so Claude's report of a task it stopped is
+//        not pre-empted. A later line listing none arms the grace again.
 //   F7 — every host git invocation runs under LC_ALL=C (locale-stable stderr).
 //   F8 — the container runs with `--init`: the entrypoint is `sleep infinity`,
 //        which reaps nothing (#42). See `sandboxRunArgs`.
@@ -188,6 +195,12 @@ const CONTAINER_NAME_PREFIX = RESOURCE_PREFIX;
 export const MAX_TAIL_CHARS = 64 * 1024;
 export const DEFAULT_IDLE_TIMEOUT_SECONDS = 10 * 60;
 export const DEFAULT_COMPLETION_TIMEOUT_SECONDS = 60;
+// Claude Code stops a command that has run ten minutes in the background and
+// reports that as a new turn (#192). A listed task started no later than the
+// run's last line, so an idle wait of exactly ten minutes races Claude's own
+// report; the margin covers the kill and the report reaching the stream.
+export const BACKGROUND_TASK_LIMIT_SECONDS = 10 * 60;
+const BACKGROUND_TASK_REPORT_MARGIN_SECONDS = 60;
 
 const NO_CONFIG_LOCK_FLAGS = [
   "-c",
@@ -255,9 +268,10 @@ export type ParsedStreamEvent =
   // not a process end. Codex emits none and keeps #83's verdict on silence.
   | { type: "turn_end"; ok: boolean }
   // How many background tasks Claude's latest `background_tasks_changed`
-  // lists (#191). A measurement, never a decision input inside the sandbox:
-  // the inner loop reads the run's last count to tell a turn ended to wait
-  // for a task, which `--print` cuts off, from a forgotten promise tag.
+  // lists (#191). `--print` stays alive while any is listed and reports each
+  // completion as a new turn, so `invokeAgent` does not take a turn end then
+  // as the run's end (#192). The inner loop reads the run's last count to
+  // tell a session that ended with tasks pending from a forgotten promise tag.
   | { type: "background_tasks"; count: number }
   // The line is a lifecycle line (Claude's `system`, `task_*` and `result`)
   // that the invocation record keeps whole, beside its bounded tail (#189).
@@ -535,8 +549,8 @@ export type SandboxRunResult = ContainerResources & {
   readonly rateLimit?: RateLimitMeasurement;
   // How many background tasks the run's last `background_tasks_changed` still
   // listed (#191). Absent when the provider reported none (Codex never does).
-  // A run that ended with tasks listed ended its turn to wait for them, and
-  // its session — and those tasks — ended with that turn.
+  // The sandbox waits while tasks are listed (#192), so a run that ended with
+  // some listed ended anyway — its process exited — and those tasks with it.
   readonly backgroundTasks?: number;
 };
 
@@ -2367,6 +2381,21 @@ const TURN_ACTIVITY: ReadonlySet<ParsedStreamEvent["type"]> = new Set([
   "context_depth",
 ]);
 
+// How long a run may stay silent before the idle kill. While background tasks
+// are listed, at least Claude Code's background limit plus a margin (#192): a
+// task that runs out its ten minutes silently is Claude's to report, and an
+// idle timeout at or under that limit would pre-empt the report.
+export const idleWaitMs = (
+  idleTimeoutMs: number,
+  backgroundTasks: number | undefined,
+): number =>
+  (backgroundTasks ?? 0) > 0
+    ? Math.max(
+      idleTimeoutMs,
+      (BACKGROUND_TASK_LIMIT_SECONDS + BACKGROUND_TASK_REPORT_MARGIN_SECONDS) * 1000,
+    )
+    : idleTimeoutMs;
+
 export const turnEndedAfter = (
   ended: boolean,
   events: readonly ParsedStreamEvent[],
@@ -2584,7 +2613,10 @@ const invokeAgent = async (
     // Two-phase: pre-signal → idle kill timer; post-signal → completion-grace
     // timer. A grace that expires right after a successful turn end accepts the
     // run (#189); otherwise announcing completion without exiting is an
-    // infrastructure failure, not a clean result (#83).
+    // infrastructure failure, not a clean result (#83). A turn end while
+    // background tasks are listed arms nothing (#192): the session is waiting
+    // for them and reports each as a new turn, so the run stays on the idle
+    // timer until a line lists none after a turn end.
     const resetTimer = (): void => {
       // Nothing is waiting any more, so nothing should be armed: `onLine` still
       // fires after a settle (readline flushes its trailing partial line as the
@@ -2595,7 +2627,8 @@ const invokeAgent = async (
       // waiting for" thought as the abort below.
       if (settled || forcedEnd) return;
       clearTimer();
-      if (matchedSignal !== undefined || turnEnded) {
+      const tasksPending = (speech.backgroundTasks ?? 0) > 0;
+      if (matchedSignal !== undefined || (turnEnded && !tasksPending)) {
         timer = setTimeout(() => {
           if (turnEnded) {
             acceptAfterGrace();
@@ -2614,12 +2647,13 @@ const invokeAgent = async (
           );
         }, completionTimeoutMs);
       } else {
+        const waitMs = idleWaitMs(idleTimeoutMs, speech.backgroundTasks);
         timer = setTimeout(() => {
           stopWith(
             "idle-timeout",
             new AgentIdleTimeoutError(
-              `Agent idle for ${idleTimeoutMs / 1000} seconds — no output received.`,
-              idleTimeoutMs,
+              `Agent idle for ${waitMs / 1000} seconds — no output received.`,
+              waitMs,
             ),
           );
           // The "idle kill timer" (#41): it used to reject and nothing else,
@@ -2627,7 +2661,7 @@ const invokeAgent = async (
           // growing output buffer alive for the rest of the ISSUE — the sandbox
           // is per-issue, so nothing else was going to collect them. See
           // ExecOptions.signal for what this does and does not reap.
-        }, idleTimeoutMs);
+        }, waitMs);
       }
     };
 

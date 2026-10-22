@@ -36,8 +36,9 @@
 // an implementer that ends with no `<promise>` tag at all one `--continue`
 // follow-up before the NO-SIGNAL reaches the SM — the SM never sees the nudge,
 // only the re-parsed result. A run that ended with background tasks still
-// listed gets the resume wording instead (#191): those tasks died with the
-// session, so the agent may finish what it was waiting on, then tag. The full
+// listed gets the resume wording instead (#191): the sandbox waits for listed
+// tasks (#192), so that session ended anyway and the tasks died with it; the
+// agent may finish what it was waiting on, then tag. The full
 // argument is at the call site.
 //
 // After a clean, on-branch COMPLETE the round is serial (#185, #187): the
@@ -287,8 +288,9 @@ const PROMISE_NUDGE_TPL = loadTemplate("implementer-promise-nudge");
 const PROMISE_NUDGE_RESUME_TPL = loadTemplate("implementer-promise-nudge-resume");
 
 // Which nudge a tagless run gets (#191). A run whose last
-// `background_tasks_changed` still listed tasks ended its turn to wait for
-// them, and under `--print` the session and those tasks ended with it: the
+// `background_tasks_changed` still listed tasks ended while waiting for them.
+// The sandbox does not cut such a session off at a turn end (#192), so this
+// is the fallback for one that ended anyway, taking those tasks with it: the
 // resume nudge says they were cut off and lets the agent finish the step it
 // was waiting on. Anything else is the plain forgotten tag, which must not
 // start new work.
@@ -2207,8 +2209,9 @@ export async function runImplementer(
   // a nudge would invite it to restate the same broken claim.
   //
   // Its wording depends on how the run ended (#191, `selectPromiseNudge`): a
-  // turn ended to wait on background tasks lost them with the session, so
-  // that agent may finish the step it was waiting on before it tags; the plain
+  // session that ended while background tasks were listed lost them with it
+  // (the sandbox waits for them, #192, so this is the fallback), and that
+  // agent may finish the step it was waiting on before it tags; the plain
   // forgotten-tag case still must not start new work.
   //
   // One nudge, inline, never a loop. The reply is parsed over the COMBINED
