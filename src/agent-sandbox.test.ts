@@ -65,6 +65,7 @@ import {
   sandboxExecArgs,
   sandboxRunArgs,
   turnEndedAfter,
+  turnSettledAfter,
   idleWaitMs,
   BACKGROUND_TASK_LIMIT_SECONDS,
   DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -1049,6 +1050,40 @@ describe("turnEndedAfter (#189)", () => {
   it("is order-sensitive within one batch", () => {
     expect(turnEndedAfter(false, [ok, text])).toBe(false);
     expect(turnEndedAfter(false, [text, ok])).toBe(true);
+  });
+});
+
+describe("turnSettledAfter (#192)", () => {
+  const ok = { type: "turn_end", ok: true } as const;
+  const failed = { type: "turn_end", ok: false } as const;
+  const listed = (count: number) => ({ type: "background_tasks", count }) as const;
+
+  it("settles on a successful turn end with no tasks listed", () => {
+    expect(turnSettledAfter(false, undefined, [ok])).toBe(true);
+    expect(turnSettledAfter(false, 0, [ok])).toBe(true);
+    expect(turnSettledAfter(true, 0, [failed])).toBe(false);
+  });
+
+  it("does not settle on a turn end while tasks are listed", () => {
+    expect(turnSettledAfter(false, 2, [ok])).toBe(false);
+    expect(turnSettledAfter(false, 0, [listed(1), ok])).toBe(false);
+  });
+
+  it("does not settle when the list clears after the turn end", () => {
+    expect(turnSettledAfter(false, 1, [listed(0)])).toBe(false);
+    expect(turnSettledAfter(false, 1, [ok, listed(0)])).toBe(false);
+  });
+
+  it("settles on the turn end that follows a cleared list", () => {
+    expect(turnSettledAfter(false, 0, [ok])).toBe(true);
+    expect(turnSettledAfter(false, 1, [listed(0), ok])).toBe(true);
+  });
+
+  it("unsettles on a list naming tasks or on turn activity", () => {
+    expect(turnSettledAfter(true, 0, [listed(1)])).toBe(false);
+    expect(turnSettledAfter(true, 0, [{ type: "text", text: "more" }])).toBe(false);
+    expect(turnSettledAfter(true, 0, [listed(0)])).toBe(true);
+    expect(turnSettledAfter(true, 0, [{ type: "control" }])).toBe(true);
   });
 });
 
@@ -2991,19 +3026,42 @@ describe("createSandbox integration (local provider)", () => {
         }
       }, 15_000);
 
-      it("arms the grace once a line after the turn end lists none", async () => {
+      it("arms the grace on the next successful result once the tasks clear", async () => {
         const sandbox = await sandboxFor("sandbar/issue-192-cleared");
         try {
           const run = await sandbox.run({
             agent: scriptedAgent(
-              `${tasks("suite")} && ${success("first")} && sleep 0.5 && ${tasks()} && sleep 30`,
+              `${tasks("suite")} && ${success("first")} && sleep 0.5 && ${tasks()} && ` +
+                `sleep 0.5 && ${success("second")} && sleep 30`,
             ),
             prompt: "go",
             completionSignal: [],
             completionTimeoutSeconds: 0.2,
             idleTimeoutSeconds: 30,
           });
-          expect(run).toMatchObject({ endedBy: "result-then-silence", stdout: "first" });
+          expect(run).toMatchObject({
+            endedBy: "result-then-silence",
+            stdout: "second",
+            backgroundTasks: 0,
+          });
+        } finally {
+          await sandbox.close();
+        }
+      }, 15_000);
+
+      it("does not arm the grace on a cleared list with no later result", async () => {
+        const sandbox = await sandboxFor("sandbar/issue-192-cleared-no-result");
+        try {
+          const run = await sandbox.run({
+            agent: scriptedAgent(
+              `${tasks("suite")} && ${success("first")} && sleep 0.3 && ${tasks()} && sleep 1`,
+            ),
+            prompt: "go",
+            completionSignal: [],
+            completionTimeoutSeconds: 0.2,
+            idleTimeoutSeconds: 30,
+          });
+          expect(run).toMatchObject({ endedBy: "exit", stdout: "first", backgroundTasks: 0 });
         } finally {
           await sandbox.close();
         }

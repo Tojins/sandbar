@@ -54,10 +54,13 @@
 //        with no signal matched, that run is back on the idle timer. A turn
 //        end while the latest `background_tasks_changed` lists tasks does not
 //        arm the grace (#192): that session is alive, waiting for them, and
-//        turns each completion into a new turn. While tasks are listed the
-//        idle wait is at least Claude's ten-minute background limit plus a
-//        margin (`idleWaitMs`), so Claude's report of a task it stopped is
-//        not pre-empted. A later line listing none arms the grace again.
+//        turns each completion into a new turn. Only a successful turn end
+//        that arrives with none listed arms it (`turnSettledAfter`); a list
+//        that clears arms nothing by itself, since the completion turn it
+//        precedes can take longer than the grace to produce its first line.
+//        While tasks are listed the idle wait is at least Claude's ten-minute
+//        background limit plus a margin (`idleWaitMs`), so Claude's report
+//        of a task it stopped is not pre-empted.
 //   F7 — every host git invocation runs under LC_ALL=C (locale-stable stderr).
 //   F8 — the container runs with `--init`: the entrypoint is `sleep infinity`,
 //        which reaps nothing (#42). See `sandboxRunArgs`.
@@ -2407,6 +2410,29 @@ export const turnEndedAfter = (
     ended,
   );
 
+// Whether the turn has ended with nothing left to wait for (#192): a
+// successful turn end counts only if no background task is listed when it
+// arrives — by `tasksBefore`, the count before this line, as updated by the
+// line's own events. A list naming tasks unsettles the turn; a list naming
+// none settles nothing by itself, because the completion turn that follows it
+// may take longer than the grace to produce its first line.
+export const turnSettledAfter = (
+  settled: boolean,
+  tasksBefore: number | undefined,
+  events: readonly ParsedStreamEvent[],
+): boolean => {
+  let tasks = tasksBefore ?? 0;
+  let state = settled;
+  for (const event of events) {
+    if (event.type === "background_tasks") {
+      tasks = event.count;
+      if (tasks > 0) state = false;
+    } else if (event.type === "turn_end") state = event.ok && tasks === 0;
+    else if (TURN_ACTIVITY.has(event.type)) state = false;
+  }
+  return state;
+};
+
 const captureCodexRolloutCursor = async (
   handle: SandboxHandle,
   sandboxRepoDir: string,
@@ -2480,6 +2506,9 @@ const invokeAgent = async (
     let signalMs: number | undefined;
     // The last turn-shaped event was a successful turn end (#189).
     let turnEnded = false;
+    // ...that arrived with no background task listed, none listed since
+    // (#192). Without a completion signal, only this arms the grace.
+    let turnSettled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
     let forcedEnd = false;
@@ -2616,7 +2645,7 @@ const invokeAgent = async (
     // infrastructure failure, not a clean result (#83). A turn end while
     // background tasks are listed arms nothing (#192): the session is waiting
     // for them and reports each as a new turn, so the run stays on the idle
-    // timer until a line lists none after a turn end.
+    // timer until a successful turn end arrives with none listed.
     const resetTimer = (): void => {
       // Nothing is waiting any more, so nothing should be armed: `onLine` still
       // fires after a settle (readline flushes its trailing partial line as the
@@ -2627,8 +2656,7 @@ const invokeAgent = async (
       // waiting for" thought as the abort below.
       if (settled || forcedEnd) return;
       clearTimer();
-      const tasksPending = (speech.backgroundTasks ?? 0) > 0;
-      if (matchedSignal !== undefined || (turnEnded && !tasksPending)) {
+      if (matchedSignal !== undefined || turnSettled) {
         timer = setTimeout(() => {
           if (turnEnded) {
             acceptAfterGrace();
@@ -2800,6 +2828,7 @@ const invokeAgent = async (
         onLine: (line) => {
           gaps.line();
           let events: ParsedStreamEvent[];
+          const tasksBefore = speech.backgroundTasks;
           try {
             events = agent.parseStreamLine(line);
             speech.ingest(events);
@@ -2813,6 +2842,7 @@ const invokeAgent = async (
           }
           if (events.some((event) => event.type === "control")) controlLines.push(line);
           turnEnded = turnEndedAfter(turnEnded, events);
+          turnSettled = turnSettledAfter(turnSettled, tasksBefore, events);
           if (matchedSignal === undefined) {
             matchedSignal = completionSignals.find((sig) =>
               speech.accumulated.includes(sig),
