@@ -30,7 +30,9 @@
 // `ParsedStreamEvent` and `parseCodexJsonLine`. Two lifecycle registers sit
 // beside them (#189): `turn_end` is Claude's `result` line closing a turn,
 // which can precede the process's exit by any amount, and `control` marks a
-// raw lifecycle line that the invocation record keeps uncapped.
+// raw lifecycle line that the invocation record keeps uncapped. A third,
+// `background_tasks`, carries the count Claude's last `background_tasks_changed`
+// listed onto the run result, for the inner loop's nudge choice (#191).
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -252,6 +254,11 @@ export type ParsedStreamEvent =
   // pending and turns each task completion into another turn, so a turn end is
   // not a process end. Codex emits none and keeps #83's verdict on silence.
   | { type: "turn_end"; ok: boolean }
+  // How many background tasks Claude's latest `background_tasks_changed`
+  // lists (#191). A measurement, never a decision input inside the sandbox:
+  // the inner loop reads the run's last count to tell a turn ended to wait
+  // for a task, which `--print` cuts off, from a forgotten promise tag.
+  | { type: "background_tasks"; count: number }
   // The line is a lifecycle line (Claude's `system`, `task_*` and `result`)
   // that the invocation record keeps whole, beside its bounded tail (#189).
   | { type: "control" };
@@ -266,7 +273,7 @@ export type AgentProvider = {
   parseStreamLine(line: string): ParsedStreamEvent[];
 };
 
-// One implementation of the provider parser's seven-register reduction.
+// One implementation of the provider parser's eight-register reduction.
 // Both the live sandbox invocation and the merger's run-to-completion capture
 // feed this accumulator, so speech, terminal failures and raw transport cannot
 // drift into different meanings on the two agent paths (#74).
@@ -279,6 +286,7 @@ export type AgentSpeechAccumulator = {
   readonly toolCalls: number;
   readonly peakContext: number | undefined;
   readonly rateLimit: RateLimitMeasurement | undefined;
+  readonly backgroundTasks: number | undefined;
 };
 
 export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
@@ -289,6 +297,7 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
   let toolCalls = 0;
   let peakContext: number | undefined;
   let rateLimit: RateLimitMeasurement | undefined;
+  let backgroundTasks: number | undefined;
   return {
     ingest(events) {
       for (const event of events) {
@@ -304,6 +313,7 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
           peakContext = maxContextDepth(peakContext, event.tokens);
         }
         else if (event.type === "rate_limit") rateLimit = event.measurement;
+        else if (event.type === "background_tasks") backgroundTasks = event.count;
       }
     },
     get accumulated() {
@@ -326,6 +336,9 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
     },
     get rateLimit() {
       return rateLimit;
+    },
+    get backgroundTasks() {
+      return backgroundTasks;
     },
   };
 }
@@ -520,6 +533,11 @@ export type SandboxRunResult = ContainerResources & {
   readonly toolCalls: number;
   readonly peakContext?: number;
   readonly rateLimit?: RateLimitMeasurement;
+  // How many background tasks the run's last `background_tasks_changed` still
+  // listed (#191). Absent when the provider reported none (Codex never does).
+  // A run that ended with tasks listed ended its turn to wait for them, and
+  // its session — and those tasks — ended with that turn.
+  readonly backgroundTasks?: number;
 };
 
 export type AgentRunEndedBy = "exit" | "result-then-silence";
@@ -960,6 +978,13 @@ const parseStreamJsonObject = (parsed: Record<string, unknown>): ParsedStreamEve
     typeof obj.session_id === "string"
   ) {
     return [{ type: "session_id", sessionId: obj.session_id }];
+  }
+  if (
+    obj.type === "system" &&
+    obj.subtype === "background_tasks_changed" &&
+    Array.isArray(obj.tasks)
+  ) {
+    return [{ type: "background_tasks", count: obj.tasks.length }];
   }
   return [];
 };
@@ -2394,6 +2419,7 @@ type InvokeAgentResult = {
   toolCalls: number;
   peakContext?: number;
   rateLimit?: RateLimitMeasurement;
+  backgroundTasks?: number;
 };
 
 const invokeAgent = async (
@@ -2715,6 +2741,9 @@ const invokeAgent = async (
         ...(speech.usage === undefined ? {} : { usage: speech.usage }),
         ...(speech.peakContext === undefined ? {} : { peakContext: speech.peakContext }),
         ...(speech.rateLimit === undefined ? {} : { rateLimit: speech.rateLimit }),
+        ...(speech.backgroundTasks === undefined
+          ? {}
+          : { backgroundTasks: speech.backgroundTasks }),
         toolCalls: speech.toolCalls,
       });
     };
@@ -3068,8 +3097,10 @@ export const createSandbox = async (
         },
       );
     }
-    const { result, signalMs, maxGapMs, endedBy, usage, toolCalls, peakContext, rateLimit, silent } =
-      invoked;
+    const {
+      result, signalMs, maxGapMs, endedBy, usage, toolCalls, peakContext, rateLimit, silent,
+      backgroundTasks,
+    } = invoked;
 
     const commits = await collectCommits();
 
@@ -3083,6 +3114,7 @@ export const createSandbox = async (
       ...(usage === undefined ? {} : { usage }),
       ...(peakContext === undefined ? {} : { peakContext }),
       ...(rateLimit === undefined ? {} : { rateLimit }),
+      ...(backgroundTasks === undefined ? {} : { backgroundTasks }),
       toolCalls,
     };
   };
@@ -3147,6 +3179,7 @@ export const createSandbox = async (
         ...(iter.usage === undefined ? {} : { usage: iter.usage }),
         ...(iter.peakContext === undefined ? {} : { peakContext: iter.peakContext }),
         ...(iter.rateLimit === undefined ? {} : { rateLimit: iter.rateLimit }),
+        ...(iter.backgroundTasks === undefined ? {} : { backgroundTasks: iter.backgroundTasks }),
         toolCalls: iter.toolCalls,
         ...resources,
       };

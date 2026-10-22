@@ -35,7 +35,10 @@
 // SM" stay within one action each. The promise nudge in runImplementer gives
 // an implementer that ends with no `<promise>` tag at all one `--continue`
 // follow-up before the NO-SIGNAL reaches the SM — the SM never sees the nudge,
-// only the re-parsed result. The full argument is at the call site.
+// only the re-parsed result. A run that ended with background tasks still
+// listed gets the resume wording instead (#191): those tasks died with the
+// session, so the agent may finish what it was waiting on, then tag. The full
+// argument is at the call site.
 //
 // After a clean, on-branch COMPLETE the round is serial (#185, #187): the
 // quality pass, then gate-1 once on the head it left, then — only on a green
@@ -281,6 +284,19 @@ function combinePromiseNudge(
 // The promise nudge (see runImplementer). Loaded at import time like every
 // other template; no placeholders.
 const PROMISE_NUDGE_TPL = loadTemplate("implementer-promise-nudge");
+const PROMISE_NUDGE_RESUME_TPL = loadTemplate("implementer-promise-nudge-resume");
+
+// Which nudge a tagless run gets (#191). A run whose last
+// `background_tasks_changed` still listed tasks ended its turn to wait for
+// them, and under `--print` the session and those tasks ended with it: the
+// resume nudge says they were cut off and lets the agent finish the step it
+// was waiting on. Anything else is the plain forgotten tag, which must not
+// start new work.
+export function selectPromiseNudge(
+  run: Pick<agentSandbox.SandboxRunResult, "backgroundTasks">,
+): string {
+  return (run.backgroundTasks ?? 0) > 0 ? PROMISE_NUDGE_RESUME_TPL : PROMISE_NUDGE_TPL;
+}
 
 export type IssueRef = {
   readonly id: string;
@@ -2190,6 +2206,11 @@ export async function runImplementer(
   // guard's specific re-prompt on a fresh attempt is the right correction, and
   // a nudge would invite it to restate the same broken claim.
   //
+  // Its wording depends on how the run ended (#191, `selectPromiseNudge`): a
+  // turn ended to wait on background tasks lost them with the session, so
+  // that agent may finish the step it was waiting on before it tags; the plain
+  // forgotten-tag case still must not start new work.
+  //
   // One nudge, inline, never a loop. The reply is parsed over the COMBINED
   // output so a bare `NEEDS-INFO` answer pairs with a `<questions>` block from
   // the original message (last-wins semantics already handle concatenation),
@@ -2208,7 +2229,7 @@ export async function runImplementer(
           continueSession: true,
           effort: config.implementerEffort,
         }),
-        prompt: PROMISE_NUDGE_TPL,
+        prompt: selectPromiseNudge(run),
         // Any of the three tags ends the wait, not just COMPLETE.
         completionSignal: PROMISE_COMPLETION_SIGNALS,
         ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
