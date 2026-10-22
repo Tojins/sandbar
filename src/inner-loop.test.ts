@@ -538,6 +538,8 @@ describe("promise nudge selection (#191)", () => {
     expect(nudge).toBe(RESUME);
     expect(nudge).toContain("cut off");
     expect(nudge).not.toContain("Do not start new work.");
+    // #192: running what a change impacts is fine; shrinking it is not wanted.
+    expect(nudge).not.toContain("narrow");
   });
 
   it.each([
