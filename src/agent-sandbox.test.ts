@@ -65,6 +65,10 @@ import {
   sandboxExecArgs,
   sandboxRunArgs,
   turnEndedAfter,
+  turnSettledAfter,
+  idleWaitMs,
+  BACKGROUND_TASK_LIMIT_SECONDS,
+  DEFAULT_IDLE_TIMEOUT_SECONDS,
 } from "./agent-sandbox.js";
 import { createTranscriptTree } from "./logs.js";
 import { readPodmanCalls, writePodmanShim } from "./podman-shim.test-util.js";
@@ -984,6 +988,26 @@ describe("defaultImageName", () => {
   });
 });
 
+describe("idleWaitMs (#192)", () => {
+  const floor = (BACKGROUND_TASK_LIMIT_SECONDS + 60) * 1000;
+
+  it.each([undefined, 0])("keeps the configured idle timeout with %s tasks listed", (count) => {
+    expect(idleWaitMs(30_000, count)).toBe(30_000);
+    expect(idleWaitMs(DEFAULT_IDLE_TIMEOUT_SECONDS * 1000, count))
+      .toBe(DEFAULT_IDLE_TIMEOUT_SECONDS * 1000);
+  });
+
+  it("waits past Claude's background limit while tasks are listed", () => {
+    expect(idleWaitMs(DEFAULT_IDLE_TIMEOUT_SECONDS * 1000, 1)).toBe(floor);
+    expect(idleWaitMs(400, 2)).toBe(floor);
+    expect(floor).toBeGreaterThan(DEFAULT_IDLE_TIMEOUT_SECONDS * 1000);
+  });
+
+  it("never shortens a longer configured idle timeout", () => {
+    expect(idleWaitMs(floor + 1, 1)).toBe(floor + 1);
+  });
+});
+
 describe("turnEndedAfter (#189)", () => {
   const ok = { type: "turn_end", ok: true } as const;
   const failed = { type: "turn_end", ok: false } as const;
@@ -1026,6 +1050,40 @@ describe("turnEndedAfter (#189)", () => {
   it("is order-sensitive within one batch", () => {
     expect(turnEndedAfter(false, [ok, text])).toBe(false);
     expect(turnEndedAfter(false, [text, ok])).toBe(true);
+  });
+});
+
+describe("turnSettledAfter (#192)", () => {
+  const ok = { type: "turn_end", ok: true } as const;
+  const failed = { type: "turn_end", ok: false } as const;
+  const listed = (count: number) => ({ type: "background_tasks", count }) as const;
+
+  it("settles on a successful turn end with no tasks listed", () => {
+    expect(turnSettledAfter(false, undefined, [ok])).toBe(true);
+    expect(turnSettledAfter(false, 0, [ok])).toBe(true);
+    expect(turnSettledAfter(true, 0, [failed])).toBe(false);
+  });
+
+  it("does not settle on a turn end while tasks are listed", () => {
+    expect(turnSettledAfter(false, 2, [ok])).toBe(false);
+    expect(turnSettledAfter(false, 0, [listed(1), ok])).toBe(false);
+  });
+
+  it("does not settle when the list clears after the turn end", () => {
+    expect(turnSettledAfter(false, 1, [listed(0)])).toBe(false);
+    expect(turnSettledAfter(false, 1, [ok, listed(0)])).toBe(false);
+  });
+
+  it("settles on the turn end that follows a cleared list", () => {
+    expect(turnSettledAfter(false, 0, [ok])).toBe(true);
+    expect(turnSettledAfter(false, 1, [listed(0), ok])).toBe(true);
+  });
+
+  it("unsettles on a list naming tasks or on turn activity", () => {
+    expect(turnSettledAfter(true, 0, [listed(1)])).toBe(false);
+    expect(turnSettledAfter(true, 0, [{ type: "text", text: "more" }])).toBe(false);
+    expect(turnSettledAfter(true, 0, [listed(0)])).toBe(true);
+    expect(turnSettledAfter(true, 0, [{ type: "control" }])).toBe(true);
   });
 });
 
@@ -2931,6 +2989,121 @@ describe("createSandbox integration (local provider)", () => {
         await sandbox.close();
       }
     }, 15_000);
+
+    // #192: a turn that ends while tasks are listed is a session waiting for
+    // them, which reports each completion as a new turn.
+    describe("while background tasks are listed (#192)", () => {
+      const tasks = (...ids: string[]) =>
+        line({
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks: ids.map((task_id) => ({ task_id })),
+        });
+      const say = (text: string) =>
+        line({ type: "assistant", message: { content: [{ type: "text", text }] } });
+
+      it("does not accept the turn end; the task-completion turn reaches the run", async () => {
+        const sandbox = await sandboxFor("sandbar/issue-192-waiting");
+        try {
+          const start = Date.now();
+          const run = await sandbox.run({
+            agent: scriptedAgent(
+              `${tasks("suite")} && ${success("waiting for the suite")} && sleep 0.8 && ` +
+                `${tasks()} && ${line({ type: "system", subtype: "task_notification" })} && ` +
+                `${say("suite passed")} && ${success("suite passed")} && sleep 30`,
+            ),
+            prompt: "go",
+            completionSignal: [],
+            completionTimeoutSeconds: 0.2,
+            idleTimeoutSeconds: 30,
+          });
+          expect(run.endedBy).toBe("result-then-silence");
+          expect(run.stdout).toBe("suite passed");
+          expect(run.backgroundTasks).toBe(0);
+          expect(Date.now() - start).toBeGreaterThanOrEqual(1000);
+        } finally {
+          await sandbox.close();
+        }
+      }, 15_000);
+
+      it("arms the grace on the next successful result once the tasks clear", async () => {
+        const sandbox = await sandboxFor("sandbar/issue-192-cleared");
+        try {
+          const run = await sandbox.run({
+            agent: scriptedAgent(
+              `${tasks("suite")} && ${success("first")} && sleep 0.5 && ${tasks()} && ` +
+                `sleep 0.5 && ${success("second")} && sleep 30`,
+            ),
+            prompt: "go",
+            completionSignal: [],
+            completionTimeoutSeconds: 0.2,
+            idleTimeoutSeconds: 30,
+          });
+          expect(run).toMatchObject({
+            endedBy: "result-then-silence",
+            stdout: "second",
+            backgroundTasks: 0,
+          });
+        } finally {
+          await sandbox.close();
+        }
+      }, 15_000);
+
+      it("does not arm the grace on a cleared list with no later result", async () => {
+        const sandbox = await sandboxFor("sandbar/issue-192-cleared-no-result");
+        try {
+          const run = await sandbox.run({
+            agent: scriptedAgent(
+              `${tasks("suite")} && ${success("first")} && sleep 0.3 && ${tasks()} && sleep 1`,
+            ),
+            prompt: "go",
+            completionSignal: [],
+            completionTimeoutSeconds: 0.2,
+            idleTimeoutSeconds: 30,
+          });
+          expect(run).toMatchObject({ endedBy: "exit", stdout: "first", backgroundTasks: 0 });
+        } finally {
+          await sandbox.close();
+        }
+      }, 15_000);
+
+      it("holds off an idle timeout under Claude's background limit", async () => {
+        const sandbox = await sandboxFor("sandbar/issue-192-idle-floor");
+        try {
+          const run = await sandbox.run({
+            agent: scriptedAgent(`${tasks("suite")} && ${success("first")} && sleep 1`),
+            prompt: "go",
+            completionSignal: [],
+            completionTimeoutSeconds: 0.2,
+            idleTimeoutSeconds: 0.4,
+          });
+          expect(run).toMatchObject({ endedBy: "exit", stdout: "first", backgroundTasks: 1 });
+        } finally {
+          await sandbox.close();
+        }
+      }, 15_000);
+
+      it("still accepts a turn end that carried a completion signal", async () => {
+        const sandbox = await sandboxFor("sandbar/issue-192-signal");
+        try {
+          const run = await sandbox.run({
+            agent: scriptedAgent(
+              `${tasks("server")} && ${success("done <promise>COMPLETE</promise>")} && sleep 30`,
+            ),
+            prompt: "go",
+            completionSignal: ["<promise>COMPLETE</promise>"],
+            completionTimeoutSeconds: 0.2,
+            idleTimeoutSeconds: 30,
+          });
+          expect(run).toMatchObject({
+            endedBy: "result-then-silence",
+            stdout: "done <promise>COMPLETE</promise>",
+          });
+        } finally {
+          await sandbox.close();
+        }
+      }, 15_000);
+    });
 
     describe("when the reap itself fails", () => {
       // The reap is the only exec whose command starts with `f=`.

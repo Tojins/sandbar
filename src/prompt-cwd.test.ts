@@ -174,8 +174,10 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
     expect(anchor).toContain("stop every background task you started");
     expect(anchor).toContain("`pgrep -f`");
-    // #191: under `--print` a turn ended to wait loses the task.
-    expect(anchor).toContain("never end a turn to wait for one");
+    // #192: a turn ended to wait does not lose the task, and backgrounding is
+    // the way past the foreground ceiling, so nothing says otherwise.
+    expect(anchor).not.toContain("never reach you");
+    expect(anchor).not.toContain("narrower scope");
   });
 
   it("marks history unavailable when the named source ref is absent", async () => {

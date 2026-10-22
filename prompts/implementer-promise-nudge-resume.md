@@ -4,8 +4,7 @@ so those tasks were cut off: their completion notices will never reach you, and
 nothing you were waiting on will finish by itself.
 
 You may finish the step you were waiting on. Rerun what is needed in the
-foreground (narrow its scope if it was slow), commit the work, then reply with
-exactly one tag:
+foreground, commit the work, then reply with exactly one tag:
 
 - `<promise>COMPLETE</promise>` — the work is done and committed.
 - `<promise>NEEDS-INFO</promise>` — you are blocked on missing information.
