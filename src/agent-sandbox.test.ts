@@ -412,6 +412,24 @@ describe("parseStreamJsonLine", () => {
       .toContainEqual({ type: "turn_end", ok });
   });
 
+  // #191: the inner loop's nudge choice reads the last listed count.
+  it("counts the tasks a background_tasks_changed line lists", () => {
+    const line = (tasks: unknown) =>
+      JSON.stringify({ type: "system", subtype: "background_tasks_changed", tasks });
+    expect(parseStreamJsonLine(line([{ task_id: "a" }, { task_id: "b" }])))
+      .toContainEqual({ type: "background_tasks", count: 2 });
+    expect(parseStreamJsonLine(line(null)))
+      .not.toContainEqual(expect.objectContaining({ type: "background_tasks" }));
+
+    const speech = createAgentSpeechAccumulator();
+    expect(speech.backgroundTasks).toBeUndefined();
+    speech.ingest(parseStreamJsonLine(line([{ task_id: "a" }, { task_id: "b" }])));
+    expect(speech.backgroundTasks).toBe(2);
+    speech.ingest(parseStreamJsonLine(line([])));
+    expect(speech.backgroundTasks).toBe(0);
+    expect(speech.spoken).toBe("");
+  });
+
   it.each([
     { type: "system", subtype: "background_tasks_changed", tasks: [] },
     { type: "system", subtype: "task_notification" },

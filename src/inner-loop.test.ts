@@ -79,6 +79,8 @@ import {
   AgentIdleTimeoutError,
   AgentInputTooLargeError,
   AgentQuotaError,
+  createAgentSpeechAccumulator,
+  parseStreamJsonLine,
   withPartialCommits,
   withPartialContainerResources,
   withPartialDurationMs,
@@ -102,6 +104,7 @@ import {
   runAdjudicator,
   runUiCheck,
   runSandboxAndPublish,
+  selectPromiseNudge,
   type QualityLedger,
   type ReadOnlyAgentSnapshot,
 } from "./inner-loop.js";
@@ -113,6 +116,8 @@ import type { HeadMismatch } from "./git-ops.js";
 import type { EventInput } from "./events.js";
 import type { GateResult } from "./gate.js";
 import { initialState } from "./inner-loop-machine.js";
+import { parsePromise } from "./promise-parser.js";
+import { loadTemplate } from "./prompts.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
 import {
   containerResourcesOf,
@@ -487,6 +492,66 @@ describe("runPartitionCheck (#158)", () => {
       kind: "partition-check",
       result: "input-too-large",
     })]);
+  });
+});
+
+describe("promise nudge selection (#191)", () => {
+  const PLAIN = loadTemplate("implementer-promise-nudge");
+  const RESUME = loadTemplate("implementer-promise-nudge-resume");
+  const line = (obj: unknown) => JSON.stringify(obj);
+  const tasksChanged = (tasks: unknown[]) =>
+    line({ type: "system", subtype: "background_tasks_changed", tasks });
+  const text = (t: string) =>
+    line({ type: "assistant", message: { content: [{ type: "text", text: t }] } });
+  const endTurn = (result: string) =>
+    line({ type: "result", subtype: "success", stop_reason: "end_turn", result });
+
+  // Replays a recorded stream the way the sandbox does and returns what the
+  // inner loop decides from: the parsed signal and the nudge it would send.
+  const replay = (lines: readonly string[]) => {
+    const speech = createAgentSpeechAccumulator();
+    for (const l of lines) speech.ingest(parseStreamJsonLine(l));
+    return {
+      signal: parsePromise(speech.spoken, { commitsAccumulated: 1 }),
+      nudge: selectPromiseNudge(
+        speech.backgroundTasks === undefined ? {} : { backgroundTasks: speech.backgroundTasks },
+      ),
+    };
+  };
+
+  const WAITING =
+    "The waiter will tell me when the run reports a verdict; nothing else to do on this branch until then.";
+
+  it("gives a turn ended while background tasks are listed the resume nudge", () => {
+    const { signal, nudge } = replay([
+      tasksChanged([{ task_id: "suite", description: "npm test" }]),
+      text("Started a waiter."),
+      tasksChanged([
+        { task_id: "suite", description: "npm test" },
+        { task_id: "waiter", description: "wait for the suite" },
+      ]),
+      text(WAITING),
+      endTurn(WAITING),
+    ]);
+
+    expect(signal).toMatchObject({ kind: "NO-SIGNAL", missingTag: true });
+    expect(nudge).toBe(RESUME);
+    expect(nudge).toContain("cut off");
+    expect(nudge).not.toContain("Do not start new work.");
+  });
+
+  it.each([
+    ["no background_tasks_changed line", [text("Done."), endTurn("Done.")]],
+    [
+      "tasks that were all stopped before the turn ended",
+      [tasksChanged([{ task_id: "suite" }]), tasksChanged([]), endTurn("Done.")],
+    ],
+  ])("keeps the plain nudge for %s", (_name, lines) => {
+    const { signal, nudge } = replay(lines);
+
+    expect(signal).toMatchObject({ kind: "NO-SIGNAL", missingTag: true });
+    expect(nudge).toBe(PLAIN);
+    expect(nudge).toContain("Do not start new work.");
   });
 });
 
@@ -869,6 +934,28 @@ describe("silent implementer attempt policy (#116)", () => {
       fastForwarded: { fromSha: "base456", toSha: "head123" },
     });
     expect(sandbox.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends the resume nudge after a run that ended on background tasks (#191)", async () => {
+    const { pending, sandbox } = runPath(
+      { ...sandboxResult("Waiting for the suite.", false, ["a"]), backgroundTasks: 2 },
+      sandboxResult("<promise>COMPLETE</promise>", false, ["b"]),
+    );
+
+    await expect(pending).resolves.toMatchObject({ signal: { kind: "COMPLETE" } });
+    expect(vi.mocked(sandbox.run).mock.calls[1]?.[0].prompt)
+      .toBe(loadTemplate("implementer-promise-nudge-resume"));
+  });
+
+  it("sends the plain nudge after a run with no background tasks listed (#191)", async () => {
+    const { pending, sandbox } = runPath(
+      { ...sandboxResult("Done.", false, ["a"]), backgroundTasks: 0 },
+      sandboxResult("<promise>COMPLETE</promise>", false),
+    );
+
+    await expect(pending).resolves.toMatchObject({ signal: { kind: "COMPLETE" } });
+    expect(vi.mocked(sandbox.run).mock.calls[1]?.[0].prompt)
+      .toBe(loadTemplate("implementer-promise-nudge"));
   });
 
   it("leaves a non-ancestor mismatch for the state machine", async () => {
