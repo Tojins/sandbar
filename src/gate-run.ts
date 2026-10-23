@@ -193,7 +193,7 @@ export function gateReuseToken(
 // statement earlier is the same mistake with the filter missing rather than
 // present.
 //
-// It is not a nicety on the headline path. The README's own worked config
+// It is not a nicety on the headline path. The reference doc's worked config
 // declares `localhost/app:sandbar` with its own `rebuildOn` and no gateStack
 // container running it; on a cold CI checkout that tag is missing, so
 // `ensureImages` would build the whole agent image — the CLI, the toolchain —
@@ -238,7 +238,7 @@ async function missingPulledImages(
 // a stylistic choice about error handling: `GATE_EXIT_NO_VERDICT` is exported
 // from the package root beside this function, and a host that took its exit
 // code straight off this call — `process.exitCode = await runGateCommand(…)`,
-// which is what the bin does, what the README recommends, and what "a thin bin
+// which is what the bin does, what docs/reference.md recommends, and what "a thin bin
 // can do nothing an embedding host cannot" claims — would get an unhandled
 // rejection, or under an ordinary catch-all some code that is not 2, on exactly
 // the path the third code exists to make legible. So every fault is rendered

@@ -134,7 +134,7 @@ describe("podCreateArgs", () => {
 
   // Unconditional since #43: `tcp` readiness was the only thing that ever put
   // a `-p` on a gate pod, and the probe runs inside the container now. The
-  // README's "publishes no fixed ports" lost its asterisk, and this is what
+  // reference doc's "publishes no fixed ports" lost its asterisk, and this is what
   // keeps it that way.
   it("publishes nothing at all", () => {
     const args = podCreateArgs({ podName: "p", networkName: "n" });

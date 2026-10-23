@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 474" width="1180" height="474" role="img">
+  <style>
+    svg { --panel:#ffffff; --fg:#17212b; --muted:#5a6875; --line:#c9d2da; --lane:#eef2f4;
+      --accent:#0f7c86; --accent-soft:#dcf0f1; --gate:#b26a00; --gate-soft:#fbecd5;
+      --human:#6b4fbb; --human-soft:#ebe5fa; --bad:#b5372f; --ok:#2c7a3f; }
+    @media (prefers-color-scheme: dark) {
+      svg { --panel:#1a2229; --fg:#e4eaee; --muted:#94a3af; --line:#33414c; --lane:#151d23;
+        --accent:#4cc3cc; --accent-soft:#163a3e; --gate:#f0a63a; --gate-soft:#3d2e17;
+        --human:#a993f0; --human-soft:#2c2547; --bad:#f07a70; --ok:#6fcf86; }
+    }
+    text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--fg); }
+    .bg { fill: var(--panel); stroke: var(--line); }
+    .t { font-weight: 600; font-size: 14px; }
+    .s, .lbl, .lbl-bad, .lbl-ok, .lane-t, .frame-t, .leg { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; }
+    .s, .lbl, .leg { fill: var(--muted); }
+    .lbl-bad { fill: var(--bad); } .lbl-ok { fill: var(--ok); }
+    .lane-bg { fill: var(--lane); }
+    .lane-t { font-size: 11px; font-weight: 500; letter-spacing: 0.08em; fill: var(--muted); }
+    .node { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; }
+    .agent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+    .gate { fill: var(--gate-soft); stroke: var(--gate); stroke-width: 1.2; }
+    .human { fill: var(--human-soft); stroke: var(--human); stroke-width: 1.2; }
+    .done { fill: var(--ok); stroke: none; }
+    .done-t { fill: var(--panel); font-weight: 600; font-size: 14px; }
+    .frame { fill: none; stroke: var(--accent); stroke-dasharray: 5 4; stroke-width: 1.2; }
+    .frame-t { font-size: 11px; fill: var(--accent); }
+    .e { fill: none; stroke: var(--muted); stroke-width: 1.4; marker-end: url(#arr); }
+    .e-bad { fill: none; stroke: var(--bad); stroke-width: 1.4; marker-end: url(#arr-bad); }
+    .e-ok { fill: none; stroke: var(--ok); stroke-width: 1.4; marker-end: url(#arr-ok); }
+    .rail { fill: none; stroke: var(--bad); stroke-width: 1.4; }
+    .m-mut { fill: var(--muted); } .m-bad { fill: var(--bad); } .m-ok { fill: var(--ok); }
+  </style>
+  <rect class="bg" x="0.5" y="0.5" width="1179" height="473" rx="10"/>
+  <title>Pre-checks (context size and UI), implementer, quality review, automatic tests, correctness review, adjudicator, then merge with a resolve agent</title>
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="m-mut"/></marker>
+          <marker id="arr-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="m-bad"/></marker>
+          <marker id="arr-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="m-ok"/></marker>
+        </defs>
+
+        <!-- checks column -->
+        <rect class="agent" x="20" y="132" width="170" height="68" rx="6"/>
+        <text class="t" x="34" y="155">Pre-checks</text>
+        <text class="s" x="34" y="173">fits one context?</text>
+        <text class="s" x="34" y="189">needs a UI prototype?</text>
+        <text class="lbl-bad" x="20" y="222">too big → split, park</text>
+        <text class="lbl-bad" x="20" y="238">UI → park for you</text>
+
+        <!-- implementer -->
+        <rect class="agent" x="230" y="140" width="150" height="52" rx="6"/>
+        <text class="t" x="244" y="162">Implementer</text>
+        <text class="s" x="244" y="180">writes the code</text>
+        <path class="e" d="M190 166H228"/>
+
+        <!-- quality review -->
+        <rect class="frame" x="420" y="30" width="355" height="270" rx="10"/>
+        <text class="frame-t" x="434" y="50">QUALITY REVIEW</text>
+        <rect class="agent" x="440" y="140" width="130" height="52" rx="6"/>
+        <text class="t" x="454" y="162">Violations lister</text>
+        <text class="s" x="454" y="180">read-only</text>
+        <rect class="agent" x="610" y="60" width="130" height="52" rx="6"/>
+        <text class="t" x="624" y="82">Fixer</text>
+        <text class="s" x="624" y="100">fixes violations</text>
+        <rect class="agent" x="610" y="220" width="130" height="52" rx="6"/>
+        <text class="t" x="624" y="242">Verify</text>
+        <text class="s" x="624" y="260">read-only</text>
+        <path class="e" d="M380 166H438"/>
+        <text class="lbl" x="386" y="158">done</text>
+        <path class="e" d="M570 160H590V86H608"/>
+        <path class="e" d="M675 112V218"/>
+        <path class="e-bad" d="M740 246H758V100H742"/>
+        <text class="lbl-bad" x="682" y="170">not fixed</text>
+
+        <!-- automatic tests / correctness -->
+        <path class="e" d="M775 86H818"/>
+        <rect class="gate" x="820" y="60" width="150" height="52" rx="6"/>
+        <text class="t" x="834" y="82">Automatic tests</text>
+        <text class="s" x="834" y="100">non AI</text>
+        <rect class="agent" x="820" y="180" width="150" height="52" rx="6"/>
+        <text class="t" x="834" y="202">Correctness review</text>
+        <text class="s" x="834" y="220">fresh model</text>
+        <path class="e-ok" d="M895 112V178"/>
+        <text class="lbl-ok" x="901" y="150">green</text>
+
+        <!-- adjudicator + done -->
+        <rect class="agent" x="880" y="262" width="100" height="52" rx="6"/>
+        <text class="t" x="892" y="284">Adjudicator</text>
+        <text class="s" x="892" y="302">disputes</text>
+        <rect class="done" x="780" y="330" width="100" height="52" rx="6"/>
+        <text class="done-t" x="810" y="361">DONE</text>
+        <path class="e" d="M930 232V260"/>
+        <text class="lbl" x="936" y="251">disputed</text>
+        <path class="e-ok" d="M840 232V328"/>
+        <text class="lbl-ok" x="782" y="290">approved</text>
+        <path class="e-ok" d="M880 288H865V328"/>
+        <text class="lbl-ok" x="886" y="332">overruled</text>
+
+        <!-- return rails -->
+        <path class="rail" d="M895 60V14H305"/>
+        <path class="e-bad" d="M305 14V138"/>
+        <path class="rail" d="M970 206H1000V14H895"/>
+        <path class="rail" d="M980 288H1000V206"/>
+        <text class="lbl-bad" x="320" y="30">tests red / review rejected / dispute lost</text>
+
+        <!-- merge -->
+        <rect class="agent" x="1020" y="330" width="140" height="52" rx="6"/>
+        <text class="t" x="1034" y="352">Merge</text>
+        <text class="s" x="1034" y="370">+ automatic tests</text>
+        <path class="e-ok" d="M880 356H1018"/>
+        <rect class="agent" x="1020" y="200" width="140" height="52" rx="6"/>
+        <text class="t" x="1034" y="222">Resolve agent</text>
+        <text class="s" x="1034" y="240">fixes the merge</text>
+        <path class="e-bad" d="M1060 330V254"/>
+        <text class="lbl-bad" x="1020" y="290">conflict</text>
+        <text class="lbl-bad" x="1020" y="303">or red</text>
+        <path class="e" d="M1120 252V328"/>
+        <path class="e-ok" d="M1090 382V420"/>
+        <text class="lbl-ok" x="1000" y="432">landed → diagram 1</text>
+  <rect class="agent" x="20" y="449" width="14" height="14" rx="3"/>
+  <text class="leg" x="44" y="460">AI agent</text>
+  <rect class="gate" x="123.2" y="449" width="14" height="14" rx="3"/>
+  <text class="leg" x="147.2" y="460">automatic tests (non AI)</text>
+  <path class="rail" d="M328.8 456H346.8"/>
+  <text class="leg" x="352.8" y="460">back to the implementer</text>
+</svg>

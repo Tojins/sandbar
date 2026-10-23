@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 530" width="1180" height="530" role="img">
+  <style>
+    svg { --panel:#ffffff; --fg:#17212b; --muted:#5a6875; --line:#c9d2da; --lane:#eef2f4;
+      --accent:#0f7c86; --accent-soft:#dcf0f1; --gate:#b26a00; --gate-soft:#fbecd5;
+      --human:#6b4fbb; --human-soft:#ebe5fa; --bad:#b5372f; --ok:#2c7a3f; }
+    @media (prefers-color-scheme: dark) {
+      svg { --panel:#1a2229; --fg:#e4eaee; --muted:#94a3af; --line:#33414c; --lane:#151d23;
+        --accent:#4cc3cc; --accent-soft:#163a3e; --gate:#f0a63a; --gate-soft:#3d2e17;
+        --human:#a993f0; --human-soft:#2c2547; --bad:#f07a70; --ok:#6fcf86; }
+    }
+    text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--fg); }
+    .bg { fill: var(--panel); stroke: var(--line); }
+    .t { font-weight: 600; font-size: 14px; }
+    .s, .lbl, .lbl-bad, .lbl-ok, .lane-t, .frame-t, .leg { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; }
+    .s, .lbl, .leg { fill: var(--muted); }
+    .lbl-bad { fill: var(--bad); } .lbl-ok { fill: var(--ok); }
+    .lane-bg { fill: var(--lane); }
+    .lane-t { font-size: 11px; font-weight: 500; letter-spacing: 0.08em; fill: var(--muted); }
+    .node { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; }
+    .agent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+    .gate { fill: var(--gate-soft); stroke: var(--gate); stroke-width: 1.2; }
+    .human { fill: var(--human-soft); stroke: var(--human); stroke-width: 1.2; }
+    .done { fill: var(--ok); stroke: none; }
+    .done-t { fill: var(--panel); font-weight: 600; font-size: 14px; }
+    .frame { fill: none; stroke: var(--accent); stroke-dasharray: 5 4; stroke-width: 1.2; }
+    .frame-t { font-size: 11px; fill: var(--accent); }
+    .e { fill: none; stroke: var(--muted); stroke-width: 1.4; marker-end: url(#arr); }
+    .e-bad { fill: none; stroke: var(--bad); stroke-width: 1.4; marker-end: url(#arr-bad); }
+    .e-ok { fill: none; stroke: var(--ok); stroke-width: 1.4; marker-end: url(#arr-ok); }
+    .rail { fill: none; stroke: var(--bad); stroke-width: 1.4; }
+    .m-mut { fill: var(--muted); } .m-bad { fill: var(--bad); } .m-ok { fill: var(--ok); }
+  </style>
+  <rect class="bg" x="0.5" y="0.5" width="1179" height="529" rx="10"/>
+  <title>You grill and file issues, sandbar works them onto a chunk branch and a draft PR, you review with human-review, then land or request changes</title>
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="m-mut"/></marker>
+          <marker id="arr-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="m-bad"/></marker>
+          <marker id="arr-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="m-ok"/></marker>
+        </defs>
+
+        <!-- lanes -->
+        <rect class="lane-bg" x="0" y="20" width="1180" height="140"/>
+        <rect class="lane-bg" x="0" y="320" width="1180" height="150"/>
+        <text class="lane-t" x="20" y="44">YOU</text>
+        <text class="lane-t" x="20" y="194">GITHUB</text>
+        <text class="lane-t" x="20" y="344">SANDBAR</text>
+
+        <!-- you: grill -->
+        <rect class="human" x="130" y="62" width="150" height="56" rx="6"/>
+        <text class="t" x="144" y="85">/grill-me</text>
+        <text class="s" x="144" y="104">agree the design</text>
+        <rect class="human" x="310" y="62" width="150" height="56" rx="6"/>
+        <text class="t" x="324" y="85">to-tickets</text>
+        <text class="s" x="324" y="104">slices + Blocked by</text>
+        <path class="e" d="M280 90H308"/>
+
+        <!-- github: issues -->
+        <rect class="node" x="310" y="212" width="150" height="56" rx="6"/>
+        <text class="t" x="324" y="235">Issues</text>
+        <text class="s" x="324" y="254">ready-for-agent</text>
+        <path class="e" d="M385 118V210"/>
+
+        <!-- sandbar: pick + work -->
+        <rect class="agent" x="310" y="362" width="150" height="56" rx="6"/>
+        <text class="t" x="324" y="385">Pick unblocked</text>
+        <text class="s" x="324" y="404">no AI here</text>
+        <path class="e" d="M385 268V360"/>
+        <rect class="agent" x="500" y="362" width="150" height="56" rx="6"/>
+        <text class="t" x="514" y="385">Build &amp; test</text>
+        <text class="s" x="514" y="404">see diagram 2</text>
+        <path class="e" d="M460 390H498"/>
+
+        <!-- park loop -->
+        <rect class="node" x="500" y="212" width="150" height="56" rx="6"/>
+        <text class="t" x="514" y="235">Question / stuck</text>
+        <text class="s" x="514" y="254">needs-info</text>
+        <rect class="human" x="500" y="62" width="150" height="56" rx="6"/>
+        <text class="t" x="514" y="85">Answer</text>
+        <text class="s" x="514" y="104">re-add ready-for-agent</text>
+        <path class="e-bad" d="M575 362V270"/>
+        <path class="e-bad" d="M575 212V120"/>
+        <path class="e-bad" d="M500 106H480V240H462"/>
+
+        <!-- landing on chunk -->
+        <rect class="agent" x="690" y="362" width="150" height="56" rx="6"/>
+        <text class="t" x="704" y="385">Merge to chunk</text>
+        <text class="s" x="704" y="404">one branch per chunk</text>
+        <path class="e" d="M650 390H688"/>
+        <rect class="node" x="690" y="212" width="150" height="56" rx="6"/>
+        <text class="t" x="704" y="235">Draft PR</text>
+        <text class="s" x="704" y="254">needs-review</text>
+        <path class="e" d="M765 362V270"/>
+
+        <!-- human review -->
+        <rect class="human" x="870" y="62" width="150" height="56" rx="6"/>
+        <text class="t" x="884" y="85">/human-review</text>
+        <text class="s" x="884" y="104">test it yourself</text>
+        <path class="e" d="M840 240H860V90H868"/>
+        <rect class="node" x="870" y="212" width="150" height="56" rx="6"/>
+        <text class="t" x="884" y="235">Request changes</text>
+        <text class="s" x="884" y="254">PR review</text>
+        <path class="e-bad" d="M945 118V210"/>
+        <path class="e-bad" d="M945 268V446H385V420"/>
+        <text class="lbl-bad" x="400" y="440">changes requested → those issues re-queue</text>
+
+        <!-- land -->
+        <rect class="node" x="1040" y="212" width="120" height="56" rx="6"/>
+        <text class="t" x="1054" y="235">land label</text>
+        <text class="s" x="1054" y="254">you approve</text>
+        <path class="e-ok" d="M1020 90H1100V210"/>
+        <text class="lbl-ok" x="1030" y="82">approve</text>
+        <rect class="done" x="1040" y="362" width="120" height="56" rx="6"/>
+        <text class="done-t" x="1054" y="386">Merged to</text>
+        <text class="done-t" x="1054" y="404">main</text>
+        <path class="e-ok" d="M1100 268V360"/>
+  <rect class="human" x="20" y="489" width="14" height="14" rx="3"/>
+  <text class="leg" x="44" y="500">you, with Claude Code skills</text>
+  <rect class="node" x="251.20000000000002" y="489" width="14" height="14" rx="3"/>
+  <text class="leg" x="275.20000000000005" y="500">GitHub state</text>
+  <rect class="agent" x="380.0" y="489" width="14" height="14" rx="3"/>
+  <text class="leg" x="404.0" y="500">sandbar</text>
+  <path class="rail" d="M476.8 496H494.8"/>
+  <text class="leg" x="500.8" y="500">goes round again</text>
+  <text class="leg" x="20" y="520">Issues labelled auto-land skip the PR and merge straight to main.</text>
+</svg>

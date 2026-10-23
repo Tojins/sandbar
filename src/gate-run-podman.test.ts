@@ -342,7 +342,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
 
   // Both of these RETURN GATE_EXIT_NO_VERDICT rather than throwing, and that
   // is the contract rather than an implementation detail: the constant is
-  // exported from the package root beside `runGateCommand`, and the README
+  // exported from the package root beside `runGateCommand`, and docs/reference.md
   // tells a host to take its exit code straight off the call — so a throw here
   // would be an unhandled rejection on exactly the path the third code exists
   // to make legible. Never 0 or 1 either way: a stack that could not be brought
@@ -498,7 +498,7 @@ describe.runIf(available)("sandbar gate against real podman", () => {
           ...cfg,
           // Every consumer's `config.images` carries this entry —
           // `resolveImages` requires one for `sandboxImage` — and in the
-          // configuration this feature exists to serve (the README's own), no
+          // configuration this feature exists to serve (docs/reference.md's own), no
           // gateStack container runs it. Missing, and unbuildable: so a command
           // that built it would fail here, and one that merely built it would
           // pay for the whole agent image before the first gate container on
