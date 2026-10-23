@@ -1,767 +1,450 @@
-# sandbar reference
+# Sandbar manual
 
-Configuration, operation and the gate stack. For how sandbar works, see the [README](../README.md).
+How to configure and run sandbar. For what it does, see the [README](../README.md).
 
-## Workflow principles
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Running](#running)
+- [The issue loop](#the-issue-loop)
+- [Images](#images)
+- [Gate stack](#gate-stack)
+- [`sandbar gate`](#sandbar-gate)
+- [Releasing](#releasing)
+- [Design principles](#design-principles)
 
-From #131.
-
-- **Separate research and planning from implementation, and review the plan, not just the diff.** Anthropic's own guidance is Explore → Plan → Implement → Commit with plan mode; HumanLayer calls it Research → Plan → Implement; Harper Reed's older "brainstorm → plan → execute" is the ancestor; Spec Kit, OpenSpec, BMAD and Superpowers all encode it. HumanLayer's line captures why: "a bad line of a plan could lead to hundreds of bad lines of code."
-- **Give the agent a deterministic check it can run.** Tests (red/green TDD), build exit codes, linters, screenshots, curl against a running server. Willison: "tests are no longer even remotely optional" because they are nearly free. Anthropic's best-practices doc is built around this ("the trust-then-verify gap"). OpenAI's harness-engineering write-up relies on custom linters whose error messages carry remediation instructions.
-- **Treat the context window as the primary resource.** Fresh sessions per task, subagents for investigation so exploration doesn't pollute the main context, intentional compaction into artifacts (plan files, progress files), and short instruction files that act as a table of contents rather than a manual.
-- **A small, stable repo-level instruction file, plus progressive disclosure.** AGENTS.md / CLAUDE.md at ~100 lines that point into docs/, skills loaded on demand. Both OpenAI and Anthropic say explicitly that long instruction files get ignored.
-- **Isolation and parallelism via git worktrees**, with a writer/reviewer split using a fresh context for review.
-- **Long-running loops with an external stop condition** (the "Ralph loop" idea) — now absorbed into the harnesses themselves (Claude Code /goal, Stop hooks, /loop; Anthropic's initializer/coder pattern with feature_list.json and claude-progress.txt).
-
-## Releasing
-
-Consumers pin to a `vX.Y.Z` tag, so every version bump **must** be tagged. Don't bump `package.json` by hand — run:
-
-```sh
-npm version minor   # or patch / major
-```
-
-This is wired (see `package.json` scripts + `.npmrc`) to atomically: gate (`preversion`: check + test) → bump `package.json`/lockfile → commit `chore: bump version to X.Y.Z` → create the lightweight `vX.Y.Z` tag → push commit **and** tag (`postversion`). No separate tag step to forget.
-
-If a version ever lands untagged anyway (e.g. hand-edited inside a feature commit), the `.github/workflows/auto-tag.yml` CI job is a backstop: on every push to `main` it creates the missing `vX.Y.Z` tag from `package.json`.
-
-## Usage
-
-Sandbar ships a `sandbar` bin. For local/ad-hoc use, install it in the repo you
-want worked on, create a gitignored config, gitignore `.sandbar/`, and run it:
+## Quick start
 
 ```sh
 npm i -D sandbar
-npx sandbar                     # or: sandbar --config path/to/sandbar.config.mjs
+cp node_modules/sandbar/sandbar.config.example.mjs sandbar.config.mjs
+cp node_modules/sandbar/sandbar.env.example sandbar.env
+echo -e "sandbar.config.mjs\nsandbar.env\n.sandbar/" >> .gitignore
+# fill in the required fields and GH_TOKEN, then:
+npx sandbar
 ```
 
-The config file is an ES module whose **default export** is the `RunConfig`
-object — a program, not data, so a computed image tag or a gate stack read from
-JSON is fine. Sandbar imports `./sandbar.config.mjs` from the current directory
-unless `--config` says otherwise, and **never searches parent directories**.
-`--config` is the only flag that carries configuration; everything else lives in
-the file.
+`npx sandbar` imports `./sandbar.config.mjs`; `--config <path>` names another
+file. Sandbar never searches parent directories. `cwd` defaults to the
+directory of the config file, not the one you launched from.
 
-`cwd` defaults to the directory holding the resolved config file, not to the
-directory you launched from. That is the whole point of the bin: there is
-nowhere to run it from that operates on the wrong repo.
+The bin is thin: `import { run } from "sandbar"` and `run(config)` does the
+same thing.
 
-`run(config)` remains the API — the bin is thin, and a host that wants to embed
-sandbar can still `import { run } from "sandbar"` and call it.
+### What the host repo supplies
 
-An unattended daemon has a different installation boundary: keep one neutral
-development/test recipe in the consumer repo, and place its config and
-environment in one private installation directory on the host, with the driver
-outside the consumer checkout. One installation entry connects those pieces and
-points the config's `cwd` at the consumer clone; the consumer repo needs no
-sandbar dependency or runtime config. The
-[Ansible host contract](../deploy/ansible/README.md) is the concrete recipe this
-repository ships — there the driver is the box's own build of `main`, deployed
-by the same commit as the config that reads it.
+- The required config fields below.
+- A `Containerfile` for the sandbox image, or whatever `images` names.
+- `GH_TOKEN` and a credential for every agent provider you route to, in
+  `config.env`.
+- Anchor docs: `CLAUDE.md`, and optionally `CONTEXT.md` and an ADR directory.
+- Optionally, files named by `{ path }` entries in `promptExtensions`.
 
-### `sandbar gate` — the gate stack on its own
+### What sandbar keeps on disk
 
-```sh
-npx sandbar gate                      # gate the current directory
-npx sandbar gate --worktree ../other  # …or some other tree
-npx sandbar gate --keep               # leave the stack up to poke at
+```
+your-repo/
+  sandbar.config.mjs   gitignored
+  sandbar.env          gitignored
+  .sandbar/            gitignored, disposable
+    repo.git/            bare object cache
+    worktrees/           source/, issue-<n>-<slug>/, merger/
+    run.lock  run.pid  logs/
 ```
 
-Brings up `gateStack`, runs its steps in order, stops at the first red, and
-exits **0** green, **1** red, **2** if it could not reach a verdict at all. No
-tracker, no agents, no worktrees, no lock — so it runs on a laptop, in CI, and
-beside a live `sandbar` run on the same machine.
+Nothing in `.sandbar/` is authoritative, so deleting it costs time, not
+work. **Don't delete it while a run is in flight**: the lock lives there.
 
-**2 is narrower than it sounds, and the difference matters if you branch on it
-in CI.** A build that fails or a container that will not start is usually your
-branch's doing and is a **red**: any image sandbar builds for this stack is
-built from the tree being gated, so a lockfile that won't install fails the gate
-as `image:<tag>` — whether the tag was missing entirely or `rebuildOn` sent it
-to a per-branch variant — and an `attempt`-lifecycle container that won't come
-up fails it as `container:<name>`. 2 is for the cases that are not about the code at all —
-a config error, an image sandbar doesn't build that you haven't pulled, a
-podman it can't talk to, an `issue`-lifecycle container (your database, your
-mail catcher) that never becomes ready. Your `scripts/gate.sh`
-becomes this line, and readiness, step timeouts, teardown and log capture stop
-having a second implementation that drifts.
+Sandbar never writes to your checkout. It reads only your git identity, your
+`copyToWorktree` sources and your `origin` URL.
 
-Three differences from the gate inside a run, all of them because the standalone
-one has no commit to be a verdict about and no orchestrator to report to:
+## Configuration
 
-- **It gates the working tree, dirty or not**, and says so when it is dirty.
-  Inside a run the gate refuses an uncommitted tree, because a green there
-  would certify something the merger cannot land; here you are asking about the
-  tree in front of you.
-- **Steps stream as they run.** Inside a run they are captured for a trace
-  nobody is watching live.
-- **`--keep` leaves the stack up**, and the next `sandbar gate` over the same
-  worktree then **reuses its `lifecycle: "issue"` containers** — the database
-  keeps its schema and its rows, and its `postReadyCommands` are not re-run.
-  That reuse is checked, not assumed: change any of those containers' config
-  (image, env, args, mounts, readiness, `postReadyCommands`, name), the
-  worktree, or sandbar's version, and the stack is rebuilt instead. A stack
-  whose own bringup never finished is torn down despite the flag, and says so —
-  keeping it would let the next invocation adopt a database whose
-  `postReadyCommands` never ran and then decline to re-run them. A stack it
-  merely *adopted* is kept even when that fails: if the database it picked up
-  has wedged since, you get it, its log and its pod name rather than a fresh
-  one, which is the whole reason to type `--keep`. Note the flip side — a
-  container that is running but permanently unhealthy is adopted and re-probed
-  by every later invocation, so fix it in place or remove the pod. Remove a kept
-  stack with the `podman pod rm -f …` line the command prints.
+The config file is an ES module whose default export is the `RunConfig`. It is
+a program, so computed values are fine. List only what differs from the
+defaults.
 
-It builds only the `config.images` entries a `gateStack` container actually
-runs. Your agent sandbox image is never built here — this command creates no
-sandbox, so building it would cost a cold CI checkout the whole agent image
-before the first gate container started, and let its build failure decide a
-gate it has nothing to do with.
+### Required fields
 
-It does **not** run `sandboxHooks`. `onWorktreeReady` (your `npm ci`, typically)
-fires when *sandbar* creates a worktree; here the tree is yours and already
-exists, and reinstalling dependencies in your checkout on every invocation would
-be a surprise. A CI job starting from a bare checkout runs its own install line
-before `npx sandbar gate`.
+| Field | Meaning |
+| --- | --- |
+| `ghOwner`, `ghRepo` | The GitHub repository. Must match `origin`. |
+| `developers` | Logins whose `ready-for-agent` label is honored (plus the token's own login), or `"anyone"`. |
+| `sandboxImage` | Image the implementer and resolve agents run in. |
+| `botName`, `botEmail` | Commit author. |
+| `sandboxHooks` | Per-sandbox setup commands, e.g. `onWorktreeReady: npm ci`. |
+| `gateStack` | Containers and steps that decide whether a commit is green. See [Gate stack](#gate-stack). |
 
-Two `sandbar gate` invocations over the **same** worktree collide — they share
-one set of podman names, which is what makes the reuse possible — so don't run
-two at once against one tree. Different worktrees, and a `sandbar` run on the
-same host, are disjoint by construction.
+### Optional fields
 
-`runGateCommand(config, { worktree, keep })` is the API, and it **returns** that
-exit code rather than throwing — including the 2, which is the whole reason
-`GATE_EXIT_GREEN`/`GATE_EXIT_RED`/`GATE_EXIT_NO_VERDICT` are exported beside it.
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `cwd` | config file's directory | Repository to work on. |
+| `workDir` | `.sandbar` | State directory inside `cwd`. |
+| `sourceBranch` | `main` | Branch issues seed from and land on. |
+| `uiPort` | `7331` | Port of the run UI. Use one per workdir. |
+| `images` | sandbox image from `./Containerfile` | See [Images](#images). |
+| `defaultLane` | `auto` | `auto` lands after the gate; `review` lands on a chunk branch with a draft PR. |
+| `mergeMode` | `{ kind: "direct" }` | `{ kind: "verified", requiredChecks: [...] }` also waits for forge CI. |
+| `maxParallelIssues` | `3` | Issues worked at once. |
+| `maxConcurrentGates` | unlimited | Gate runs at once. |
+| `pollIntervalMs` | `60000` | Idle poll interval. |
+| `keepAwakeWhileIdle` | `false` | Hold the wake lock while idle too. |
+| `partitionCheck` | `true` | Ask whether an issue is too big before starting it. |
+| `uiPrototypeCheck` | `true` | Ask whether an issue needs a UI prototype first. |
+| `maxContextChars` | `600000` | Context budget per role (prompt plus diff). |
+| `maxQualityRounds` | `3` | See [Budgets](#budgets). |
+| `maxGateRounds` | `4` | See [Budgets](#budgets). |
+| `maxReviewRounds` | `4` | See [Budgets](#budgets). |
+| `labels` | `needs-info`, `agent-stuck` | Rename the tracker labels. |
+| `copyToWorktree` | `[]` | Host-only files copied into each issue worktree. |
+| `claudeMdPath`, `contextMdPath`, `adrDir` | `CLAUDE.md`, `CONTEXT.md`, `docs/adr` | Anchor docs. |
+| `promptExtensions` | `{}` | Per-role `{ text }` or `{ path }` additions. |
+| `coauthorTrailer` | from bot name/email | `Co-authored-by` line. |
+| `requiresSandbar` | none | Oldest driver version this config needs. |
+
+`ready-for-agent`, `auto-land` and `land` are fixed label names. `land` must
+exist in the repo; sandbar never creates it.
+
+### Credentials and role routing
+
+`sandbar.env` holds two kinds of keys. `splitRoleRouting` separates them:
 
 ```js
-process.exitCode = await runGateCommand(config, { worktree: ".", keep: false });
-```
-
-That is the bin, near enough — and **set the code rather than calling
-`process.exit(code)`**, which is not a style preference: the steps stream
-through `process.stdout.write`, and to a pipe (a CI log, a `| tee`) those writes
-are asynchronous, so exiting on the spot truncates the failing step's output —
-the diagnosis the exit code is about, lost only on red. Setting the code and
-letting node drain cannot. Faults are rendered to stderr on the way out; pass
-`out` and `err` sinks to put them somewhere else.
-
-`RunConfig` is **deviations-only**. Supply the repo-specific facts sandbar can't guess (required) plus only the knobs you want different from the defaults. Everything else falls through — don't restate a default.
-
-```js
-// sandbar.config.mjs
 import { readEnvFile, splitRoleRouting } from "sandbar";
-
 const { routing, env } = splitRoleRouting(
   readEnvFile(new URL("sandbar.env", import.meta.url)),
 );
+export default { /* ... */ env, ...routing };
+```
 
+- **Credentials** (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` or
+  `ANTHROPIC_API_KEY`, ...) go into `env` and are the only host variables that
+  reach agent containers. An empty value inherits from the launching shell.
+- **Routing** keys `SANDBAR_<ROLE>_AGENT`, `_MODEL_ID` and `_EFFORT` choose the
+  agent CLI, model and effort per role. Roles: `IMPLEMENTER`, `UI_CHECK`,
+  `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, `MERGER`. They never enter a
+  sandbox. Defaults are claude, `opus`, no effort flag.
+
+[`sandbar.env.example`](../sandbar.env.example) lists every key.
+
+### Example config
+
+```js
 export default {
-  // Required — no sensible default exists:
   ghOwner: "your-org",
   ghRepo: "your-repo",
-  // Restrict queue admission to the latest ready-for-agent application by one
-  // of these forge logins (or by this run's token login). Bots and GitHub Apps
-  // can be listed by their recorded login. Use "anyone" for the legacy policy.
   developers: ["your-github-login"],
-  // The image the AGENT runs in (your toolchain). Built from ./Containerfile
-  // unless you override `images` below; sandbar appends the routed agent CLIs.
   sandboxImage: "localhost/your-repo-sandbar:latest",
   botName: "your-bot",
   botEmail: "bot@your-org.dev",
-  sandboxHooks: { /* per-sandbox build/setup commands */ },
-
-  // What it takes to produce a verdict about a commit. Every container joins
-  // one podman pod, so the stack addresses itself as 127.0.0.1 and publishes
-  // no fixed ports — a gate run can't collide with your dev stack or another
-  // issue's.
+  sandboxHooks: {},
   gateStack: {
     containers: [
       {
         name: "db",
-        image: "docker.io/library/mariadb:10.11",  // must be fully qualified
-        lifecycle: "issue",                        // started once per issue
+        image: "docker.io/library/mariadb:10.11",
+        lifecycle: "issue",
         env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "app" },
-        // Argv podman runs INSIDE the container until it exits 0. Sandbar
-        // registers it with `--health-cmd` and polls it on demand, so there
-        // is nothing to publish and nothing scheduled.
         readiness: {
           kind: "healthcheck",
           command: ["healthcheck.sh", "--connect", "--innodb_initialized"],
         },
-        readinessTimeoutMs: 120_000,               // default 60_000
-        // Optional: args (image CMD args), mounts (fixture files, hostPath
-        // relative to the GATED WORKTREE, read-only unless the entry says
-        // `mode: "rw"`), postReadyCommands (one-shot setup exec'd after
-        // readiness). Add `inSandbox: true` to also run this container beside
-        // the AGENT, so it can exercise the app before the gate does — see
-        // below.
+        readinessTimeoutMs: 120_000,
       },
       {
         name: "runner",
         image: "localhost/your-repo-sandbar:latest",
-        // Default lifecycle "attempt": recreated every gate run, because it
-        // mounts the worktree and runs the branch's code.
-        mountWorktree: "/workspace",  // rw; also the working directory
-        hold: true,                   // no long-running process of its own
+        mountWorktree: "/workspace",
+        hold: true,
       },
     ],
     steps: [
-      // Run in order, stopping at the first red. Each is `podman exec`'d in
-      // the named container; its exit code is the verdict. The db is reachable
-      // at 127.0.0.1:3306 — one namespace, so the address is knowable here.
-      //
-      // Every step is time-bounded (default 15 min). Exceeding the bound kills
-      // the step, removes the container the work was running in, and reds the
-      // gate with a trace naming the step — a hung suite spends an attempt and
-      // moves instead of hanging the run and holding the lock forever.
       { name: "check", in: "runner", command: ["npm", "run", "check"] },
       { name: "test", in: "runner", command: ["npm", "test"] },
-      { name: "e2e", in: "runner", command: ["npx", "playwright", "test"],
-        timeoutMs: 1_800_000 },  // default 900_000
+      { name: "e2e", in: "runner", command: ["npx", "playwright", "test"], timeoutMs: 1_800_000 },
     ],
   },
-
-  // Credentials: a VALUE, not a path. Only non-routing keys declared in the
-  // file cross into a sandbox container, each falling back to process.env when
-  // empty — so GH_TOKEN= means "inherit it", and CI needs no secret in Git.
   env,
-
-  // Everything else is OPTIONAL — see sandbar.config.example.mjs for host
-  // fields and sandbar.env.example for installation routing. Omit any value
-  // you're happy to inherit.
-  // Non-empty SANDBAR_* role values from the installation's gitignored env
-  // file override those committed defaults.
   ...routing,
 };
 ```
 
-`splitRoleRouting` recognizes `SANDBAR_<ROLE>_AGENT`,
-`SANDBAR_<ROLE>_MODEL_ID`, and `SANDBAR_<ROLE>_EFFORT` for `IMPLEMENTER`,
-`UI_CHECK`, `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, and `MERGER`. An
-absent or empty value keeps the committed field. The helper removes all
-eighteen reserved keys from `env`, so they never enter a sandbox;
-`resolveConfig` still performs the ordinary provider, model-pairing, and effort
-validation on the merged object.
-See `sandbar.env.example` for the complete list.
+## Running
 
-### Local/ad-hoc layout
-
-```
-your-repo/
-  sandbar.config.mjs   <- gitignored; local/ad-hoc config
-  sandbar.env          <- gitignored; required by the published example config
-  .sandbar/            <- gitignored; node_modules-shaped, `rm -rf` at will
-    repo.git/            bare object cache; re-created if you delete it
-    worktrees/           source/ (image build context), issue-<n>-<slug>/, merger/
-    run.lock  run.pid  logs/
-```
-
-Nothing in `.sandbar/` is authoritative: the tracker is GitHub Issues, branches
-are pushed at finalise, merged work is on `origin/<sourceBranch>`. Deleting it
-costs agent time, never correctness. **Do not clean it while a run is in
-flight** — the single-instance lock lives there, and removing it lets a second
-run collide with the first.
-
-Sandbar never writes to your checkout. Every git and `gh` call — including
-`git branch -D` and the worktree removals — runs in `.sandbar/repo.git`, which
-holds only sandbar's own refs. What it *reads* from your checkout is your git
-identity, your `copyToWorktree` sources, and the URL of your `origin` (which is
-why no config names the remote: it cannot drift from the consumer repo named by
-`cwd`).
-
-### Required fields
-
-| Field | Why it can't default |
-| --- | --- |
-| `ghOwner`, `ghRepo` | Repo identity. Every `gh` call names this repository, so it — not `cwd`'s `origin` — decides which tracker sandbar reads and writes. Each must be a single GitHub name (no slashes). Preflight refuses to start if it disagrees with `origin`. |
-| `developers` | Queue-label policy. A non-empty list admits an issue only when the latest recorded `ready-for-agent` application came from one of these forge logins or the run token's login; matching is case-insensitive and listed bot/App logins count. `"anyone"` restores the pre-0.37 behavior. There is deliberately no default: every host upgrading to 0.37 must choose and commit one policy. |
-| `sandboxImage` | The image the agent (and the merger's resolve agent) runs in. |
-| `botName`, `botEmail` | Commit/author identity. |
-| `sandboxHooks` | Host-specific build/setup. |
-| `gateStack` | The containers and steps that produce a verdict. What it takes to test this repo is repo identity — sandbar ships no preset. |
-
-### Optional fields and their defaults
-
-The published package includes the paired
-[`sandbar.config.example.mjs`](../sandbar.config.example.mjs) and
-[`sandbar.env.example`](../sandbar.env.example) templates. Copy the first beside
-your `package.json` as `sandbar.config.mjs` and the second beside it as
-gitignored `sandbar.env`; the config reads that file at module load, even when
-all its values inherit from the launching process. Fill in the required config
-placeholders, then uncomment only the host settings this repository needs to
-change. Optional host fields are documented in the config; the eighteen
-per-installation role-routing fields are documented in the env template.
-
-### Daemon operation
-
-Sandbar keeps up to `maxParallelIssues` issue sandboxes in flight and replans
-whenever a slot becomes free. When the queue is empty it remains running and
-refreshes origin and the tracker every `pollIntervalMs` (default 60 seconds).
-Launch it once; stop it with a signal when you want to reload its config:
+### Local
 
 ```sh
 npx sandbar
 ```
 
-Exit 2 (`stuck`) stops the daemon after six consecutive issue terminals without
-a landing. It bounds persistent failures such as a red source branch or a
-misconfigured gate stack. By default the wake lock is released while idle;
-`keepAwakeWhileIdle: true` keeps it for the daemon's lifetime.
+Sandbar runs as a daemon. It keeps `maxParallelIssues` issues in flight,
+replans when a slot frees up, and polls every `pollIntervalMs` when the queue
+is empty. Stop it with a signal; restart it to reload the config.
 
-A `restart-requested` file beside the config file is how a deployment asks a
-running daemon to step aside for new code: the daemon stops admitting, lands
-what is already committed, and exits 75 once nothing is running — the one exit
-a supervisor should turn back into a start (`RestartForceExitStatus=`), and the
-one it reaches only because it was asked. At startup it removes the request it
-was started to answer, so that exit cannot repeat, and leaves one written since
-for the deployment that wrote it.
+### Exit codes
 
-To run daemons unattended on a dedicated Linux box, `deploy/ansible/` is the
-host contract: one neutral recipe in the consumer repo, one private installation
-directory, and one installation entry. The role creates an isolated Linux user,
-consumer clone, rootless Podman session and systemd unit pair per project. The
-driver lives outside every consumer checkout; starts neither pull nor install
-the consumer's development tree, and a daemon restarts only when it has been
-asked to and has finished draining.
-[`deploy/ansible/README.md`](../deploy/ansible/README.md) has the by-hand steps.
+| Code | Name | Cause |
+| --- | --- | --- |
+| 75 | restart | A deploy asked it to step aside. A supervisor should restart it. |
+| 4 | quota / credential | A provider closed for this process. |
+| 3 | storage | Podman storage stayed below its free-space floor. |
+| 2 | stuck | Six issues in a row finished without anything landing. |
+| 1 | halted | Lost the origin lock, or a fault it can't continue past. |
 
-### Context and convergence budgets
+Before exiting with 2, 3 or 4 sandbar lands committed work and lets running
+issues finish. A GitHub rate limit pauses planning; it doesn't exit.
 
-Before attempt 1, `partitionCheck` (default `true`) makes one cold,
-read-only classification that asks for a split only when the whole issue
-plausibly exceeds `maxContextChars` and it names deliverables that each land
-alone. Disable it only when work is partitioned before it reaches Sandbar.
+### Restart requests
 
-`maxContextChars` (default 600,000) bounds the complete working picture for an
-issue-loop role: its rendered prompt plus the seed-anchored net diff it is told
-to read from the worktree. Sandbar measures resumed work at admission, and the
-branch again before each quality role and before the correctness review. An oversize issue parks as
-`NEEDS-PARTITION` under `labels.needsInfo`; the comment asks for a `## Blocked
-by` chain whose independently landable members each fit the budget. This is a
-useful-context budget, not a provider input limit. A provider size refusal maps
-to the same terminal instead of rebuilding a sandbox and replaying the prompt.
+Writing a `restart-requested` file beside the config file makes a running
+daemon stop taking new issues, land what is committed, and exit 75 once idle.
 
-After the implementer reports COMPLETE, each round is serial. First the
-**quality pass**, whose three cold roles are all routed by
-`reviewerQualityAgent`, `reviewerQualityModelId` and `reviewerQualityEffort`
-and all get `promptExtensions.reviewerQuality`:
+### Unattended hosts
 
-1. A read-only **lister** walks every changed file and lists every tests and
-   standards finding under a verdict. Until a quality pass has approved a head
-   it reads the whole branch; after that, only what changed since that head.
-   `APPROVED` ends the pass.
-2. On `CHANGES-REQUESTED`, a **fixer** gets the report and makes one commit in
-   the implementer's writable sandbox under a `<botName> (quality)` author. Its
-   text is ignored; whatever it leaves uncommitted or off the branch is
-   discarded and recorded. A test it writes that fails is how a correctness
-   defect reaches the implementer.
-3. A read-only **verify** then judges only whether each listed item was dealt
-   with and the fixer's own changed lines, restating every item still open. A
-   rejection goes back to the fixer.
+[`deploy/ansible/`](../deploy/ansible/README.md) sets up a dedicated Linux box:
+one user, consumer clone, rootless podman and systemd unit per project. The
+consumer repo needs no sandbar dependency; config and credentials live in a
+private installation directory on the host.
 
-A fixer that commits nothing disputes the report: an independent adjudicator
-rules on it once per head. Overruled, the pass ends approved and later listers
-are shown the ruling; upheld, the fixer runs once more with the ruling
-attached. The lister and verify are held read-only — a write parks the issue —
-and each gets one cold retry when it produces no verdict; a fixer that crashes
-is retried once. Then gate-1 runs once on the head the pass left, and the
-correctness reviewer runs only on a green gate there. Per-commit rules the
-quality pass must follow (a version bump, say) reach it through the anchor
-docs.
+## The issue loop
 
-The three convergence budgets are independent:
+### Pre-checks
 
-`maxQualityRounds` (default 3) bounds one quality pass: verify rejections and
-upheld quality adjudications. When it runs out, or a quality role fails on its
-retry too, the round still goes on to gate-1, and the open items stay in the
-event record — they are never handed to the implementer.
+Before the first attempt, two read-only agents classify the issue:
 
-`maxGateRounds` (default 4) bounds consecutive attempts without a green
-gate-1: red gate-1 results and pre-gate re-prompts (NO-SIGNAL, a dirty tree,
-or HEAD off the issue branch). Any green gate-1 result resets that count.
+- **Partition check** (`partitionCheck`): if the issue won't fit
+  `maxContextChars`, it parks as `NEEDS-PARTITION` under `needs-info` and asks
+  for a `## Blocked by` chain.
+- **UI check** (`uiPrototypeCheck`): if the issue needs a UI prototype first,
+  it parks for a human.
 
-`maxReviewRounds` (default 4) separately bounds correctness rejections.
-Reviewer harness failures spend no budget, and the second harness
-failure anywhere in one inner loop stops it. There is no total implementer-attempt
-ceiling: each attempt is charged only to the condition that sent it back.
+`maxContextChars` is checked again before each review, against the prompt plus
+the branch's diff.
 
-After a correctness rejection, an implementer attempt that completes with no commit
-at the rejected head sends that report to a cold, read-only adjudicator instead
-of repeating the review. `adjudicatorAgent`, `adjudicatorModelId`, and
-`adjudicatorEffort` default to the correctness reviewer's routing. An overruled
-rejection completes the issue as approved; an upheld rejection remains
-chargeable and is offered for adjudication only once at that head. Adjudicator harness
-failures share the review harness's two-failure inner-loop stop.
+### Rounds
 
-### `images` — what sandbar builds
+Each round after the implementer reports done:
 
-By default sandbar builds one image: `sandboxImage`, from `./Containerfile`.
-The sandbox base-image contract is `/bin/sh`, CA certificates, and either git
-or one of apt/apk/dnf so sandbar can install it. After resolving that image,
-sandbar adds a generated layer containing a uid-1000 `agent` user, git, and
-exactly the standalone agent CLIs routed by `implementerAgent`, `reviewerAgent`,
-`uiCheckAgent` (only when `uiPrototypeCheck` is enabled),
-`reviewerQualityAgent`, `adjudicatorAgent`, and `mergerAgent`, downloaded on the host and verified
-against per-architecture hashes pinned by the driver. The same happens after resolving a per-branch
-variant, so an older branch's Containerfile cannot remove a CLI selected by the
-current run. Gate containers keep using the unaugmented image: they judge the
-branch environment and run no agent CLI.
+1. **Quality review.** A read-only violations lister checks tests and coding
+   standards. If it finds violations, a fixer commits fixes and a read-only
+   verify checks them. The fixer can dispute the list; an adjudicator rules.
+2. **Automatic tests** (gate-1): the gate stack, run once on the result.
+3. **Correctness review**, only if the tests are green. The implementer can
+   dispute a rejection; an adjudicator rules.
 
-CA certificates remain explicit because bare-container probes of both
-standalone CLIs stop at credential validation before making an authenticated
-TLS request; that experiment therefore cannot establish that either binary
-ships a usable trust store. Sandbar does not inject an `SSL_CERT_FILE`.
+Red tests and rejections go back to the implementer. Quality findings never
+do. The implementer doesn't see the coding standards; the quality roles do.
 
-Migration is deliberately order-independent: upgrade sandbar first, then remove
-`@anthropic-ai/claude-code` and `@openai/codex` install lines from your sandbox
-Containerfile whenever convenient. During the overlap the driver's pinned
-install wins, so a host-baked copy cannot drift the protocol parser.
+Role routing: the quality roles use `reviewerQuality*` and
+`promptExtensions.reviewerQuality`; the adjudicator defaults to the
+correctness reviewer's routing.
 
-List `images` explicitly when the stack needs more than one:
+### Budgets
 
-```ts
+| Budget | Counts | Resets | When spent |
+| --- | --- | --- | --- |
+| `maxQualityRounds` | verify rejections, upheld quality disputes | each quality review | goes on to the tests; open items are logged |
+| `maxGateRounds` | red tests, and attempts with no usable commit (no signal, dirty tree, off-branch HEAD) | on green tests | issue parks as stuck |
+| `maxReviewRounds` | correctness rejections | — | issue parks as stuck |
+
+A reviewer that crashes spends no budget. A second crash in one issue stops it.
+
+## Images
+
+### Defaults
+
+Sandbar builds `sandboxImage` from `./Containerfile` and adds a layer with a
+uid-1000 `agent` user, git, and the agent CLIs the config routes to. Don't
+install `claude-code` or `codex` yourself.
+
+The base image needs `/bin/sh`, CA certificates, and git or a package manager
+(apt, apk or dnf). Gate containers use the image without the agent layer.
+
+### More than one image
+
+```js
 images: [
-  { tag: "localhost/your-repo-sandbar:latest", containerfile: "Containerfile" },
-  // A named stage makes the sandbox and gates address stages of one ordinary
-  // multi-stage product Dockerfile. The target also participates in rebuildOn.
-  { tag: "localhost/your-repo-dev:latest", containerfile: "Dockerfile", target: "dev" },
-  // Reuse a deployed Dockerfile whose COPY paths are rooted at the repository.
-  { tag: "localhost/your-repo-prod:latest", containerfile: "docker/Dockerfile", context: "." },
-  // No build context at all — right for a Containerfile that only pulls from a
-  // registry and installs packages; tarring the repo up for it is pure latency.
+  { tag: "localhost/app-sandbar:latest", containerfile: "Containerfile" },
+  { tag: "localhost/app-dev:latest", containerfile: "Dockerfile", target: "dev" },
+  { tag: "localhost/app-prod:latest", containerfile: "docker/Dockerfile", context: "." },
   { tag: "localhost/app-php:gate", containerfile: "gate/Containerfile.php", stdinContext: true },
-  // buildArgs are passed through verbatim; sandbar injects no magic ARG name.
   { tag: "localhost/app-runner:gate", containerfile: "gate/Containerfile.runner",
     buildArgs: { AGENT_UID: String(process.getuid?.() ?? 0) } },
 ]
 ```
 
-An entry is skipped when its tag already exists, so warm runs pay one
-`image exists` per entry. The list must include `sandboxImage`. Every *other*
-image the stack references must already be pulled — preflight refuses with the
-exact `podman pull` command rather than pulling it, so no run does silent
-network work at startup.
+| Key | Meaning |
+| --- | --- |
+| `tag` | Image name. Skipped if it already exists (unless `rebuildOn` says otherwise). |
+| `containerfile` | Path to the Containerfile. |
+| `context` | Build context, repo-relative. Defaults to the Containerfile's directory. |
+| `target` | Multi-stage build target. |
+| `stdinContext` | Build with no context. |
+| `buildArgs` | Passed through as-is. |
+| `rebuildOn` | Files the image is built from. See below. |
+| `buildTimeoutMs` | Default 45 minutes. |
 
-### `rebuildOn` — images that are a function of the branch
+The list must include `sandboxImage`. Any other image the stack uses must
+already be pulled; preflight prints the `podman pull` command if it isn't.
 
-If a gate image bakes dependencies (a `node_modules` layer, a browser, vendored
-packages) so a gate attempt installs nothing, that image is a **function of the
-branch**. The tag alone cannot express that: it exists, so it is reused, and an
-issue branch that changes the lockfile gets gated against dependencies built
-from the source branch. Both directions are silent false verdicts — a branch
-that *adds* a dependency reds with a module-not-found nobody can reproduce (and
-can burn its whole gate budget onto `agent-stuck` for it), and a branch that
-*removes* one greens against a dependency it deleted.
+### `rebuildOn`
 
-Declare what the image is built from and sandbar owns the rest:
+Use `rebuildOn` when an image bakes in dependencies, so that a branch that
+changes the lockfile is tested against its own dependencies:
 
-```ts
-images: [
-  { tag: "localhost/app-runner:gate", containerfile: "docker/Dockerfile",
-    context: ".", target: "dev",
-    rebuildOn: ["package-lock.json", "bower.json"] },
-]
+```js
+{ tag: "localhost/app-runner:gate", containerfile: "docker/Dockerfile",
+  context: ".", target: "dev", rebuildOn: ["package-lock.json"] }
 ```
 
-`context` is repo-relative and defaults to the containerfile's directory, so
-existing entries keep their exact build. Set it to `"."` (or `""`) for the
-common deployed layout above: sandbar runs the equivalent of
-`podman build -f docker/Dockerfile .`. A `rebuildOn` path outside the effective
-context is rejected because it could never be `COPY`d and would otherwise
-trigger builds that produce a byte-identical image.
+Sandbar hashes the listed files, the Containerfile, `buildArgs`, `target` and
+`context`, and rebuilds when the hash changes:
 
-Sandbar hashes those paths — plus the Containerfile's own bytes and the entry's
-`buildArgs`, `target`, and explicitly declared `context` — and uses the hash,
-not the tag, as the cache key:
+| Where | When it's checked |
+| --- | --- |
+| Gate images | Before every gate run, including after a merge. A changed branch gets its own tag. |
+| `sandboxImage` | Once per sandbox, before the agent starts. |
 
-- at startup the tag is rebuilt when the hash no longer matches your checkout,
-  instead of being reused because the name exists (the hash is recorded as an
-  image label, so no state file is involved);
-- before **every** gate run, including gate-2 on the merge result, the gated
-  worktree is hashed. One that matches uses the base image; one that differs
-  gets its own content-addressed tag, built from that worktree, and the stack's
-  containers — `issue`-lifecycle ones included — are recreated from it.
+A gate image that won't build from the branch fails the tests, with the build
+output. A sandbox image that won't build falls back to the declared tag and
+logs a warning.
 
-Per-gate-run rather than per-issue on purpose: the branch grows under the loop,
-so an implementer that adds a dependency in attempt 2 must be gated against an
-image that has it. The common cases stay free — a gate run that changed nothing
-rebuilds nothing, two issues that make the same change share one build, and a
-rebuild that *is* needed hits podman's layer cache above the changed `COPY`,
-which is the work your CI does anyway. The per-branch tags are removed at the
-end of the run.
+Rules:
 
-An image that will not build from the branch is a **red gate** naming the image
-and carrying the build's output, not an infrastructure failure: a lockfile that
-does not install is the branch's to fix, and routing it to a retry would
-reproduce it twice and then park the issue with a trace blaming the environment.
-The same applies to a variant whose recipe the branch changed such that it no
-longer runs as root or as your uid — the D3 check is re-asked for every image
-sandbar builds from a branch, not just the declared ones.
+- Paths are repo-relative and must exist and sit inside the build context.
+- Not allowed with `stdinContext` or an absolute `containerfile`.
+- The image must be one something runs (a gate container or `sandboxImage`).
+- `.dockerignore` isn't read; don't exclude a declared input.
 
-An image that will not build in time is the same: `images[].buildTimeoutMs`
-(default 45 minutes) bounds it, because since this feature the recipe and its
-inputs are written by the implementer agent and the build runs inside a gate
-run while sandbar holds its single-instance lock.
+## Gate stack
 
-Rules: `context` is repo-relative (no `..`, no leading `/`) and cannot be
-combined with `stdinContext`. `rebuildOn` paths are likewise repo-relative;
-they must sit inside the effective build context, they must
-exist in your checkout (a path that matches nothing makes the whole declaration
-inert, which is the failure above), it cannot be combined with `stdinContext`
-(that build has no context, so nothing in the repo can change it) or with an
-absolute `containerfile` (the rebuild re-roots the build at the worktree), and
-the image must be one something actually runs — a `gateStack` container's, or
-`sandboxImage`. An entry sandbar builds and nothing ever runs is rejected: the
-declaration would be inert, which is this feature's own failure mode.
-Sandbar checks containment but does not interpret `.dockerignore` or
-`.containerignore`; make sure those files do not exclude a declared input the
-recipe needs.
+All containers join one podman pod, reach each other on `127.0.0.1`, and
+publish no ports. Steps run in order and stop at the first failure.
 
-### `rebuildOn` on `sandboxImage`
+### Containers
 
-The agent's sandbox has the same problem the gate does. An image that bakes
-dependencies so the agent starts working immediately is a function of the
-branch, and an issue that moves the lockfile gets a sandbox built from the
-source branch's — which reads, from inside, as a bug in the code the agent was
-asked to fix. Declaring `rebuildOn` on the `sandboxImage` entry closes it:
+| Key | Meaning |
+| --- | --- |
+| `name` | Container name; steps refer to it. |
+| `image` | Fully qualified image. |
+| `lifecycle` | `attempt` (default): recreated every gate run. `issue`: started once per issue and reused. |
+| `env`, `args` | Container environment and command arguments. |
+| `mountWorktree` | Mount the worktree read-write at this path; also the working directory. |
+| `mounts` | Extra mounts; `hostPath` is relative to the worktree, read-only unless `mode: "rw"`. |
+| `hold` | Run `sleep infinity` instead of the entrypoint. |
+| `readiness` | `{ kind: "healthcheck", command: [...] }`, run inside the container. |
+| `readinessTimeoutMs` | Default `60000`. |
+| `postReadyCommands` | One-shot setup run after readiness. |
+| `servesWorktree` | See rules below. |
+| `inSandbox` | Also run a copy beside the agent. See below. |
 
-```ts
-sandboxImage: "localhost/app:sandbar",
-images: [
-  { tag: "localhost/app:sandbar", containerfile: "Containerfile.sandbar",
-    rebuildOn: ["package-lock.json", "bower.json"] },
-]
-```
+### Steps
 
-Sandbar prepares the issue worktree **before** it creates the sandbox container
-(the gate stack's mounts need the files on disk), so the branch's inputs are
-there in time to be hashed, and the sandbox starts on an image built from them.
-Two things differ from the gate's version:
+| Key | Meaning |
+| --- | --- |
+| `name` | Step name in logs. |
+| `in` | Container to `podman exec` in. |
+| `command` | Argv. Exit 0 is green. |
+| `timeoutMs` | Default `900000` (15 min). A timeout fails the step. |
 
-- it resolves **once per sandbox**, not per attempt. The attempts of an issue
-  accumulate in one container, so re-resolving mid-issue would mean throwing
-  that container away — and an agent can install into its own sandbox with one
-  command. What the branch adds *during* the run still reaches the gate, which
-  is where verdicts come from;
-- a build that fails leaves the sandbox on the **declared** tag, with a line on
-  the console and in the run log, rather than refusing to start. The sandbox is
-  where the fix gets written and the branch outlives the attempt, so a throw would
-  wedge the issue instead of failing it — every later sandbox for that branch,
-  including the ones meant to repair it, would fail before the agent's first
-  turn. The agent then works a commit behind its own branch, and can install
-  for itself.
+### Readiness
 
-  Read that line, because how much else you will hear depends on your config.
-  If a `gateStack` container runs the **same tag**, the gate resolves the entry
-  itself and reds with the same build output, against the branch — the line is
-  advance warning. If the entry is the **sandbox's alone**, as in the example
-  above, nothing else resolves it: the gate's verdict is computed from images
-  that built fine, so it can go green and the fallback line is the only report
-  you will get. Sandbar says which case you are in.
+The command is registered as a podman healthcheck and polled by sandbar until
+it succeeds or `readinessTimeoutMs` passes. On `issue` containers it is
+checked again before every gate run, so a wedged service is treated as an
+infrastructure problem rather than a red test. `tcp`, `log` and `exec` kinds
+are no longer accepted; write an in-container probe instead.
 
-The rebuild lands in the issue's critical path, before the agent's first turn,
-and the sandbox image is usually the largest one — so it costs what your layer
-cache says it costs, and only for an entry that declares `rebuildOn`.
+### Rules
 
-### `readiness` — one kind, evaluated inside the container
+- **Worktree-mounting images run as root or as your uid.** Otherwise writes to
+  the worktree fail. Preflight checks this.
+- **At least one stepped-into container mounts the worktree.** Otherwise every
+  commit gets the same verdict. If your stack serves the app from one container
+  and tests it from another, mark the app container `servesWorktree: true`.
+- **Steps write only to gitignored paths.** The gate refuses a dirty tree; a
+  step that leaves files behind makes the issue park as `NEEDS-HUMAN`.
+- **A container that boots the worktree's code can't be `lifecycle: "issue"`**
+  unless it uses `hold`. Use `mounts` if it only needs fixture files.
+- After a merge, sandbar runs `npm install` and commits any lockfile change
+  before testing the merge.
 
-```ts
-readiness: { kind: "healthcheck", command: ["nc", "-z", "127.0.0.1", "3306"] }
-```
+### `inSandbox`
 
-Sandbar registers `command` as the container's healthcheck (`--health-cmd`, argv
-rather than a shell string) with podman's own scheduling **disabled**, and then
-invokes it from its own poll loop — bounded by `readinessTimeoutMs`, which is
-the only bound there is. Podman's `--health-timeout` is deliberately not exposed:
-it does not kill a slow probe, it lets it run to completion and labels the result
-afterwards, so a config field spelled like a per-probe bound would be a lie.
-Scheduling is disabled because a real interval makes podman create a **transient
-systemd timer** — needing a user session the host may not have, and named by
-container id, outside everything sandbar's cleanup can sweep.
+`inSandbox: true` runs a second copy of a gate container beside the agent, so
+the agent can run the app while it works:
 
-`command` is required; there is no fallback to the image's own `HEALTHCHECK`.
-Omitting `--health-cmd` is the one configuration in which podman schedules that
-timer anyway, and the fallback would buy almost nothing: `podman build` defaults
-to the OCI format, which has no `HEALTHCHECK` field at all, so no image sandbar
-builds carries one.
-
-A readiness failure reports the last five entries of `.State.Health.Log` — what
-the *probe* said — above the container's own log tail.
-
-**On a `lifecycle: "issue"` container this buys more than bringup gating.**
-Sandbar re-asks the probe at the top of every gate run, so a long-lived service
-that is *running but wedged* — a database that accepts connections and never
-answers, a process that survived an OOM with its worker pool dead — is caught as
-infrastructure instead of reddening the gate against a branch that never touched
-it. Because a healthcheck can be transiently false, it polls to
-`readinessTimeoutMs` rather than deciding on one shot (the healthy case is one
-probe and no wait), a probe podman could not run at all is ignored rather than
-escalated, and a container still unhealthy at the deadline is recreated in place
-before the run gives up on it. A container with no `readiness` is not asked, and
-behaves exactly as it always has. Worth declaring one where you previously would
-not have bothered.
-
-> **Upgrading from `tcp` / `log` / `exec`.** All three are rejected at resolve
-> time, before the lock, with the replacement in the message. `exec` translates
-> exactly (same argv). `tcp` becomes any in-container probe of the port — and is
-> better there, with no publish and no settle window, because the rootless port
-> forwarder that made a bare connect meaningless is not in the path. `log` is
-> **not** a mechanical translation: write the check the pattern stood in for. A
-> reused `issue` container whose log the host journal has since vacuumed can
-> never match its boot-time pattern again, which is the failure retiring it
-> fixes.
->
-> The one thing lost: a `scratch` image with no shell and no probe binary can no
-> longer declare readiness. Bake a static probe binary, or use `hold: true` plus
-> a `postReadyCommand`.
-
-### Three constraints the gate stack imposes on your images and steps
-
-**A worktree-mounting image must run as root, or as your uid.** Stack containers
-run inside a pod, and podman refuses `--userns=keep-id` alongside `--pod`; inside
-the pod's userns, uid 1000 maps to a subuid rather than to you, so writes into
-the mounted worktree fail with EACCES. Container root under rootless podman maps
-to the invoking user, so files still land owned by you. Sandbar checks this
-before the run by running each such image (`podman run --rm --entrypoint id <img> -u`)
-and refuses with both remedies named: drop the `USER` directive, or align the
-image to your uid at build time via `buildArgs`.
-
-**The steps have to be able to see the code under test.** A gate whose steps all
-run in containers that never mount the worktree returns the same verdict for
-every commit — green included — which is the one failure the gate exists to
-prevent. Sandbar therefore requires that **at least one container mounting the
-worktree is stepped into**. Ordinary stacks (a runner that mounts the tree and
-holds, with every step `in` it) satisfy this for free.
-
-The exception is a stack that serves the branch's code over loopback: an app
-container that mounts the worktree and runs it, with every step in a playwright
-container that needs no mount of its own. That shape is correct and fails the
-check, and no rule can tell it apart from the broken one — a stale mount left on
-a database by a refactor produces byte-identical config, and a realistic database
-declares `readiness` too. So it says so:
-
-```ts
-{ name: "app", image: "…", mountWorktree: "/app", servesWorktree: true }
-```
-
-`servesWorktree` is needed **only** by a stack with no stepped-into mount at all.
-It is rejected where it is decidably false: on a container that mounts nothing
-(it has nothing to serve), and on one that sets `hold` with no
-`postReadyCommands` (`sleep infinity` plus nothing exec'd after it means the
-container never runs anything). A held container *with* a `postReadyCommands`
-entry that backgrounds a daemon is accepted — that is the only route for an
-image whose `ENTRYPOINT` is not a shell.
-
-> **Note.** A container that mounts the worktree and boots its own entrypoint
-> may not be `lifecycle: "issue"`. An `issue` container is reused across attempts
-> precisely because it depends only on its image and its env, which is why a
-> failure to start it is treated as infrastructure: two HARD-ERROR retries on a
-> fresh stack, then `NEEDS-HUMAN` with an "environment" trace. Booting the
-> branch's code breaks that — a branch that breaks its own startup gets blamed on
-> the environment. Use `mounts` when such a container only needs fixture files
-> from the worktree.
->
-> `hold` is the exception, and is allowed: the entrypoint becomes `sleep
-> infinity`, so nothing of the branch's runs at bringup. It is also the only home
-> for per-issue setup, since `postReadyCommands` run once per *container* and an
-> `attempt` container is recreated on every gate run. Such a container's own
-> `postReadyCommands` do re-open the misblame window if they build branch code;
-> that is your argv and your call, not something sandbar can decide for you.
-
-### `inSandbox` — letting the agent run the app before the gate does
-
-An implementer that can't run your application writes a test it has never
-watched fail and a fix it has never watched pass. Mark a gate-stack container
-`inSandbox: true` and sandbar runs a **second copy of it beside the agent**, in
-the agent container's own network namespace:
-
-```ts
+```js
 { name: "db", image: "docker.io/library/mariadb:10.11", lifecycle: "issue",
-  readiness: { kind: "healthcheck",
-               command: ["healthcheck.sh", "--connect", "--innodb_initialized"] },
+  readiness: { kind: "healthcheck", command: ["healthcheck.sh", "--connect"] },
   inSandbox: true }
 ```
 
-The agent then reaches it on `127.0.0.1` exactly as a gate step does — one
-namespace, so the address is the same one your `gateStack` steps already use —
-and you delete the database, the mail catcher and the web server from your
-sandbox image along with whatever start-and-wait script was supervising them.
-One description of what it takes to run the app, not two. Sandbar names no port
-in the agent's prompt, because since the readiness probe moved inside the
-container there is no port written down in the config for it to read; say which
-port is which in your own anchor docs, beside the credentials.
+- The agent reaches it on `127.0.0.1`, as the gate steps do. Name the ports in
+  your anchor docs.
+- It is separate from the gate's copy; the gate's result is what counts.
+- It is started once per sandbox and never restarted.
+- `onSandboxReady` hooks run after it is up; use them for migrations or
+  fixtures.
+- Its log is at `/sandbar/logs/<name>.log` in the sandbox.
+- An `attempt` container that fails to start is reported to the agent; an
+  `issue` container that fails retries the issue.
+- Cost: one extra container per `inSandbox` entry per active issue.
 
-- **Opt-in per container.** Declare it nowhere and nothing changes: no extra
-  container, no prompt section, no cost.
-- **It is a different namespace from the gate's**, deliberately. The agent must
-  not mistake the stack beside it for the stack its verdict is formed in. The
-  gate remains a separate network namespace and its result remains
-  authoritative. The sandbox also receives the mounts and environment of every
-  container a gate step runs in; if those expose a runtime socket, the agent can
-  use the image's client to run the same runtime-backed tests while iterating.
-  Two step runners must agree on shared env keys and mount destinations, and a
-  gate env key must not collide with `config.env`; inconsistent configurations
-  are refused before the run.
-- **The gate is authoritative.** Sandbox siblings run the image your config
-  names, resolved once when the sandbox is created; the gate re-resolves
-  `rebuildOn` images per gate run. (The agent's own container is in between:
-  since #46 its image is resolved against the branch, but once per sandbox
-  rather than per attempt.) So a suite that passes in the sandbox can still red
-  the gate — most often right after the branch changed a lockfile. The agent is
-  told this in its prompt.
-- **Nothing restarts a sibling.** A service that reads configuration at *boot*
-  keeps what it booted with for the rest of the issue, however the agent edits
-  the file. Mounted interpreted code is unaffected; a config change is not.
-- **Your `onSandboxReady` hooks run after the siblings are up**, so that is the
-  place to run a migration or load fixtures against them. (`onWorktreeReady`
-  still runs before anything is started — it is where `npm ci` belongs.)
-- **The agent can read their logs.** Each sibling's `podman logs -f` is followed
-  into a file on the host and mounted read-only at `/sandbar/logs/<name>.log`.
-  Those files also land in the run log tree, and they are not rotated or
-  capped — a service that logs every request writes for as long as the issue
-  runs. A container that failed to come up is followed too, with the bringup
-  error written in ahead of it: the usual failure is a service that started and
-  then missed its readiness check, and it keeps logging.
-- **A sibling that will not start is reported, not fatal** — for an `attempt`
-  container. The sandbox comes up degraded and the agent gets that container's
-  log tail in its prompt, because the agent is the one party that can fix its
-  own app's bootstrap. An `issue` container failing is still infrastructure: the
-  issue retries with a fresh sandbox.
-- **`inSandbox` with `hold` and no `postReadyCommands` is rejected** — the same
-  decidable emptiness `servesWorktree` is checked for. `sleep infinity` plus
-  nothing exec'd after it would advertise a service that does not exist.
-- **Cost.** At the default plan size, three issues run at once, so N `inSandbox`
-  containers means 3N extra containers per concurrently active issue. That is the price of the
-  isolation.
+## `sandbar gate`
 
-Note the sandbox siblings share the issue worktree with the gate and keep
-writing while a gate run is in progress, so the rule below applies to them too —
-and give them cache paths of their own if they compile anything.
+Runs the gate stack on its own: no tracker, agents or lock. Use it locally or
+in CI.
 
-**A gate step must write only into gitignored paths.** The gate is a verdict
-about a *commit*, so sandbar refuses to run it against a worktree with
-uncommitted changes — including untracked files. Ignored build artifacts are
-exempt (that is what lets `node_modules` survive between attempts), but a step
-that writes anywhere else reports its own exhaust as uncommitted work. The
-implementer is asked to commit and gets another attempt; if it comes back with
-the *same* dirty set — which is what happens when the files are not the agent's
-to remove — the issue stops immediately as `NEEDS-HUMAN`, naming the paths,
-rather than spending the rest of its budget on it.
+```sh
+npx sandbar gate                      # gate the current directory
+npx sandbar gate --worktree ../other  # gate another tree
+npx sandbar gate --keep               # leave the stack up
+```
 
-> **Note.** Between the merge and gate-2 the merge phase runs
-> `npm install --no-audit --no-fund` in its own ephemeral worktree. If that
-> rewrites `package-lock.json` (merging two branches that both changed
-> dependencies usually does), the update is committed into the merge result —
-> otherwise the clean-tree rule above would refuse the very merge sandbar just
-> made. Non-npm projects are unaffected; the install failing is a skip, not a
-> hard error.
+| Exit | Meaning |
+| --- | --- |
+| 0 | Green. |
+| 1 | Red, including an image that won't build from the tree. |
+| 2 | No verdict: config error, missing pulled image, podman unreachable, or an `issue` container that never became ready. |
 
-The host project also supplies on disk:
-- A `Containerfile` for the sandbox image (or whatever `images` names)
-- Optionally, files named by `{ path }` entries in `promptExtensions`; the quality pass still receives the built-in coding standards in `prompts/coding-standards.md`; the implementer does not
-- `GH_TOKEN` and a credential for every routed agent provider, reachable through `config.env` — as literal values, as keys declared empty so they inherit from the launching environment, or read from a file of your choosing with `readEnvFile`; `splitRoleRouting` can reserve that same file's `SANDBAR_*` keys for per-installation routing
+Differences from the gate inside a run:
 
-`verified` mode additionally uses the host's own `gh` auth (not the container's
-`GH_TOKEN`) for `gh api .../check-runs`, `gh api .../commits/<sha>/status`,
-`gh run view --log-failed` and, with `openPullRequest`, `gh pr list/create/edit/close`.
-A token that cannot read Actions surfaces as repeated poll failures, which halt
-the run.
-- Project anchor docs (`CLAUDE.md`, optional `CONTEXT.md`, optional ADR directory)
+- It tests the working tree even if it is dirty, and says so.
+- Steps stream to the terminal.
+- `--keep` leaves the stack up, and the next run on the same tree reuses its
+  `issue` containers unless their config, the tree or sandbar's version
+  changed. Remove it with the `podman pod rm -f` line it prints.
+- It builds only images a gate container runs, and doesn't run `sandboxHooks`.
+  In CI, install dependencies first.
+- Don't run two at once on the same tree.
+
+From code:
+
+```js
+import { runGateCommand } from "sandbar";
+process.exitCode = await runGateCommand(config, { worktree: ".", keep: false });
+```
+
+It returns the exit code (`GATE_EXIT_GREEN`, `GATE_EXIT_RED`,
+`GATE_EXIT_NO_VERDICT`) instead of throwing. Set `process.exitCode` rather than
+calling `process.exit()`, or piped step output gets cut off.
+
+## Releasing
+
+Consumers pin to `vX.Y.Z` tags. Every commit bumps the version (see
+[AGENTS.md](../AGENTS.md)). On every push to `main`,
+`.github/workflows/auto-tag.yml` creates the matching tag if it is missing.
+
+## Design principles
+
+From #131.
+
+- Separate planning from implementation, and review the plan, not just the
+  diff.
+- Give the agent a deterministic check it can run.
+- Treat the context window as the main resource: fresh sessions per task,
+  subagents for exploration.
+- Keep instruction files short and point into docs.
+- Isolate work in worktrees, and review with a fresh context.
+- Run long loops with an external stop condition.
