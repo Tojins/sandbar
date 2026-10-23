@@ -330,11 +330,12 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.pushes++;
       return r;
     },
-    async pullFfOnly() {
+    async syncWithSource() {
       const r = script.pulls?.[plIdx++];
-      if (r === undefined) throw new Error("pull called but not scripted");
+      if (r === undefined) throw new Error("sync called but not scripted");
       calls.pulls++;
-      return { ok: r };
+      calls.order.push("sync");
+      return { ok: r, reason: r ? "" : "merge failed: CONFLICT (content)" };
     },
     // #68.
     async unmergedPaths() {
@@ -1380,10 +1381,10 @@ describe("runMergerWithAdapter — ordering and mixed", () => {
 });
 
 describe("runMergerWithAdapter — push lifecycle", () => {
-  it("push race retry: pulls, re-pushes successfully, closes issues", async () => {
+  it("push race retry: merges origin's new tip, re-gates, re-pushes, closes issues", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
-      gates: [{ ok: true }],
+      gates: [{ ok: true }, { ok: true }],
       pushes: [{ kind: "race" }, { kind: "ok" }],
       pulls: [true],
     });
@@ -1392,12 +1393,18 @@ describe("runMergerWithAdapter — push lifecycle", () => {
     expect(summary.pushed).toBe(true);
     expect(calls.pushes).toBe(2);
     expect(calls.pulls).toBe(1);
+    // The re-merged tree is gated before it is pushed (D1).
+    expect(calls.order.slice(calls.order.indexOf("sync"))).toEqual([
+      "sync",
+      "install",
+      "gate",
+    ]);
     expect(calls.closes).toEqual([
       { n: 42, comment: "Completed by Sandbar" },
     ]);
   });
 
-  it("push race + pull conflict: throws MergerError, no closes", async () => {
+  it("push race + re-merge conflict: throws MergerError, no closes", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
       gates: [{ ok: true }],
@@ -1410,13 +1417,30 @@ describe("runMergerWithAdapter — push lifecycle", () => {
     );
     expect(calls.pushes).toBe(1);
     expect(calls.pulls).toBe(1);
+    expect(calls.gates).toBe(1);
+    expect(calls.closes).toEqual([]);
+  });
+
+  it("push race + re-merged tree gate-red: throws MergerError, no second push", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }, gateRed()],
+      pushes: [{ kind: "race" }],
+      pulls: [true],
+    });
+
+    await expect(runMergerWithAdapter([issue(42)], adapter)).rejects.toBeInstanceOf(
+      MergerError,
+    );
+    expect(calls.pushes).toBe(1);
+    expect(calls.gates).toBe(2);
     expect(calls.closes).toEqual([]);
   });
 
   it("push race + still-rejected after retry: throws MergerError", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
-      gates: [{ ok: true }],
+      gates: [{ ok: true }, { ok: true }],
       pushes: [{ kind: "race" }, { kind: "race" }],
       pulls: [true],
     });

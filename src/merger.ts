@@ -177,8 +177,14 @@
 //
 //   direct   — the default and today's behaviour: a single
 //              `git push origin HEAD:<sourceBranch>`. On a push race
-//              (rejected/non-fast-forward), one retry via `git pull --ff-only`
-//              then push again; pull-conflict is a hard fail.
+//              (rejected/non-fast-forward — someone else landed on the source
+//              branch mid-cycle, e.g. a manually merged PR), the new tip is
+//              merged into the result (`syncWithSource`), npm install and
+//              gate-2 run again on that composed tree, and the push is retried
+//              once. A `--ff-only` pull could never recover this: HEAD carries
+//              the cycle's merge commits, so a moved origin is always
+//              divergent. A conflicting re-merge, a red re-gate or a second
+//              race is a hard fail; nothing has landed in any of them.
 //
 //   verified — nothing reaches the source branch until the FORGE agrees. The
 //              merge result goes to a scratch integration branch, sandbar polls
@@ -375,6 +381,7 @@ import {
   type VerifiedFailureReason,
   type VerifiedLandingOptions,
   type VerifyAdapter,
+  pushErrorReason,
   runVerifiedLanding,
 } from "./forge-verify.js";
 import {
@@ -781,7 +788,10 @@ export type MergerAdapter = ResolveAdapter & {
   removeLabel(issueNum: number, label: string): Promise<void>;
   closeIssue(issueNum: number, comment: string): Promise<void>;
   push(): Promise<PushResult>;
-  pullFfOnly(): Promise<{ readonly ok: boolean }>;
+  // After a push race: fetch origin/<sourceBranch> and merge it into HEAD
+  // (--no-ff, so the cycle's own merge commits are kept, never rewritten). A
+  // failed merge is aborted before answering.
+  syncWithSource(): Promise<{ readonly ok: boolean; readonly reason: string }>;
   // --- the version collision (#68) ---
   // The unmerged set on its own, without the `git status` + `git diff` that
   // `conflictDigest` runs to build the agent's prompt. Asked twice per
@@ -2545,13 +2555,28 @@ export async function runMergerWithAdapter(
   await emit(`push attempt 1`);
   let push = await adapter.push();
   if (push.kind === "race") {
-    await emit(`push race; pull --ff-only`);
-    const pull = await adapter.pullFfOnly();
-    if (!pull.ok) {
-      await emit(`pull --ff-only failed`);
+    await emit(`push race; merging origin's new tip`);
+    const sync = await adapter.syncWithSource();
+    if (!sync.ok) {
+      await emit(`sync with origin failed: ${sync.reason}`);
       throw new MergerError(
-        "Push to origin source branch was rejected and `git pull --ff-only` then failed " +
-          "(origin source has diverged). Operator must reconcile manually.",
+        "Push to origin source branch was rejected (origin moved during the cycle) and " +
+          `merging its new tip into the merge result failed: ${sync.reason}. ` +
+          "Nothing landed; the next run re-merges onto the new tip.",
+        nothingLanded(),
+      );
+    }
+    // The tree about to land is no longer the one gate-2 passed: the verdict
+    // has to be about the commit that is pushed (D1, #27).
+    const inst = await adapter.npmInstall();
+    await emit(`install synced ok=${inst.ok}`);
+    const g = inst.ok ? await adapter.runGate() : null;
+    if (g !== null) await emit(`gate-2 synced ${formatGateFields(g)}`);
+    if (g === null || !g.ok) {
+      throw new MergerError(
+        "Push to origin source branch was rejected (origin moved during the cycle), and " +
+          `the merge result re-merged onto its new tip ${g === null ? "failed npm install" : "is gate-red"}. ` +
+          "Nothing landed; the next run re-merges onto the new tip.",
         nothingLanded(),
       );
     }
@@ -2560,7 +2585,7 @@ export async function runMergerWithAdapter(
     if (push.kind === "race") {
       await emit(`push race retry exhausted`);
       throw new MergerError(
-        "Push race retry exhausted: still rejected after one fast-forward pull and re-push.",
+        "Push race retry exhausted: still rejected after re-merging origin's new tip and re-pushing.",
         nothingLanded(),
       );
     }
@@ -3506,15 +3531,38 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // untouched (it fast-forwards on their next pull).
       return pushHeadTo(deps.sourceBranch);
     },
-    async pullFfOnly() {
+    async syncWithSource() {
       try {
-        await exec("git", ["pull", "--ff-only", "origin", deps.sourceBranch], {
-          cwd,
-        });
-        return { ok: true };
+        await exec("git", ["fetch", "origin", deps.sourceBranch], { cwd });
       } catch (err) {
         if (!hasExitCode(err)) throw err;
-        return { ok: false };
+        return { ok: false, reason: `fetch failed: ${pushErrorReason(err)}` };
+      }
+      try {
+        await exec(
+          "git",
+          [
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            `Merge origin/${deps.sourceBranch} into the sandbar merge result`,
+            "-m",
+            deps.coauthorTrailer,
+            "FETCH_HEAD",
+          ],
+          { cwd, env: gitAuthorEnv(deps) },
+        );
+        return { ok: true, reason: "" };
+      } catch (err) {
+        if (!hasExitCode(err)) throw err;
+        try {
+          await exec("git", ["merge", "--abort"], { cwd });
+        } catch (abortErr) {
+          if (!isExitCode(abortErr, 128)) throw abortErr;
+          // Exit 128 means the merge never started; nothing to abort.
+        }
+        return { ok: false, reason: `merge failed: ${pushErrorReason(err)}` };
       }
     },
     fetchChunkRef,

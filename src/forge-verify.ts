@@ -1096,7 +1096,7 @@ export type RealVerifyAdapterDeps = {
 // (content): Merge conflict in <path>" to STDOUT and leaves stderr empty — so
 // reading stderr alone reduces a conflict to "Command failed: git merge …",
 // which is the one detail an operator reading a parked cycle actually needs.
-function pushErrorReason(err: unknown): string {
+export function pushErrorReason(err: unknown): string {
   const e = err as { stderr?: string; stdout?: string; message?: string };
   const parts = [(e.stderr ?? "").trim(), (e.stdout ?? "").trim()].filter(
     (p) => p.length > 0,

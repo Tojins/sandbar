@@ -456,6 +456,35 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(barriers).toBe(1);
   });
 
+  it("recovers a source push race by merging origin's new tip, keeping the cycle's commits", async () => {
+    // The cycle's own work, then someone else lands on main (a manual PR).
+    await commit(wt, "cycle.txt", "ours\n");
+    const cycleSha = await git(wt, "rev-parse", "HEAD");
+    await commit(seed, "manual.txt", "theirs\n");
+    await git(seed, "push", "-q", "origin", "main");
+
+    const a = adapter();
+    await expect(a.push()).resolves.toEqual({ kind: "race" });
+    await expect(a.syncWithSource()).resolves.toEqual({ ok: true, reason: "" });
+    // A merge, not a rebase: the cycle's commit is still in history.
+    await git(wt, "merge-base", "--is-ancestor", cycleSha, "HEAD");
+    await expect(a.push()).resolves.toEqual({ kind: "ok" });
+    expect(await originHas("main")).toBe(await git(wt, "rev-parse", "HEAD"));
+  });
+
+  it("aborts a conflicting source re-merge and says why", async () => {
+    await commit(wt, "a.txt", "ours\n");
+    const head = await git(wt, "rev-parse", "HEAD");
+    await commit(seed, "a.txt", "theirs\n");
+    await git(seed, "push", "-q", "origin", "main");
+
+    const sync = await adapter().syncWithSource();
+    expect(sync.ok).toBe(false);
+    expect(sync.reason).toMatch(/CONFLICT/);
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(head);
+    expect(await git(wt, "status", "--porcelain")).toBe("");
+  });
+
   it("reports a non-fast-forward member ref as a race", async () => {
     // Git's client-side `[rejected] (non-fast-forward)` status means the
     // destination moved, whichever atomic ref names it. Server-side content
