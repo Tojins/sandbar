@@ -837,42 +837,34 @@ export type RunConfig = {
   // land — the draft PR says as much on itself, but nothing notifies them.
   //
   // Fourth thing, and it is about PACING rather than about what a host must
-  // provide: sandbar works a whole chunk, one LAYER per cycle (#61). Every
-  // member whose blockers have all landed on the chunk branch is planned
-  // together — same-cycle members are always siblings, never a chain — and a
-  // member queued behind one of those waits for the cycle after it, because
-  // what unblocks it is the blocker's merge commit on the fetched chunk
-  // branch. So a chunk N edges deep takes N cycles to reach the human, and it
-  // reaches them whole. The one
-  // review-gated issue sandbar will not work at all is one `chunks.ts` can
-  // give no chunk — blockers straddling two chunks, an issue downstream of
-  // that, or a `## Blocked by` cycle — which stays held, and reported as held,
-  // until a human edits the bodies.
+  // provide: sandbar works a whole chunk, one LAYER per cycle (#61). A chunk
+  // is every review-gated issue connected through `## Blocked by`, in either
+  // direction (#193), so a series with several independent roots and one
+  // common final issue is ONE chunk and one review; its roots are worked in
+  // parallel. Every member whose blockers have all landed on the chunk branch
+  // is planned together, and a member queued behind one of those waits for
+  // the cycle after it, because what unblocks it is the blocker's merge commit
+  // on the fetched chunk branch. So a chunk N edges deep takes N cycles to
+  // reach the human, and it reaches them whole.
   //
-  // And one thing a host must NOT do, because it is the one way a chunk in
-  // flight can be broken from outside: do not CLOSE one member of a chunk that
-  // still has issues queued behind it. A chunk's branch name is derived from
-  // its root, and sandbar only ever sees open issues (both of the planner's
-  // listings are `--state open`), so closing a member re-derives the chunk
-  // under whichever member is left at the front — and therefore under a branch
-  // name nobody has pushed, while the commits sit on the old one.
+  // Publish a series without pauses longer than a poll: a new chunk starts
+  // only once two consecutive polls see the same graph of not-yet-started
+  // review-gated issues, which is what lets a series filed one issue at a time
+  // be chunked as a whole (a restart costs one extra poll). Once a chunk is
+  // underway — a member in flight or landed — a newly filed issue connected to
+  // it joins it. The one review-gated issue sandbar will not work at all is
+  // one `chunks.ts` can give no chunk — an issue connecting two underway
+  // chunks, an issue downstream of that, or a `## Blocked by` cycle — which
+  // stays held, and reported as held, until one side lands or a human edits
+  // the bodies. Connect a series through real dependencies; inventing edges to
+  // force issues into one chunk serialises unrelated work for nothing.
   //
-  // Only ONE of the two things that follow is loud, and the boundary is exactly
-  // where `ensureIssueBranch`'s guard sits:
-  //
-  //   - A member queued BEHIND the new front one is a non-root with no chunk
-  //     branch, so it throws `ChunkBaseMissingError` (#61) rather than being
-  //     built on a tree missing its blockers' work. Loud, per-issue, recoverable.
-  //   - The new FRONT member is a root as far as every derivation can tell, and
-  //     a root with no chunk branch is the ordinary first-landing case. So it is
-  //     seeded from the source branch and lands on a fresh chunk branch, leaving
-  //     the closed member's commits stranded on the old one. Nothing reports
-  //     this, because nothing about it is distinguishable from a new chunk: the
-  //     signal that would tell them apart (an origin chunk branch whose root
-  //     issue is closed) is not one the seeding path is given.
-  //
-  // Land the chunk branch and close its members together. Reopening the closed
-  // issue restores the original root, and with it the branch name.
+  // An underway chunk keeps its root and branch name: they come from origin's
+  // chunk branch and the members already on it or in flight, so closing or
+  // retitling a member does not rename it. Land the chunk branch and close its
+  // members together all the same; a chunk branch deleted by hand strands any
+  // member still chained behind it, which refuses to seed
+  // (`ChunkBaseMissingError`) rather than build on a tree missing its work.
   readonly defaultLane?: Lane;
 };
 

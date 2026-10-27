@@ -48,7 +48,6 @@ import { promisify } from "node:util";
 
 import { type ChunkTarget } from "./chunks.js";
 import { hasExitCode, isExitCode } from "./errors.js";
-import { issueNumberFromBranch } from "./naming.js";
 
 const exec = promisify(execFile);
 
@@ -83,8 +82,8 @@ export function sourceBranchBase(sourceBranch: string): IssueBranchBase {
   return { ref: `origin/${sourceBranch}`, chunkBranch: null };
 }
 
-// A chunk member that is not its chunk's root, whose chunk branch the cache can
-// name no ref for. Deliberately NOT a `SandbarError`: this is not sandbar's own
+// A chunk member that must seed from its chunk's tip (`ChunkTarget.seed`),
+// whose chunk branch the cache can name no ref for. Deliberately NOT a `SandbarError`: this is not sandbar's own
 // machinery malfunctioning and it is not the run's problem, it is ONE issue
 // whose premise no longer holds. The inner loop wraps a plain throw out of
 // setup as HARD-ERROR, which costs two futile retries (seeding is the first
@@ -96,11 +95,12 @@ export class ChunkBaseMissingError extends Error {
     readonly chunk: ChunkTarget,
   ) {
     super(
-      `${branch} is a chunk member behind #${chunk.root}, but neither origin nor ` +
-        `sandbar's object cache has \`${chunk.branch}\` — the branch its blockers' ` +
-        `commits are supposed to be on. Seeding it from the source branch would ` +
-        `develop it against a tree missing that work (#61), and nothing downstream ` +
-        `would reject the result. The usual cause is chunk re-rooting after ` +
+      `${branch} must seed from the tip of chunk #${chunk.root}, but neither ` +
+        `origin nor sandbar's object cache has \`${chunk.branch}\` — the branch its ` +
+        `blockers' commits (or its own landed work) are supposed to be on. Seeding ` +
+        `it from the source branch would develop it against a tree missing that ` +
+        `work (#61), and nothing downstream would reject the result. The usual ` +
+        `cause is a chunk branch deleted on origin, or chunk re-rooting after ` +
         `history no longer names the component's root, so the surviving graph ` +
         `derives a new branch name while its commits remain on the old one. ` +
         `Inspect origin's chunk ` +
@@ -148,10 +148,10 @@ export class ChunkBaseMissingError extends Error {
 //
 // Null therefore means the cache can name no such ref, which is the chunk's
 // FIRST landing: no branch on origin and none cached, since preflight prunes
-// this namespace at the top of every run. The two callers then base on
-// `origin/<sourceBranch>` — for the merger that is the correct creation point
-// for a new chunk branch, and for the seeding it is the chunk root's correct
-// seed. A branch a human deleted on origin MID-RUN answers null too late to be
+// this namespace at the top of every run. The merger then bases on
+// `origin/<sourceBranch>`, the correct creation point for a new chunk branch;
+// the seeding never asks for a member that seeds from the source branch, so
+// for it null is a refusal (`ChunkBaseMissingError`). A branch a human deleted on origin MID-RUN answers null too late to be
 // pruned and so keeps answering with the cached tip for the rest of the run;
 // that costs nothing extra, because a member seeded from that tip carries the
 // old chunk's commits into the landing either way.
@@ -593,62 +593,44 @@ export class IssueBranchDivergedError extends Error {
 // which is also why writing this ref cannot reach the operator's own branches.
 //
 // TWO SEEDS since #61, and which one an issue gets is decided by the `chunk`
-// the planner attached to it (`PlannedIssue.chunk`), never re-derived here:
+// the planner attached to it (`PlannedIssue.chunk`, and since #193 its
+// `seed`), never re-derived here:
 //
 //   - No chunk (the auto lane) → `origin/<sourceBranch>`, as it always was.
-//   - A chunk whose branch is on ORIGIN → that branch's tip. This is the
-//     chained member (#61): its blocker's commits live on the chunk branch and
-//     nowhere else, so seeding from the source branch would develop it against
-//     a tree missing the very work it declares itself blocked by. Seeded from
-//     the tip, its commits sit on top of every ancestor's, so the chunk-merge
-//     of it cannot conflict with them (#54 round-1 Q4) — an UNRELATED member of
-//     the same chunk still can, and that stays the resolve loop's job. When a
+//   - `seed: "source"` — a PARENTLESS member that has not landed (#193) →
+//     `origin/<sourceBranch>`, whether or not its chunk branch exists yet. It
+//     builds on nothing else in the chunk, so the source branch is all it
+//     needs under its feet; the merge phase merges it onto the chunk branch,
+//     creating that branch at `origin/<sourceBranch>` on the chunk's first
+//     landing (#60). A chunk may have several such members — independent roots
+//     of one series, worked in parallel — which is why this is a property of
+//     the member and no longer "is this issue the chunk's root?".
+//   - `seed: "tip"` (or absent), and the chunk branch is on ORIGIN → that
+//     branch's tip. This is the chained member (#61), and rework of a landed
+//     member: the work it builds on lives on the chunk branch and nowhere else,
+//     so seeding from the source branch would develop it against a tree
+//     missing the very work it declares itself blocked by. Seeded from the tip,
+//     its commits sit on top of every ancestor's, so the chunk-merge of it
+//     cannot conflict with them (#54 round-1 Q4) — an UNRELATED member of the
+//     same chunk still can, and that stays the resolve loop's job. When a
 //     chained member also names a blocker satisfied only by CLOSED, the planner
 //     admits it only after this exact origin chunk ref contains the exact
 //     origin source ref (#174). The landing path refreshes the chunk first;
 //     seeding stays a plain branch cut from one origin-owned ref, so the issue
-//     diff never inherits a synthetic source catch-up merge.
-//   - A chunk the cache can name no branch for, AND this issue is that chunk's
-//     root → `origin/<sourceBranch>`, which is exactly where the merge phase
-//     creates a chunk branch (#60). The two agreeing is what makes the root's
-//     landing honest. (Root is one issue, not several — a chunk has exactly ONE
-//     parentless member, which is chunks.ts's own argument from the rule that a
-//     chunk never grows to accommodate an issue whose blockers straddle two.
-//     Two gated issues both blocking a third do not make one chunk with two
-//     roots; they stay two chunks and the third is `two-chunk-parent`.) A
-//     failed fetch does not land here — see `fetchOriginChunkBranch`.
-//
-//     What this arm CANNOT tell apart, and the limit of the guard below: a
-//     genuine first landing, and a chunk that RE-ROOTED onto this very issue.
-//     Close the root of {#10 → #11} once #10 has landed and #11 becomes
-//     parentless, so `chunk.branch` is `sandbar/chunk-11-…` — a name nobody has
-//     pushed — while #10's commits sit on `sandbar/chunk-10-…`. #11 IS the root
-//     of the chunk as derived, the two agree, and it is seeded from the source
-//     branch and lands on a fresh chunk branch with #10's work stranded on the
-//     old one. Nothing here can see it: `ChunkTarget` carries the root and the
-//     branch, and both say "new chunk". The signal that would separate the two
-//     — an origin chunk branch whose root issue is now closed — lives in the
-//     namespace preflight fetches, not in anything this function is handed, so
-//     closing it means threading that namespace into the planner rather than
-//     tightening a comparison here. Documented for the host instead beside
-//     `defaultLane` in `sandbar.config.example.mjs`: don't close one member of
-//     a chunk with issues still queued behind it. The guard below covers the
-//     members BEHIND the new root, which is the case that has a fact to check.
-//   - A chunk the cache can name no branch for, and this issue is NOT its root
-//     → `ChunkBaseMissingError`. The ordinary argument says this cannot happen:
-//     a non-root member plans only once a blocker of its own carries
-//     its origin member ref contained by the chunk branch, published atomically as that branch
-//     carrying the commits is on origin. But the branch NAME is derived per
-//     cycle from the chunk's current root. Git-derived members normally keep a
-//     closed root in the graph, but missing or repaired history can still make
-//     the graph re-root and name a branch nobody has ever pushed. Falling back
-//     there is the one outcome #61 exists to prevent,
-//     and unlike the merger's identical fallback nothing downstream catches it:
-//     the landing CREATES the branch, so there is no non-fast-forward push to
-//     be rejected, and the member merges cleanly onto a base its ancestors'
-//     commits are absent from. So the fallback is guarded by the very condition
-//     that justifies it rather than by a paragraph asserting the condition
-//     holds, and one issue with a broken premise goes to a human.
+//     diff never inherits a synthetic source catch-up merge. A failed fetch
+//     does not fall through to the next arm — see `fetchOriginChunkBranch`.
+//   - `seed: "tip"` and the cache can name no branch → `ChunkBaseMissingError`.
+//     The ordinary argument says this cannot happen: a chained member plans
+//     only once a blocker of its own carries its origin member ref contained
+//     by the chunk branch, published atomically with the commits, and a landed
+//     member's rework names the branch carrying it. But a human can delete
+//     that branch, and missing or repaired history can still make the graph
+//     name a branch nobody has ever pushed. Falling back to the source branch
+//     there is the one outcome #61 exists to prevent, and unlike the merger's
+//     identical fallback nothing downstream catches it: the landing CREATES the
+//     branch, so there is no non-fast-forward push to be rejected, and the
+//     member merges cleanly onto a base its ancestors' commits are absent from.
+//     So one issue with a broken premise goes to a human.
 //
 // A member whose commits are already on a fetched chunk branch is de-queued by
 // that git fact even if the display-label edit never happened. There is no
@@ -717,18 +699,16 @@ async function chunkOrSourceBase(
   chunk: ChunkTarget,
   sourceBranch: string,
 ): Promise<IssueBranchBase> {
+  // A parentless member that has not landed builds on nothing in its chunk,
+  // whether or not the chunk branch exists yet (#193): the planner decided
+  // that from the graph and fixed it on the target at dispatch.
+  if (chunk.seed === "source") return sourceBranchBase(sourceBranch);
   const ref = await fetchOriginChunkBranch(repoDir, chunk.branch);
   if (ref !== null) return { ref, chunkBranch: chunk.branch };
-  // The source-branch fallback is the ROOT'S seed, and this is where that stops
-  // being an assumption. `issueNumberFromBranch` reads the number back out of
-  // the branch sandbar built from it (naming.ts owns both directions), so the
-  // comparison is against the same `chunk.root` the merge phase will land on.
-  // An unparseable branch name lands here too, and refuses for the same reason:
-  // what cannot be shown to be the root must not be given the root's seed.
-  if (issueNumberFromBranch(branch) !== chunk.root) {
-    throw new ChunkBaseMissingError(branch, chunk);
-  }
-  return sourceBranchBase(sourceBranch);
+  // Everything else needs the tip, and there is none to name. Never the
+  // source branch: that would build this member on a tree missing the work
+  // it is chained behind, and nothing downstream would reject it.
+  throw new ChunkBaseMissingError(branch, chunk);
 }
 
 // The paths `git status --porcelain` reports in a worktree — tracked

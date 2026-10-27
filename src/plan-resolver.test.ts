@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ChunkTarget } from "./chunks.js";
 import type { Lane } from "./lanes.js";
 import { chunkBranchName } from "./naming.js";
 import {
@@ -18,6 +19,17 @@ const membersOn = (
   ...members: number[]
 ): ReadonlyMap<string, ReadonlySet<number>> =>
   new Map([[chunkBranchName(root, title), new Set(members)]]);
+
+// Two chunks still underway because each kept branch carries its root's
+// member ref — the shape a straddler is held against (#193).
+const twoKeptChunks = (
+  a: number,
+  b: number,
+): ReadonlyMap<string, ReadonlySet<number>> =>
+  new Map([
+    [chunkBranchName(a, `Issue ${a}`), new Set([a])],
+    [chunkBranchName(b, `Issue ${b}`), new Set([b])],
+  ]);
 
 function issue(
   number: number,
@@ -489,8 +501,8 @@ describe("resolvePlan lanes (#57)", () => {
 
     expect(r.plan.map((p) => p.id)).toEqual(["10", "11"]);
     expect(r.plan.map((p) => p.chunk)).toEqual([
-      { root: 10, branch: "sandbar/chunk-10-issue-10", landed: [] },
-      { root: 11, branch: "sandbar/chunk-11-issue-11", landed: [] },
+      { root: 10, branch: "sandbar/chunk-10-issue-10", landed: [], seed: "source" },
+      { root: 11, branch: "sandbar/chunk-11-issue-11", landed: [], seed: "source" },
     ]);
   });
 
@@ -509,20 +521,22 @@ describe("resolvePlan lanes (#57)", () => {
 
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
       ["10", null],
-      ["11", { root: 11, branch: "sandbar/chunk-11-issue-11", landed: [] }],
+      ["11", { root: 11, branch: "sandbar/chunk-11-issue-11", landed: [], seed: "source" }],
     ]);
   });
 
-  it("holds a review-gated issue whose blockers sit in two different chunks", () => {
-    // #1 and #2 are two chunks; #30 straddles them, so `deriveChunks` gives it
-    // none and it is nobody's root. Its blockers are closed, so nothing else
-    // is keeping it out of the plan — the holding rule is.
+  it("holds a review-gated issue that would join two underway chunks", () => {
+    // #1 and #2 are two UNDERWAY chunks — each still carried by its kept chunk
+    // branch — and #30 straddles them, so `deriveChunks` gives it none (#193:
+    // join, never merge). Its blockers are closed, so nothing else is keeping
+    // it out of the plan — the holding rule is.
     const r = resolvePlan(
       [issue(1, ""), issue(2, ""), issue(30, "## Blocked by\n- #1\n- #2\n")],
       states({ 1: "CLOSED", 2: "CLOSED" }),
       new Set(),
       3,
       "review",
+      twoKeptChunks(1, 2),
     );
 
     expect(r.plan).toEqual([]);
@@ -552,6 +566,7 @@ describe("resolvePlan lanes (#57)", () => {
           root: 12,
           branch: "sandbar/chunk-12-issue-12",
           landed: [{ number: 12, title: "Issue 12" }],
+          seed: "tip",
         },
       ],
     ]);
@@ -575,11 +590,11 @@ describe("resolvePlan lanes (#57)", () => {
 
     // #13 plans, and the CHUNK it carries is the proof the gating landed: an
     // auto-lane issue is in no chunk at all, so a `chunk` here can only have
-    // come from #12 staying in the graph. (The chunk is rooted at a closed
-    // issue only because a CLOSED candidate is a stale-listing artefact by
-    // construction — #16 — and it clears as soon as the index catches up.)
+    // come from #12 staying in the LANE graph. The chunk graph leaves the
+    // closed #12 out — no chunk branch carries it, so its work is on the
+    // source branch (#193) — and #13 is its own chunk's root.
     expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
-      ["13", { root: 12, branch: "sandbar/chunk-12-issue-12", landed: [] }],
+      ["13", { root: 13, branch: "sandbar/chunk-13-issue-13", landed: [], seed: "source" }],
     ]);
     expect(r.overrides).toEqual([{ issue: 13, gatedBy: 12 }]);
   });
@@ -606,9 +621,9 @@ describe("resolvePlan lanes (#57)", () => {
   });
 
   it("does not count a closed or already-merged issue as held", () => {
-    // Three straddlers over the same two chunks, so all three are shapes the
-    // holding rule still covers — and only the one that is neither closed nor
-    // already merged is reported as held.
+    // Three straddlers over the same two underway chunks, so all three are
+    // shapes the holding rule still covers — and only the one that is neither
+    // closed nor already merged is reported as held.
     const r = resolvePlan(
       [
         issue(1, ""),
@@ -621,6 +636,7 @@ describe("resolvePlan lanes (#57)", () => {
       new Set([32]),
       3,
       "review",
+      twoKeptChunks(1, 2),
     );
 
     expect(r.waiting.filter((entry) => entry.reason.kind === "held")
@@ -641,9 +657,9 @@ describe("resolvePlan lanes (#57)", () => {
 
   it("holds review-gated issues without shrinking K for the auto ones", () => {
     // The hold happens before the slice, so a held issue does not silently
-    // consume one of the cycle's three slots. #6 and #7 are two closed chunks
-    // and #2 and #4 straddle both, which is what makes them held rather than
-    // merely blocked.
+    // consume one of the cycle's three slots. #6 and #7 are two closed,
+    // still-underway chunks and #2 and #4 straddle both, which is what makes
+    // them held rather than merely blocked.
     const r = resolvePlan(
       [
         issue(1, "", { labels: ["auto-land"] }),
@@ -658,6 +674,7 @@ describe("resolvePlan lanes (#57)", () => {
       new Set(),
       3,
       "review",
+      twoKeptChunks(6, 7),
     );
 
     expect(r.plan.map((p) => p.id)).toEqual(["1", "3", "5"]);
@@ -702,6 +719,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
           root: 10,
           branch: "sandbar/chunk-10-issue-10",
           landed: [{ number: 10, title: "Issue 10" }],
+          seed: "tip",
         },
       ],
     ]);
@@ -827,6 +845,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
           root: 10,
           branch: "sandbar/chunk-10-issue-10",
           landed: [{ number: 10, title: "Issue 10" }],
+          seed: "tip",
         },
       ],
       [
@@ -835,6 +854,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
           root: 10,
           branch: "sandbar/chunk-10-issue-10",
           landed: [{ number: 10, title: "Issue 10" }],
+          seed: "tip",
         },
       ],
     ]);
@@ -997,6 +1017,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
           root: 10,
           branch: "sandbar/chunk-10-issue-10",
           landed: [{ number: 10, title: "Issue 10" }],
+          seed: "tip",
         },
       ],
     ]);
@@ -1019,6 +1040,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
           root: 10,
           branch: "sandbar/chunk-10-issue-10",
           landed: [{ number: 10, title: "Issue 10" }],
+          seed: "tip",
         },
       ],
     ]);
@@ -1186,21 +1208,82 @@ describe("resolvePlan git membership safety (#93)", () => {
     expect(result.plan.map((p) => p.id)).toEqual(["47"]);
   });
 
-  it("de-queues membership on any branch but does not satisfy from the wrong branch", () => {
+  // #193: a landed member answers to the root its branch encodes, so the
+  // chunk keeps that identity even when the graph alone would root it
+  // elsewhere — here at #47, which never named a branch.
+  it("keeps the identity of the branch a landed member is on", () => {
     const candidates = [
       issue(47, "", { title: "Root" }),
       issue(48, "## Blocked by\n- #47\n", { title: "Child" }),
     ];
     const result = resolvePlan(
       candidates,
-      facts({ 47: {}, 48: {} }),
+      facts({ 47: {}, 48: { labels: ["ready-for-agent"] } }),
       new Set(),
       3,
       "review",
       new Map([["sandbar/chunk-99-other", new Set([47])]]),
     );
-    expect(result.plan).toEqual([]);
-    expect(result.landedChunks).toEqual([]);
+    expect(result.plan).toEqual([expect.objectContaining({
+      id: "48",
+      chunk: {
+        root: 99,
+        branch: "sandbar/chunk-99-other",
+        landed: [{ number: 47, title: "Root" }],
+        seed: "tip",
+      },
+    })]);
+    expect(result.landedChunks.map((c) => [c.root, c.branch])).toEqual([
+      [99, "sandbar/chunk-99-other"],
+    ]);
+    expect(result.chunkNameDrifts).toEqual([]);
+  });
+
+  // A member ref inherited through the source branch sits on a later chunk's
+  // branch too. Membership there still de-queues, but the member answers to
+  // the chunk its root is connected to, so the later branch neither satisfies
+  // its dependent nor lists it for review or closure.
+  it("de-queues membership on any branch but does not satisfy from the wrong branch", () => {
+    const candidates = [
+      issue(47, "", { title: "Root" }),
+      issue(48, "## Blocked by\n- #47\n", { title: "Child" }),
+      issue(99, "", { title: "Other" }),
+    ];
+    const result = resolvePlan(
+      candidates,
+      facts({ 47: {}, 48: { labels: ["ready-for-agent"] }, 99: {} }),
+      new Set(),
+      3,
+      "review",
+      new Map([
+        ["sandbar/chunk-47-root", new Set([47])],
+        ["sandbar/chunk-99-other", new Set([47, 99])],
+      ]),
+    );
+    expect(result.plan.map((p) => [p.id, p.chunk?.branch])).toEqual([
+      ["48", "sandbar/chunk-47-root"],
+    ]);
+    expect(
+      result.landedChunks.map((c) => [c.branch, c.members.map((m) => m.number)]),
+    ).toEqual([
+      ["sandbar/chunk-47-root", [47]],
+      ["sandbar/chunk-99-other", [99]],
+    ]);
+    expect(result.chunkNameDrifts).toEqual([]);
+  });
+
+  it("reports a branch whose members all answer to another chunk", () => {
+    const result = resolvePlan(
+      [issue(47, "", { title: "Root" })],
+      facts({ 47: {} }),
+      new Set(),
+      3,
+      "review",
+      new Map([
+        ["sandbar/chunk-47-root", new Set([47])],
+        ["sandbar/chunk-99-other", new Set([47])],
+      ]),
+    );
     expect(result.chunkNameDrifts).toEqual([{
       existing: "sandbar/chunk-99-other",
       root: 99,
@@ -1326,29 +1409,81 @@ describe("resolvePlan git membership safety (#93)", () => {
     expect(result.landedChunks).toEqual([]);
   });
 
-  it("reports the new branch name when the old root becomes a member", () => {
+  // #193: a lower-numbered root joining later never renames an underway
+  // chunk. The new prerequisite joins #47's chunk as one more parentless
+  // member, seeded from the source branch and merged onto the same branch.
+  it("joins a new lower-numbered root to the underway chunk without drift", () => {
     const result = resolvePlan(
       [
         issue(40, "", { title: "New prerequisite" }),
         issue(47, "## Blocked by\n- #40\n", { title: "Root" }),
         issue(48, "## Blocked by\n- #47\n", { title: "Child" }),
       ],
-      facts({ 40: {}, 47: {}, 48: {} }),
+      facts({
+        40: { labels: ["ready-for-agent"] },
+        47: {},
+        48: { labels: ["ready-for-agent"] },
+      }),
       new Set(),
       3,
       "review",
       new Map([["sandbar/chunk-47-root", new Set([47])]]),
     );
-    expect(result.chunkNameDrifts).toEqual([{
-      existing: "sandbar/chunk-47-root",
-      root: 47,
-      members: [{ number: 47, title: "Root" }],
-      cause: {
-        kind: "rerooted",
-        derived: "sandbar/chunk-40-new-prerequisite",
-      },
-    }]);
+    expect(result.chunkNameDrifts).toEqual([]);
+    expect(result.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["40", {
+        root: 47,
+        branch: "sandbar/chunk-47-root",
+        landed: [{ number: 47, title: "Root" }],
+        seed: "source",
+      }],
+      ["48", {
+        root: 47,
+        branch: "sandbar/chunk-47-root",
+        landed: [{ number: 47, title: "Root" }],
+        seed: "tip",
+      }],
+    ]);
   });
+
+  // #193, item 7: a wrap-up closes in `closeOrder` and stops at the first
+  // failure, keeping the branch for the reconciler's retry. Whatever prefix
+  // closed, the closed members are still on the kept branch and come back
+  // through their member refs, so the retry finds the same chunk, root,
+  // branch, members and close order — for a multi-root chunk too.
+  const series = [
+    issue(677, "## Blocked by\n- #752\n- #753\n- #754\n", { title: "Final" }),
+    issue(751, "", { title: "First root" }),
+    issue(752, "## Blocked by\n- #751\n", { title: "Second" }),
+    issue(753, "", { title: "Other root" }),
+    issue(754, "", { title: "Third root" }),
+  ];
+  const seriesBranch = "sandbar/chunk-751-first-root";
+  const closeOrder = [677, 754, 753, 752, 751];
+  it.each([0, 1, 2, 3, 4])(
+    "re-derives a multi-root chunk whole after %i closes succeeded",
+    (closedCount) => {
+      const closedNow = new Set(closeOrder.slice(0, closedCount));
+      const result = resolvePlan(
+        series,
+        facts(Object.fromEntries(series.map((c) => [
+          c.number,
+          closedNow.has(c.number) ? { state: "CLOSED" as const } : {},
+        ]))),
+        new Set(),
+        3,
+        "review",
+        new Map([[seriesBranch, new Set(closeOrder)]]),
+      );
+      expect(result.chunkNameDrifts).toEqual([]);
+      expect(result.landedChunks).toHaveLength(1);
+      const [chunk] = result.landedChunks;
+      expect(chunk?.root).toBe(751);
+      expect(chunk?.branch).toBe(seriesBranch);
+      expect(chunk?.members.map((m) => m.number)).toEqual([677, 751, 752, 753, 754]);
+      expect(chunk?.closeOrder.map((m) => m.number)).toEqual(closeOrder);
+    },
+  );
 
   it("reports an origin chunk whose root has left the graph", () => {
     const result = resolvePlan(
@@ -1516,5 +1651,84 @@ describe("resolvePlan landed chunks (#63, #64)", () => {
 
     expect(r.plan.map((p) => p.id)).toEqual(["50"]);
     expect(r.plan[0]?.chunk?.branch).toBe("sandbar/chunk-10-root");
+  });
+});
+
+// #193 — chunks are components under `## Blocked by` edges in both
+// directions, underway chunks keep their identity, and fresh ones wait for
+// the pending graph to hold still across two polls.
+describe("resolvePlan multi-root chunks (#193)", () => {
+  const series = [
+    issue(677, "## Blocked by\n- #752\n- #753\n- #754\n", { title: "Final" }),
+    issue(751, "", { title: "First root" }),
+    issue(752, "## Blocked by\n- #751\n", { title: "Second" }),
+    issue(753, "", { title: "Other root" }),
+    issue(754, "", { title: "Third root" }),
+  ];
+  const resolve = (opts: {
+    readonly settledGraph?: string | null;
+    readonly inFlight?: ReadonlyMap<number, ChunkTarget | null>;
+    readonly chunkMembers?: ReadonlyMap<string, ReadonlySet<number>>;
+    readonly ongoing?: ReadonlySet<number>;
+  }) =>
+    resolvePlanDecision(series, new Map(), {
+      defaultLane: "review",
+      readyLabelPolicy: "anyone",
+      k: 5,
+      ...opts,
+    });
+
+  it("works every root of a fresh series in parallel, all onto one branch", () => {
+    const r = resolve({});
+    const target = {
+      root: 751,
+      branch: "sandbar/chunk-751-first-root",
+      landed: [],
+      seed: "source",
+    };
+    expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["751", target],
+      ["753", target],
+      ["754", target],
+    ]);
+  });
+
+  it("holds a fresh series until two polls have seen the same graph", () => {
+    const first = resolve({ settledGraph: null });
+    expect(first.plan).toEqual([]);
+    expect(first.waiting.filter((w) => w.reason.kind === "held").map((w) => w.issue))
+      .toEqual([751, 753, 754]);
+    expect(first.pendingChunkGraph).toBe("677<752,753,754 751 752<751 753 754");
+
+    const second = resolve({ settledGraph: first.pendingChunkGraph });
+    expect(second.plan.map((p) => p.id)).toEqual(["751", "753", "754"]);
+  });
+
+  it("lets an in-flight root's target name the chunk others join", () => {
+    // #753 was dispatched alone before the rest of the series was filed. The
+    // series now joins #753's chunk rather than re-rooting at #751, and needs
+    // no settling to do it.
+    const r = resolve({
+      settledGraph: null,
+      ongoing: new Set([753]),
+      inFlight: new Map([[753, { root: 753, branch: "sandbar/chunk-753-other-root" }]]),
+    });
+    expect(r.plan.map((p) => [p.id, p.chunk?.root, p.chunk?.branch, p.chunk?.seed]))
+      .toEqual([
+        ["751", 753, "sandbar/chunk-753-other-root", "source"],
+        ["754", 753, "sandbar/chunk-753-other-root", "source"],
+      ]);
+    expect(r.pendingChunkGraph).toBe("");
+  });
+
+  it("seeds a not-yet-landed root from the source even once the branch exists", () => {
+    const r = resolve({
+      chunkMembers: new Map([["sandbar/chunk-751-first-root", new Set([751])]]),
+    });
+    expect(r.plan.map((p) => [p.id, p.chunk?.seed])).toEqual([
+      ["752", "tip"],
+      ["753", "source"],
+      ["754", "source"],
+    ]);
   });
 });

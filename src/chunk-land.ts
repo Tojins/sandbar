@@ -93,13 +93,18 @@
 //                     authoritative `ready-for-agent` is still in flight, so
 //                     landing waits, keeps `land`, and names that member on
 //                     the PR rather than closing it with feedback unbuilt.
-//   * drifted       — the tracker graph no longer assigns this origin branch
-//                     to its encoded root, or origin carries competing
-//                     branches for that root. Nothing is merged or closed;
-//                     the PR names the branch's member refs and the repair,
-//                     and `land` comes OFF. A graph edit cannot retroactively
-//                     make commits include its new blocker, and choosing a
-//                     duplicate branch would be arbitrary (#176).
+//   * drifted       — no derived chunk claims this origin branch for its
+//                     encoded root, or origin carries competing branches for
+//                     that root. Since #193 a landed member answers to the
+//                     root its branch encodes, so a `## Blocked by` edit
+//                     alone rarely drifts a branch; what remains is a cycle
+//                     edited into landed work, a member ref the branch shares
+//                     with an older chunk (inherited through the source
+//                     branch), or a member that left the review lane. Nothing
+//                     is merged or closed; the PR names the branch's member
+//                     refs and the repair, and `land` comes OFF. Choosing
+//                     among those readings, or between duplicate branches,
+//                     would be arbitrary (#176).
 //
 // ---------------------------------------------------------------------------
 // Reconciliation — the same wrap-up, without the merge
@@ -674,9 +679,9 @@ export function describeChunkBranchDrift(drift: ChunkBranchDrift): string {
   switch (drift.cause.kind) {
     case "rerooted":
       return `root issue #${drift.root} now derives to ` +
-        `\`${drift.cause.derived}\` after its \`## Blocked by\` graph changed`;
+        `\`${drift.cause.derived}\` and no chunk claims this branch any more`;
     case "orphaned":
-      return `root issue #${drift.root} no longer belongs to any derivable chunk`;
+      return `no derivable chunk claims this branch for root issue #${drift.root}`;
     case "ambiguous":
       return `origin carries multiple chunk branches for root issue #${drift.root}: ` +
         drift.cause.competing.map((branch) => `\`${branch}\``).join(", ");
@@ -696,7 +701,8 @@ export const CHUNK_LAND_REFUSED_PR_COMMENT = (
     : "- none found";
   const repair = refusal.cause.kind === "ambiguous"
     ? "Delete the surplus chunk branch, then re-apply `land` to the one that remains."
-    : "Revert the `## Blocked by` edit that changed this chunk, then re-apply `land`.";
+    : "Check the members' `## Blocked by` sections for a cycle or an edit that " +
+      "moved them, and their lanes; restore what changed, then re-apply `land`.";
   return `${BOT_COMMENT_PREFIX} refused to land \`${refusal.existing}\`: ${cause}.\n\n` +
     "The branch carries these members according to its `sandbar/member-<n>` refs:\n\n" +
     `${members}\n\n${repair} Or merge/fold the branch by hand and close the named ` +

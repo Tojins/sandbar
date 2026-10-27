@@ -743,13 +743,30 @@ describe("ensureIssueBranch — the chunk tip is the other seed (#61)", () => {
     expect((await git(cache, "rev-parse", "--verify", base.ref)).stdout.trim()).toBe(tip);
   });
 
-  // The root's case. Origin has no chunk branch yet — the merge phase creates
-  // it, at `origin/<sourceBranch>` — so the two agree by construction.
-  it("falls back to the source branch when origin has no chunk branch yet", async () => {
-    const base = await ensureIssueBranch(cache, "sandbar/issue-10-root", "main", CHUNK);
+  // A parentless member's case (#193). Origin has no chunk branch yet — the
+  // merge phase creates it, at `origin/<sourceBranch>` — so the two agree by
+  // construction.
+  it("seeds a source-seeded member from the source branch before the first landing", async () => {
+    const base = await ensureIssueBranch(
+      cache, "sandbar/issue-10-root", "main", { ...CHUNK, seed: "source" },
+    );
 
     expect(base).toEqual({ ref: "origin/main", chunkBranch: null });
     expect(await filesOn("sandbar/issue-10-root")).toEqual([ON_MAIN]);
+  });
+
+  // A SECOND root of the same chunk (#193): another member has already landed
+  // and the branch is on origin, but this one builds on nothing in the chunk.
+  // It seeds from the source branch, and the merger merges it onto the tip.
+  it("seeds a second root from the source branch even once the chunk branch exists", async () => {
+    await landRootOnChunkBranch();
+
+    const base = await ensureIssueBranch(
+      cache, "sandbar/issue-12-other-root", "main", { ...CHUNK, seed: "source" },
+    );
+
+    expect(base).toEqual({ ref: "origin/main", chunkBranch: null });
+    expect(await filesOn("sandbar/issue-12-other-root")).toEqual([ON_MAIN]);
   });
 
   it("seeds from the source branch when the issue has no chunk at all", async () => {
@@ -941,27 +958,24 @@ describe("ensureIssueBranch — a failed fetch falls back to the cached tip (#61
     ).toContain(ON_CHUNK);
   });
 
-  // And the case the fallback must NOT swallow: no ref to name, which is the
-  // chunk's first landing. Preflight prunes this namespace at the top of every
-  // run, so a branch that is not on origin is not in the cache either — and the
-  // root's seed has to be `origin/main`, where the merge phase creates the
-  // branch.
-  it("still falls back to the source branch when the cache has no such ref", async () => {
+  // And the case the cached tip must NOT be confused with: no ref to name.
+  // Preflight prunes this namespace at the top of every run, so a branch that
+  // is not on origin is not in the cache either — and a tip-seeded member has
+  // nothing to stand on, so it refuses rather than taking the source branch.
+  it("refuses a tip-seeded member when the cache has no such ref", async () => {
     const other = { root: 20, branch: "sandbar/chunk-20-other" };
 
-    const base = await ensureIssueBranch(cache, "sandbar/issue-20-root", "main", other);
-
-    expect(base).toEqual({ ref: "origin/main", chunkBranch: null });
-    expect(
-      (await git(cache, "ls-tree", "--name-only", "sandbar/issue-20-root")).stdout,
-    ).not.toContain(ON_CHUNK);
+    await expect(
+      ensureIssueBranch(cache, "sandbar/issue-21-leaf", "main", other),
+    ).rejects.toBeInstanceOf(ChunkBaseMissingError);
   });
 });
 
-// #61 — the source-branch fallback belongs to a chunk's ROOT, and this is the
-// case that proves it is guarded rather than merely argued for.
+// #61 — the source-branch fallback belongs only to a member the planner seeds
+// from the source (since #193, `ChunkTarget.seed`), and this is the case that
+// proves it is guarded rather than merely argued for.
 //
-// The argument said a non-root member can never find its chunk branch missing:
+// The argument said a chained member can never find its chunk branch missing:
 // it plans only once chunk history names its blocker, which can happen only
 // after the chunk branch is on origin. What that argument leaves out is that
 // `chunk.branch` is DERIVED per cycle from the chunk's current root, and a
@@ -973,7 +987,7 @@ describe("ensureIssueBranch — a failed fetch falls back to the cached tip (#61
 // silent kind: the merge phase CREATES the chunk branch it cannot find, so
 // there is no non-fast-forward push to reject it the way the merger's identical
 // fallback is rejected.
-describe("ensureIssueBranch — a non-root member with no chunk branch refuses (#61)", () => {
+describe("ensureIssueBranch — a tip-seeded member with no chunk branch refuses (#61)", () => {
   let root: string;
   let origin: string;
   let seed: string;
@@ -1055,37 +1069,13 @@ describe("ensureIssueBranch — a non-root member with no chunk branch refuses (
     expect(err).not.toBeInstanceOf(SandbarError);
   });
 
-  // The chunk's own root is what the fallback is FOR, and it still gets it —
-  // the guard must not turn a first landing into a halt.
-  //
-  // And this fixture is the LIMIT of the guard, pinned rather than left to the
-  // prose: #11 is not a first landing at all, it is the RE-ROOTED root of the
-  // chunk #10 already landed on. `chunk.root` says 11 and the branch says 11,
-  // so seeding cannot tell it from a new chunk — it takes the source branch and
-  // #10's work stays stranded on `sandbar/chunk-10-thing`. Asserted because it
-  // is the one case the host-facing docs have to describe as silent
-  // (`config.ts`, `defaultLane`); were it ever to become detectable here, this
-  // is the test that should fail and send someone to those docs.
-  it("gives a re-rooted chunk's new root the source branch, stranding the old work", async () => {
-    const base = await ensureIssueBranch(cache, "sandbar/issue-11-mid", "main", REROOTED);
-
-    expect(base).toEqual({ ref: "origin/main", chunkBranch: null });
-    // The stranding itself: the landed chunk's file is on the old branch and
-    // NOT under the new root's feet.
-    expect(
-      (await git(cache, "ls-tree", "--name-only", "refs/remotes/origin/sandbar/chunk-10-thing"))
-        .stdout,
-    ).toContain("chunk.txt");
-    expect(
-      (await git(cache, "ls-tree", "--name-only", "sandbar/issue-11-mid")).stdout,
-    ).not.toContain("chunk.txt");
-  });
-
-  // A branch name the parser cannot read is not a root either. It cannot be
-  // shown to be one, and the cost of guessing wrong is the silent bug above.
-  it("refuses a branch whose number cannot be parsed", async () => {
+  // Being named as the target's root no longer earns the source branch
+  // (#193): the old `member === chunk.root` guard gave it to a re-rooted
+  // chunk's new root and stranded the landed work. Only the planner's
+  // `seed: "source"` does, so a tip-seeded member refuses whatever its number.
+  it("refuses a tip-seeded member even when it is the target's root", async () => {
     await expect(
-      ensureIssueBranch(cache, "not-a-sandbar-branch", "main", REROOTED),
+      ensureIssueBranch(cache, "sandbar/issue-11-mid", "main", REROOTED),
     ).rejects.toBeInstanceOf(ChunkBaseMissingError);
   });
 });

@@ -221,7 +221,7 @@ describe("refuseLandRequest (#176)", () => {
     expect(calls[0]).toContain("sandbar/chunk-40-new-root");
     expect(calls[0]).toContain("#42 — Old root");
     expect(calls[0]).toContain("#43 — Child");
-    expect(calls[0]).toContain("Revert the `## Blocked by` edit");
+    expect(calls[0]).toContain("restore what changed, then re-apply `land`");
     expect(calls[0]).toContain("merge/fold the branch by hand");
     expect(calls[1]).toBe(`remove 9: ${LAND_LABEL}`);
   });
@@ -231,7 +231,7 @@ describe("refuseLandRequest (#176)", () => {
       ...refusal,
       members: [],
       cause: { kind: "orphaned" },
-    })).toContain("no longer belongs to any derivable chunk");
+    })).toContain("no derivable chunk claims this branch");
     expect(CHUNK_LAND_REFUSED_PR_COMMENT({
       ...refusal,
       members: [],
