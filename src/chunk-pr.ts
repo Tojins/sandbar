@@ -67,9 +67,11 @@ export function chunkMembersOnBranch(
 
 // `Sandbar chunk #<root>: <the root issue's title>`. The root names the chunk
 // everywhere else (it names the branch), so it names the PR too. The fallback
-// is unreachable in practice — the root is the first member to land, so it is
-// on the branch before any other member can be — but a title is not worth a
-// throw, and `Sandbar chunk #42` still identifies the chunk.
+// is reachable: since #193 a chunk may have several parentless members worked
+// in parallel, so another root can land before the one the chunk is named
+// after, and the PR goes up before the root is on the branch. A title is not
+// worth a throw, and `Sandbar chunk #42` still identifies the chunk; the next
+// update after the root lands carries its title.
 export function chunkPullRequestTitle(
   root: number,
   members: readonly ChunkMember[],

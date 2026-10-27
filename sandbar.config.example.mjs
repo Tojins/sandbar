@@ -144,9 +144,10 @@ export default {
   // default, unless review-gating reaches it through `## Blocked by`; inherited
   // review-gating wins. Land a chunk by adding the non-configurable `land`
   // label to its draft PR; that label must already exist because sandbar never
-  // creates it. A landed chunk member stays open until then: while the chunk is
-  // live, do not close a member or retitle its root, because those issues
-  // determine the chunk's membership and derived branch name.
+  // creates it. A landed chunk member stays open until then. A chunk is every
+  // review-gated issue connected through `## Blocked by` in either direction;
+  // publish a series without pauses longer than a poll, because a new chunk
+  // starts only once two consecutive polls see the same graph.
   // defaultLane: "auto",
 
   // Keep host defaults above. The eighteen SANDBAR_* entries documented in

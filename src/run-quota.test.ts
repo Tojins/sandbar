@@ -3019,7 +3019,7 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.commentOnChunkPullRequest).toHaveBeenCalledWith(
       305,
       expect.stringMatching(
-        /sandbar\/chunk-40-new-root[\s\S]*#42 — Old root[\s\S]*#43 — Child[\s\S]*Revert the `## Blocked by` edit/,
+        /sandbar\/chunk-40-new-root[\s\S]*#42 — Old root[\s\S]*#43 — Child[\s\S]*restore what changed/,
       ),
     );
     expect(seams.removeChunkPullRequestLabel).toHaveBeenCalledOnce();

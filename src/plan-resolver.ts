@@ -73,8 +73,8 @@
 // branch, so its commits are not under the dependent at all;
 // treating it as satisfied would start work on a base that does not exist. The
 // dependent waits for that other chunk to land and its issues to close —
-// exactly what `chunks.ts`'s two-chunk-parent rule already says such an issue
-// must do. A dependent with no chunk of its own (an auto-lane issue, or one
+// exactly what `chunks.ts`'s join rule already says an issue that would join
+// two underway chunks must do. A dependent with no chunk of its own (an auto-lane issue, or one
 // `chunks.ts` held back) fails the same test: `chunkOf` has no entry for it, and
 // undefined is never equal to a chunk root.
 //
@@ -83,9 +83,10 @@
 // graph this module derives lanes and chunks from. `readChunkMembers` therefore
 // enumerates issue numbers from member refs contained by fetched chunk branches
 // and fetches those issues directly. Dropping those issues from the
-// graph would break the feature in two separate ways: a chunk that has landed
-// its root would re-derive itself around the members that are left, under a new
-// root and so under a branch name nothing is on; and a descendant of a landed
+// graph would break the feature in two separate ways: a chunk would lose the
+// landed members that carry its identity (#193) and its connections, so what
+// is left could fall apart into fresh chunks under branch names nothing is on;
+// and a descendant of a landed
 // review-gated issue would read as AUTO (its gating ancestor having vanished
 // from the lane graph) and auto-land unreviewed chunk code onto the source
 // branch, which is the back door `lanes.ts` exists to shut. They are listed
@@ -123,19 +124,29 @@
 //
 //   a review-gated issue is held iff it has NO CHUNK AT ALL.
 //
-// That is `chunks.ts`'s own refusal read back: a two-chunk parent, an issue
-// downstream of one, or an issue inside a `## Blocked by` cycle. Each has no
-// landing target — no `chunk.branch` for the merge phase to point at and no tip
-// for its branch to seed from — so working it could still only end in
-// auto-landing unreviewed code onto the source branch. All three mean "wait",
-// and all three resolve without sandbar's help (the blocking chunks land, or a
-// human edits the bodies).
+// That is `chunks.ts`'s own refusal read back: an issue that would join two
+// underway chunks, an issue downstream of one, an issue inside a `## Blocked
+// by` cycle, or a member of a fresh component whose graph has not yet held
+// still across two polls (#193). Each has no landing target — no
+// `chunk.branch` for the merge phase to point at — so working it could still
+// only end in auto-landing unreviewed code onto the source branch. All of them
+// mean "wait", and all resolve without sandbar's help (the blocking chunks
+// land, a human edits the bodies, or the next poll sees the same graph).
 //
-// Everything else plans. A chunk can now admit SEVERAL issues in one cycle —
-// every member whose blockers have landed — though never a chain: a member is
-// unblocked only by a blocker already merged onto the chunk branch, which no issue
-// planned in the same cycle does. So same-cycle members of one chunk are always
-// siblings, which is what the merge phase's per-chunk grouping relies on.
+// Everything else plans. A chunk can admit SEVERAL issues in one cycle —
+// every parentless member that has not landed (#193: a chunk may have several
+// roots, each seeded from the source branch) and every member whose blockers
+// have landed — though never a chain: a member is unblocked only by a blocker
+// already merged onto the chunk branch, which no issue planned in the same
+// cycle does. So same-cycle members of one chunk are always siblings or
+// roots, which is what the merge phase's per-chunk grouping relies on.
+//
+// Two planner inputs exist only for chunk derivation (#193). `inFlight`
+// carries each in-flight issue's dispatched `ChunkTarget`: it makes the chunk
+// underway and fixes its root and branch, so a target never changes after
+// dispatch. `settledGraph` is the pending chunk graph two polls agreed on;
+// the resolution reports today's as `pendingChunkGraph` and `run.ts` keeps
+// the memory.
 //
 // `resolvePlan` returns a RESOLUTION rather than a bare plan: every ready issue
 // outside its K-sized plan carries the planner reason, and inherited
@@ -582,8 +593,8 @@ export function resolvePlan(
     // holding rule look like it costs more than it does.
     //
     // What is still held (#61): a review-gated issue `deriveChunks` gave no
-    // chunk at all. Every member of a chunk — its root, and since #61 the
-    // members chained behind one — has somewhere to land and a tip to seed
+    // chunk at all. Every member of a chunk — its roots, and since #61 the
+    // members chained behind one — has somewhere to land and a base to seed
     // from. See "What the holding rule still covers" above.
     //
     // Guarded on `chunkTargetOf`, the very value the plan below attaches, and

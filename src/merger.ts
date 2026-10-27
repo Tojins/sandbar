@@ -1125,8 +1125,10 @@ export type ChunkGroup = {
 // per issue.
 //
 // Groups of more than one member are reachable since #61: a chunk whose root
-// has landed can hand this cycle every member blocked on it at once. Those
-// members are necessarily SIBLINGS rather than a chain — a member plans only
+// has landed can hand this cycle every member blocked on it at once, and since
+// #193 a chunk with several parentless members hands over all of its roots,
+// each seeded from the source branch. Those members are necessarily SIBLINGS
+// or roots rather than a chain — a member plans only
 // once its own blockers are on the chunk branch, which no issue planned in the same
 // cycle does — so the order within a group is not a dependency order and
 // ascending issue number (what `sortIssuesAsc` already gave) is simply

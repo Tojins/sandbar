@@ -231,9 +231,12 @@ export function sandboxContainerNameFor(
 // plus component intersection guard review and closure (`plan-resolver.ts`).
 //
 // A chunk is a connected component of review-gated issues under the
-// `## Blocked by` graph (`chunks.ts`), and `<root>` is that component's
-// parentless member — so the number in a chunk branch is an issue number too,
-// just not the only issue whose commits are on the branch.
+// `## Blocked by` graph, edges taken in both directions (`chunks.ts`, #193),
+// and `<root>` is its identity: the lowest-numbered parentless member when the
+// chunk started. A chunk may have several parentless members, and a later
+// lower-numbered one never renames it — so the number in a chunk branch is an
+// issue number too, just not the only issue whose commits are on the branch,
+// nor necessarily the first to land.
 //
 // A prefix plus an INFIX rather than two independent prefixes, because
 // `ALL_BRANCH_INFIXES` reserves every owned shape from integration-branch use.
