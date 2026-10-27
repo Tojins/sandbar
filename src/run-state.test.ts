@@ -22,6 +22,16 @@ describe("run event reducer", () => {
       .toBe("excluded: ready-for-agent label actor unknown");
   });
 
+  it("names why a review-gated issue is held", () => {
+    expect(waitingReasonText({ kind: "held", why: "unsettled" }))
+      .toBe("held: waiting for the issue graph to settle");
+    expect(waitingReasonText({ kind: "held", why: "drifted-branches" }))
+      .toBe("held: several chunk branches name its root");
+    // A record written before `why` existed.
+    expect(waitingReasonText({ kind: "held" }))
+      .toBe("held: no chunk to land on");
+  });
+
   // A drain can take an hour, and a reader who cannot see the request would
   // see only a pool that stopped admitting (#146).
   it("keeps a pending restart visible for the whole drain", () => {

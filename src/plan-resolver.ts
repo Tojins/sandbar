@@ -220,7 +220,7 @@ import {
   issueNumberFromBranch,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
-import type { WaitingReason } from "./events.js";
+import type { HeldReason, WaitingReason } from "./events.js";
 
 const exec = promisify(execFile);
 
@@ -451,7 +451,7 @@ export function resolvePlan(
   for (const [n, target] of options.inFlight ?? []) {
     if (target) inFlight.set(n, target);
   }
-  const { chunks, chunkOf, pendingGraph } = deriveChunks(
+  const { chunks, chunkOf, blocked, pendingGraph } = deriveChunks(
     chunkIssues.filter((c) =>
       issueFacts.get(c.number)?.state !== "CLOSED" ||
       publishedChunkMembers.has(c.number)
@@ -464,6 +464,7 @@ export function resolvePlan(
     },
   );
   const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
+  const chunkBlockOf = new Map(blocked.map((b) => [b.issue, b.reason] as const));
   const originBranchesByRoot = chunkBranchesByRoot(originChunkBranches);
   const ambiguousChunkRoots = new Set(
     [...originBranchesByRoot]
@@ -539,7 +540,7 @@ export function resolvePlan(
     | { readonly kind: "label-actor"; readonly actor: string | null }
     | { readonly kind: "blocked"; readonly by: readonly number[] }
     | { readonly kind: "chunk-refresh"; readonly branch: string; readonly by: readonly number[] }
-    | { readonly kind: "held" }
+    | { readonly kind: "held"; readonly why?: HeldReason }
     | { readonly kind: "ongoing" }
     | { readonly kind: "eligible" };
   const classify = (c: IssueSummary): CandidateDisposition => {
@@ -606,8 +607,16 @@ export function resolvePlan(
     // `chunk: null`, and phase 3 would land unreviewed work on the source
     // branch — the one outcome the lane exists to prevent. Asking the same
     // question the answer is built from costs nothing and cannot drift.
+    //
+    // `why` is for the reader only (the UI's waiting list): the derivation's
+    // reason, or drifted branches when the root is ambiguous on origin.
     if (lanes.get(c.number)?.lane === "review" && chunkTargetOf(c.number) === null) {
-      return { kind: "held" };
+      const root = chunkOf.get(c.number);
+      const why: HeldReason | undefined =
+        root !== undefined && ambiguousChunkRoots.has(root)
+          ? "drifted-branches"
+          : chunkBlockOf.get(c.number);
+      return why === undefined ? { kind: "held" } : { kind: "held", why };
     }
     return { kind: "eligible" };
   };
