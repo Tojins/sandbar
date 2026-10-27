@@ -847,8 +847,9 @@ export function landedChunksOf(
  * being dropped — the caller closes what it is given, so a missing member is a
  * member that never closes at all, and putting them first keeps the root last
  * where the walk did reach it. That can only happen for a `## Blocked by`
- * cycle, which `deriveChunks` never puts in a chunk in the first place (a
- * cyclic issue comes out `blocked`), so this is a fallback with no caller.
+ * cycle edited in among LANDED members: `deriveChunks` holds a cyclic issue
+ * that has not started, but an underway one keeps its chunk (#193), so every
+ * member stays closeable here.
  */
 export function closeOrderOfChunkMembers(
   members: readonly number[],
