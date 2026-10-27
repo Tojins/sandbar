@@ -24,6 +24,7 @@
 
 import type {
   GateStepEvent,
+  HeldReason,
   RecomputeWaiting,
   RunEvent,
   WaitingReason,
@@ -169,13 +170,24 @@ const implementerFailure = (event: ImplementerEvent): string | null => {
   return "invocation failed";
 };
 
+const heldText = (why: HeldReason | undefined): string => {
+  switch (why) {
+    case "unsettled": return "held: waiting for the issue graph to settle";
+    case "joins-two-chunks": return "held: would join two chunks";
+    case "unchunked-blocker": return "held: a blocker has no chunk";
+    case "cycle": return "held: in a blocked-by cycle";
+    case "drifted-branches": return "held: several chunk branches name its root";
+    case undefined: return "held: no chunk to land on";
+  }
+};
+
 export function waitingReasonText(reason: WaitingReason): string {
   switch (reason.kind) {
     case "blocked": return `blocked by ${reason.by.map((n) => `#${n}`).join(", ")}`;
     case "chunk-refresh":
       return `waiting on chunk refresh: ${reason.branch}`;
     case "no-slot": return "no free slot";
-    case "held": return "held: no chunk to land on";
+    case "held": return heldText(reason.why);
     case "ongoing": return "ongoing";
     case "label-actor":
       return reason.actor === null

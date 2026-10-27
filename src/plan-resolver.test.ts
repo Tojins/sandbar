@@ -1398,7 +1398,7 @@ describe("resolvePlan git membership safety (#93)", () => {
       {
         issue: 47,
         title: "Current title",
-        reason: { kind: "held" },
+        reason: { kind: "held", why: "drifted-branches" },
       },
       {
         issue: 48,

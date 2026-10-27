@@ -44,6 +44,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import type { ChunkBlockReason } from "./chunks.js";
 import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
 import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
@@ -100,6 +101,8 @@ export type IssuePhase =
   | "review"
   | "adjudication";
 
+export type HeldReason = ChunkBlockReason | "drifted-branches";
+
 export type WaitingReason =
   | { readonly kind: "blocked"; readonly by: readonly number[] }
   | {
@@ -108,7 +111,10 @@ export type WaitingReason =
       readonly by: readonly number[];
     }
   | { readonly kind: "no-slot" }
-  | { readonly kind: "held" }
+  // `why` is the chunk-derivation reason, or `drifted-branches` when several
+  // origin chunk branches name the issue's root. Optional: records written
+  // before it existed carry none.
+  | { readonly kind: "held"; readonly why?: HeldReason }
   | { readonly kind: "ongoing" }
   | { readonly kind: "label-actor"; readonly actor: string | null };
 
