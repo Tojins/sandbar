@@ -171,6 +171,12 @@ import {
   realAdapter as realChunkFollowUpAdapter,
 } from "./chunk-follow-up.js";
 import {
+  type ChunkSettleMemory,
+  UNSETTLED,
+  rememberPollGraph,
+  settledGraphFor,
+} from "./chunks.js";
+import {
   formatDriverIdentity,
   readDriverIdentity,
 } from "./driver-identity.js";
@@ -1433,6 +1439,11 @@ export async function run(
   // What the observed request carried, and the whole of the drain's state.
   let restartRequested: string | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
+  // The previous poll's pending chunk graph (#193, `chunks.ts` "Settling"):
+  // fresh chunks start only once two consecutive polls agree on it. Memory
+  // only, so a restart costs one extra poll; the launch recompute is the
+  // first poll.
+  let chunkSettle: ChunkSettleMemory = UNSETTLED;
   let deferredChunksForRecompute: string[] = [];
   let landingNumber = 0;
   let iteration = 0;
@@ -2073,6 +2084,7 @@ export async function run(
         }
         continue;
       }
+      const atPoll = planTrigger === "poll" || planTrigger === "launch";
       const planOptions = {
         excluded: new Set([
           ...mergedThisRun,
@@ -2084,6 +2096,12 @@ export async function run(
         repoDir: layout.repoDir,
         sourceBranch: config.sourceBranch,
         ongoing: new Set([...pool.startedIds()].map(Number)),
+        // Dispatched targets are chunk identity: an in-flight member makes its
+        // chunk underway under the root and branch it was sent to (#193).
+        inFlight: new Map(
+          pool.ongoingIssues().map((issue) => [Number(issue.id), issue.chunk] as const),
+        ),
+        settledGraph: settledGraphFor(chunkSettle, atPoll),
       };
       // Every forge call the plan makes before the reconciler. A transport
       // failure mid-scan leaves the follow-up scan exactly where a halt and
@@ -2184,6 +2202,9 @@ export async function run(
           continue;
         }
         resolution = replanned.value;
+      }
+      if (atPoll) {
+        chunkSettle = rememberPollGraph(chunkSettle, resolution.pendingChunkGraph);
       }
       // What the reconciler left behind, in the three shapes it comes in
       // (#64). Split rather than reported as one list, and each report counting

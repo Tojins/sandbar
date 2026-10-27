@@ -3,9 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   type ChunkDerivation,
   type ChunkIssue,
+  type ChunkTarget,
   NEEDS_REVIEW_LABEL,
+  UNSETTLED,
   deriveChunks,
   landedChunksOf,
+  rememberPollGraph,
+  settledGraphFor,
 } from "./chunks.js";
 import { type Lane, computeLanes } from "./lanes.js";
 
@@ -146,18 +150,29 @@ describe("deriveChunks — the lane is the input", () => {
   });
 });
 
-describe("deriveChunks — the two-chunk-parent rule", () => {
-  it("blocks an issue whose blockers sit in two different chunks", () => {
+describe("deriveChunks — several roots, one chunk (#193)", () => {
+  it("joins two roots through their common dependent", () => {
     const d = allReview([issue(10), issue(20), issue(30, [10, 20])]);
-    // No merging: #10 and #20 stay two chunks and #30 joins neither.
+    expect(shape(d)).toEqual([{ root: 10, members: [10, 20, 30] }]);
+    expect(d.chunks[0]?.parentless).toEqual([10, 20]);
+    expect(d.blocked).toEqual([]);
+  });
+
+  // The series the issue was filed for (Tojins/outdoor): #751 → #752, plus
+  // #753 and #754, all blocking #677. One chunk, one review, rooted at the
+  // lowest parentless member, with three roots to work in parallel.
+  it("chunks a filed series with several roots as one", () => {
+    const d = allReview([
+      issue(677, [752, 753, 754]),
+      issue(751),
+      issue(752, [751]),
+      issue(753),
+      issue(754),
+    ]);
     expect(shape(d)).toEqual([
-      { root: 10, members: [10] },
-      { root: 20, members: [20] },
+      { root: 751, members: [677, 751, 752, 753, 754] },
     ]);
-    expect(d.blocked).toEqual([
-      { issue: 30, reason: "two-chunk-parent", blockers: [10, 20] },
-    ]);
-    expect(d.chunkOf.has(30)).toBe(false);
+    expect(d.chunks[0]?.parentless).toEqual([751, 753, 754]);
   });
 
   it("does not block an issue whose blockers are all in ONE chunk", () => {
@@ -168,62 +183,285 @@ describe("deriveChunks — the two-chunk-parent rule", () => {
       issue(13, [11, 12]),
     ]);
     expect(shape(d)).toEqual([{ root: 10, members: [10, 11, 12, 13] }]);
+    expect(d.chunks[0]?.parentless).toEqual([10]);
     expect(d.blocked).toEqual([]);
   });
 
-  // The order-independence the topological walk buys. Two straddlers over the
-  // same pair: neither may be decided by looking at the graph without itself,
-  // because each would then see the other joining the two chunks into one.
-  it("blocks BOTH straddlers over the same pair of chunks", () => {
+  it("takes both straddlers over the same pair into one chunk", () => {
     const d = allReview([issue(1), issue(2), issue(3, [1, 2]), issue(4, [1, 2])]);
-    expect(shape(d)).toEqual([
-      { root: 1, members: [1] },
-      { root: 2, members: [2] },
-    ]);
-    expect(d.blocked.map((b) => b.issue)).toEqual([3, 4]);
+    expect(shape(d)).toEqual([{ root: 1, members: [1, 2, 3, 4] }]);
   });
 
-  // The case a union-find in issue order gets wrong: #3's blockers land in one
-  // chunk, but only once #1 and #2 have themselves been placed.
   it("waits for a blocker's own chunk before judging the dependent", () => {
     const d = allReview([issue(1, [9]), issue(2, [9]), issue(3, [1, 2]), issue(9)]);
     expect(shape(d)).toEqual([{ root: 9, members: [1, 2, 3, 9] }]);
     expect(d.blocked).toEqual([]);
   });
+});
 
-  it("blocks what depends on a blocked issue, transitively", () => {
-    const d = allReview([
-      issue(10),
-      issue(20),
-      issue(30, [10, 20]),
-      issue(40, [30]),
-      issue(50, [40]),
-    ]);
+// Underway state, stated directly: a landed member is a member ref on an
+// origin chunk branch, an in-flight one carries the target it was sent with.
+const on = (
+  entries: Record<string, readonly number[]>,
+): ReadonlyMap<string, ReadonlySet<number>> =>
+  new Map(Object.entries(entries).map(([b, ms]) => [b, new Set(ms)]));
+const flying = (
+  entries: Record<number, ChunkTarget>,
+): ReadonlyMap<number, ChunkTarget> =>
+  new Map(Object.entries(entries).map(([n, t]) => [Number(n), t]));
+const gatedLanes = (issues: readonly ChunkIssue[]) =>
+  lanes(Object.fromEntries(issues.map((i) => [i.number, "review" as Lane])));
+const underway = (
+  issues: readonly ChunkIssue[],
+  options: Parameters<typeof deriveChunks>[2],
+): ChunkDerivation => deriveChunks(issues, gatedLanes(issues), options);
+
+describe("deriveChunks — join, never merge (#193)", () => {
+  it("holds an issue that would join two underway chunks", () => {
+    const d = underway(
+      [issue(10), issue(20), issue(30, [10, 20])],
+      { originChunks: on({ "sandbar/chunk-10-a": [10], "sandbar/chunk-20-b": [20] }) },
+    );
+    // No merging: #10 and #20 stay two chunks and #30 joins neither.
     expect(shape(d)).toEqual([
       { root: 10, members: [10] },
       { root: 20, members: [20] },
     ]);
     expect(d.blocked).toEqual([
-      { issue: 30, reason: "two-chunk-parent", blockers: [10, 20] },
+      { issue: 30, reason: "joins-two-chunks", blockers: [10, 20] },
+    ]);
+    expect(d.chunkOf.has(30)).toBe(false);
+  });
+
+  it("counts an in-flight member as underway, under its dispatched target", () => {
+    const d = underway(
+      [issue(10), issue(20), issue(30, [10, 20])],
+      {
+        originChunks: on({ "sandbar/chunk-10-a": [10] }),
+        inFlight: flying({ 20: { root: 20, branch: "sandbar/chunk-20-b" } }),
+      },
+    );
+    expect(d.chunks.map((c) => [c.root, c.branch, c.members])).toEqual([
+      [10, "sandbar/chunk-10-a", [10]],
+      [20, "sandbar/chunk-20-b", [20]],
+    ]);
+    expect(d.blocked.map((b) => [b.issue, b.reason])).toEqual([
+      [30, "joins-two-chunks"],
+    ]);
+  });
+
+  it("joins a fresh component to the one underway chunk it connects to", () => {
+    // #10 has landed; #20 and #30 are new, connected to it only through #30.
+    const d = underway(
+      [issue(10), issue(20), issue(30, [10, 20])],
+      { originChunks: on({ "sandbar/chunk-10-a": [10] }), settledGraph: null },
+    );
+    // Joining needs no settling: the graph has not held still, yet #20 and
+    // #30 are already #10's.
+    expect(d.chunks).toEqual([{
+      root: 10,
+      members: [10, 20, 30],
+      parentless: [10, 20],
+      branch: "sandbar/chunk-10-a",
+    }]);
+    expect(d.blocked).toEqual([]);
+  });
+
+  it("blocks what depends on a held issue, transitively", () => {
+    const d = underway(
+      [issue(10), issue(20), issue(30, [10, 20]), issue(40, [30]), issue(50, [40])],
+      { originChunks: on({ "sandbar/chunk-10-a": [10], "sandbar/chunk-20-b": [20] }) },
+    );
+    expect(d.blocked).toEqual([
+      { issue: 30, reason: "joins-two-chunks", blockers: [10, 20] },
       { issue: 40, reason: "unchunked-blocker", blockers: [30] },
       { issue: 50, reason: "unchunked-blocker", blockers: [40] },
     ]);
   });
 
-  // A blocked issue must not silently take its own dependents' chunk with it:
-  // #40 is blocked by both a real chunk and a blocked issue, and the reason
-  // reported is the one a human can act on first.
   it("reports the unchunked blocker even alongside a placed one", () => {
-    const d = allReview([
-      issue(10),
-      issue(20),
-      issue(30, [10, 20]),
-      issue(40, [10, 30]),
-    ]);
+    const d = underway(
+      [issue(10), issue(20), issue(30, [10, 20]), issue(40, [10, 30])],
+      { originChunks: on({ "sandbar/chunk-10-a": [10], "sandbar/chunk-20-b": [20] }) },
+    );
     expect(d.blocked).toEqual([
-      { issue: 30, reason: "two-chunk-parent", blockers: [10, 20] },
+      { issue: 30, reason: "joins-two-chunks", blockers: [10, 20] },
       { issue: 40, reason: "unchunked-blocker", blockers: [30] },
     ]);
+  });
+
+  // A bridge filed between two underway series must not stall either: the
+  // chained members already in each chunk stay there, and only the bridge
+  // waits.
+  it("leaves both underway chunks whole when a bridge is filed between them", () => {
+    const d = underway(
+      [issue(1), issue(2, [1]), issue(5), issue(6, [5]), issue(9, [2, 6])],
+      { originChunks: on({ "sandbar/chunk-1-a": [1], "sandbar/chunk-5-b": [5] }) },
+    );
+    expect(shape(d)).toEqual([
+      { root: 1, members: [1, 2] },
+      { root: 5, members: [5, 6] },
+    ]);
+    expect(d.blocked.map((b) => [b.issue, b.reason])).toEqual([
+      [9, "joins-two-chunks"],
+    ]);
+  });
+
+  it("gives a chunk's root back to the chunk it names", () => {
+    // #753 landed on #751's branch while #751 itself was parked; nothing in
+    // the graph connects them any more, but #751 still belongs to its chunk.
+    const d = underway(
+      [issue(751), issue(753)],
+      { originChunks: on({ "sandbar/chunk-751-a": [753] }), settledGraph: null },
+    );
+    expect(d.chunks).toEqual([{
+      root: 751,
+      members: [751, 753],
+      parentless: [751, 753],
+      branch: "sandbar/chunk-751-a",
+    }]);
+  });
+
+  it("keeps an underway member in its chunk even inside a cycle", () => {
+    const d = underway(
+      [issue(10, [11]), issue(11, [10])],
+      { originChunks: on({ "sandbar/chunk-10-a": [10] }) },
+    );
+    expect(shape(d)).toEqual([{ root: 10, members: [10] }]);
+    expect(d.blocked).toEqual([{ issue: 11, reason: "cycle", blockers: [10] }]);
+  });
+});
+
+describe("deriveChunks — stable identity (#193)", () => {
+  // The design's own example of what must not happen: a lower-numbered root
+  // joining later renames nothing.
+  it("never renames an underway chunk when a lower root joins", () => {
+    const d = underway(
+      [issue(40), issue(47, [40]), issue(48, [47])],
+      { originChunks: on({ "sandbar/chunk-47-root": [47] }) },
+    );
+    expect(d.chunks.map((c) => [c.root, c.branch, c.members, c.parentless])).toEqual([
+      [47, "sandbar/chunk-47-root", [40, 47, 48], [40]],
+    ]);
+  });
+
+  it("keeps the in-flight target's root and branch before the first landing", () => {
+    // #753 was dispatched as #753's chunk; #751 is filed and joins later.
+    const d = underway(
+      [issue(677, [751, 753]), issue(751, [], "Renamed"), issue(753)],
+      { inFlight: flying({ 753: { root: 753, branch: "sandbar/chunk-753-old" } }) },
+    );
+    expect(d.chunks.map((c) => [c.root, c.branch, c.members])).toEqual([
+      [753, "sandbar/chunk-753-old", [677, 751, 753]],
+    ]);
+  });
+
+  it("keeps the identity of a branch whose root issue has left the graph", () => {
+    const d = underway(
+      [issue(753), issue(677, [753])],
+      { originChunks: on({ "sandbar/chunk-751-first": [753] }) },
+    );
+    expect(d.chunks.map((c) => [c.root, c.branch, c.members])).toEqual([
+      [751, "sandbar/chunk-751-first", [677, 753]],
+    ]);
+  });
+
+  // A member ref inherited through the source branch sits on a later chunk's
+  // branch too. The member answers to the root it is connected to.
+  it("assigns an inherited member ref to the chunk its root is connected to", () => {
+    const d = underway(
+      [issue(10), issue(11, [10]), issue(20)],
+      {
+        originChunks: on({
+          "sandbar/chunk-10-a": [10, 11],
+          "sandbar/chunk-20-b": [10, 11, 20],
+        }),
+      },
+    );
+    expect(shape(d)).toEqual([
+      { root: 10, members: [10, 11] },
+      { root: 20, members: [20] },
+    ]);
+  });
+
+  // #193, item 7: closeOrder is unchanged for a multi-root chunk — every
+  // dependent before its blockers, every other root before the identity
+  // root. The partial-close table is in plan-resolver.test.ts, where the
+  // CLOSED facts are an input.
+  it("closes a multi-root chunk dependents first and its identity root last", () => {
+    const branch = "sandbar/chunk-751-series";
+    const series = [
+      issue(677, [752, 753, 754]),
+      issue(751),
+      issue(752, [751]),
+      issue(753),
+      issue(754),
+    ];
+    const all = new Set([677, 751, 752, 753, 754]);
+    const d = underway(series, { originChunks: on({ [branch]: [...all] }) });
+    const [landed] = landedChunksOf(d.chunks, series, all);
+    expect(landed?.closeOrder.map((m) => m.number)).toEqual([
+      677, 754, 753, 752, 751,
+    ]);
+  });
+});
+
+describe("deriveChunks — settling (#193)", () => {
+  it("holds a fresh component until the pending graph is settled", () => {
+    const issues = [issue(753), issue(754), issue(677, [753, 754])];
+    const first = underway(issues, { settledGraph: null });
+    expect(first.chunks).toEqual([]);
+    expect(first.blocked).toEqual([
+      { issue: 677, reason: "unsettled", blockers: [] },
+      { issue: 753, reason: "unsettled", blockers: [] },
+      { issue: 754, reason: "unsettled", blockers: [] },
+    ]);
+    const second = underway(issues, { settledGraph: first.pendingGraph });
+    expect(shape(second)).toEqual([{ root: 753, members: [677, 753, 754] }]);
+    expect(second.blocked).toEqual([]);
+  });
+
+  it("does not settle a graph that changed since the previous poll", () => {
+    const early = underway([issue(753), issue(754)], { settledGraph: null });
+    const later = underway(
+      [issue(753), issue(754), issue(677, [753, 754])],
+      { settledGraph: early.pendingGraph },
+    );
+    expect(later.chunks).toEqual([]);
+    expect(later.pendingGraph).not.toBe(early.pendingGraph);
+  });
+
+  it("states the pending graph canonically, ignoring underway chunks", () => {
+    const one = underway(
+      [issue(1), issue(2, [1]), issue(7), issue(8, [7])],
+      { originChunks: on({ "sandbar/chunk-7-x": [7] }) },
+    );
+    const two = underway(
+      [issue(8, [7]), issue(2, [1]), issue(1), issue(7)],
+      { originChunks: on({ "sandbar/chunk-7-x": [7, 8] }) },
+    );
+    expect(one.pendingGraph).toBe("1 2<1");
+    expect(two.pendingGraph).toBe(one.pendingGraph);
+  });
+
+  it("leaves the gate open when no settled graph is given at all", () => {
+    expect(shape(allReview([issue(1)]))).toEqual([{ root: 1, members: [1] }]);
+  });
+});
+
+describe("chunk settle memory (#193)", () => {
+  it("settles only on two consecutive polls that agree", () => {
+    let memory = UNSETTLED;
+    expect(settledGraphFor(memory, true)).toBeNull();
+    memory = rememberPollGraph(memory, "1 2<1");
+    // The next poll compares against it; a recompute between polls does not.
+    expect(settledGraphFor(memory, true)).toBe("1 2<1");
+    expect(settledGraphFor(memory, false)).toBeNull();
+    memory = rememberPollGraph(memory, "1 2<1");
+    expect(settledGraphFor(memory, false)).toBe("1 2<1");
+    memory = rememberPollGraph(memory, "1 2<1 3");
+    expect(settledGraphFor(memory, false)).toBeNull();
+    expect(settledGraphFor(memory, true)).toBe("1 2<1 3");
   });
 });
 
@@ -255,7 +493,7 @@ describe("deriveChunks — hostile input", () => {
 
   it("returns empty for an empty candidate list", () => {
     const d = deriveChunks([], new Map());
-    expect(d).toEqual({ chunks: [], chunkOf: new Map(), blocked: [] });
+    expect(d).toEqual({ chunks: [], chunkOf: new Map(), blocked: [], pendingGraph: "" });
   });
 });
 

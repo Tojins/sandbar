@@ -837,10 +837,11 @@ async function runSandboxCycle(
   try {
     // Seed the issue branch off origin — never the host's local refs, so the
     // sandbox cannot inherit cwd's in-progress state. Idempotent. Off
-    // `origin/<sourceBranch>` for an ordinary issue, off the CHUNK TIP for a
-    // member chained behind one that has already landed (#61); which of the two
-    // is git-ops.ts's decision, made from `issue.chunk` and what origin
-    // actually carries.
+    // `origin/<sourceBranch>` for an ordinary issue or a chunk's parentless
+    // member, off the CHUNK TIP for a member chained behind one that has
+    // already landed (#61) or rework of a landed member; which of the two is
+    // git-ops.ts's decision, made from `issue.chunk` and what origin actually
+    // carries.
     //
     // The return value is the whole reason this is one call and not two: it is
     // the ref the branch was really cut from, and every range the prompts below
@@ -882,10 +883,9 @@ async function runSandboxCycle(
       });
     }
     // For a chunk member, `admitted` above already says which of the two
-    // seeds it got: `seedRef` is the chunk tip, or the source branch when the
-    // member roots a chunk origin does not carry yet (`ensureIssueBranch`
-    // gives the source branch to a member only when it IS the root, and
-    // throws otherwise), which is where the merge phase will create it.
+    // seeds it got: `seedRef` is the chunk tip, or the source branch for a
+    // parentless member that has not landed (`ChunkTarget.seed`, #193), which
+    // the merge phase then merges onto the chunk branch.
 
     // Worktree first (fast git ops), then container bringups in parallel: the
     // stack's mounts resolve against this worktree and must see its files on

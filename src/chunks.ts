@@ -4,8 +4,9 @@
 // A chunk is DERIVED, never declared. Nobody labels an issue "chunk 3"; the
 // chunk falls out of two things sandbar already knows: the lane of each issue
 // (`lanes.ts`) and the `## Blocked by` edges the planner already parses. A
-// chunk is a connected component of the REVIEW-GATED issues under those edges,
-// and a review-gated issue with no review-gated neighbours is a chunk of one.
+// chunk is a connected component of the REVIEW-GATED issues under those edges
+// taken in BOTH directions (#193), and a review-gated issue with no
+// review-gated neighbours is a chunk of one.
 //
 // That is the only definition that can be right, because it is the only one
 // that matches what a human reviewing the branch is actually looking at. Two
@@ -16,6 +17,14 @@
 // Conversely, two review-gated issues with no path between them share nothing —
 // putting them on one branch would only make a human's review bigger and couple
 // two landings that have no reason to be coupled.
+//
+// Both directions, because a series is filed that way. A freshly filed series
+// often has several independent roots that all lead into one final issue, the
+// one carrying the human review: #751 → #752, plus #753 and #754, all blocking
+// #677. Following edges only downward from each root gives three chunks and
+// holds #677 until all three are reviewed and landed apart, which is not what
+// the person filing it meant. So a chunk may have several PARENTLESS members,
+// and independent roots inside it are worked in parallel.
 //
 // The lane is the input, not a second opinion about it. Everything here reads
 // `lanes.get(n).lane === "review"`, which already carries #57's downward
@@ -31,17 +40,18 @@
 // then puts the display-only `needs-review` label on it.
 //
 // A whole chunk is WORKED, one layer at a time. `plan-resolver.ts` plans any
-// member whose blockers are satisfied, root or not (#61): the root seeds from
-// `origin/<sourceBranch>` — exactly where its chunk branch is created when
-// absent, so the two agree — and every member behind it seeds from the chunk's
-// TIP, which is where its blockers' commits actually are. A chunk therefore
-// grows one LAYER per cycle rather than one member: a member is unblocked by a
-// blocker whose origin member ref is contained by the chunk branch, visible in the
-// cycle AFTER the one that landed it, so every member planned together is a
-// set of siblings.
+// member whose blockers are satisfied (#61). A parentless member that has not
+// landed seeds from `origin/<sourceBranch>` and the merger merges it onto the
+// chunk branch, creating that branch on the chunk's first landing; every
+// member with a blocker inside the chunk, and rework of a landed member, seeds
+// from the chunk's TIP, which is where its blockers' commits actually are
+// (`ChunkTarget.seed`, read by `git-ops.ts`). A chained member is unblocked by
+// a blocker whose origin member ref is contained by the chunk branch, visible
+// in the cycle AFTER the one that landed it, so a chain grows one LAYER per
+// cycle and every member planned together is a sibling or another root.
 //
-// The one thing still held is a review-gated issue with NO chunk — the output
-// of `blocked` below. There is no branch to name and no tip to seed from, so
+// What is still held is a review-gated issue with NO chunk — the output of
+// `blocked` below. There is no branch to name and no tip to seed from, so
 // working it could only end in auto-landing unreviewed code.
 //
 // ---------------------------------------------------------------------------
@@ -58,7 +68,8 @@
 // the fail-safe de-queue fact; membership on the exact selected branch is the
 // stricter blocker-satisfaction fact. Membership is never read from a label.
 // The planner reads those members from git and fetches their issues back into
-// the candidate graph so the chunk cannot re-root around whatever remains queued.
+// the candidate graph, and a landed member answers to the branch carrying it,
+// so the chunk cannot re-root around whatever remains queued.
 //
 // Hardcoded, not a `LabelConfig` knob: configurability is outside #93's scope,
 // and the name is embedded in human-facing prose across finalise, chunk
@@ -67,61 +78,79 @@
 // step. The declaration is below the imports.
 //
 // ---------------------------------------------------------------------------
-// The two-chunk-parent rule
+// Underway chunks: join, never merge (#193)
 // ---------------------------------------------------------------------------
 //
-// An issue blocked by members of two DIFFERENT chunks is blocked — held out of
-// every chunk — until its blockers are on the source branch or all in one
-// chunk. Chunks are never merged to accommodate it.
+// Plain connected components are right for a series nobody has started, and
+// wrong for work already in progress: an issue filed across two unrelated
+// review series would silently fuse both into one branch, and the human who
+// was reviewing a three-issue chunk is handed nine issues they never agreed to
+// look at together — retroactively, to work that may already be on origin.
 //
-// The alternative is the whole reason the rule is written down: plain connected
-// components WOULD merge them, since that issue is a path between the two. So
-// an issue somebody files across two unrelated review series silently fuses
-// both into one branch, and the human who was reviewing a three-issue chunk is
-// now handed nine issues they never agreed to look at together. Worse, it is
-// retroactive — the merge happens the moment the new issue is filed, to work
-// that may already be underway. Refusing to grow a chunk that way keeps the
-// unit of review a thing a human chose, and the cost falls on the one issue
-// that straddles: it waits, which it would have had to do anyway, since both
-// its blockers must land before it can be built on them.
+// So a component is UNDERWAY once a member is in flight (dispatched to a
+// sandbox, `inFlight`; a restart drains running work, so this stays accurate)
+// or has landed on a chunk branch (`originChunks`). An underway chunk has an
+// IDENTITY — the root its origin branch, or its in-flight members' dispatched
+// targets, already name — and keeps it: a lower-numbered root joining later
+// never renames it, so there is no spurious `rerooted` drift, and a member's
+// `ChunkTarget` is never re-targeted after dispatch. A landed member answers to
+// the root encoded in the branch carrying its member ref; a ref inherited
+// through the source branch can sit on several branches at once, and the root
+// connected to the member, then the lowest, wins.
 //
-// "Blocked" here is a fact about chunk assignment, not a label or a comment.
-// Reporting it to a human is a later issue's job; this module names it so
-// there is something to report.
+// A not-yet-started part of the graph JOINS the one underway chunk it connects
+// to. An issue that would join two or more underway chunks is held
+// (`joins-two-chunks`), and so is everything downstream of it
+// (`unchunked-blocker`). Chunk branches are never merged; the cost falls on
+// the one issue that straddles, which waits for one side to land and close.
 //
 // ---------------------------------------------------------------------------
-// Why the walk is topological, and not a union-find over the edge set
+// Why the walk is topological, over a union-find
 // ---------------------------------------------------------------------------
 //
-// The two-chunk rule makes the answer depend on the order issues are decided
-// in, and only one order is defensible. Take A and B unrelated, X blocked by
-// both, and Y also blocked by both. Union-find in issue order unions X with A,
-// then X with B — the merge the rule forbids. Deciding each issue by looking at
-// the components of the graph WITHOUT it is no better: with X removed, Y joins
-// A and B into one component, so X sees one chunk and joins; by symmetry so
-// does Y; both join and the chunks are merged after all.
-//
-// Deciding an issue only once every one of its blockers is decided removes the
-// ambiguity entirely: X and Y each see A and B already settled as two chunks,
-// and each is blocked. That order is a topological order of the blocked-by
-// edges, so the walk here is Kahn's algorithm over the review-gated subgraph,
+// Groups are built by union-find, each issue uniting with its blockers once
+// all of them are decided — Kahn's order over the review-gated subgraph,
 // smallest issue number first among the ready set purely so the output is
-// deterministic.
+// deterministic. Uniting every edge from the dependent's side is what makes
+// the components undirected: fresh roots A and B with X blocked by both become
+// one group through X. The order matters only at the join rule: a group's
+// identity is fixed by the first underway chunk it unites with, and an issue
+// whose blockers' groups carry two identities is held rather than united. An
+// underway issue keeps its identity whatever its edges say, and pulls in any
+// fresh group among its blockers. A fresh group that contains the very issue
+// an underway chunk is named after joins that chunk: a root belongs to the
+// chunk it names.
 //
-// A consequence worth stating, because it is what makes `root` well defined: a
-// chunk only ever grows by attaching an issue whose blockers are all in that
-// one chunk, and it is seeded by an issue with no review-gated blockers at all.
-// So a chunk has exactly ONE parentless member, its seed. `chunkRoot` still
-// takes the lowest-numbered parentless member as #58 specifies it — a total
-// rule that does not depend on the reader trusting that argument.
+// Root of a FRESH group: its lowest-numbered parentless member — a total rule,
+// and the one #58 specified. It becomes the identity once a member is
+// dispatched with a target naming it.
 //
 // CYCLES are hostile input: two issues can name each other under `## Blocked
 // by`, and a human wrote them. Kahn's simply never reaches those nodes, nor
-// anything downstream of them, and they come out `blocked` with reason
-// `cycle`. That is the honest answer rather than a diagnostic failure — a cycle
-// has no parentless member, so it has no root, so it cannot be named; and the
-// planner deadlocks on a cyclic pair regardless, since neither blocker will
-// ever read CLOSED.
+// anything downstream of them, and a not-yet-started one comes out `blocked`
+// with reason `cycle`. That is the honest answer rather than a diagnostic
+// failure — a cycle has no parentless member, so it has no root, so it cannot
+// be named; and the planner deadlocks on a cyclic pair regardless, since
+// neither blocker will ever read CLOSED. An underway issue keeps its chunk.
+//
+// ---------------------------------------------------------------------------
+// Settling: fresh components wait for the graph to hold still (#193)
+// ---------------------------------------------------------------------------
+//
+// A series is published one issue at a time, and a poll that lands between
+// two of them sees roots that a later issue will connect. Started then, they
+// would be two underway chunks and the connecting issue would be held. So a
+// FRESH component — one no underway chunk claims — starts only once two
+// consecutive polls see the same `pendingGraph`: every review-gated issue no
+// underway chunk claims, with its edges among those issues (auto-lane issues
+// and underway chunks are ignored, so their churn does not hold new work).
+// Until then its members are `unsettled`. Joining an underway chunk needs no
+// settling: a later issue can only join the same chunk or be held.
+//
+// The previous poll's graph is the caller's memory (`run.ts`), handed back as
+// `settledGraph`: no extra GitHub calls and no time knob, and a restart costs
+// one extra poll. That is what lets a series published in one go be chunked
+// as a whole.
 //
 // ---------------------------------------------------------------------------
 // What is NOT an edge
@@ -214,6 +243,15 @@ export type ChunkTarget = {
   // and context builders have nothing to say about it, and an absent list
   // reads as "none known", which is what they mean.
   readonly landed?: readonly ChunkMember[];
+  // Where this member's issue branch is cut (#193), decided at plan time and
+  // fixed at dispatch like the rest of the target. "source" for a parentless
+  // member that has not landed: it builds on nothing else in the chunk, so it
+  // seeds from `origin/<sourceBranch>` and the merger merges it onto the
+  // chunk branch, creating that branch on the chunk's first landing. "tip"
+  // for a member with blockers inside the chunk and for rework of a landed
+  // member: their work has to sit on top of what the chunk branch carries.
+  // Absent reads as "tip", the answer that can only refuse, never mis-seed.
+  readonly seed?: "source" | "tip";
 };
 
 // A chunk that must catch up to the source branch before one or more chained
@@ -237,11 +275,17 @@ export type ChunkIssue = {
 };
 
 export type Chunk = {
-  // The lowest-numbered member with no blocker inside the chunk. It names the
-  // branch and identifies the chunk everywhere else.
+  // The chunk's identity: the root its origin branch or its in-flight
+  // members' targets already name, and before either exists the
+  // lowest-numbered parentless member. It names the branch and identifies the
+  // chunk everywhere else. Not necessarily a member: an underway chunk keeps
+  // its root even once that issue has left the graph.
   readonly root: number;
-  // Every issue that lands on this chunk's branch, ascending, root included.
+  // Every issue that lands on this chunk's branch, ascending.
   readonly members: readonly number[];
+  // The members with no blocker inside the chunk, ascending: its roots in the
+  // plural sense. Each seeds from the source branch until it has landed.
+  readonly parentless: readonly number[];
   // `sandbar/chunk-<root>-<slug>`. One origin branch for `root` keeps its
   // existing name across title edits; otherwise the name is derived from the
   // current title. This function remains pure because origin's branch names
@@ -268,11 +312,9 @@ export type LandedChunk = {
   // the git-derived members rather than `Chunk.members`. A component holds
   // members that have never been worked — a chained member waits for its
   // blockers to land — and closing one of those would destroy a queued issue
-  // while telling a human its commits were on the source branch, and would
-  // cancel the re-rooting the design turns on: a member left OPEN has its
-  // blocker satisfied by CLOSED and becomes its own chunk's root, while a
-  // closed one never does. It is the same set the chunk's pull request lists
-  // (#62), so a landing closes exactly what that PR said it carried.
+  // while telling a human its commits were on the source branch. It is the
+  // same set the chunk's pull request lists (#62), so a landing closes exactly
+  // what that PR said it carried.
   readonly members: readonly ChunkMember[];
   // The same members, in the one order a landing may CLOSE them in: every
   // member before every member it is blocked by, so the ROOT is last.
@@ -283,23 +325,17 @@ export type LandedChunk = {
   // only the derivation can compute. It is here for one reason, and the reason
   // is what happens when a close FAILS. The wrap-up stops there and keeps the
   // branch so the next cycle's reconciler retries it, and that retry finds the
-  // chunk again only if it still has the same root identity — that is, only if
-  // its root is still open, since a closed root leaves the graph and re-roots
-  // the chunk under a survivor.
+  // chunk again only if it still has the same root identity and members.
   //
-  // Closing in this order and stopping at the first failure is what makes that
-  // true, and nothing weaker does. The members left open are then every
-  // ancestor of the one that failed plus everything not yet attempted: the
-  // root is among them (it is last), every one of them reaches the root
-  // through members that are also still open (its own blockers are all later
-  // in this order), and no other member of the set is parentless. So the next
-  // cycle derives the same root, the same branch and exactly these members —
-  // which is the promise the landing's own prose makes to a human.
-  //
-  // Stopping matters as much as the order: close #43 and fail on #44 with the
-  // root #42 left for last, and #44's blocker is gone, so #44 re-roots into a
-  // chunk of its own on a branch origin has never had, while the branch it
-  // really is on matches nothing and is deleted out from under it.
+  // Since #193 that holds structurally: the closed members are still on the
+  // kept branch, `buildPlan` fetches them back into the graph by their member
+  // refs, and a landed member answers to the root its branch encodes — so the
+  // next cycle derives the same chunk, root and branch, multi-root or not,
+  // which is the promise the landing's own prose makes to a human. The order
+  // is kept as the second line of that argument: the members left open are
+  // every ancestor of the one that failed plus everything not yet attempted,
+  // so the open remainder still reaches the root through open members even
+  // for a reader that ignored closed ones.
   readonly closeOrder: readonly ChunkMember[];
   // Members explicitly put back in the authoritative agent queue for rework.
   readonly rework: readonly ChunkMember[];
@@ -311,27 +347,33 @@ export type LandedChunk = {
   readonly tips: readonly ChunkMember[];
 };
 
-// Why an issue got no chunk. All three mean "wait", never "give up".
+// Why an issue got no chunk. All four mean "wait", never "give up".
 //
-//   two-chunk-parent  — its blockers sit in two or more different chunks (the
-//                       rule above). Resolves when those chunks land.
+//   joins-two-chunks  — placing it would join two or more UNDERWAY chunks (the
+//                       join rule above). Resolves when those chunks land.
 //   unchunked-blocker — a blocker of its own has no chunk, so neither can it.
-//                       The transitive shadow of the other two reasons.
+//                       The transitive shadow of the other reasons.
 //   cycle             — it is inside a `## Blocked by` cycle, or downstream of
 //                       one. Resolves only when a human edits the bodies.
+//   unsettled         — it is in a fresh component and the pending graph has
+//                       not yet held still across two polls. Resolves on its
+//                       own once it does.
 export type ChunkBlockReason =
-  | "two-chunk-parent"
+  | "joins-two-chunks"
   | "unchunked-blocker"
-  | "cycle";
+  | "cycle"
+  | "unsettled";
 
 export type ChunkBlock = {
   readonly issue: number;
   readonly reason: ChunkBlockReason;
   // The review-gated blockers that account for the reason, ascending: ALL of
-  // them for `two-chunk-parent` (it is the set of chunks they land in that
-  // conflicts, so no subset states it) and for `cycle` (which edge closes the
-  // loop is not decided here), and only the ones with no chunk of their own for
-  // `unchunked-blocker`. Resolve them through `chunkOf` to name the chunks.
+  // them for `joins-two-chunks` (it is the set of chunks they land in that
+  // conflicts, so no subset states it — or, for a fresh component holding
+  // several underway roots, those roots) and for `cycle` (which edge closes
+  // the loop is not decided here), only the ones with no chunk of their own for
+  // `unchunked-blocker`, and none for `unsettled`. Resolve them through
+  // `chunkOf` to name the chunks.
   readonly blockers: readonly number[];
 };
 
@@ -343,6 +385,11 @@ export type ChunkDerivation = {
   readonly chunkOf: ReadonlyMap<number, number>;
   // Review-gated issues that landed in no chunk, in issue order.
   readonly blocked: readonly ChunkBlock[];
+  // The settling key: every review-gated issue no underway chunk claims, with
+  // its `## Blocked by` edges among those issues, in one canonical string.
+  // The caller remembers it across polls and hands it back as
+  // `settledGraph`; nothing else may read meaning into its spelling.
+  readonly pendingGraph: string;
 };
 
 const ascending = (a: number, b: number): number => a - b;
@@ -361,14 +408,34 @@ export function chunkBranchesByRoot(
   return byRoot;
 }
 
+// What the derivation is told about work already underway, and about the
+// graph the previous polls saw. Every field is optional so a table test can
+// state a bare graph; `plan-resolver.ts` passes all of them.
+export type DeriveChunksOptions = {
+  // Origin's chunk branches, each with the issues whose member refs it
+  // contains (`readChunkMembers`). A contained member has LANDED, so its
+  // component is underway, and the branch's encoded root is its identity.
+  readonly originChunks?: ReadonlyMap<string, ReadonlySet<number>>;
+  // In-flight issues and the chunk their dispatched `ChunkTarget` names.
+  // Fixed at dispatch, so it is identity, not a second opinion about it.
+  readonly inFlight?: ReadonlyMap<number, ChunkTarget>;
+  // The pending graph the caller accepts as settled (see "Settling" above):
+  // fresh components start only when today's `pendingGraph` equals it.
+  // Undefined disables the gate — every fresh component starts — which is
+  // what a table test about shapes wants; null settles nothing.
+  readonly settledGraph?: string | null;
+};
+
 // `lanes` is typed to the one field it reads rather than to `LaneDecision`, so
 // the table tests can state a lane instead of building a decision around it.
 // A `computeLanes` result is assignable as-is.
 export function deriveChunks(
   issues: readonly ChunkIssue[],
   lanes: ReadonlyMap<number, { readonly lane: Lane }>,
-  originChunkBranches: readonly string[] = [],
+  options: DeriveChunksOptions = {},
 ): ChunkDerivation {
+  const originChunks = options.originChunks ?? new Map<string, ReadonlySet<number>>();
+  const inFlight = options.inFlight ?? new Map<number, ChunkTarget>();
   const gated = new Map<number, ChunkIssue>();
   for (const issue of issues) {
     if (lanes.get(issue.number)?.lane === "review") gated.set(issue.number, issue);
@@ -390,48 +457,100 @@ export function deriveChunks(
     }
   }
 
+  // The whole graph's components, edges in both directions. Read only to
+  // disambiguate a member ref contained by more than one chunk branch (below).
+  const whole = new UnionFind();
+  for (const [number, blockers] of parents) {
+    whole.add(number);
+    for (const blocker of blockers) whole.union(number, blocker);
+  }
+
+  // Identity of every UNDERWAY issue: the root its chunk already answers to.
+  // An in-flight member's dispatched target wins; a landed member answers to
+  // the root encoded in the branch carrying its member ref. A ref inherited
+  // through the source branch can make several branches contain one member, so
+  // prefer a root connected to it, then the lowest — the older chunk, which is
+  // the one that inherited copies came from.
+  const containing = new Map<number, number[]>();
+  for (const [branch, members] of originChunks) {
+    const root = rootIssueFromChunkBranch(branch);
+    if (root === null) continue;
+    for (const member of members) {
+      const roots = containing.get(member);
+      if (roots) roots.push(root);
+      else containing.set(member, [root]);
+    }
+  }
+  const identityOf = new Map<number, number>();
+  for (const number of gated.keys()) {
+    const dispatched = inFlight.get(number);
+    if (dispatched) {
+      identityOf.set(number, dispatched.root);
+      continue;
+    }
+    const roots = [...new Set(containing.get(number) ?? [])].sort(ascending);
+    if (roots.length === 0) continue;
+    const connected = roots.filter(
+      (r) => gated.has(r) && whole.find(r) === whole.find(number),
+    );
+    identityOf.set(number, connected[0] ?? roots[0]!);
+  }
+  const underwayRoots = new Set(identityOf.values());
+
+  // Groups are built by union-find; a group's identity is the underway root it
+  // answers to, or absent while it is FRESH. Two identities never meet in one
+  // group: every union below is refused, or held, when it would do that.
+  const groups = new UnionFind();
+  const identity = new Map<number, number>();
+  const identityOfGroup = (n: number): number | undefined => identity.get(groups.find(n));
+  const join = (a: number, b: number): void => {
+    const id = identityOfGroup(a) ?? identityOfGroup(b);
+    const top = groups.union(a, b);
+    if (id !== undefined) identity.set(top, id);
+  };
+  for (const [number, root] of identityOf) {
+    groups.add(number);
+    identity.set(groups.find(number), root);
+  }
+
+  const held = new Map<number, ChunkBlock>();
   const indegree = new Map<number, number>();
   for (const [number, blockers] of parents) indegree.set(number, blockers.length);
-
-  // Components keyed by their seed. The seed is provisional — the root each
-  // chunk reports is recomputed from the members below, by #58's rule.
-  const seedOf = new Map<number, number>();
-  const componentMembers = new Map<number, number[]>();
-  const blocked: ChunkBlock[] = [];
-
+  const reached = new Set<number>();
   const ready = [...gated.keys()].filter((n) => indegree.get(n) === 0);
   ready.sort(ascending);
   while (ready.length > 0) {
     const number = ready.shift();
     if (number === undefined) break;
+    reached.add(number);
+    // Every blocker is decided by now: placed in a group, or held.
     const blockers = parents.get(number) ?? [];
-
-    // Every blocker is decided by now, so an undecided one can only be a
-    // blocker that was itself blocked.
-    const unchunked = blockers.filter((b) => !seedOf.has(b));
-    if (unchunked.length > 0) {
-      blocked.push({ issue: number, reason: "unchunked-blocker", blockers: unchunked });
+    if (identityOf.has(number)) {
+      // Underway already. It keeps its identity whatever its edges say, and
+      // pulls in any FRESH blocker group — the join rule, read from below.
+      for (const b of blockers) {
+        if (groups.has(b) && identityOfGroup(b) === undefined) join(number, b);
+      }
     } else {
-      const seeds = new Set(
+      const unchunked = blockers.filter((b) => !groups.has(b));
+      const ids = new Set(
         blockers
-          .map((b) => seedOf.get(b))
-          .filter((s): s is number => s !== undefined),
+          .map(identityOfGroup)
+          .filter((id): id is number => id !== undefined),
       );
-      if (seeds.size > 1) {
-        blocked.push({ issue: number, reason: "two-chunk-parent", blockers });
+      if (unchunked.length > 0) {
+        held.set(number, { issue: number, reason: "unchunked-blocker", blockers: unchunked });
+      } else if (ids.size > 1) {
+        held.set(number, { issue: number, reason: "joins-two-chunks", blockers });
       } else {
-        // No blockers at all ⇒ this issue seeds a chunk of its own.
-        const seed = [...seeds][0] ?? number;
-        seedOf.set(number, seed);
-        const members = componentMembers.get(seed);
-        if (members) members.push(number);
-        else componentMembers.set(seed, [number]);
+        groups.add(number);
+        for (const b of blockers) join(number, b);
       }
     }
 
-    // Retire the edge whether this issue got a chunk or not: a dependent of a
-    // blocked issue still has to be DECIDED (as `unchunked-blocker`), and
-    // leaving its in-degree standing would silently reclassify it as a cycle.
+    // Retire the edge whether this issue got a group or not: a dependent of a
+    // held issue still has to be DECIDED (as `unchunked-blocker`), and leaving
+    // its in-degree standing would silently reclassify it as a cycle.
     for (const child of children.get(number) ?? []) {
       const left = (indegree.get(child) ?? 0) - 1;
       indegree.set(child, left);
@@ -442,50 +561,174 @@ export function deriveChunks(
     }
   }
 
+  // Whatever Kahn's never reached is in a `## Blocked by` cycle or downstream
+  // of one. An underway member keeps the group it was seeded into above.
+  for (const number of [...gated.keys()].sort(ascending)) {
+    if (reached.has(number) || identityOf.has(number)) continue;
+    held.set(number, { issue: number, reason: "cycle", blockers: parents.get(number) ?? [] });
+  }
+
+  // Members of each group, keyed by the group's union-find top.
+  const membersOf = new Map<number, number[]>();
+  for (const number of [...gated.keys()].sort(ascending)) {
+    if (!groups.has(number)) continue;
+    const top = groups.find(number);
+    const members = membersOf.get(top);
+    if (members) members.push(number);
+    else membersOf.set(top, [number]);
+  }
+
+  // A fresh group holding the very issue an underway chunk is named after is
+  // that chunk's: the root belongs to the chunk it names. Holding two such
+  // issues would join two underway chunks, so it is held instead.
+  for (const [top, members] of membersOf) {
+    if (identity.has(top)) continue;
+    const named = [...new Set(members.filter((m) => underwayRoots.has(m)))];
+    if (named.length === 1) identity.set(top, named[0]!);
+    else if (named.length > 1) {
+      for (const m of members) {
+        held.set(m, { issue: m, reason: "joins-two-chunks", blockers: named });
+      }
+      membersOf.delete(top);
+    }
+  }
+
+  // The settling comparison: every review-gated issue no underway chunk
+  // claims, with its edges among those issues.
+  const underway = (n: number): boolean =>
+    groups.has(n) && membersOf.has(groups.find(n)) && identity.has(groups.find(n));
+  const pending = [...gated.keys()].filter((n) => !underway(n)).sort(ascending);
+  const pendingSet = new Set(pending);
+  const pendingGraph = pending
+    .map((n) => {
+      const edges = (parents.get(n) ?? []).filter((p) => pendingSet.has(p));
+      return edges.length > 0 ? `${n}<${edges.join(",")}` : `${n}`;
+    })
+    .join(" ");
+  const settled = options.settledGraph === undefined ||
+    options.settledGraph === pendingGraph;
+
+  const byRoot = new Map<number, number[]>();
+  for (const [top, members] of membersOf) {
+    let root = identity.get(top);
+    if (root === undefined) {
+      if (!settled) {
+        for (const m of members) held.set(m, { issue: m, reason: "unsettled", blockers: [] });
+        continue;
+      }
+      const inGroup = new Set(members);
+      // `members` is non-empty and holds no cycle, so a parentless member
+      // exists; the fallback is here because an index is typed `T | undefined`.
+      root = members.find(
+        (m) => !(parents.get(m) ?? []).some((p) => inGroup.has(p)),
+      ) ?? members[0]!;
+    }
+    const existing = byRoot.get(root);
+    if (existing) existing.push(...members);
+    else byRoot.set(root, [...members]);
+  }
+
   const chunks: Chunk[] = [];
   const chunkOf = new Map<number, number>();
-  const originBranchesByRoot = chunkBranchesByRoot(originChunkBranches);
-  for (const rawMembers of componentMembers.values()) {
+  const originBranchesByRoot = chunkBranchesByRoot([...originChunks.keys()].sort());
+  for (const [root, rawMembers] of byRoot) {
     const members = [...rawMembers].sort(ascending);
     const inChunk = new Set(members);
     // Parentless WITHIN the chunk: blockers outside it are on the source
-    // branch (or in the auto lane and heading there), which is exactly the
-    // state the two-chunk rule says an issue is waiting for.
+    // branch (or in the auto lane and heading there).
     const parentless = members.filter(
       (m) => !(parents.get(m) ?? []).some((p) => inChunk.has(p)),
     );
-    // `members` is non-empty and ascending, and the seed is always parentless,
-    // so both fallbacks are unreachable; they are here because an index and a
-    // `Map.get` are typed `T | undefined`.
-    const root = parentless[0] ?? members[0] ?? 0;
-    const title = gated.get(root)?.title ?? "";
     const originBranches = originBranchesByRoot.get(root) ?? [];
-    // The issue number is the durable identity. A title edit changes only the
-    // human-readable slug, so one existing origin branch for this root wins
-    // over today's spelling. More than one is deliberately not selected: the
-    // planner reports every competing branch as drifted and holds new work.
+    // The issue number is the durable identity. One existing origin branch
+    // for this root wins over today's spelling, and before the first landing
+    // so does the branch an in-flight member was dispatched to. More than one
+    // origin branch is deliberately not selected: the planner reports every
+    // competing branch as drifted and holds new work.
+    const dispatched = members
+      .map((m) => inFlight.get(m))
+      .find((t) => t !== undefined && t.root === root)?.branch;
     const branch = originBranches.length === 1
       ? originBranches[0]!
-      : chunkBranchName(root, title);
-    chunks.push({ root, members, branch });
+      : originBranches.length === 0 && dispatched !== undefined
+      ? dispatched
+      : chunkBranchName(root, gated.get(root)?.title ?? "");
+    chunks.push({ root, members, parentless, branch });
     for (const member of members) chunkOf.set(member, root);
   }
   chunks.sort((a, b) => a.root - b.root);
 
-  // Whatever Kahn's never reached is in a `## Blocked by` cycle or downstream
-  // of one: those are the only nodes whose in-degree never reaches zero.
-  for (const number of [...gated.keys()].sort(ascending)) {
-    if (seedOf.has(number)) continue;
-    if (blocked.some((b) => b.issue === number)) continue;
-    blocked.push({
-      issue: number,
-      reason: "cycle",
-      blockers: parents.get(number) ?? [],
-    });
-  }
-  blocked.sort((a, b) => a.issue - b.issue);
+  const blocked = [...held.values()].sort((a, b) => a.issue - b.issue);
+  return { chunks, chunkOf, blocked, pendingGraph };
+}
 
-  return { chunks, chunkOf, blocked };
+// The settling memory `run.ts` carries across recomputes (#193): the pending
+// graph the latest poll saw, and whether it equalled the one the poll before
+// saw. Kept in memory only, so a restart costs one extra poll.
+export type ChunkSettleMemory = {
+  readonly lastPoll: string | null;
+  readonly agreed: boolean;
+};
+
+export const UNSETTLED: ChunkSettleMemory = { lastPoll: null, agreed: false };
+
+// The `settledGraph` a recompute may plan with. At a poll, the previous
+// poll's graph: today's settles iff the two consecutive polls agree. Between
+// polls (a freed slot, a landing), only a graph two polls already agreed on —
+// otherwise a recompute seconds after a poll would settle a series that is
+// still being published.
+export function settledGraphFor(
+  memory: ChunkSettleMemory,
+  atPoll: boolean,
+): string | null {
+  return atPoll || memory.agreed ? memory.lastPoll : null;
+}
+
+// What a poll's recompute leaves behind for the next one.
+export function rememberPollGraph(
+  memory: ChunkSettleMemory,
+  pendingGraph: string,
+): ChunkSettleMemory {
+  return { lastPoll: pendingGraph, agreed: memory.lastPoll === pendingGraph };
+}
+
+// A plain union-find over issue numbers. `union` returns the surviving top so
+// the caller can carry a group's data across the merge.
+class UnionFind {
+  readonly #parent = new Map<number, number>();
+
+  has(n: number): boolean {
+    return this.#parent.has(n);
+  }
+
+  add(n: number): void {
+    if (!this.#parent.has(n)) this.#parent.set(n, n);
+  }
+
+  find(n: number): number {
+    let top = n;
+    for (let up = this.#parent.get(top); up !== undefined && up !== top; up = this.#parent.get(top)) {
+      top = up;
+    }
+    // Path compression: every node walked now points at the top directly.
+    for (let at = n; at !== top;) {
+      const up = this.#parent.get(at)!;
+      this.#parent.set(at, top);
+      at = up;
+    }
+    return top;
+  }
+
+  union(a: number, b: number): number {
+    this.add(a);
+    this.add(b);
+    const ta = this.find(a);
+    const tb = this.find(b);
+    // The lower number survives, so the result never depends on call order.
+    const [top, child] = ta <= tb ? [ta, tb] : [tb, ta];
+    this.#parent.set(child, top);
+    return top;
+  }
 }
 
 /**
