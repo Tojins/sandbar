@@ -444,6 +444,22 @@ describe("deriveChunks — settling (#193)", () => {
     expect(two.pendingGraph).toBe(one.pendingGraph);
   });
 
+  it("ignores issues that became underway since the previous poll", () => {
+    // Both series were pending at the previous poll; #1's has started since.
+    // #5's is unchanged, so it settles without waiting another poll.
+    const issues = [issue(1), issue(2, [1]), issue(5), issue(6, [5])];
+    const previous = underway(issues, { settledGraph: null }).pendingGraph;
+    expect(previous).toBe("1 2<1 5 6<5");
+    const d = underway(issues, {
+      settledGraph: previous,
+      inFlight: flying({ 1: { root: 1, branch: "sandbar/chunk-1-issue-1" } }),
+    });
+    expect(shape(d)).toEqual([
+      { root: 1, members: [1, 2] },
+      { root: 5, members: [5, 6] },
+    ]);
+  });
+
   it("leaves the gate open when no settled graph is given at all", () => {
     expect(shape(allReview([issue(1)]))).toEqual([{ root: 1, members: [1] }]);
   });

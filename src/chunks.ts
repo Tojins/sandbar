@@ -143,7 +143,10 @@
 // FRESH component — one no underway chunk claims — starts only once two
 // consecutive polls see the same `pendingGraph`: every review-gated issue no
 // underway chunk claims, with its edges among those issues (auto-lane issues
-// and underway chunks are ignored, so their churn does not hold new work).
+// and underway chunks are ignored, so their churn does not hold new work —
+// on both sides of the comparison, so an issue that became underway since the
+// previous poll leaves the remembered graph too, and one fresh chunk starting
+// does not cost every other fresh component another poll).
 // Until then its members are `unsettled`. Joining an underway chunk needs no
 // settling: a later issue can only join the same chunk or be held.
 //
@@ -599,14 +602,21 @@ export function deriveChunks(
     groups.has(n) && membersOf.has(groups.find(n)) && identity.has(groups.find(n));
   const pending = [...gated.keys()].filter((n) => !underway(n)).sort(ascending);
   const pendingSet = new Set(pending);
-  const pendingGraph = pending
-    .map((n) => {
-      const edges = (parents.get(n) ?? []).filter((p) => pendingSet.has(p));
-      return edges.length > 0 ? `${n}<${edges.join(",")}` : `${n}`;
-    })
-    .join(" ");
-  const settled = options.settledGraph === undefined ||
-    options.settledGraph === pendingGraph;
+  const pendingGraph = graphKey(
+    pending.map((n) => [n, (parents.get(n) ?? []).filter((p) => pendingSet.has(p))]),
+  );
+  // Underway chunks are ignored on BOTH sides: an issue that has become
+  // underway since the previous poll (a fresh chunk that just started, an
+  // issue that joined one) leaves the remembered graph too, so one chunk
+  // starting does not cost every other fresh component another poll.
+  const settled = options.settledGraph === undefined || (
+    options.settledGraph !== null &&
+    graphKey(
+      parseGraphKey(options.settledGraph)
+        .filter(([n]) => !underway(n))
+        .map(([n, edges]) => [n, edges.filter((e) => !underway(e))]),
+    ) === pendingGraph
+  );
 
   const byRoot = new Map<number, number[]>();
   for (const [top, members] of membersOf) {
@@ -660,6 +670,28 @@ export function deriveChunks(
 
   const blocked = [...held.values()].sort((a, b) => a.issue - b.issue);
   return { chunks, chunkOf, blocked, pendingGraph };
+}
+
+// `pendingGraph`'s spelling: ascending issues, each with its ascending
+// in-graph blockers, as `n` or `n<a,b`, space-separated. Only this module
+// writes or reads it.
+type GraphEntry = readonly [number, readonly number[]];
+
+function graphKey(entries: readonly GraphEntry[]): string {
+  return [...entries]
+    .sort((a, b) => a[0] - b[0])
+    .map(([n, edges]) => {
+      const sorted = [...edges].sort(ascending);
+      return sorted.length > 0 ? `${n}<${sorted.join(",")}` : `${n}`;
+    })
+    .join(" ");
+}
+
+function parseGraphKey(key: string): readonly GraphEntry[] {
+  return key.split(" ").filter(Boolean).map((token): GraphEntry => {
+    const [n, edges] = token.split("<");
+    return [Number(n), edges ? edges.split(",").map(Number) : []];
+  });
 }
 
 // The settling memory `run.ts` carries across recomputes (#193): the pending
