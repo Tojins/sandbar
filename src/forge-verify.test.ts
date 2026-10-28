@@ -237,6 +237,14 @@ describe("buildForgeRedTrace", () => {
     expect(t).toContain("### tests");
     expect(t).toContain("no step output captured");
   });
+
+  it("tails each job to the caller's line budget", () => {
+    const log = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
+    const t = buildForgeRedTrace([{ name: "deploy", log }], 60);
+    expect(t).toContain("line 99");
+    expect(t).toContain("line 40");
+    expect(t).not.toContain("line 39");
+  });
 });
 
 describe("verifiedLandingOptionsFrom", () => {
