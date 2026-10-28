@@ -27,6 +27,9 @@
 //   podman volume ls -q --filter dangling=true | grep -E '^[0-9a-f]{64}$' \
 //     | xargs -r podman volume rm
 //
+// Egress proxies and their internal networks (#202) carry the scoped prefix
+// too, so the same order reaps them: the proxy as a container, then its network.
+//
 // PODS MUST BE SWEPT SEPARATELY, not as tidiness (#24): a pod's infra
 // container is named `<pod-id-prefix>-infra` — matching no sandbar prefix —
 // so a name-only container sweep leaves the pod alive and its network
