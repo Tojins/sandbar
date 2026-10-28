@@ -34,6 +34,7 @@ import {
 } from "./events.js";
 import { type ResolvedStack, resolveGateStack } from "./config.js";
 import {
+  deleteLocalJanitorBranches,
   deleteMergedSandbarBranches,
   fetchOriginRefs,
   fetchPlanningRefs,
@@ -165,6 +166,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     agentProviders: ["claude"] as readonly AgentProviderName[],
     deployWatch: null,
     databaseCopies: null,
+    janitor: false,
     onEvent: () => undefined,
   });
   // What `runPreflight` hands `gatherState` once its own `gh` checks pass.
@@ -279,6 +281,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     await git(target, "update-ref", "refs/heads/sandbar/issue-2-test", "HEAD");
     await git(target, "update-ref", "refs/heads/sandbar/chunk-2-test", "HEAD");
     await git(target, "update-ref", "refs/heads/sandbar/member-2", "HEAD");
+    await git(target, "update-ref", "refs/heads/sandbar/janitor-tidy", "HEAD");
     await writeFile(join(target, "a.txt"), "planning moved\n");
     await git(target, "add", "a.txt");
     await git(target, "commit", "-qm", "move before planning");
@@ -294,8 +297,25 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       target, "show-ref", "--verify", "refs/remotes/origin/sandbar/member-2",
     )).resolves.toBeDefined();
     await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/janitor-tidy",
+    )).resolves.toBeDefined();
+    await expect(git(
       target, "show-ref", "--verify", "refs/sandbar/poll/origin/sandbar/issue-2-test",
     )).rejects.toBeDefined();
+  });
+
+  it("deletes local janitor branches, and nothing else (#205)", async () => {
+    await git(target, "update-ref", "refs/heads/sandbar/janitor-tidy", "HEAD");
+    await git(target, "update-ref", "refs/heads/sandbar/issue-3-keep", "HEAD");
+    await git(target, "update-ref", "refs/remotes/origin/sandbar/janitor-tidy", "HEAD");
+
+    expect(await deleteLocalJanitorBranches(target)).toEqual(["sandbar/janitor-tidy"]);
+    await expect(git(target, "show-ref", "--verify", "refs/heads/sandbar/janitor-tidy")).rejects.toBeDefined();
+    await expect(git(target, "show-ref", "--verify", "refs/heads/sandbar/issue-3-keep")).resolves.toBeDefined();
+    await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/janitor-tidy",
+    )).resolves.toBeDefined();
+    expect(await deleteLocalJanitorBranches(target)).toEqual([]);
   });
 
   it("fetches origin member refs before later preflight checks", async () => {
@@ -363,7 +383,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     ).catch((err: unknown) => err);
 
     expect(error).toBeInstanceOf(Error);
-    expect(String(error)).toContain("Fetching origin refs (source, issues, chunks, members) failed");
+    expect(String(error)).toContain("Fetching origin refs (source, issues, chunks, members, janitor) failed");
     expect(String(error)).toContain("does not appear to be a git repository");
   });
 

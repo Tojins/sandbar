@@ -30,7 +30,10 @@ import {
   BRANCH_PREFIX,
   LEGACY_BRANCH_PREFIXES,
   LEGACY_RESOURCE_PREFIXES,
+  JANITOR_BRANCH_INFIX,
+  LOCAL_JANITOR_BRANCH_REFGLOB,
   MEMBER_BRANCH_INFIX,
+  ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS,
   RESOURCE_PREFIX,
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
@@ -45,6 +48,9 @@ import {
   issueBranchName,
   issueMergeSubject,
   issueNumberFromBranch,
+  janitorBranchName,
+  janitorStackId,
+  janitorTaskFromBranch,
   kebabSlug,
   parseIssueMergeSubject,
   rootIssueFromChunkBranch,
@@ -505,5 +511,41 @@ describe("reflect scope (#182)", () => {
       expect(reflectScope(p)).not.toBe(gateScope(p));
     }
     expect(reflectScope("/repo")).toMatch(/^w[0-9a-f]{8}$/);
+  });
+});
+
+// #205 — an idle janitor task's rolling branch.
+describe("janitor branches (#205)", () => {
+  it("round-trips a task name through its branch", () => {
+    expect(janitorBranchName("tidy-tests")).toBe("sandbar/janitor-tidy-tests");
+    expect(janitorTaskFromBranch(janitorBranchName("tidy-tests"))).toBe("tidy-tests");
+    expect(janitorStackId("tidy-tests")).toBe("janitor-tidy-tests");
+  });
+
+  it.each([
+    "sandbar/issue-12-x",
+    "sandbar/chunk-3-x",
+    "sandbar/janitor-",
+    "sandbar/janitor-Upper",
+    "sandbar/janitor-a--b",
+    `sandbar/janitor-${"a".repeat(41)}`,
+    "sandcastle/janitor-x",
+  ])("reads %s as no janitor branch", (branch) => {
+    expect(janitorTaskFromBranch(branch)).toBeNull();
+  });
+
+  it("is reserved, but neither a local sandbar glob nor an issue or chunk branch", () => {
+    const branch = janitorBranchName("tidy");
+    expect(ALL_BRANCH_INFIXES).toContain(JANITOR_BRANCH_INFIX);
+    expect(SANDBAR_BRANCH_REFGLOBS.some((glob) => glob.includes(JANITOR_BRANCH_INFIX))).toBe(false);
+    expect(issueNumberFromBranch(branch)).toBeNull();
+    expect(rootIssueFromChunkBranch(branch)).toBeNull();
+  });
+
+  it("fetches origin's janitor branches into their remote-tracking refs", () => {
+    expect(ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS).toEqual([
+      "+refs/heads/sandbar/janitor-*:refs/remotes/origin/sandbar/janitor-*",
+    ]);
+    expect(LOCAL_JANITOR_BRANCH_REFGLOB).toBe("refs/heads/sandbar/janitor-*");
   });
 });

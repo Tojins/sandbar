@@ -1858,3 +1858,56 @@ describe("egressStartupWarning (#202)", () => {
     }))).toBeNull();
   });
 });
+
+describe("resolveConfig — janitor (#205)", () => {
+  const task = { name: "tidy-tests", prompt: "standards", runsPerDay: 2 } as const;
+
+  it("is off without the key or without tasks", () => {
+    expect(resolveConfig(minimal).janitor).toBeNull();
+    expect(resolveConfig({ ...minimal, janitor: { tasks: [] } }).janitor).toBeNull();
+  });
+
+  it("fills paths and unit, and keeps each prompt form", () => {
+    expect(resolveConfig({
+      ...minimal,
+      janitor: {
+        tasks: [
+          task,
+          { name: "docs", prompt: { file: "./docs//janitor.md" }, runsPerDay: 48, paths: ["docs", ":(exclude)docs/old"], unit: "directory" },
+          { name: "arch", prompt: { skill: "improve-codebase-architecture" }, runsPerDay: 1 },
+        ],
+      },
+    }).janitor).toEqual({
+      tasks: [
+        { ...task, paths: ["."], unit: "file" },
+        { name: "docs", prompt: { file: "docs/janitor.md" }, runsPerDay: 48, paths: ["docs", ":(exclude)docs/old"], unit: "directory" },
+        { name: "arch", prompt: { skill: "improve-codebase-architecture" }, runsPerDay: 1, paths: ["."], unit: "file" },
+      ],
+    });
+  });
+
+  it.each([
+    ["a non-object", "tidy", /config\.janitor must be/],
+    ["tasks that are no list", { tasks: task }, /config\.janitor must be/],
+    ["a task that is no object", { tasks: ["tidy"] }, /tasks\[0\] must be/],
+    ["an uppercase name", { tasks: [{ ...task, name: "Tidy" }] }, /tasks\[0\]\.name/],
+    ["a name with a double hyphen", { tasks: [{ ...task, name: "a--b" }] }, /tasks\[0\]\.name/],
+    ["a name over 40 characters", { tasks: [{ ...task, name: "a".repeat(41) }] }, /tasks\[0\]\.name/],
+    ["a repeated name", { tasks: [task, task] }, /tasks\[1\]\.name 'tidy-tests' names an earlier task/],
+    ["zero runs a day", { tasks: [{ ...task, runsPerDay: 0 }] }, /runsPerDay/],
+    ["49 runs a day", { tasks: [{ ...task, runsPerDay: 49 }] }, /runsPerDay/],
+    ["fractional runs a day", { tasks: [{ ...task, runsPerDay: 1.5 }] }, /runsPerDay/],
+    ["an unknown prompt", { tasks: [{ ...task, prompt: "lint" }] }, /tasks\[0\]\.prompt/],
+    ["a prompt file outside the repo", { tasks: [{ ...task, prompt: { file: "../x.md" } }] }, /prompt\.file/],
+    ["an absolute prompt file", { tasks: [{ ...task, prompt: { file: "/x.md" } }] }, /prompt\.file/],
+    ["a skill that is no slug", { tasks: [{ ...task, prompt: { skill: "a/b" } }] }, /tasks\[0\]\.prompt/],
+    ["a prompt naming both forms", { tasks: [{ ...task, prompt: { file: "a.md", skill: "b" } }] }, /tasks\[0\]\.prompt/],
+    ["empty paths", { tasks: [{ ...task, paths: [] }] }, /paths/],
+    ["an absolute path", { tasks: [{ ...task, paths: ["/src"] }] }, /paths/],
+    ["a path with '..'", { tasks: [{ ...task, paths: ["src/../.."] }] }, /paths/],
+    ["an unknown unit", { tasks: [{ ...task, unit: "module" }] }, /unit/],
+  ])("refuses %s", (_, janitor, message) => {
+    expect(() => resolveConfig({ ...minimal, janitor: janitor as never })).toThrow(message);
+    expect(() => resolveConfig({ ...minimal, janitor: janitor as never })).toThrow(SandbarError);
+  });
+});

@@ -16,7 +16,7 @@
 
 import { createHash } from "node:crypto";
 
-// Branch prefix for every ref sandbar creates. The three shapes are built and
+// Branch prefix for every ref sandbar creates. The four shapes are built and
 // parsed in the "Branch names" section below.
 export const BRANCH_PREFIX = "sandbar/";
 
@@ -163,8 +163,9 @@ export function isScopedResourceName(name: string): boolean {
 // ---------------------------------------------------------------------------
 // Gate-stack resource names (#24)
 //
-// A stack is identified by a `stackId` — the issue id in the inner loop, the
-// literal "merger" for gate-2 — within a run's scope. Three shapes:
+// A stack is identified by a `stackId` within a run's scope: the issue number
+// in the inner loop, the literal "merger" for gate-2, or `janitor-<task>` for
+// an idle janitor run (#205, `janitorStackId`). Three shapes:
 //
 //   network    sandbar-<scope>-net-<stackId>
 //   pod        sandbar-<scope>-pod-<stackId>
@@ -199,8 +200,9 @@ export function stackContainerNameFor(
 //
 // A fourth shape rather than a fourth `stackId`, and the `sbx-` segment is what
 // makes it safe: `stackContainerNameFor` would produce the identical string for
-// a stack whose id were the literal `sbx`, and ids are issue numbers or the
-// literal `merger`, so no gate container can ever alias a sandbox one. The
+// a stack whose id were the literal `sbx`, and ids are issue numbers, the
+// literal `merger` or `janitor-<task>`, so no gate container can ever alias
+// a sandbox one. The
 // alias would matter — the two stacks bind-mount the same worktree and the gate
 // force-removes its own containers before every gate run, so a collision is one
 // stack reaping the other's live sibling mid-attempt.
@@ -293,12 +295,13 @@ export function sandboxDbCopyContainerNameFor(
 // ---------------------------------------------------------------------------
 // Branch names (#58)
 //
-// Sandbar owns three ref SHAPES under the same prefix:
+// Sandbar owns four ref SHAPES under the same prefix:
 //
 //   sandbar/issue-<n>-<slug>     one issue's work, landed by the merger
 //   sandbar/chunk-<root>-<slug>  one review-gated CHUNK (#54 §2), landed only
 //                                after a human has reviewed it
 //   sandbar/member-<n>           landing-only origin membership ref (#93)
+//   sandbar/janitor-<task>       one idle task's rolling branch (#205), below
 //
 // The dedicated member namespace is deliberately narrower than preserving an
 // issue branch under its ordinary name. Issue refs can be parked or pushed by
@@ -334,15 +337,19 @@ export function sandboxDbCopyContainerNameFor(
 export const ISSUE_BRANCH_INFIX = "issue-";
 export const CHUNK_BRANCH_INFIX = "chunk-";
 export const MEMBER_BRANCH_INFIX = "member-";
+export const JANITOR_BRANCH_INFIX = "janitor-";
 
 const LOCAL_BRANCH_INFIXES: readonly string[] = [
   ISSUE_BRANCH_INFIX,
   CHUNK_BRANCH_INFIX,
 ];
 
+// The janitor infix is reserved here but kept out of the local infixes:
+// preflight classifies every local branch those globs list as an issue's.
 export const ALL_BRANCH_INFIXES: readonly string[] = [
   ...LOCAL_BRANCH_INFIXES,
   MEMBER_BRANCH_INFIX,
+  JANITOR_BRANCH_INFIX,
 ];
 
 // Every ref pattern that can name a branch sandbar created. Callers hand these
@@ -415,6 +422,45 @@ export const ORIGIN_MEMBER_BRANCH_REFGLOBS: readonly string[] =
   ALL_BRANCH_PREFIXES.map(
     (prefix) => `refs/remotes/origin/${prefix}${MEMBER_BRANCH_INFIX}*`,
   );
+
+// ---------------------------------------------------------------------------
+// Idle janitor tasks (#205)
+//
+//   sandbar/janitor-<task>       one idle task's rolling branch, the head of
+//                                its draft pull request
+//
+// A janitor run is keyed by its task name, a slug the config validates
+// against `JANITOR_TASK_RE`, so the branch, the clone path, the stack and
+// sandbox id `janitor-<task>` and the log directory all derive from it.
+// Origin owns the branch: the local `refs/heads/sandbar/janitor-*` are a
+// run's scratch, set to each run's base and deleted by preflight. Current
+// prefix only, since no legacy-named janitor branch can exist.
+// ---------------------------------------------------------------------------
+
+export const JANITOR_TASK_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+export const JANITOR_TASK_MAX_CHARS = 40;
+
+export function janitorBranchName(task: string): string {
+  return `${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}${task}`;
+}
+
+// `sandbar/janitor-<task>` -> task, or null for any other shape.
+export function janitorTaskFromBranch(branch: string): string | null {
+  const prefix = `${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}`;
+  if (!branch.startsWith(prefix)) return null;
+  const task = branch.slice(prefix.length);
+  return JANITOR_TASK_RE.test(task) && task.length <= JANITOR_TASK_MAX_CHARS ? task : null;
+}
+
+export function janitorStackId(task: string): string {
+  return `${JANITOR_BRANCH_INFIX}${task}`;
+}
+
+export const LOCAL_JANITOR_BRANCH_REFGLOB = `refs/heads/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*`;
+
+export const ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS: readonly string[] = [
+  `+refs/heads/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*:refs/remotes/origin/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*`,
+];
 
 // `git for-each-ref --format=%(refname:short)` renders the remote-tracking
 // namespaces above as `origin/<branch>`. Membership consumers need the branch

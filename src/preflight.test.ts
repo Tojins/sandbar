@@ -6,6 +6,7 @@ import {
   checkInvariants,
   classifySandbarBranches,
   deployWatchRefusals,
+  mergeTreeRefusals,
   type RepoState,
 } from "./preflight.js";
 import type { ExecFn } from "./forge-verify.js";
@@ -818,5 +819,21 @@ describe("deployWatchRefusals (#198)", () => {
       throw new TypeError("bug");
     };
     await expect(refusals(exec)).rejects.toThrow(TypeError);
+  });
+});
+
+describe("mergeTreeRefusals (#205)", () => {
+  it.each([
+    ["git version 2.38.0", []],
+    ["git version 2.39.5\n", []],
+    ["git version 3.0.1", []],
+  ] as const)("accepts %j", (version, refusals) => {
+    expect(mergeTreeRefusals(version)).toEqual(refusals);
+  });
+
+  it.each(["git version 2.37.9", "git version 1.99.0", ""])("refuses %j, naming what it found", (version) => {
+    const [refusal] = mergeTreeRefusals(version);
+    expect(refusal).toMatch(/config\.janitor needs git 2\.38 or newer/);
+    expect(refusal).toContain(version.trim() || "an unidentified git");
   });
 });
