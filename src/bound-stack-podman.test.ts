@@ -3,8 +3,6 @@
 // is a fact about what podman ends up running, so it is asserted on container
 // ids and their environment rather than on `ensure`'s return value.
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
 import { resolveGateStack } from "./config.js";
@@ -12,10 +10,7 @@ import type { Stack } from "./gate-stack.js";
 import { gateStackFixture, IMAGE } from "./gate-stack-podman.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { podmanTestScope } from "./podman-test-scope.test-util.js";
-import { RUNTIME } from "./runtime.js";
 import { bindStack } from "./stack-source.js";
-
-const exec = promisify(execFile);
 
 const available = podmanTestsEnabled({
   what: "bound gate stack podman tests",
@@ -65,10 +60,11 @@ describe.runIf(available)("bindStack against real podman", () => {
 
       const restarted = await bound.ensure(specWith("2"));
       expect(await idOf("db")).not.toBe(dbBefore);
-      const { stdout } = await exec(RUNTIME, [
-        "exec", await inspectOf("db", "{{.Name}}"), "printenv", "STACK_VERSION",
-      ]);
-      expect(stdout.trim()).toBe("2");
+      // Read from the container's config, not a `podman exec printenv`: over
+      // the gate's remote socket an exec of a short-lived process can come
+      // back exit 0 with its stdout lost, which reds this test on nothing.
+      const env = await inspectOf("db", "{{range .Config.Env}}{{println .}}{{end}}");
+      expect(env.split("\n")).toContain("STACK_VERSION=2");
       expect((await restarted.runGate()).ok).toBe(true);
     },
     300_000,
