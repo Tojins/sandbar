@@ -302,6 +302,10 @@ export async function runJanitor(deps: JanitorRunDeps): Promise<JanitorOutcome |
   const { repoDir, stateDir } = layout;
   const branch = janitorBranchName(task.name);
   const notice = (message: string): Promise<void> => deps.onEvent({ kind: "notice", message });
+  const report = async (ending: RunEnding, scope: readonly string[]): Promise<JanitorOutcome> => {
+    await deps.onEvent({ kind: "janitor-run", task: task.name, branch, ...ending, scope, durationMs: timer() });
+    return ending.outcome;
+  };
   const startedAt = deps.now();
   let ledger: JanitorLedger = ledgerWithHold(
     ledgerWithStart(await readJanitorLedger(stateDir, task.name, notice), startedAt),
@@ -353,18 +357,7 @@ export async function runJanitor(deps: JanitorRunDeps): Promise<JanitorOutcome |
     visits: ledger.visits,
     budgetChars: Math.floor(deps.maxContextChars / 4),
   });
-  if (scope.length === 0) {
-    await deps.onEvent({
-      kind: "janitor-run",
-      task: task.name,
-      branch,
-      outcome: "no-change",
-      cause: "nothing in scope",
-      scope,
-      durationMs: timer(),
-    });
-    return "no-change";
-  }
+  if (scope.length === 0) return await report({ outcome: "no-change", cause: "nothing in scope" }, scope);
 
   const clone = worktreePathFor(layout.worktreesDir, branch);
   const reclaim = await reclaimIssueClone(repoDir, clone, branch);
@@ -400,15 +393,7 @@ export async function runJanitor(deps: JanitorRunDeps): Promise<JanitorOutcome |
     ledger = ledgerWithVisit(ledger, scope, deps.now(), new Set(scopeUnits(candidates, task.unit).keys()));
     await writeJanitorLedger(stateDir, task.name, ledger);
   }
-  await deps.onEvent({
-    kind: "janitor-run",
-    task: task.name,
-    branch,
-    ...result,
-    scope,
-    durationMs: timer(),
-  });
-  return result.outcome;
+  return await report(result, scope);
 }
 
 type RunEnding = {
