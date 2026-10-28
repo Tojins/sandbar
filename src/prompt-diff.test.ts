@@ -45,7 +45,7 @@ const git = (repo: string, ...args: string[]) =>
 
 const REPO = { owner: "acme", name: "app" };
 const BRANCH = "sandbar/issue-7-widget";
-const ISSUE = { id: "7", title: "widget", branch: BRANCH };
+const ISSUE = { subject: { kind: "issue", id: "7", title: "widget" }, branch: BRANCH } as const;
 
 // Content the assertions look for. The line itself must stay out of prompt
 // slots; its filename in the stat proves progressive disclosure is wired.
@@ -133,7 +133,7 @@ const anchorOpts = (sourceBranch = "main") => ({
 // `ensureIssueBranch` returned, so a test can hand them a chunk tip exactly as
 // the inner loop does. `sourceBranchBase` is the ordinary case.
 const implementerInputs = (base = sourceBranchBase("main")) => ({
-  issue: ISSUE,
+  ...ISSUE,
   attempt: 2,
   worktreePath: worktree,
   lastFailureTrace: "",
@@ -142,7 +142,7 @@ const implementerInputs = (base = sourceBranchBase("main")) => ({
 });
 
 const reviewerInputs = (base = sourceBranchBase("main"), sourceBranch = "main") => ({
-  issue: ISSUE,
+  ...ISSUE,
   issueSource: ghIssueSource(REPO),
   repo: REPO,
   repoDir,
@@ -396,7 +396,10 @@ describe("readGit truncation (#40)", () => {
 describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
   const CHUNK = { root: 6, branch: "sandbar/chunk-6-widget" };
   const MEMBER_BRANCH = "sandbar/issue-8-member";
-  const MEMBER_ISSUE = { id: "8", title: "member", branch: MEMBER_BRANCH };
+  const MEMBER_ISSUE = {
+    subject: { kind: "issue", id: "8", title: "member" },
+    branch: MEMBER_BRANCH,
+  } as const;
   // The earlier member's contribution: on the chunk branch and nowhere else.
   const CHUNK_SUBJECT = "commit-that-belongs-to-an-earlier-member";
   const CHUNK_LINE = "the-line-only-the-chunk-branch-has";
@@ -433,7 +436,7 @@ describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
 
   it("shows the implementer its own commits and not the chunk's", async () => {
     const prompt = await buildPrompt(
-      { ...implementerInputs(base), issue: MEMBER_ISSUE, worktreePath: memberWt },
+      { ...implementerInputs(base), ...MEMBER_ISSUE, worktreePath: memberWt },
       anchorOpts(),
     );
 
@@ -449,7 +452,7 @@ describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
   it("gives the reviewer this issue's changeset and not the chunk's", async () => {
     const prompt = await buildCorrectnessPrompt({
       ...correctnessInputs(base),
-      issue: MEMBER_ISSUE,
+      ...MEMBER_ISSUE,
       worktreePath: memberWt,
     });
 
@@ -468,7 +471,7 @@ describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
     const prompt = await buildPrompt(
       {
         ...implementerInputs(sourceBranchBase("main")),
-        issue: MEMBER_ISSUE,
+        ...MEMBER_ISSUE,
         worktreePath: memberWt,
       },
       anchorOpts(),

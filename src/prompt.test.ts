@@ -22,7 +22,8 @@ import { loadTemplate } from "./prompts.js";
 import { type RuleGroup, combineStandards, parseStandards } from "./standards-groups.js";
 
 const baseInputs = {
-  issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
+  subject: { kind: "issue", id: "42", title: "do the thing" },
+  branch: "sandbar/issue-42-do-the-thing",
   sourceBranch: "main",
   // The default shape since #61: a branch seeded from the source branch, which
   // is every auto-lane issue and every chunk ROOT. `chunkBranch: null` is what
@@ -47,7 +48,8 @@ const qualityInputs = {
 } as const;
 
 const implementerInputs = {
-  issue: baseInputs.issue,
+  subject: baseInputs.subject,
+  branch: baseInputs.branch,
   attempt: 1,
   worktreePath: "/tmp/wt",
   lastFailureTrace: "",
@@ -1364,3 +1366,41 @@ End your review with a single verdict token on its own:
   implementer will address them in the next round.
 
 A missing verdict is a failed reviewer invocation and will be retried. Emit exactly one verdict.`;
+
+describe("a janitor subject's {{subject}} line (#205)", () => {
+  const janitor = { kind: "janitor", task: "tidy", anchor: "# Idle task anchor" } as const;
+  const line = "Idle task `tidy` — the task anchor above is the spec.";
+
+  it("names an issue as the implementer's fix and every other role's subject", () => {
+    expect(renderAttemptSlot(implementerInputs)).toContain("\nFix issue #42: do the thing\n");
+    expect(renderReviewerSlot({ ...baseInputs, commits: "a1", stat: " x | 1 +" }))
+      .toContain("\nIssue #42: do the thing\n");
+  });
+
+  it("points every branch role at the task anchor instead", () => {
+    const slots = [
+      renderAttemptSlot({ ...implementerInputs, subject: janitor }),
+      renderReviewerSlot({ ...baseInputs, subject: janitor, commits: "a1", stat: " x | 1 +" }),
+      renderQualityFixSlot({
+        ...qualityInputs,
+        subject: janitor,
+        commits: "a1",
+        stat: " x | 1 +",
+        report: "src/a.ts:3 duplicates b.ts",
+        ruling: null,
+      }),
+      renderQualityReviewSlot({
+        ...qualityInputs,
+        subject: janitor,
+        commits: "a1",
+        stat: " x | 1 +",
+        mode: { kind: "list", scope: { kind: "full" }, overrules: [] },
+        changedSinceStat: null,
+      }),
+    ];
+    for (const slot of slots) {
+      expect(slot).toContain(`\n${line}\n`);
+      expect(slot).not.toMatch(/Issue #|issue #/);
+    }
+  });
+});

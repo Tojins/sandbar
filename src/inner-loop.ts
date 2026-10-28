@@ -182,6 +182,20 @@
 // Each duration-bearing agent event carries that invocation's peak-memory/OOM
 // evidence, gate events retain it per step, and both stacks emit each sibling's
 // final teardown record after their resources are removed (#141).
+// An idle janitor run (#205) is the same loop under a task name instead of
+// an issue (`InnerLoopOptions.janitor`). Its runner has already set the
+// branch to the base it hands in, so nothing is seeded and no `admitted` or
+// `origin-sync` is emitted; the anchor step, partition check, UI check and
+// scenario writer are off, every role reads the rendered task anchor in place
+// of the issue's (no `gh` call), and every event names the task
+// (`EventSubject`). Having no `terminal`, it ends on an empty `phase` on
+// every exit, an abort or a surfaced catch included, not only at the machine's
+// `terminate`. `InnerLoopOptions.signal` pre-empts any loop: an abort
+// runs the cycle's teardown at once, so the in-flight action fails within
+// seconds instead of holding its slot, and from then on any result or
+// rejection becomes `InnerLoopAbortedError`, never a HARD-ERROR retry. The
+// `finally` tears down whatever setup created after that; each resource is
+// stopped once.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
@@ -253,6 +267,7 @@ import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import type {
   EventInput,
+  EventSubject,
   IssueAnchorResult,
   QualityPassEvent,
   QualityReviewEvent,
@@ -305,7 +320,12 @@ import {
   renderIssueText,
   writeCondenseCache,
 } from "./issue-anchor.js";
-import type { AgentInvocationSequence, AttemptLogger } from "./logs.js";
+import {
+  type AgentInvocationSequence,
+  type AttemptLogger,
+  issueLogDirName,
+  janitorLogDirName,
+} from "./logs.js";
 import { type RunScope, sandboxNetworkNameFor, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
@@ -351,6 +371,7 @@ import {
 import {
   type IssueAnchorOptions,
   type PromptAnchorOptions,
+  type PromptSubject,
   type PriorReviewRound,
   type QualityGrader,
   type QualityOverrule,
@@ -782,12 +803,62 @@ export type InnerLoopOptions = {
   // The run's database copies (#201), null when `config.databaseCopies` is
   // off. Each sandbox cycle aligns a slot of them before every action.
   readonly dbCopies: DbCopies | null;
+  // An idle janitor task in place of an issue (#205): `issue.id` is then its
+  // resource key, `janitor-<task>`, and `issue.branch` its rolling branch,
+  // which the runner has already set to `base` (whose ref is a sha). Its
+  // `anchor` is the rendered task anchor every role reads where an issue's
+  // would be.
+  readonly janitor?: {
+    readonly task: string;
+    readonly base: IssueBranchBase;
+    readonly anchor: string;
+  };
+  // Pre-emption: aborting tears the cycle down and rejects the loop with
+  // `InnerLoopAbortedError`.
+  readonly signal?: AbortSignal;
 };
+
+// The loop was aborted through `InnerLoopOptions.signal` (#205). Whatever the
+// in-flight action rejected with after that is its cause; it is never
+// classified, and `runInnerLoop` does not retry it.
+export class InnerLoopAbortedError extends Error {
+  constructor(options?: ErrorOptions) {
+    super("inner loop aborted", options);
+    this.name = "InnerLoopAbortedError";
+  }
+}
+
+const throwIfAborted = (signal: AbortSignal | undefined): void => {
+  if (signal?.aborted) throw new InnerLoopAbortedError();
+};
+
+// Whom a loop is about (#205), in the shape each of its consumers names it:
+// its events, its roles' prompts and its log directory.
+type LoopSubject = {
+  readonly event: EventSubject;
+  readonly prompt: PromptSubject;
+  readonly logDir: string;
+};
+
+const loopSubjectOf = (
+  issue: IssueRef,
+  janitor: InnerLoopOptions["janitor"],
+): LoopSubject => janitor === undefined
+  ? {
+      event: { issue: Number(issue.id), title: issue.title },
+      prompt: { kind: "issue", id: issue.id, title: issue.title },
+      logDir: issueLogDirName(issue.id),
+    }
+  : {
+      event: { janitor: janitor.task, title: issue.title },
+      prompt: { kind: "janitor", task: janitor.task, anchor: janitor.anchor },
+      logDir: janitorLogDirName(janitor.task),
+    };
 
 // The `gate-stack` record for one sandbox cycle (#186): the spec in effect at
 // setup, and again each time a gate-1 finds a different one.
 function gateStackReporter(
-  issue: IssueRef,
+  subject: EventSubject,
   onEvent: InnerLoopOptions["onEvent"],
 ): (head: HeadStack) => Promise<void> {
   let token: string | null = null;
@@ -797,8 +868,7 @@ function gateStackReporter(
     token = next;
     await onEvent({
       kind: "gate-stack",
-      issue: Number(issue.id),
-      title: issue.title,
+      ...subject,
       gate: "gate-1",
       tipBlob,
       classification: classification.kind,
@@ -846,10 +916,26 @@ export async function runInnerLoop(
   let retriesUsed = 0;
   const specGaps: SpecGap[] = [];
   let admitted = false;
-  let partitionCheckPending = opts.config.partitionCheck;
+  const subject = loopSubjectOf(issue, opts.janitor).event;
+  // A janitor task (#205) has no issue to split, prototype or write hidden
+  // scenarios for.
+  const config: InnerLoopConfig = opts.janitor === undefined
+    ? opts.config
+    : { ...opts.config, partitionCheck: false, uiPrototypeCheck: false, scenarioWriter: false };
+  let partitionCheckPending = config.partitionCheck;
+  // A janitor's header row (#205) stands from a `phase` or a retry's
+  // `hard-error` until an empty `phase`, which a cycle emits only at the
+  // machine's `terminate`; the `finally` closes it on every other exit.
+  let phaseOpen = false;
+  let phaseAttempt = 1;
   const cycleOptions: InnerLoopOptions = {
     ...opts,
+    config,
     onEvent: async (event) => {
+      if (event.kind === "phase") {
+        phaseOpen = event.phases.length > 0;
+        phaseAttempt = event.attempt;
+      }
       if (event.kind === "admitted") {
         if (admitted) return;
         const issueSnapshot = await opts.attemptLogger.writeIssueSnapshot(
@@ -868,10 +954,10 @@ export async function runInnerLoop(
       await opts.onEvent(event);
     },
   };
-  const scenarioWriter = opts.config.scenarioWriter
+  const scenarioWriter = config.scenarioWriter
     ? createScenarioWriterTask({
         issue,
-        config: opts.config,
+        config,
         attemptLogger: opts.attemptLogger,
         onEvent: opts.onEvent,
         providerState: opts.providerState,
@@ -881,10 +967,7 @@ export async function runInnerLoop(
     for (;;) {
       const outcome = await runCycle(
         issue,
-        {
-          ...cycleOptions,
-          config: { ...cycleOptions.config, partitionCheck: partitionCheckPending },
-        },
+        { ...cycleOptions, config: { ...config, partitionCheck: partitionCheckPending } },
         opts.attemptLogger.startInvocationCycle(),
         scenarioWriter,
       );
@@ -897,12 +980,12 @@ export async function runInnerLoop(
       const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
       await opts.onEvent({
         kind: "hard-error",
-        issue: Number(issue.id),
-        title: issue.title,
+        ...subject,
         retry: retriesUsed,
         max: HARD_ERROR_MAX_RETRIES,
         reason,
       });
+      phaseOpen = true;
     }
   } finally {
     // A no-op once the join has heard it; otherwise the admission has ended
@@ -915,6 +998,10 @@ export async function runInnerLoop(
         severity: "error",
         message: `issue=${issue.id} scenario writer failed: ${err instanceof Error ? err.message : String(err)}`,
       });
+    }
+    // An issue's row is closed by its `terminal`, which a janitor run has none of.
+    if (opts.janitor !== undefined && phaseOpen) {
+      await opts.onEvent({ kind: "phase", ...subject, attempt: phaseAttempt, phases: [] });
     }
   }
 }
@@ -1009,6 +1096,66 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
   }
 }
 
+// Seed an issue's branch and record its admission.
+async function seedIssueBranch(
+  issue: IssueRef,
+  opts: InnerLoopOptions,
+): Promise<IssueBranchBase> {
+  // Seed the issue branch off origin — never the host's local refs, so the
+  // sandbox cannot inherit cwd's in-progress state. Idempotent. Off
+  // `origin/<sourceBranch>` for an ordinary issue or a chunk's parentless
+  // member, off the CHUNK TIP for a member chained behind one that has
+  // already landed (#61) or rework of a landed member; which of the two is
+  // git-ops.ts's decision, made from `issue.chunk` and what origin actually
+  // carries.
+  //
+  // The return value is the whole reason this is one call and not two: it is
+  // the ref the branch was really cut from, and every range the prompts below
+  // render is anchored at it. Re-deriving `origin/<sourceBranch>` in the
+  // prompt layer would hand a chunk member its ancestors' entire chunk as
+  // "the work done so far" (#40's failure, re-entered from the other side).
+  const base = await ensureIssueBranch(
+    opts.config.layout.repoDir,
+    issue.branch,
+    opts.config.sourceBranch,
+    issue.chunk ?? null,
+  );
+  await opts.onEvent({
+    kind: "admitted",
+    issue: Number(issue.id),
+    title: issue.title,
+    branch: issue.branch,
+    chunk: issue.chunk?.branch ?? null,
+    seedRef: base.ref,
+    seedSha: await revParse(opts.config.layout.repoDir, base.ref),
+  });
+  // What origin's copy of the branch had to say (#112): a fast-forward, a
+  // resume from origin, unpushed work kept, abandonment, or an origin that
+  // could not be asked. This is its own observation rather than a `repair`:
+  // several outcomes deliberately change nothing, and calling all of them a
+  // fast-forward would make the sole structured record assert a false action.
+  // Nothing is emitted for the common in-sync and fresh-seed cases.
+  const originSync = base.originSync;
+  const originLine =
+    originSync === undefined
+      ? null
+      : describeIssueBranchOriginSync(issue.branch, originSync);
+  if (originSync !== undefined && originLine !== null) {
+    await opts.onEvent({
+      kind: "origin-sync",
+      issue: Number(issue.id),
+      title: issue.title,
+      outcome: originSync.kind,
+      detail: originLine,
+    });
+  }
+  // For a chunk member, `admitted` above already says which of the two
+  // seeds it got: `seedRef` is the chunk tip, or the source branch for a
+  // parentless member that has not landed (`ChunkTarget.seed`, #193), which
+  // the merge phase then merges onto the chunk branch.
+  return base;
+}
+
 async function runSandboxCycle(
   issue: IssueRef,
   opts: InnerLoopOptions,
@@ -1022,7 +1169,8 @@ async function runSandboxCycle(
   let stack: BoundStack | null = null;
   let egress: OwnerProxy | null = null;
   let dbCopySlot: DbCopySlot | null = null;
-  const subject = { issue: Number(issue.id), title: issue.title };
+  const loopSubject = loopSubjectOf(issue, opts.janitor);
+  const subject = loopSubject.event;
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
   const priorReviewRounds: PriorReviewRound[] = [];
@@ -1045,59 +1193,65 @@ async function runSandboxCycle(
   const setupTimer = startTimer();
   let worktreeMs = 0;
 
+  // The cycle's teardown, one ordered pass over what exists, each resource
+  // stopped once. An abort runs a pass at once (#205): removing the agent
+  // container, the siblings and the gate pod is what ends the in-flight
+  // action. The `finally` runs one after it, for whatever setup created since.
+  // A pass never rejects; its failures are reported by the `finally`.
+  const teardownFailures: { readonly what: string; readonly reason: unknown }[] = [];
+  const tornDown = new Set<object>();
+  let teardown: Promise<void> = Promise.resolve();
+  const tearDownCycle = (): Promise<void> => (teardown = teardown.then(async () => {
+    const once = async <T extends object>(
+      resource: T | null,
+      stop: (resource: T) => Promise<unknown>,
+      what = "",
+    ): Promise<void> => {
+      if (resource === null || tornDown.has(resource)) return;
+      tornDown.add(resource);
+      const [result] = await Promise.allSettled([stop(resource)]);
+      if (result.status === "rejected") teardownFailures.push({ what, reason: result.reason });
+    };
+    // Stack first: its containers bind-mount the worktree read-write, and
+    // `sandbox.close()` ends in `git worktree remove --force`. Tearing the
+    // sandbox down first leaves a still-running attempt container (an app
+    // server, a watcher) writing into the tree while it is being removed —
+    // and a write between the last gate and `close()` flips the
+    // uncommitted-changes check, so the worktree is PRESERVED instead and
+    // leaks for the rest of the run. run.ts:466 already orders the merge
+    // phase this way, with the same reasoning.
+    await once(stack, async (s) => s.stop());
+    // The database copy goes before the siblings it runs among, every cycle,
+    // so a HARD-ERROR's fresh sandbox, the next admission and a preserved
+    // clone all start without it.
+    await once(dbCopySlot, async (slot) => slot.align(null), "Failed to drop the database copy: ");
+    // Then the sandbox's own siblings, and BEFORE `sandbox.close()` (#44). They
+    // are attached to the agent container's network namespace, and podman
+    // refuses to remove a container others depend on — so the reverse order
+    // does not merely leak the siblings, it fails to remove the anchor too.
+    // (`close()` passes `--depend` as a backstop for the paths this ordering
+    // cannot cover, but the ordering is what makes the ordinary path clean.)
+    // They also write into the worktree, so the same argument that puts the
+    // gate stack ahead of the worktree removal applies to them.
+    await once(sandboxStack, async (s) => s.stop());
+    await once(sandbox, async (s) => {
+      s.deferWorktreeReclaim();
+      await s.close();
+    }, "Failed to close agent sandbox: ");
+    // Last: the sandbox and its siblings were the proxy's only clients, and
+    // its network goes with it.
+    await once(egress, async (e) => e.stop());
+  }));
+  const onAbort = (): void => {
+    void tearDownCycle();
+  };
+  opts.signal?.addEventListener("abort", onAbort, { once: true });
+
   try {
-    // Seed the issue branch off origin — never the host's local refs, so the
-    // sandbox cannot inherit cwd's in-progress state. Idempotent. Off
-    // `origin/<sourceBranch>` for an ordinary issue or a chunk's parentless
-    // member, off the CHUNK TIP for a member chained behind one that has
-    // already landed (#61) or rework of a landed member; which of the two is
-    // git-ops.ts's decision, made from `issue.chunk` and what origin actually
-    // carries.
-    //
-    // The return value is the whole reason this is one call and not two: it is
-    // the ref the branch was really cut from, and every range the prompts below
-    // render is anchored at it. Re-deriving `origin/<sourceBranch>` in the
-    // prompt layer would hand a chunk member its ancestors' entire chunk as
-    // "the work done so far" (#40's failure, re-entered from the other side).
-    const base: IssueBranchBase = await ensureIssueBranch(
-      config.layout.repoDir,
-      issue.branch,
-      config.sourceBranch,
-      issue.chunk ?? null,
-    );
-    await opts.onEvent({
-      kind: "admitted",
-      issue: Number(issue.id),
-      title: issue.title,
-      branch: issue.branch,
-      chunk: issue.chunk?.branch ?? null,
-      seedRef: base.ref,
-      seedSha: await revParse(config.layout.repoDir, base.ref),
-    });
-    // What origin's copy of the branch had to say (#112): a fast-forward, a
-    // resume from origin, unpushed work kept, abandonment, or an origin that
-    // could not be asked. This is its own observation rather than a `repair`:
-    // several outcomes deliberately change nothing, and calling all of them a
-    // fast-forward would make the sole structured record assert a false action.
-    // Nothing is emitted for the common in-sync and fresh-seed cases.
-    const originSync = base.originSync;
-    const originLine =
-      originSync === undefined
-        ? null
-        : describeIssueBranchOriginSync(issue.branch, originSync);
-    if (originSync !== undefined && originLine !== null) {
-      await opts.onEvent({
-        kind: "origin-sync",
-        issue: Number(issue.id),
-        title: issue.title,
-        outcome: originSync.kind,
-        detail: originLine,
-      });
-    }
-    // For a chunk member, `admitted` above already says which of the two
-    // seeds it got: `seedRef` is the chunk tip, or the source branch for a
-    // parentless member that has not landed (`ChunkTarget.seed`, #193), which
-    // the merge phase then merges onto the chunk branch.
+    throwIfAborted(opts.signal);
+    // A janitor run's branch already stands at the base its runner computed
+    // (#205), so only an issue is seeded here.
+    const base: IssueBranchBase = opts.janitor?.base ?? await seedIssueBranch(issue, opts);
 
     // Worktree first (fast git ops), then container bringups in parallel: the
     // stack's mounts resolve against this worktree and must see its files on
@@ -1130,12 +1284,12 @@ async function runSandboxCycle(
       worktreePath,
       `refs/heads/${issue.branch}`,
     );
-    const reportGateStack = gateStackReporter(issue, opts.onEvent);
+    const reportGateStack = gateStackReporter(subject, opts.onEvent);
     await reportGateStack(setupStack);
     const sbxContainers = sandboxContainers(setupStack.stack);
     const sandboxLogDir = join(
       opts.sandboxLogBaseDir ?? config.layout.logsDir,
-      `issue-${issue.id}`,
+      loopSubject.logDir,
       "sandbox-logs",
     );
     // Before the sandbox container, not after: the directory is a bind-mount
@@ -1276,8 +1430,7 @@ async function runSandboxCycle(
                     onContainerTeardown: (record) => opts.onEvent({
                       kind: "container",
                       stack: "sandbox",
-                      issue: Number(issue.id),
-                      title: issue.title,
+                      ...subject,
                       ...record,
                     }),
                   });
@@ -1301,8 +1454,7 @@ async function runSandboxCycle(
         onContainerTeardown: (record) => opts.onEvent({
           kind: "container",
           stack: "gate",
-          issue: Number(issue.id),
-          title: issue.title,
+          ...subject,
           ...record,
         }),
         ...(config.egress === null ? {} : {
@@ -1352,8 +1504,7 @@ async function runSandboxCycle(
 
     await opts.onEvent({
       kind: "setup",
-      issue: Number(issue.id),
-      title: issue.title,
+      ...subject,
       durationMs: setupTimer(),
       worktreeMs,
       ...(sandboxMs === null ? {} : { sandboxMs }),
@@ -1411,7 +1562,8 @@ async function runSandboxCycle(
     const branchAhead = await branchIsAheadOfSeed(worktreePath, base.ref);
     if (branchAhead) {
       const admissionPrompt = await buildPrompt({
-        issue,
+        subject: loopSubject.prompt,
+        branch: issue.branch,
         attempt: 1,
         worktreePath,
         lastFailureTrace: "",
@@ -1457,8 +1609,7 @@ async function runSandboxCycle(
     let action: LoopAction = initialAction(state);
     await opts.onEvent({
       kind: "phase",
-      issue: Number(issue.id),
-      title: issue.title,
+      ...subject,
       attempt: state.attempt,
       phases: visiblePhases(action),
     });
@@ -1469,6 +1620,7 @@ async function runSandboxCycle(
       const dbCopy = await dbCopySlot?.align(dbCopyHolderFor(action)) ?? { kind: "none" };
       const event = await executeAction(action, {
         issue,
+        subject: loopSubject,
         sandbox: loopSandbox,
         opts,
         config,
@@ -1488,6 +1640,9 @@ async function runSandboxCycle(
         scenarioWriter,
         dbCopy,
       });
+      // Whatever an action returned after an abort, it ran against a
+      // sandbox being torn down.
+      throwIfAborted(opts.signal);
       const r = step(state, event);
       state = r.state;
       action = r.action;
@@ -1502,8 +1657,7 @@ async function runSandboxCycle(
         }
         await opts.onEvent({
           kind: "review-round",
-          issue: Number(issue.id),
-          title: issue.title,
+          ...subject,
           attempt: opened.attempt,
           round: opened.attempt,
           quality: opened.quality.verdict,
@@ -1520,8 +1674,7 @@ async function runSandboxCycle(
       if (action.kind === "run-implementer" && action.extraReprompt !== null) {
         await opts.onEvent({
           kind: "repair",
-          issue: Number(issue.id),
-          title: issue.title,
+          ...subject,
           attempt: action.attempt,
           action: "re-prompt",
           detail: action.extraReprompt,
@@ -1531,8 +1684,7 @@ async function runSandboxCycle(
       if (phases.length > 0 || action.kind === "terminate") {
         await opts.onEvent({
           kind: "phase",
-          issue: Number(issue.id),
-          title: issue.title,
+          ...subject,
           attempt: state.attempt,
           phases,
         });
@@ -1541,6 +1693,11 @@ async function runSandboxCycle(
 
     return { verdict: action.verdict, accumulatedCommits: accumulated, specGaps };
   } catch (err) {
+    // After an abort every failure is the teardown's doing, so none is
+    // classified.
+    if (opts.signal?.aborted) {
+      throw err instanceof InnerLoopAbortedError ? err : new InnerLoopAbortedError({ cause: err });
+    }
     if (err instanceof PartitionRequiredError) {
       return {
         verdict: err.verdict,
@@ -1602,52 +1759,17 @@ async function runSandboxCycle(
       specGaps,
     };
   } finally {
+    opts.signal?.removeEventListener("abort", onAbort);
+    await tearDownCycle();
     // Never mask the verdict with a teardown failure, but never hide it
     // either — it means leaked podman resources or a leaked clone.
-    const tearDown = async (step: () => Promise<unknown>, what = ""): Promise<void> => {
-      try {
-        await step();
-      } catch (err) {
-        await opts.onEvent({
-          kind: "complaint",
-          severity: "error",
-          message: `${what}${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-    };
-    // Stack first: its containers bind-mount the worktree read-write, and
-    // `sandbox.close()` ends in `git worktree remove --force`. Tearing the
-    // sandbox down first leaves a still-running attempt container (an app
-    // server, a watcher) writing into the tree while it is being removed —
-    // and a write between the last gate and `close()` flips the
-    // uncommitted-changes check, so the worktree is PRESERVED instead and
-    // leaks for the rest of the run. run.ts:466 already orders the merge
-    // phase this way, with the same reasoning.
-    if (stack) await tearDown(stack.stop);
-    // The database copy goes before the siblings it runs among, every cycle,
-    // so a HARD-ERROR's fresh sandbox, the next admission and a preserved
-    // clone all start without it.
-    const copySlot = dbCopySlot;
-    if (copySlot) await tearDown(() => copySlot.align(null), "Failed to drop the database copy: ");
-    // Then the sandbox's own siblings, and BEFORE `sandbox.close()` (#44). They
-    // are attached to the agent container's network namespace, and podman
-    // refuses to remove a container others depend on — so the reverse order
-    // does not merely leak the siblings, it fails to remove the anchor too.
-    // (`close()` passes `--depend` as a backstop for the paths this ordering
-    // cannot cover, but the ordering is what makes the ordinary path clean.)
-    // They also write into the worktree, so the same argument that puts the
-    // gate stack ahead of the worktree removal applies to them.
-    if (sandboxStack) await tearDown(sandboxStack.stop);
-    const closing = sandbox;
-    if (closing) {
-      await tearDown(() => {
-        closing.deferWorktreeReclaim();
-        return closing.close();
-      }, "Failed to close agent sandbox: ");
+    for (const { what, reason } of teardownFailures) {
+      await opts.onEvent({
+        kind: "complaint",
+        severity: "error",
+        message: `${what}${reason instanceof Error ? reason.message : String(reason)}`,
+      });
     }
-    // Last: the sandbox and its siblings were the proxy's only clients, and
-    // its network goes with it.
-    if (egress) await tearDown(egress.stop);
   }
 }
 
@@ -1676,6 +1798,7 @@ export function withEgressCheckpoints(sandbox: Sandbox, egress: OwnerProxy): San
 
 type ExecuteActionCtx = {
   readonly issue: IssueRef;
+  readonly subject: LoopSubject;
   readonly sandbox: Sandbox;
   readonly opts: InnerLoopOptions;
   readonly config: InnerLoopConfig;
@@ -1830,12 +1953,14 @@ function requireScenarioWriter(ctx: ExecuteActionCtx): ScenarioWriterTask {
 // thread. The condenser is an optimisation, so neither its failure nor its
 // provider's closure stops the issue; `runWithProviderState` still records a
 // closure for the run, and a failure is not cached, so the next loop asks
-// again.
+// again. A janitor task's anchor is no thread: it is ready as rendered.
 export async function runAnchorCondense(
   _action: Extract<LoopAction, { kind: "run-anchor-condense" }>,
   ctx: ExecuteActionCtx,
 ): Promise<Extract<LoopEvent, { kind: "anchor-ready" | "anchor-condenser-wrote" }>> {
   const { issue, sandbox, opts, config } = ctx;
+  const ready = { kind: "anchor-ready" } as const;
+  if (ctx.subject.prompt.kind === "janitor") return ready;
   const anchor = await fetchIssueAnchor(
     issue.id,
     config.issueSource,
@@ -1865,7 +1990,6 @@ export async function runAnchorCondense(
     comments,
     ...fields,
   });
-  const ready = { kind: "anchor-ready" } as const;
   if (config.condenseAboveChars === null || anchor.tracedChars <= config.condenseAboveChars) {
     await record({ result: "below-threshold", anchorChars: anchor.tracedChars, dropped: 0 });
     return ready;
@@ -2224,7 +2348,8 @@ export const issueAnchorOptionsOf = (
 
 // The anchors and branch range every branch-reading cold role is built from.
 const branchRoleInputs = (ctx: ExecuteActionCtx): ReviewerPromptInputs => ({
-  issue: ctx.issue,
+  subject: ctx.subject.prompt,
+  branch: ctx.issue.branch,
   ...issueAnchorOptionsOf(ctx.config),
   repoDir: ctx.config.layout.repoDir,
   worktreePath: ctx.sandbox.worktreePath,
@@ -2407,8 +2532,7 @@ function runQualityReviewer(
     ),
     record: (r) => opts.onEvent({
       kind: "quality-review",
-      issue: Number(issue.id),
-      title: issue.title,
+      ...ctx.subject.event,
       attempt,
       round: attempt,
       invocation: r.invocation,
@@ -2504,8 +2628,7 @@ export async function runQualityFix(
       const usage = usageFields(m, m.rateLimit, measuredContextChars);
       await opts.onEvent({
         kind: "quality-pass",
-        issue: Number(issue.id),
-        title: issue.title,
+        ...ctx.subject.event,
         attempt: action.attempt,
         round: action.attempt,
         provider: config.reviewerQualityAgent,
@@ -2614,7 +2737,8 @@ export async function runImplementer(
   const qualityCommits = ctx.quality.sinceImplementer.splice(0);
   const prompt = await buildPrompt(
     {
-      issue,
+      subject: ctx.subject.prompt,
+      branch: issue.branch,
       attempt: action.attempt,
       worktreePath: sandbox.worktreePath,
       lastFailureTrace: action.failureTrace,
@@ -2685,8 +2809,7 @@ export async function runImplementer(
       : (prior?.commits.length ?? 0) + failedCommits;
     await opts.onEvent({
       kind: "implementer",
-      issue: Number(issue.id),
-      title: issue.title,
+      ...ctx.subject.event,
       attempt: action.attempt,
       signal: err instanceof AgentQuotaError
         ? "QUOTA"
@@ -2814,8 +2937,7 @@ export async function runImplementer(
     });
     await opts.onEvent({
       kind: "repair",
-      issue: Number(issue.id),
-      title: issue.title,
+      ...ctx.subject.event,
       attempt: action.attempt,
       action: "promise-nudge",
       detail: `signal=${signal.kind} durationMs=${nudge.durationMs} maxGapMs=${nudge.maxGapMs} endedBy=${nudge.endedBy}`,
@@ -2892,8 +3014,7 @@ export async function runImplementer(
     offBranch = null;
     await opts.onEvent({
       kind: "repair",
-      issue: Number(issue.id),
-      title: issue.title,
+      ...ctx.subject.event,
       attempt: action.attempt,
       action: "fast-forward",
       detail: `from=${fastForwarded.fromSha} to=${fastForwarded.toSha}`,
@@ -2911,8 +3032,7 @@ export async function runImplementer(
   );
   await opts.onEvent({
     kind: "implementer",
-    issue: Number(issue.id),
-    title: issue.title,
+    ...ctx.subject.event,
     attempt: action.attempt,
     signal: signal.kind,
     commits: attemptCommits,
@@ -3014,8 +3134,7 @@ export async function runGate(
   );
   await opts.onEvent({
     kind: "gate",
-    issue: Number(issue.id),
-    title: issue.title,
+    ...ctx.subject.event,
     attempt: action.attempt,
     gate: "gate-1",
     ok: gate1.ok,
@@ -3236,8 +3355,7 @@ export async function runAdjudicator(
       await opts.onEvent({
         kind: "adjudication",
         pass: action.pass,
-        issue: Number(issue.id),
-        title: issue.title,
+        ...ctx.subject.event,
         attempt: action.attempt,
         round: rejection.round,
         head: rejection.head,
@@ -3347,8 +3465,7 @@ export async function runVerifier(
     // spent it, and both are per-call config a stats reader cannot recover.
     record: (r) => opts.onEvent({
       kind: "review-pass",
-      issue: Number(issue.id),
-      title: issue.title,
+      ...ctx.subject.event,
       attempt: action.attempt,
       round: action.attempt,
       invocation: r.invocation,

@@ -1,6 +1,6 @@
 # Attempt {{attempt}}
 
-Fix issue #{{issueId}}: {{issueTitle}}
+{{subject}}
 Branch: {{branch}}
 
 {{chunkBase}}{{workDone}}{{qualityCommits}}{{sandboxStack}}{{dbCopy}}{{stackFile}}{{egress}}{{gateFailure}}{{reviewerFeedback}}{{orchestratorNote}}{{escalation}}If you realise mid-implementation that you are inventing non-trivial visible UI
@@ -42,8 +42,8 @@ with `git diff {{baseRef}}...HEAD` and `git log {{baseRef}}..HEAD`, then:
 2. Re-read {{conventionsRef}} and update prose your commits falsified.
 3. Check that the diff does not contradict settled choices recorded in those
    conventions.
-4. Re-read the issue, list its stated requirements, tick each against the diff,
-   and delete anything the issue did not ask for.
+4. Re-read the issue (or task) above, list its stated requirements, tick each
+   against the diff, and delete anything the issue did not ask for.
 {{commitRitual}}
 ## The quality pass
 

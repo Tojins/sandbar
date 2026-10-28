@@ -59,6 +59,10 @@
 // it only through `buildIssueAnchor`, which reads the condenser's cache in
 // `anchorCacheDir` (issue-anchor.ts), so each role sees the condensed thread
 // whenever the inner loop's `needs-anchor` step condensed this exact thread.
+// A branch role's anchor layer is its `PromptSubject`'s (#205): an issue's as
+// above, or an idle janitor task's, rendered by its runner, used verbatim and
+// never fetched or condensed. The `{{subject}}` line of the implementer,
+// white-box and quality templates names whichever it is.
 //
 // Every range a slot renders is anchored at the issue branch's SEED REF, never
 // a bare branch name (#40, #61): the agents' worktree head namespace holds
@@ -280,8 +284,16 @@ export type IssueAnchorOptions = {
 // The implementer's two anchors.
 export type PromptAnchorOptions = ProjectAnchorOptions & IssueAnchorOptions;
 
+// What a branch role works for (#205): an issue, whose anchor is fetched from
+// the tracker, or an idle janitor task, whose anchor the run rendered already
+// and which no condenser touches. Each prompt's `{{subject}}` line names it.
+export type PromptSubject =
+  | { readonly kind: "issue"; readonly id: string; readonly title: string }
+  | { readonly kind: "janitor"; readonly task: string; readonly anchor: string };
+
 export type PromptInputs = {
-  readonly issue: { readonly id: string; readonly title: string; readonly branch: string };
+  readonly subject: PromptSubject;
+  readonly branch: string;
   readonly attempt: number;
   readonly worktreePath: string;
   readonly lastFailureTrace: string;
@@ -330,7 +342,8 @@ export type PromptInputs = {
 };
 
 export type ReviewerPromptInputs = {
-  readonly issue: { readonly id: string; readonly title: string; readonly branch: string };
+  readonly subject: PromptSubject;
+  readonly branch: string;
   // The anchor layers' sources (#34, #38). `issueSource` is the tracker; `repoDir`
   // is where the `git log` runs, and it stays the bare cache rather than
   // `worktreePath` — that worktree is the reviewer's SUBJECT, and sourcing the
@@ -441,7 +454,7 @@ export async function buildPrompt(
     // this module directly, and silently drops the `@ref` for any doc the
     // branch itself adds.
     await buildProjectAnchor(anchor, inputs.worktreePath),
-    await buildIssueAnchor(inputs.issue.id, anchor),
+    await buildSubjectAnchor(inputs.subject, anchor),
     await buildAttemptSlot(inputs, anchor),
   ];
   return layers.join("\n\n---\n\n");
@@ -539,7 +552,7 @@ async function buildBranchRoleAnchors(
       },
       inputs.worktreePath,
     ),
-    buildIssueAnchor(inputs.issue.id, inputs),
+    buildSubjectAnchor(inputs.subject, inputs),
   ]);
 }
 
@@ -586,7 +599,7 @@ async function readChangedSinceStat(
   return (await readGit(
     ["diff", FULL_PATH_DIFF_STAT, `${anchor}..HEAD`],
     inputs.worktreePath,
-    `the diff stat since ${anchor} for ${inputs.issue.branch}`,
+    `the diff stat since ${anchor} for ${inputs.branch}`,
   )).trim();
 }
 
@@ -642,7 +655,7 @@ export async function buildAdjudicatorPrompt(
     render(ADJUDICATOR_TPL, {
       pass: inputs.pass,
       head: inputs.head,
-      branch: inputs.issue.branch,
+      branch: inputs.branch,
       baseRef: inputs.base.ref,
       report: reportProse(inputs.report),
     }),
@@ -717,6 +730,24 @@ export async function buildProjectAnchor(
   return lines.join("\n");
 }
 
+// The anchor layer of a branch role: the issue's, or a janitor task's text
+// verbatim, with nothing fetched.
+async function buildSubjectAnchor(
+  subject: PromptSubject,
+  anchor: IssueAnchorOptions,
+): Promise<string> {
+  return subject.kind === "issue" ? buildIssueAnchor(subject.id, anchor) : subject.anchor;
+}
+
+// The `{{subject}}` line: the implementer is told to fix an issue, every other
+// role that it is about one; a janitor task's line points at its anchor.
+function subjectLine(subject: PromptSubject, role: "implementer" | "reviewer"): string {
+  if (subject.kind === "janitor") {
+    return `Idle task \`${subject.task}\` — the task anchor above is the spec.`;
+  }
+  return `${role === "implementer" ? "Fix issue" : "Issue"} #${subject.id}: ${subject.title}`;
+}
+
 async function buildIssueAnchor(
   issueId: string,
   anchor: IssueAnchorOptions,
@@ -743,19 +774,19 @@ async function buildAttemptSlot(
     readGit(
       ["log", "--reverse", "--oneline", `${base.ref}..HEAD`],
       worktreePath,
-      `the commit list for ${inputs.issue.branch}, anchored at ${base.ref}`,
+      `the commit list for ${inputs.branch}, anchored at ${base.ref}`,
     ),
     readGit(
       ["diff", FULL_PATH_DIFF_STAT, `${base.ref}...HEAD`],
       worktreePath,
-      `the branch diff stat for ${inputs.issue.branch}, anchored at ${base.ref}`,
+      `the branch diff stat for ${inputs.branch}, anchored at ${base.ref}`,
     ),
     qualityCommits.length === 0
       ? Promise.resolve("")
       : readGit(
           ["log", "--no-walk=unsorted", "--oneline", ...qualityCommits],
           worktreePath,
-          `the quality pass's commits on ${inputs.issue.branch}`,
+          `the quality pass's commits on ${inputs.branch}`,
         ),
   ]);
 
@@ -790,7 +821,8 @@ export type AttemptSlotRender = Omit<PromptInputs, "qualityCommits"> & {
 
 export function renderAttemptSlot(inputs: AttemptSlotRender): string {
   const {
-    issue,
+    subject,
+    branch,
     attempt,
     base,
     lastFailureTrace,
@@ -854,9 +886,8 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
 
   return render(IMPLEMENTER_TPL, {
     attempt: String(attempt),
-    issueId: issue.id,
-    issueTitle: issue.title,
-    branch: issue.branch,
+    subject: subjectLine(subject, "implementer"),
+    branch,
     chunkBase: section(chunkBase),
     workDone: section(workDone),
     qualityCommits: section(qualityCommitsSection),
@@ -953,7 +984,7 @@ async function readBranchPicture(
     await readGit(
       ["log", `${base}..HEAD`, "--oneline"],
       worktreePath,
-      `the commit list for ${inputs.issue.branch}, anchored at ${base}`,
+      `the commit list for ${inputs.branch}, anchored at ${base}`,
     )
   ).trim();
 
@@ -969,7 +1000,7 @@ async function readBranchPicture(
   // reviewing nothing.
   if (commits === "") {
     throw new SandbarError(
-      `refusing to launch ${role} for issue #${inputs.issue.id}: ` +
+      `refusing to launch ${role} for ${inputs.branch}: ` +
         `\`${base}..HEAD\` is empty in ${worktreePath}, but it only runs on ` +
         `committed work the implementer reported COMPLETE. The branch's commits and ` +
         `the range used to render them disagree.`,
@@ -980,7 +1011,7 @@ async function readBranchPicture(
     await readGit(
       ["diff", FULL_PATH_DIFF_STAT, `${base}...HEAD`],
       worktreePath,
-      `the branch diff stat for ${inputs.issue.branch}, anchored at ${base}`,
+      `the branch diff stat for ${inputs.branch}, anchored at ${base}`,
     )
   ).trim();
 
@@ -1136,7 +1167,7 @@ function renderQualityOverrule(overrule: QualityOverrule): string {
 }
 
 function branchSlotVars(inputs: BranchSlotRender): Record<string, string> {
-  const { issue, base, sourceBranch, claudeMdPath, contextMdPath, commits, stat } = inputs;
+  const { subject, branch, base, sourceBranch, claudeMdPath, contextMdPath, commits, stat } = inputs;
 
   // Same slot as the implementer's, aimed at the other half of the mistake: an
   // uninformed reader would go looking for the chunk's earlier work in this
@@ -1161,12 +1192,11 @@ function branchSlotVars(inputs: BranchSlotRender): Record<string, string> {
     : `## Branch diff stat\n\n(empty — no changes against \`${base.ref}\`)`;
 
   return {
-    branch: issue.branch,
+    branch,
     baseRef: base.ref,
     sourceBranch,
     chunkBase: section(chunkBase),
-    issueId: issue.id,
-    issueTitle: issue.title,
+    subject: subjectLine(subject, "reviewer"),
     commits: section(commitsBlock),
     diffStat: section(diffStatBlock),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),

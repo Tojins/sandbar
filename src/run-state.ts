@@ -33,10 +33,15 @@
 // a refusal is as likely an injection attempt as a missing allowlist entry, so
 // it is the run record's to show, not the header's to escalate. A proxy's
 // `egress` summary is a dim line beside the containers'.
+// An idle janitor run (#205) is no issue: its events, which name a task
+// instead (`EventSubject`), are feed lines tagged with that task and drive
+// one header row — the task and its phase, gone once its loop finishes — and
+// never reach the pool, waiting or finished tables.
 
 import type {
   GateStepEvent,
   HeldReason,
+  IssueRunEvent,
   IssueAnchorResult,
   ScenarioWriterResult,
   RecomputeWaiting,
@@ -69,6 +74,13 @@ export type WaitingIssueState = {
   readonly title: string;
   readonly why: string;
   readonly parked?: true;
+};
+
+export type JanitorRowState = {
+  readonly task: string;
+  readonly title: string;
+  readonly phase: string;
+  readonly phaseSince: string;
 };
 
 export type FinishedIssueState = {
@@ -113,6 +125,8 @@ export type FinishedChunkState = {
 export type FeedEvent = ContainerResources & {
   readonly at: string;
   readonly issue: number | null;
+  // The idle task a janitor run's line is about, in place of `issue`.
+  readonly janitor?: string;
   readonly text: string;
   readonly tone: "" | "dim" | "good" | "warn" | "bad";
   readonly steps?: Readonly<Record<string, GateStepEvent>>;
@@ -146,6 +160,8 @@ export type UiState = {
       readonly severity: "warning" | "error";
       readonly text: string;
     }[];
+    // The idle janitor task in its inner loop, if any.
+    readonly janitor: JanitorRowState | null;
   };
   readonly pool: readonly PoolIssueState[];
   readonly waiting: readonly WaitingIssueState[];
@@ -449,6 +465,7 @@ function feedText(event: RunEvent): FeedEvent | null {
   return {
     at: event.ts,
     issue,
+    ...(isJanitorEvent(event) ? { janitor: event.janitor } : {}),
     text,
     tone,
     ...(event.kind === "gate" && event.steps !== undefined
@@ -555,6 +572,28 @@ function applyPhase(issue: MutableIssue, event: Extract<RunEvent, { kind: "phase
   }
 }
 
+type JanitorEvent = Extract<RunEvent, { readonly janitor?: string }> & {
+  readonly janitor: string;
+};
+
+const isJanitorEvent = (event: RunEvent): event is JanitorEvent =>
+  "janitor" in event && event.janitor !== undefined;
+const isIssueRunEvent = (event: RunEvent): event is IssueRunEvent => !isJanitorEvent(event);
+
+// A janitor run's header row after one of its events: its loop's phase, a
+// fresh cycle's setup after a HARD-ERROR, gone once the loop has finished.
+function applyJanitor(row: JanitorRowState | null, event: JanitorEvent): JanitorRowState | null {
+  const at = (phase: string): JanitorRowState => ({
+    task: event.janitor,
+    title: event.title ?? row?.title ?? "",
+    phase,
+    phaseSince: event.ts,
+  });
+  if (event.kind === "phase") return event.phases.length === 0 ? null : at(phaseLabel(event.phases));
+  if (event.kind === "hard-error") return at("setup");
+  return row;
+}
+
 function finishedFrom(events: readonly RunEvent[]): readonly FinishedIssueState[] {
   const titles = new Map<number, string>();
   const terminals = new Map<number, Extract<RunEvent, { kind: "terminal" }>>();
@@ -565,7 +604,7 @@ function finishedFrom(events: readonly RunEvent[]): readonly FinishedIssueState[
   const attempts = new Map<number, number>();
   const rounds = new Map<number, number>();
   const finalisations = new Map<number, Extract<RunEvent, { kind: "finalise" }>>();
-  for (const event of events) {
+  for (const event of events.filter(isIssueRunEvent)) {
     if ("issue" in event && typeof event.issue === "number" && event.title) {
       titles.set(event.issue, event.title);
     }
@@ -669,10 +708,15 @@ export function reduceRunEvents(
   >();
   const landingRequests = new Map<number, LandingRequestState>();
   const closedBranchIssues = new Set<number>();
+  let janitor: JanitorRowState | null = null;
 
   for (const event of events) {
     const feedEvent = feedText(event);
     if (feedEvent) feed.push(feedEvent);
+    if (isJanitorEvent(event)) {
+      janitor = applyJanitor(janitor, event);
+      continue;
+    }
     switch (event.kind) {
       case "admitted":
         {
@@ -971,6 +1015,7 @@ export function reduceRunEvents(
         }
         : null,
       complaints,
+      janitor,
     },
     pool: [...issues.values()].sort((a, b) => a.issue - b.issue),
     waiting: waitingRows.sort((a, b) => a.issue - b.issue),

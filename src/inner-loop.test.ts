@@ -153,6 +153,7 @@ import {
   runVerifier,
   runGate,
   runImplementer,
+  InnerLoopAbortedError,
   runInnerLoop,
   runPartitionCheck,
   runQualityFix,
@@ -204,6 +205,17 @@ import {
   containerResourcesOf,
   type ContainerResources,
 } from "./container-resources.js";
+
+// The issue a hand-built action context is about, as the loop derives its
+// event and prompt subjects from it.
+const issueCtx = (issue: { readonly id: string; readonly title: string; readonly branch: string }) => ({
+  issue,
+  subject: {
+    event: { issue: Number(issue.id), title: issue.title },
+    prompt: { kind: "issue" as const, id: issue.id, title: issue.title },
+    logDir: `issue-${issue.id}`,
+  },
+});
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -278,7 +290,7 @@ describe("runAnchorCondense (#217)", () => {
     } as unknown as Sandbox;
     const providerState = createRunProviderState();
     const ctx = {
-      issue: { id: "217", title: "condense", branch: "sandbar/issue-217" },
+      ...issueCtx({ id: "217", title: "condense", branch: "sandbar/issue-217" }),
       sandbox,
       opts: {
         attemptLogger: { writeInvocation: vi.fn(async (filename) => writes.push(filename)) },
@@ -461,7 +473,7 @@ describe("runUiCheck (#126)", () => {
     return {
       sandbox,
       ctx: {
-        issue: { id: "126", title: "ui check", branch: "sandbar/issue-126" },
+        ...issueCtx({ id: "126", title: "ui check", branch: "sandbar/issue-126" }),
         sandbox,
         opts: {
           stackSource: inlineStackSource,
@@ -708,7 +720,7 @@ describe("runPartitionCheck (#158)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "158", title: "fan out", branch: "sandbar/issue-158" },
+      ...issueCtx({ id: "158", title: "fan out", branch: "sandbar/issue-158" }),
       sandbox,
       base: { ref: "origin/main", sha: "base" },
       opts: {
@@ -945,7 +957,7 @@ describe("silent implementer attempt policy (#116)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "116", title: "silent", branch: "sandbar/issue-116-silent" },
+      ...issueCtx({ id: "116", title: "silent", branch: "sandbar/issue-116-silent" }),
       sandbox,
       opts: {
         stackSource: inlineStackSource,
@@ -1348,7 +1360,7 @@ describe("silent implementer attempt policy (#116)", () => {
 
 describe("role prompt-extension wiring (#91)", () => {
   const ctxWith = () => ({
-    issue: { id: "91", title: "extensions", branch: "sandbar/issue-91" },
+    ...issueCtx({ id: "91", title: "extensions", branch: "sandbar/issue-91" }),
     sandbox: { worktreePath: "/worktree" },
     worktreePath: "/worktree",
     opts: { stackSource: inlineStackSource },
@@ -1477,7 +1489,7 @@ describe("runVerifier (#121, #180, #185)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "91", title: "records", branch: "sandbar/issue-91" },
+      ...issueCtx({ id: "91", title: "records", branch: "sandbar/issue-91" }),
       sandbox,
       worktreePath: "/worktree",
       opts: {
@@ -1718,7 +1730,7 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "187", title: "quality", branch: "sandbar/issue-187" },
+      ...issueCtx({ id: "187", title: "quality", branch: "sandbar/issue-187" }),
       sandbox,
       worktreePath: "/worktree",
       opts: {
@@ -2080,7 +2092,7 @@ describe("runQualityFix (#185, #187)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "185", title: "fixer", branch: "sandbar/issue-185" },
+      ...issueCtx({ id: "185", title: "fixer", branch: "sandbar/issue-185" }),
       sandbox,
       worktreePath: "/worktree",
       opts: {
@@ -2372,7 +2384,7 @@ describe("runAdjudicator (#167)", () => {
     sandbox: Sandbox,
     events: EventInput[] = [],
   ): Parameters<typeof runAdjudicator>[1] => ({
-    issue: { id: "167", title: "adjudicate", branch: "sandbar/issue-167" },
+    ...issueCtx({ id: "167", title: "adjudicate", branch: "sandbar/issue-167" }),
     sandbox,
     opts: {
       stackSource: inlineStackSource,
@@ -2747,7 +2759,7 @@ describe("runGate admission (#142)", () => {
     };
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
     const context = (id: string, runGate: () => Promise<GateResult>) => ({
-      issue: { id, title: `Issue ${id}`, branch: `sandbar/issue-${id}` },
+      ...issueCtx({ id, title: `Issue ${id}`, branch: `sandbar/issue-${id}` }),
       worktreePath: "/worktree",
       opts: {
         gateSemaphore,
@@ -2821,7 +2833,7 @@ describe("runGate admission (#142)", () => {
     };
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
     const ctx = {
-      issue: { id: "153", title: "gate log", branch: "sandbar/issue-153" },
+      ...issueCtx({ id: "153", title: "gate log", branch: "sandbar/issue-153" }),
       worktreePath: "/worktree",
       opts: {
         gateSemaphore: createGateSemaphore(undefined),
@@ -2871,7 +2883,7 @@ describe("runGate admission (#142)", () => {
       const ensure = vi.fn(async () => ({ runGate: runGateOnBound }));
       const reportGateStack = vi.fn(async () => undefined);
       const ctx = {
-        issue: { id: "186", title: "stack", branch: "sandbar/issue-186" },
+        ...issueCtx({ id: "186", title: "stack", branch: "sandbar/issue-186" }),
         worktreePath: "/worktree",
         opts: {
           gateSemaphore: createGateSemaphore(undefined),
@@ -4157,6 +4169,176 @@ describe("runInnerLoop context terminals (#158)", () => {
         expect.stringMatching(/^reviewer-/),
       ]);
       expect(stack.runGate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // #205: an idle janitor task runs the same loop under its name.
+  describe("for a janitor subject (#205)", () => {
+    const task = "tidy";
+    const janitorIssue = {
+      id: "janitor-tidy",
+      title: "Idle task: tidy",
+      branch: "sandbar/janitor-tidy",
+    };
+    const janitor = {
+      task,
+      base: { ref: "0123456789abcdef0123456789abcdef01234567", chunkBranch: null },
+      anchor: "# Idle task anchor\n\nTidy `src/a.ts`.",
+    };
+    const routine: Sandbox["run"] = async (options) =>
+      /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : completeRun;
+
+    beforeEach(() => {
+      innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(`refs/heads/${janitorIssue.branch}`);
+      innerLoopMocks.createScenarioWriterTask.mockReset();
+      innerLoopMocks.fetchIssueAnchor.mockClear();
+      innerLoopMocks.issueSource.mockClear();
+    });
+
+    it("runs the full loop with no seed, no tracker read, no pre-attempt check and no issue-keyed event", async () => {
+      const { opts, events } = harness(routine, {
+        partitionCheck: true,
+        uiPrototypeCheck: true,
+        scenarioWriter: true,
+      } as never);
+
+      await expect(runInnerLoop(janitorIssue, { ...opts, janitor }))
+        .resolves.toMatchObject({ type: "DONE" });
+
+      expect(innerLoopMocks.ensureIssueBranch).not.toHaveBeenCalled();
+      expect(innerLoopMocks.issueSource).not.toHaveBeenCalled();
+      expect(innerLoopMocks.fetchIssueAnchor).not.toHaveBeenCalled();
+      expect(innerLoopMocks.buildPartitionCheckPrompt).not.toHaveBeenCalled();
+      expect(innerLoopMocks.buildUiCheckPrompt).not.toHaveBeenCalled();
+      expect(innerLoopMocks.createScenarioWriterTask).not.toHaveBeenCalled();
+      const subject = { kind: "janitor", task, anchor: janitor.anchor };
+      expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ subject, branch: janitorIssue.branch, base: janitor.base }),
+        expect.anything(),
+      );
+      expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ subject, base: janitor.base }),
+      );
+      expect(innerLoopMocks.buildCorrectnessPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ subject, base: janitor.base }),
+      );
+      expect(events.filter((event) => "issue" in event)).toEqual([]);
+      expect(events.map((event) => event.kind)).not.toEqual(expect.arrayContaining(["admitted"]));
+      for (const kind of ["setup", "phase", "implementer", "quality-review", "gate", "review-pass", "review-round"]) {
+        expect(events).toContainEqual(expect.objectContaining({ kind, janitor: task }));
+      }
+      expect(events.flatMap((event) => event.kind === "phase" ? [event.phases] : [])).toEqual([
+        ["anchor"], ["implementer"], ["quality"], ["gate-1"], ["review"], [],
+      ]);
+    });
+
+    it("creates the sandbox log directory under the janitor's own log name", async () => {
+      const logsDir = await mkdtemp(join(tmpdir(), "janitor-logs-"));
+      try {
+        const { opts } = harness(routine, {
+          layout: { repoDir: "/repo", worktreesDir: "/worktrees", logsDir, anchorCacheDir: "/anchor-cache" },
+        } as never);
+        const stackSource = {
+          path: null,
+          forHead: async () => ({
+            stack: {
+              containers: [{ name: "app", image: "app", inSandbox: true }],
+              steps: [],
+            },
+            attachments: { env: {}, mounts: [] },
+            classification: { kind: "same" },
+            tipBlob: null,
+          }),
+        } as unknown as typeof opts.stackSource;
+
+        await runInnerLoop(janitorIssue, { ...opts, stackSource, janitor });
+
+        expect(await readdir(join(logsDir, "janitor-tidy"))).toContain("sandbox-logs");
+        expect(await readdir(logsDir)).not.toContain("issue-janitor-tidy");
+      } finally {
+        await rm(logsDir, { recursive: true, force: true });
+      }
+    });
+
+    it("tears the cycle down once on an abort mid-implementer and rejects unretried", async () => {
+      const controller = new AbortController();
+      let removed: (err: Error) => void = () => undefined;
+      const { sandbox, stack, opts, events } = harness(async (options) => {
+        if (!(options.name ?? "").startsWith("implementer-")) return routine(options);
+        const running = new Promise<never>((_resolve, reject) => {
+          removed = reject;
+        });
+        controller.abort();
+        return await running;
+      });
+      // Removing the agent container is what ends the in-flight run.
+      sandbox.close = vi.fn(async () => {
+        removed(new AgentError("container removed"));
+      });
+
+      const loop = runInnerLoop(janitorIssue, { ...opts, janitor, signal: controller.signal });
+
+      await expect(loop).rejects.toBeInstanceOf(InnerLoopAbortedError);
+      await expect(loop).rejects.toMatchObject({ cause: expect.any(AgentError) });
+      expect(stack.stop).toHaveBeenCalledOnce();
+      expect(sandbox.close).toHaveBeenCalledOnce();
+      expect(sandbox.deferWorktreeReclaim).toHaveBeenCalledOnce();
+      expect(vi.mocked(sandbox.run)).toHaveBeenCalledOnce();
+      expect(events).not.toContainEqual(expect.objectContaining({ kind: "hard-error" }));
+      expect(events).not.toContainEqual(expect.objectContaining({ kind: "complaint" }));
+      // The UI's janitor row stands until an empty phase closes it.
+      expect(events.filter((event) => event.kind === "phase").at(-1))
+        .toMatchObject({ janitor: task, phases: [] });
+    });
+
+    it("closes the header row at the last phase's attempt when a cycle aborts after it", async () => {
+      const { opts, events } = harness(routine);
+      const runCycle = vi.fn(async (_issue, cycleOpts) => {
+        await cycleOpts.onEvent({ kind: "phase", janitor: task, attempt: 2, phases: ["implementer"] });
+        throw new InnerLoopAbortedError();
+      });
+
+      await expect(runInnerLoop(janitorIssue, { ...opts, janitor }, runCycle))
+        .rejects.toBeInstanceOf(InnerLoopAbortedError);
+
+      expect(events.at(-1)).toMatchObject({ kind: "phase", janitor: task, attempt: 2, phases: [] });
+    });
+
+    it("emits one empty phase when the cycle already closed the row", async () => {
+      const { opts, events } = harness(routine);
+      const runCycle = vi.fn(async (_issue, cycleOpts) => {
+        await cycleOpts.onEvent({ kind: "phase", janitor: task, attempt: 1, phases: ["review"] });
+        await cycleOpts.onEvent({ kind: "phase", janitor: task, attempt: 1, phases: [] });
+        return { verdict: { type: "DONE" as const, commits: [] }, accumulatedCommits: [], specGaps: [] };
+      });
+
+      await runInnerLoop(janitorIssue, { ...opts, janitor }, runCycle);
+
+      const phases = events.flatMap((event) => event.kind === "phase" ? [event.phases] : []);
+      expect(phases).toEqual([["review"], []]);
+    });
+
+    it("closes its phase when a setup failure surfaces after the retries", async () => {
+      innerLoopMocks.prepareWorktree.mockRejectedValue(new Error("podman"));
+      const { opts, events } = harness(routine);
+
+      await expect(runInnerLoop(janitorIssue, { ...opts, janitor }))
+        .resolves.toMatchObject({ type: "HARD-ERROR" });
+
+      expect(events.filter((event) => event.kind === "hard-error")).toHaveLength(2);
+      expect(events.at(-1)).toMatchObject({ kind: "phase", janitor: task, phases: [] });
+    });
+
+    it("rejects before setup when the signal is already aborted", async () => {
+      const { sandbox, opts } = harness(routine);
+
+      await expect(runInnerLoop(janitorIssue, {
+        ...opts,
+        janitor,
+        signal: AbortSignal.abort(),
+      })).rejects.toBeInstanceOf(InnerLoopAbortedError);
+      expect(innerLoopMocks.prepareWorktree).not.toHaveBeenCalled();
+      expect(vi.mocked(sandbox.run)).not.toHaveBeenCalled();
     });
   });
 });
