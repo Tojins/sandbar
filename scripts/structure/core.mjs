@@ -4,11 +4,12 @@
 // gate step runs it without a build; not shipped.
 //
 // Every git call is `git -C <dir> [--git-dir <gitDir>] -c safe.directory=*`.
-// `gitDir` exists for sandbar's own gate, which masks the clone's `.git` with
-// a tmpfs (#98) and mounts it read-only elsewhere instead: nothing here
-// writes to the repository, so a read-only object store answers every
-// question a check asks. `safe.directory` because the gate's container user
-// need not own the clone.
+// `gitDir` exists for sandbar's own gate, whose tmpfs over the clone's `.git`
+// (#98) holds at most a copy from container start, so the installation
+// mounts the live one read-only elsewhere: nothing here writes to the
+// repository, so a read-only object store answers every question a check
+// asks. `safe.directory` because the gate's container user need not own the
+// clone.
 //
 // The base is `merge-base(HEAD, <base>)`, so a branch is measured against
 // where it left the source, not where the source has since moved. A git call

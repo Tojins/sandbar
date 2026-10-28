@@ -576,7 +576,7 @@ calling `process.exit()`, or piped step output gets cut off.
 
 ## Releasing
 
-Consumers pin to `vX.Y.Z` tags. Every commit bumps the version (see
+Consumers pin to `vX.Y.Z` tags. Every branch bumps the version (see
 [AGENTS.md](../AGENTS.md)). On every push to `main`,
 `.github/workflows/auto-tag.yml` creates the matching tag if it is missing.
 

@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-Read @AGENTS.md first: its rules apply to every commit (starting with: bump the
-version in the same commit). It is shared with the sandbar agents, which get it
+Read @AGENTS.md first: its rules apply to every commit (starting with: every
+branch bumps the version). It is shared with the sandbar agents, which get it
 as an anchor doc directly.
 
 This file is a **map**. The authoritative design notes are the header comments

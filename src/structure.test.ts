@@ -225,7 +225,7 @@ describe("version check", () => {
     });
   });
 
-  // Sandbar's gate masks the worktree's `.git` and mounts it elsewhere (#98).
+  // Sandbar's gate reads the clone's `.git` from a read-only mount elsewhere.
   it("reads the repository through --git-dir from a directory that is none", async () => {
     const dir = await fixtureRepo("version-unbumped");
     const elsewhere = await tempDir();

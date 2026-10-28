@@ -9,10 +9,12 @@ here — those are `CLAUDE.md` and the module headers.
 Agents never run `npm run replay`: it reruns past issues on real agents and
 spends real tokens, so only a human starts one (#195).
 
-## Bump the version on every commit
+## Bump the version on every branch
 
-Every commit moves `version` in `package.json`, in the **same commit** as the
-change it describes — never as a bump-only commit:
+Every branch moves `version` in `package.json` above its base (its merge base
+with `origin/main`); a commit made directly on `main` bumps itself. The bump
+rides in a commit with the change it describes — never a bump-only commit —
+and the gate's `version` step checks it (`npm run structure` locally):
 
 ```sh
 npm version patch --no-git-tag-version --ignore-scripts   # or `minor`
