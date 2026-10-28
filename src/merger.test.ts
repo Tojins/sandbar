@@ -166,6 +166,10 @@ type Script = {
   promptExtensionPaths?: string[];
   // #186: what each `stackChange` call answers, in order. Absent ⇒ null.
   stackChanges?: (StackChange | null)[];
+  // #235: per merge about to be gated, in order, the `version` both of its
+  // sides bumped to from the base's `0.20.33`, as package.json in the
+  // worktree carries it too. Absent or null ⇒ no package.json anywhere.
+  sameBumps?: (string | null)[];
 };
 
 function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
@@ -212,6 +216,9 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
   let prIdx = 0;
   let headIdx = 0;
   let mcIdx = 0;
+  let sbIdx = 0;
+  let sameBump: string | null = null;
+  const pkg = (v: string) => `{\n  "name": "sandbar",\n  "version": "${v}"\n}\n`;
   let merging = false;
   // #68: the unmerged set the mechanical resolution reads and shrinks.
   let unmerged = new Map<string, string>();
@@ -362,7 +369,10 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       return [...unmerged.keys(), ...otherUnmerged];
     },
     async readWorktreeFile(path) {
-      return unmerged.get(path) ?? null;
+      return (
+        unmerged.get(path) ??
+        (path === "package.json" && sameBump !== null ? pkg(sameBump) : null)
+      );
     },
     async writeWorktreeFile(path, contents) {
       calls.fileWrites.push({ path, contents });
@@ -371,6 +381,21 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     async stagePath(path) {
       calls.staged.push(path);
       unmerged.delete(path);
+    },
+    // #235.
+    async mergeSides() {
+      sameBump = script.sameBumps?.[sbIdx++] ?? null;
+      return { ours: "ours", theirs: "theirs", inProgress: merging };
+    },
+    async readFileAt(rev, path) {
+      if (sameBump === null || path !== "package.json") return null;
+      return pkg(rev === "base" ? "0.20.33" : sameBump);
+    },
+    async mergeBaseOf() {
+      return "base";
+    },
+    async amendHead() {
+      calls.order.push("amend");
     },
     async commitMerge() {
       calls.mergeCommits++;
@@ -1270,6 +1295,68 @@ describe("runMergerWithAdapter — the version collision is resolved without an 
     expect(calls.agentRuns).toEqual([]);
     expect(calls.pushes).toBe(1);
     expect(calls.closes).toEqual([]);
+  });
+});
+
+describe("runMergerWithAdapter — the identical bump is settled before the gate (#235)", () => {
+  it("bumps a clean merge both of whose sides bumped to one value, inside the merge commit", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      sameBumps: ["0.20.34"],
+    });
+    const lines: string[] = [];
+    const summary = await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      lines.push(line);
+    });
+
+    expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
+    expect(calls.order).toEqual(["merge", "amend", "install", "gate"]);
+    expect(calls.fileWrites).toEqual([
+      { path: "package.json", contents: '{\n  "name": "sandbar",\n  "version": "0.20.35"\n}\n' },
+    ]);
+    expect(lines).toContain("version-collision #42 both sides bumped to 0.20.34 -> 0.20.35");
+  });
+
+  it("stages it for the resolve agent when another file conflicted", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      otherConflicts: ["src/merger.ts"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      sameBumps: ["0.20.34"],
+    });
+    await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(calls.staged).toEqual(["package.json"]);
+    expect(calls.order.slice(0, 2)).toEqual(["merge", "agent"]);
+  });
+
+  it("settles a push race's clean re-merge onto an origin that bumped to the cycle's value", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }, { ok: true }],
+      pushes: [{ kind: "race" }, { kind: "ok" }],
+      pulls: [true],
+      sameBumps: [null, "0.20.34"],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.pushed).toBe(true);
+    expect(calls.order.slice(calls.order.indexOf("sync"))).toEqual([
+      "sync",
+      "amend",
+      "install",
+      "gate",
+    ]);
+  });
+
+  it("changes nothing when the merge's sides did not bump to one value", async () => {
+    const { adapter, calls } = makeAdapter({ merges: ["ok"], gates: [{ ok: true }] });
+    await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(calls.order).toEqual(["merge", "install", "gate"]);
+    expect(calls.fileWrites).toEqual([]);
   });
 });
 

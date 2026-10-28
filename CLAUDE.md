@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-Read @AGENTS.md first: its rules apply to every commit (starting with: bump the
-version in the same commit). It is shared with the sandbar agents, which get it
+Read @AGENTS.md first: its rules apply to every commit (starting with: every
+branch bumps the version). It is shared with the sandbar agents, which get it
 as an anchor doc directly.
 
 This file is a **map**. The authoritative design notes are the header comments
@@ -15,6 +15,8 @@ cited GitHub issue (`#N`) and the commit history.
 - `npm run check` — `tsc --noEmit`; the only static gate (no linter).
 - `npm test` — rebuild, then `vitest run`.
 - `npx vitest run src/<file>.test.ts [-t "<name>"]` — one file / one test.
+- `npm run structure` — the structural checks sandbar's gate runs as steps
+  (`scripts/structure/`, #183): today `version`, the branch's bump.
 
 Node ≥ 20.6, ESM, NodeNext: imports in `src/` use `.js` even for `.ts` files.
 
@@ -78,7 +80,7 @@ and the gate stack (`config.gateStack`, #24).
    verifier; its failure changes nothing.
 3. **Landing** — serialized, in an ephemeral worktree at `origin/<source>`
    (#10): `merger.ts`, `merger-worktree.ts`, `resolve-loop.ts` (#67),
-   `version-conflict.ts` (#68), `forge-verify.ts` (`mergeMode`, #22),
+   `version-conflict.ts` (#68, #235), `forge-verify.ts` (`mergeMode`, #22),
    `chunk-land.ts` / `chunk-pr.ts` / `forge-pr.ts` (chunk branches, draft PRs,
    `land` label #64).
 4. **Finalise** — `finalize.ts` + `finalize-inputs.ts`: branch publish, bot

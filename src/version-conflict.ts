@@ -1,7 +1,7 @@
 // The one merge conflict in this repo whose answer is not a judgement call
 // (#68), resolved mechanically before the resolve agent is ever invoked.
 //
-// AGENTS.md requires every commit to move `version` in `package.json`, and the
+// AGENTS.md requires every branch to move `version` in `package.json`, and the
 // command that does it rewrites the two matching entries in
 // `package-lock.json` as well. So any two branches landing in the same cycle
 // have both bumped `version` from the same base, and their merge conflicts in
@@ -10,6 +10,9 @@
 // bounded, expensive agentic budget re-deriving the same answer every cycle,
 // and the agent can get it wrong: neither side's value is correct, and the
 // correct one — `max(ours, theirs)` bumped once — appears on neither branch.
+//
+// Its clean twin — both sides bumped to the SAME value, so git merges without
+// a word — is settled by the same rule; see "The identical bump" below (#235).
 //
 // ---------------------------------------------------------------------------
 // What this module will and will not touch
@@ -414,4 +417,73 @@ export function planVersionCollision(
     };
   }
   return { version, resolved, declined };
+}
+
+// ---------------------------------------------------------------------------
+// The identical bump (#235)
+// ---------------------------------------------------------------------------
+//
+// The collision above has a twin git never reports: both sides ran the same
+// `npm version patch` from the same base, so they made the SAME change to the
+// version lines and the merge is clean at a value one side already carried.
+// That is the common case in a continuous pool — every two branches cut from
+// one tip — and the gate's `version` check (scripts/structure) rightly calls
+// the result not above its source. The answer is the collision's own rule,
+// `max(ours, theirs)` bumped once, with `max` the shared value.
+//
+// Decided from `package.json` alone at the two parents and their merge base:
+// both moved `version` away from the base, to the same plain `X.Y.Z`. Anything
+// else — one side bumped, neither did, a side without the file, a prerelease —
+// is not this case and changes nothing, so a host that never bumps on a
+// branch never sees it.
+export function identicalBump(sides: {
+  readonly ours: string | null;
+  readonly theirs: string | null;
+  readonly base: string | null;
+}): { readonly from: string; readonly to: string } | null {
+  const ours = rootVersion(sides.ours);
+  const theirs = rootVersion(sides.theirs);
+  if (ours === null || ours !== theirs || ours === rootVersion(sides.base)) {
+    return null;
+  }
+  const to = bumpAboveAll([ours]);
+  return to === null ? null : { from: ours, to };
+}
+
+function rootVersion(packageJson: string | null): string | null {
+  if (packageJson === null) return null;
+  const parsed = parseJson(packageJson);
+  if (!parsed.ok || !isPlainObject(parsed.value)) return null;
+  const v = parsed.value["version"];
+  return typeof v === "string" ? v : null;
+}
+
+// `text` with its root version moved from `from` to `to` at the paths npm
+// mirrors for `path`, formatting untouched; null when no line moved one — the
+// text is not JSON (a file still in conflict), or no allowed path carries
+// `from`. Line by line, keeping a `"version"` line only when rewriting it
+// alone moves exactly one allowed path, so a dependency the lockfile pins at
+// the same version stays where it is.
+export function rewriteRootVersion(
+  path: string,
+  text: string,
+  from: string,
+  to: string,
+): string | null {
+  const allowed = ALLOWED_VERSION_PATHS[path];
+  const original = parseJson(text);
+  if (!allowed || !original.ok) return null;
+  const lines = text.split("\n");
+  const rewritten = lines.map((line, i) => {
+    const m = VERSION_LINE.exec(line);
+    if (!m || m[2] !== from) return line;
+    const candidate = `${m[1]}"version": "${to}"${m[3]}`;
+    const alone = parseJson(lines.map((l, j) => (j === i ? candidate : l)).join("\n"));
+    if (!alone.ok) return line;
+    const [moved, ...more] = differingPaths(original.value, alone.value);
+    return moved !== undefined && more.length === 0 && allowed.some((a) => samePath(a, moved))
+      ? candidate
+      : line;
+  });
+  return rewritten.some((line, i) => line !== lines[i]) ? rewritten.join("\n") : null;
 }

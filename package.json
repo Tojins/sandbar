@@ -1,6 +1,6 @@
 {
   "name": "sandbar",
-  "version": "0.62.5",
+  "version": "0.62.6",
   "description": "Self-hosted issue-tracker-driven coding agent orchestrator.",
   "type": "module",
   "main": "dist/index.js",
@@ -36,7 +36,8 @@
     "postversion": "git push --follow-tags",
     "stats": "node dist/stats-cli.js",
     "reflect": "node dist/reflect-cli.js",
-    "replay": "node dist/replay-cli.js"
+    "replay": "node dist/replay-cli.js",
+    "structure": "node scripts/structure/run.mjs"
   },
   "dependencies": {
     "proper-lockfile": "^4.1.2"

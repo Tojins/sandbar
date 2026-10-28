@@ -8,14 +8,15 @@
 // production while looking correct in any test that uses a plain clone.
 
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { realAdapter, resolveVersionCollision } from "./merger.js";
+import { checkVersion } from "../scripts/structure/version.mjs";
+import { realAdapter, resolveVersionCollision, settleIdenticalBump } from "./merger.js";
 import { runResolveLoop } from "./resolve-loop.js";
 
 const exec = promisify(execFile);
@@ -1079,5 +1080,207 @@ describe("resolveVersionCollision (real conflicting merge in a linked worktree)"
       "version-collision #42 package-lock.json left to the resolve agent: " +
         "the conflict also touches packages.node_modules/proper-lockfile.version",
     ]);
+  });
+});
+
+describe("settleIdenticalBump (real same-bump merge in a linked worktree)", () => {
+  let root: string;
+  let repo: string;
+  let wt: string;
+
+  const pkg = (v: string): string =>
+    ["{", '  "name": "sandbar",', `  "version": "${v}",`, '  "type": "module"', "}", ""].join("\n");
+
+  // A dependency pinned at the very version both sides bump to: the one line
+  // in the lockfile a value-matching rewrite must leave alone.
+  const lock = (v: string): string =>
+    [
+      "{",
+      '  "name": "sandbar",',
+      `  "version": "${v}",`,
+      '  "lockfileVersion": 3,',
+      '  "packages": {',
+      '    "": {',
+      '      "name": "sandbar",',
+      `      "version": "${v}"`,
+      "    },",
+      '    "node_modules/proper-lockfile": {',
+      '      "version": "0.20.34"',
+      "    }",
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+
+  const bump = async (
+    cwd: string,
+    v: string,
+    extra?: { readonly file: string; readonly body: string },
+  ): Promise<void> => {
+    await writeFile(join(cwd, "package.json"), pkg(v));
+    await writeFile(join(cwd, "package-lock.json"), lock(v));
+    if (extra) await writeFile(join(cwd, extra.file), extra.body);
+    await git(cwd, "add", ".");
+    await git(cwd, "commit", "-m", `chore: ${v}`);
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-ib-"));
+    repo = join(root, "repo");
+    wt = join(root, "wt");
+    await exec("git", ["init", "-b", "main", repo], { env: GIT_ENV });
+    await bump(repo, "0.20.33");
+    await git(repo, "checkout", "-qb", "side");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const adapterAt = (cwd: string) =>
+    realAdapter({
+      cwd,
+      sourceBranch: "main",
+      botName: "bot",
+      botEmail: "bot@e",
+      coauthorTrailer: "Co-authored-by: Claude <noreply@anthropic.com>",
+    } as unknown as Parameters<typeof realAdapter>[0]);
+
+  // Both branches ran `npm version patch` from the same base, so git sees the
+  // same change on both sides and merges it without a word.
+  const sameBump = async (
+    sides: {
+      readonly ours?: { readonly file: string; readonly body: string };
+      readonly theirs?: { readonly file: string; readonly body: string };
+    } = {},
+    ourVersion = "0.20.34",
+  ): Promise<{ adapter: ReturnType<typeof adapterAt>; ok: boolean }> => {
+    // A file of its own, or the two bump commits are one commit and
+    // there is nothing to merge.
+    await bump(repo, "0.20.34", sides.theirs ?? { file: "side.txt", body: "side\n" });
+    await git(repo, "checkout", "-q", "main");
+    await bump(repo, ourVersion, sides.ours);
+    await git(repo, "worktree", "add", "--detach", wt, "HEAD");
+    const adapter = adapterAt(wt);
+    const { ok } = await adapter.mergeNoFf({ id: "42", title: "t", branch: "side" });
+    return { adapter, ok };
+  };
+
+  const version = async (rev: string): Promise<string> =>
+    (JSON.parse(await git(wt, "show", `${rev}:package.json`)) as { version: string }).version;
+
+  const lines: string[] = [];
+  const emit = async (l: string): Promise<void> => {
+    lines.push(l);
+  };
+
+  it("bumps a clean merge that absorbed the same bump once, inside the merge commit", async () => {
+    const { adapter, ok } = await sameBump();
+    expect(ok).toBe(true);
+    expect(await version("HEAD")).toBe("0.20.34");
+    lines.length = 0;
+
+    expect(await settleIdenticalBump(adapter, emit, "#42")).toBe(true);
+
+    expect(await version("HEAD^1")).toBe("0.20.34");
+    expect(await version("HEAD^2")).toBe("0.20.34");
+    expect(await version("HEAD")).toBe("0.20.35");
+    expect((await git(wt, "rev-list", "--parents", "-n", "1", "HEAD")).split(" ")).toHaveLength(3);
+    expect(await git(wt, "status", "--porcelain")).toBe("");
+    const message = await git(wt, "log", "-1", "--format=%B");
+    expect(message).toContain("Merge sandbar/issue-42: t");
+    expect(message).toContain("Co-authored-by: Claude <noreply@anthropic.com>");
+    expect(lines).toEqual(["version-collision #42 both sides bumped to 0.20.34 -> 0.20.35"]);
+  });
+
+  it("moves both lockfile mirrors and not a dependency pinned at the same version", async () => {
+    const { adapter } = await sameBump();
+    await settleIdenticalBump(adapter, emit, "#42");
+
+    const merged = JSON.parse(await git(wt, "show", "HEAD:package-lock.json")) as {
+      version: string;
+      packages: Record<string, { version: string }>;
+    };
+    expect(merged.version).toBe("0.20.35");
+    expect(merged.packages[""]?.version).toBe("0.20.35");
+    expect(merged.packages["node_modules/proper-lockfile"]?.version).toBe("0.20.34");
+  });
+
+  it("leaves the merge passing the gate's `version` check, which it failed before", async () => {
+    const { adapter } = await sameBump();
+    const repoAt = { dir: wt };
+    expect(checkVersion(repoAt, "main").findings).toEqual([
+      "package.json: version 0.20.34 is not above main's 0.20.34",
+    ]);
+
+    await settleIdenticalBump(adapter, emit, "#42");
+
+    expect(checkVersion(repoAt, "main").findings).toEqual([]);
+  });
+
+  it("stages the bump for the resolve agent when another file conflicted", async () => {
+    const { adapter, ok } = await sameBump({
+      ours: { file: "src.txt", body: "ours\n" },
+      theirs: { file: "src.txt", body: "theirs\n" },
+    });
+    expect(ok).toBe(false);
+
+    expect(await settleIdenticalBump(adapter, emit, "#42")).toBe(true);
+
+    expect(await adapter.unmergedPaths()).toEqual(["src.txt"]);
+    expect(await adapter.isMergeInProgress()).toBe(true);
+    expect(
+      (JSON.parse(await git(wt, "show", ":package.json")) as { version: string }).version,
+    ).toBe("0.20.35");
+    expect(
+      (JSON.parse(await git(wt, "show", ":package-lock.json")) as { version: string }).version,
+    ).toBe("0.20.35");
+  });
+
+  it("changes nothing when only the merged branch bumped", async () => {
+    const { adapter, ok } = await sameBump({ ours: { file: "main.txt", body: "main\n" } }, "0.20.33");
+    expect(ok).toBe(true);
+    const head = await git(wt, "rev-parse", "HEAD");
+    lines.length = 0;
+
+    expect(await settleIdenticalBump(adapter, emit, "#42")).toBe(false);
+
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(head);
+    expect(await version("HEAD")).toBe("0.20.34");
+    expect(lines).toEqual([]);
+  });
+
+  it("leaves both files alone and says so when the lockfile cannot be rewritten", async () => {
+    const { adapter, ok } = await sameBump();
+    expect(ok).toBe(true);
+    const head = await git(wt, "rev-parse", "HEAD");
+    const conflicted =
+      "<<<<<<< ours\n" + lock("0.20.34") + "=======\n" + lock("0.20.34") + ">>>>>>> theirs\n";
+    await writeFile(join(wt, "package-lock.json"), conflicted);
+    lines.length = 0;
+
+    expect(await settleIdenticalBump(adapter, emit, "#42")).toBe(false);
+
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(head);
+    expect(await readFile(join(wt, "package.json"), "utf8")).toBe(pkg("0.20.34"));
+    expect(await readFile(join(wt, "package-lock.json"), "utf8")).toBe(conflicted);
+    expect(await git(wt, "diff", "--cached", "--name-only")).toBe("");
+    expect(lines).toEqual([
+      "version-collision #42 both sides bumped to 0.20.34; " +
+        "package-lock.json is still in conflict or has no root version at it; left to the gate",
+    ]);
+  });
+
+  it("changes nothing when HEAD is neither a merge nor in the middle of one", async () => {
+    await git(repo, "checkout", "-q", "main");
+    await git(repo, "worktree", "add", "--detach", wt, "HEAD");
+    const head = await git(wt, "rev-parse", "HEAD");
+    lines.length = 0;
+
+    expect(await settleIdenticalBump(adapterAt(wt), emit, "#42")).toBe(false);
+
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(head);
+    expect(await git(wt, "status", "--porcelain")).toBe("");
+    expect(lines).toEqual([]);
   });
 });
