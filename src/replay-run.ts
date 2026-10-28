@@ -51,11 +51,9 @@
 // terminal is recorded, and propagates.
 
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
-import { promisify } from "node:util";
 
 import { reclaimIssueClone } from "./agent-sandbox.js";
 import { agentToolsImageTags, createAgentImages } from "./agent-tools.js";
@@ -82,6 +80,7 @@ import {
   startEventRecord,
 } from "./events.js";
 import { type GateSemaphore, createGateSemaphore } from "./gate-semaphore.js";
+import { gitStdout } from "./git-ops.js";
 import { reconcileImages } from "./image-lifecycle.js";
 import {
   type InnerLoopConfig,
@@ -90,7 +89,7 @@ import {
   createRunProviderState,
   runInnerLoop,
 } from "./inner-loop.js";
-import { type IssueJson, fetchIssueSnapshot } from "./issue-anchor.js";
+import { type IssueJson, fetchIssueLastEditedAt, fetchIssueSnapshot, issueJsonErrors } from "./issue-anchor.js";
 import { acquireLock, lockPathsFor } from "./lock.js";
 import { issueBranchName, issueMergeSubject, parseIssueMergeSubject, runScope } from "./naming.js";
 import { checkStackOnHost } from "./preflight.js";
@@ -120,15 +119,7 @@ import { innerLoopConfigOf, rejectedEnding, sandboxEnvOf, terminalEventOf, termi
 import { type StackSource, openStackSource, stackSpecToken } from "./stack-source.js";
 import { startTimer } from "./timing.js";
 
-const exec = promisify(execFile);
-
 export const GH_DISABLED_EXIT = 97;
-
-const git = async (repoDir: string, args: readonly string[], input?: string): Promise<string> => {
-  const child = exec("git", ["--git-dir", repoDir, ...args], { cwd: repoDir, maxBuffer: 64 * 1024 * 1024 });
-  if (input !== undefined) child.child.stdin?.end(input);
-  return (await child).stdout;
-};
 
 export function replayLayout(config: Pick<ResolvedConfig, "cwd" | "workDir">): RepoLayout {
   return repoLayout(config.cwd, join(config.workDir, "replay"));
@@ -165,13 +156,13 @@ export async function prepareCaseCache(args: {
   const layout = { ...repoLayout(args.caseDir, ""), hostCwd: args.hostCwd };
   const { repoDir } = layout;
   await mkdir(args.caseDir, { recursive: true });
-  await exec("git", ["clone", "--bare", "--local", "--quiet", args.baseRepoDir, repoDir], { cwd: args.caseDir });
-  const refs = (await git(repoDir, ["for-each-ref", "--format=%(refname)"]))
+  await gitStdout(args.caseDir, ["clone", "--bare", "--local", "--quiet", args.baseRepoDir, repoDir]);
+  const refs = (await gitStdout(repoDir, ["for-each-ref", "--format=%(refname)"]))
     .split("\n").filter((ref) => ref !== "");
-  await git(repoDir, ["update-ref", "--stdin"], `${caseCacheRefUpdates(refs, args.sourceBranch, args.seedSha).join("\n")}\n`);
-  await git(repoDir, ["config", "remote.origin.url", repoDir]);
-  await git(repoDir, ["config", "remote.origin.pushurl", join(args.caseDir, "push-forbidden")]);
-  await git(repoDir, ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+  await gitStdout(repoDir, ["update-ref", "--stdin"], `${caseCacheRefUpdates(refs, args.sourceBranch, args.seedSha).join("\n")}\n`);
+  await gitStdout(repoDir, ["config", "remote.origin.url", repoDir]);
+  await gitStdout(repoDir, ["config", "remote.origin.pushurl", join(args.caseDir, "push-forbidden")]);
+  await gitStdout(repoDir, ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
   const hook = join(repoDir, "hooks", "pre-receive");
   await mkdir(dirname(hook), { recursive: true });
   await writeFile(hook, REFUSE_PUSH_HOOK);
@@ -193,7 +184,7 @@ type LandingMerge = {
 // The newest merge the merger made of the issue's branch into the source's
 // history — a chunk member's too, which sits behind its chunk's merge.
 async function landingMerge(repoDir: string, sourceBranch: string, issue: number): Promise<LandingMerge | null> {
-  const log = await git(repoDir, [
+  const log = await gitStdout(repoDir, [
     "log", "--merges", "--fixed-strings", `--grep=${issueMergeSubject(issue, "")}`,
     "--format=%H %P%x09%s", `refs/remotes/origin/${sourceBranch}`,
   ]);
@@ -202,7 +193,7 @@ async function landingMerge(repoDir: string, sourceBranch: string, issue: number
     const parsed = parseIssueMergeSubject(subject);
     const [merge, first, second] = shas.split(" ");
     if (parsed?.issue !== issue || merge === undefined || first === undefined || second === undefined) continue;
-    const base = (await git(repoDir, ["merge-base", first, second])).trim();
+    const base = (await gitStdout(repoDir, ["merge-base", first, second])).trim();
     return { merge, base, tip: second, title: parsed.title };
   }
   return null;
@@ -239,22 +230,8 @@ async function recordedAdmissions(
   return found;
 }
 
-async function issueLastEditedAt(issue: number, repo: RepoRef): Promise<string | null> {
-  const { stdout } = await exec("gh", [
-    "api", "graphql", "-F", `owner=${repo.owner}`, "-F", `repo=${repo.name}`, "-F", `number=${issue}`,
-    "-f", "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){lastEditedAt}}}",
-  ]);
-  const edited = (JSON.parse(stdout) as {
-    data?: { repository?: { issue?: { lastEditedAt?: string | null } | null } };
-  }).data?.repository?.issue;
-  if (edited === undefined || edited === null) {
-    throw new SandbarError(`${repoSlug(repo)} has no issue #${issue}`);
-  }
-  return edited.lastEditedAt ?? null;
-}
-
 async function earliestAuthorDate(repoDir: string, seed: string, tip: string): Promise<string | null> {
-  const dates = (await git(repoDir, ["log", "--format=%aI", `${seed}..${tip}`]))
+  const dates = (await gitStdout(repoDir, ["log", "--format=%aI", `${seed}..${tip}`]))
     .split("\n").filter((date) => date !== "");
   return dates.reduce<string | null>(
     (earliest, date) => earliest === null || Date.parse(date) < Date.parse(earliest) ? date : earliest,
@@ -290,13 +267,16 @@ async function freezeCase(args: {
   let text: CaseText & { readonly issueJson: IssueJson };
   if (admission !== null && admission.issueSnapshot !== null) {
     const path = join(args.logsDir, admission.run, `issue-${issue}`, admission.issueSnapshot);
-    text = { issueFrom: "recorded", issueJson: JSON.parse(await readFile(path, "utf8")) as IssueJson };
+    const snapshot: unknown = JSON.parse(await readFile(path, "utf8"));
+    const errors = issueJsonErrors(snapshot);
+    if (errors.length > 0) throw new SandbarError(`${path} is not an issue snapshot: ${errors.join("; ")}`);
+    text = { issueFrom: "recorded", issueJson: snapshot as IssueJson };
   } else {
     const cutoff = admission?.ts ?? (merge === null ? null : await earliestAuthorDate(repoDir, seed.seedSha, merge.tip));
     if (cutoff === null) return { failure: `#${issue}: no admission time and no commit on its branch to date it by` };
     const [current, lastEditedAt] = await Promise.all([
       fetchIssueSnapshot(String(issue), args.repo),
-      issueLastEditedAt(issue, args.repo),
+      fetchIssueLastEditedAt(issue, args.repo),
     ]);
     text = {
       issueFrom: "reconstructed",
@@ -314,7 +294,7 @@ async function freezeCase(args: {
       landed: merge === null ? null : {
         merge: merge.merge,
         tip: merge.tip,
-        diff: parseNumstat(await git(repoDir, ["diff", "--numstat", merge.base, merge.tip])),
+        diff: parseNumstat(await gitStdout(repoDir, ["diff", "--numstat", merge.base, merge.tip])),
       },
     },
   };
@@ -342,8 +322,8 @@ export async function freeze(args: {
   const release = await acquireLock(lockPathsFor(layout.stateDir));
   try {
     await ensureRepoCache(layout, args.log);
-    await git(layout.repoDir, ["config", "remote.origin.pushurl", join(layout.stateDir, "push-forbidden")]);
-    await git(layout.repoDir, ["fetch", "origin", "--prune", "--quiet"]);
+    await gitStdout(layout.repoDir, ["config", "remote.origin.pushurl", join(layout.stateDir, "push-forbidden")]);
+    await gitStdout(layout.repoDir, ["fetch", "origin", "--prune", "--quiet"]);
     const repo = { owner: config.ghOwner, name: config.ghRepo };
     const admissions = await recordedAdmissions(args.logsDir, args.issues);
     const frozen = await Promise.all(args.issues.map((issue) => freezeCase({
@@ -410,7 +390,7 @@ async function readCases(casesFile: string, config: ResolvedConfig): Promise<{
 async function missingSeeds(baseRepoDir: string, cases: readonly ReplayCase[]): Promise<readonly string[]> {
   const present = await Promise.all(cases.map(async (c) => {
     try {
-      await git(baseRepoDir, ["rev-parse", "--verify", "--quiet", `${c.seedSha}^{commit}`]);
+      await gitStdout(baseRepoDir, ["rev-parse", "--verify", "--quiet", `${c.seedSha}^{commit}`]);
       return true;
     } catch (err) {
       if (!isExitCode(err, 1)) throw err;
@@ -420,9 +400,18 @@ async function missingSeeds(baseRepoDir: string, cases: readonly ReplayCase[]): 
   return cases.filter((_, i) => !present[i]).map((c) => `#${c.issue} ${c.seedSha}`);
 }
 
-// The session manifest, rewritten whole (tmp + rename) after every result,
-// one write at a time.
-function sessionManifest(path: string, session: Omit<ReplaySession, "results">) {
+// The session manifest: `replay.json`, rewritten whole (tmp + rename) after
+// every result. Pool workers share one, so the writes are chained inside it:
+// callers never coordinate, and the file's results are in the order of the
+// `append` calls.
+export interface SessionManifest {
+  // Rewrites the file from the results appended so far.
+  write(): Promise<void>;
+  // Adds a result and rewrites the file.
+  append(result: ReplayResult): Promise<void>;
+}
+
+function sessionManifest(path: string, session: Omit<ReplaySession, "results">): SessionManifest {
   const results: ReplayResult[] = [];
   let tail: Promise<void> = Promise.resolve();
   const write = (): Promise<void> => {
@@ -435,7 +424,7 @@ function sessionManifest(path: string, session: Omit<ReplaySession, "results">) 
   };
   return {
     write,
-    append: (result: ReplayResult): Promise<void> => {
+    append: (result) => {
       results.push(result);
       return write();
     },
@@ -487,13 +476,31 @@ export async function runReplay(opts: ReplayRunOptions): Promise<0 | 3> {
   onCleanup(release);
   installCleanupTraps();
   try {
-    return await replaySession(opts, layout, realpathSync(lockPaths.workDir));
+    return await runRepeats(opts, await prepareSession(opts, layout, realpathSync(lockPaths.workDir)));
   } finally {
     await runCleanup();
   }
 }
 
-async function replaySession(opts: ReplayRunOptions, layout: RepoLayout, lockedWorkDir: string): Promise<0 | 3> {
+// Everything `runRepeats` needs, after every refusal that can be made before a
+// token is spent: the case file, the base cache, the host, the images, the
+// session directory and each case's cache and stack.
+type PreparedSession = {
+  readonly driver: string;
+  readonly stateDir: string;
+  readonly sessionDir: string;
+  readonly parallel: number;
+  readonly manifest: SessionManifest;
+  readonly repeats: readonly (readonly PreparedCase[])[];
+  readonly branchImages: BranchImages;
+  readonly issueConfigOf: (run: PreparedCase) => InnerLoopConfig;
+};
+
+async function prepareSession(
+  opts: ReplayRunOptions,
+  layout: RepoLayout,
+  lockedWorkDir: string,
+): Promise<PreparedSession> {
   const { config, log } = opts;
   const casesFile = resolve(opts.casesFile);
   const { cases, sha256 } = await readCases(casesFile, config);
@@ -524,7 +531,7 @@ async function replaySession(opts: ReplayRunOptions, layout: RepoLayout, lockedW
 
   const env = makeEnvReader(config.env);
   const codexAuthMount = providers.includes("codex")
-    ? existingCodexAuth(repoLayout(config.cwd, config.workDir).stateDir, env("CODEX_HOME"))
+    ? await existingCodexAuth(repoLayout(config.cwd, config.workDir).stateDir, env("CODEX_HOME"))
     : undefined;
   const baseFingerprints = await existingBaseFingerprints(config.images);
   const agentImages = await createAgentImages({
@@ -557,7 +564,7 @@ async function replaySession(opts: ReplayRunOptions, layout: RepoLayout, lockedW
 
   const hostUid = process.getuid?.() ?? 0;
   const plan = planReplay(cases.cases, opts.repeats);
-  const prepared = await Promise.all(plan.map((repeat) => Promise.all(repeat.map(async (run): Promise<PreparedCase> => {
+  const repeats = await Promise.all(plan.map((repeat) => Promise.all(repeat.map(async (run): Promise<PreparedCase> => {
     const caseLayout = await prepareCaseCache({
       baseRepoDir: layout.repoDir,
       caseDir: join(sessionDir, "cases", `${run.case.issue}-r${run.repeat}`),
@@ -579,7 +586,7 @@ async function replaySession(opts: ReplayRunOptions, layout: RepoLayout, lockedW
     });
     return { ...run, layout: caseLayout, stackSource };
   }))));
-  const stacks = new Map(prepared.flat().map((c) => {
+  const stacks = new Map(repeats.flat().map((c) => {
     const { stack } = c.stackSource.accepted();
     return [stackSpecToken(stack), stack] as const;
   }));
@@ -595,6 +602,28 @@ async function replaySession(opts: ReplayRunOptions, layout: RepoLayout, lockedW
   });
 
   const sandboxEnv = stripForgeCredentials(sandboxEnvOf(config));
+  return {
+    driver,
+    stateDir: layout.stateDir,
+    sessionDir,
+    parallel,
+    manifest,
+    repeats,
+    branchImages,
+    issueConfigOf: (run) => innerLoopConfigOf(config, {
+      layout: run.layout,
+      issueSource: async () => run.case.issueJson,
+      scope,
+      env: sandboxEnv,
+      codexAuthMount,
+      agentImages,
+    }),
+  };
+}
+
+async function runRepeats(opts: ReplayRunOptions, session: PreparedSession): Promise<0 | 3> {
+  const { config, log } = opts;
+  const { manifest } = session;
   let stopped: string | null = null;
   const notRun = (run: PlannedRun, record: string | null, reason: string): ReplayResult => ({
     repeat: run.repeat,
@@ -606,44 +635,37 @@ async function replaySession(opts: ReplayRunOptions, layout: RepoLayout, lockedW
     reason,
   });
 
-  for (const repeat of prepared) {
-    if (stopped !== null) {
-      for (const run of repeat) await manifest.append(notRun(run, null, stopped));
-      continue;
-    }
-    const record = await startEventRecord({
-      baseDir: join(sessionDir, "logs"),
-      start: {
-        driver,
-        configPath: opts.configPath,
-        workdir: layout.stateDir,
-        maxParallelIssues: parallel,
-        pid: process.pid,
-      },
-    });
-    const withdrawFinalize = registerDisposable(() => record.finalize("interrupted"));
-    const runName = basename(record.runDir);
+  for (const repeat of session.repeats) {
+    // A repeat's record starts with its first case to run, so a repeat a stop
+    // closed before it began leaves none (and its results name no run).
+    const repeatRecord: {
+      open: Promise<{ readonly record: EventRecord; readonly withdraw: () => void }> | null;
+    } = { open: null };
     const gateSemaphore = createGateSemaphore(config.maxConcurrentGates);
     const providerState = createRunProviderState();
-    await inPool(repeat, parallel, async (run) => {
+    await inPool(repeat, session.parallel, async (run) => {
       if (stopped !== null) {
-        await manifest.append(notRun(run, runName, stopped));
+        await manifest.append(notRun(run, repeatRecord.open === null ? null : basename((await repeatRecord.open).record.runDir), stopped));
         return;
       }
+      repeatRecord.open ??= startEventRecord({
+        baseDir: join(session.sessionDir, "logs"),
+        start: {
+          driver: session.driver,
+          configPath: opts.configPath,
+          workdir: session.stateDir,
+          maxParallelIssues: session.parallel,
+          pid: process.pid,
+        },
+      }).then((record) => ({ record, withdraw: registerDisposable(() => record.finalize("interrupted")) }));
+      const { record } = await repeatRecord.open;
       const { result, stop } = await replayCase(run, {
         config,
         log,
         record,
-        runName,
-        issueConfig: innerLoopConfigOf(config, {
-          layout: run.layout,
-          issueSource: async () => run.case.issueJson,
-          scope,
-          env: sandboxEnv,
-          codexAuthMount,
-          agentImages,
-        }),
-        branchImages,
+        runName: basename(record.runDir),
+        issueConfig: session.issueConfigOf(run),
+        branchImages: session.branchImages,
         gateSemaphore,
         providerState,
       });
@@ -651,8 +673,11 @@ async function replaySession(opts: ReplayRunOptions, layout: RepoLayout, lockedW
       await manifest.append(result);
       log(`replay: r${run.repeat} #${run.case.issue} ${result.status === "ran" ? result.terminal : result.reason}`);
     });
-    await record.finalize(stopped === null ? "normal-exit" : "stopped");
-    withdrawFinalize();
+    if (repeatRecord.open !== null) {
+      const { record, withdraw } = await repeatRecord.open;
+      await record.finalize(stopped === null ? "normal-exit" : "stopped");
+      withdraw();
+    }
   }
   return stopped === null ? 0 : 3;
 }
@@ -710,7 +735,7 @@ async function replayCase(
   if (reclaimed.kind === "preserved") {
     ctx.log(`replay: #${c.issue} clone kept at ${reclaimed.worktreePath}: ${reclaimed.reason}`);
   }
-  const tip = (await git(layout.repoDir, ["rev-parse", `refs/heads/${issue.branch}`])).trim();
+  const tip = (await gitStdout(layout.repoDir, ["rev-parse", `refs/heads/${issue.branch}`])).trim();
   return {
     stop: terminal.type === "QUOTA" || terminal.type === "CREDENTIAL"
       ? `${terminal.type}: ${terminalReason(terminal)}`
@@ -725,7 +750,7 @@ async function replayCase(
       terminal: terminal.type,
       tip,
       lastGateOk,
-      diff: parseNumstat(await git(layout.repoDir, ["diff", "--numstat", c.seedSha, tip])),
+      diff: parseNumstat(await gitStdout(layout.repoDir, ["diff", "--numstat", c.seedSha, tip])),
     },
   };
 }

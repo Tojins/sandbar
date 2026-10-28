@@ -20,99 +20,13 @@
 // credential.
 
 import { resolve } from "node:path";
-import { parseArgs } from "node:util";
 
 import { loadConfig, withDefaultCwd } from "./cli.js";
 import { resolveConfig } from "./config.js";
-import { SandbarError, isParseArgsError } from "./errors.js";
+import { SandbarError } from "./errors.js";
 import { LockHeldError } from "./lock.js";
+import { USAGE, type ReplayArgs, parseReplayArgs } from "./replay-args.js";
 import { freeze, runReplay } from "./replay-run.js";
-
-const USAGE =
-  "usage: replay-cli.js freeze --issues <n,n…> --logs <dir> --out <file> [--config <path>]\n" +
-  "       replay-cli.js run --cases <file> --label <name> [--repeat k] [--parallel P] [--config <path>]\n" +
-  "       npm run replay -- <verb> […]";
-
-type ReplayArgs =
-  | {
-      readonly verb: "freeze";
-      readonly config: string;
-      readonly issues: readonly number[];
-      readonly logs: string;
-      readonly out: string;
-    }
-  | {
-      readonly verb: "run";
-      readonly config: string;
-      readonly cases: string;
-      readonly label: string;
-      readonly repeat: number;
-      readonly parallel: number;
-    };
-
-const COUNT = /^[1-9][0-9]*$/;
-const CONFIG = { type: "string", default: "./sandbar.config.mjs" } as const;
-
-// One verb's flags, or why they are not.
-function flagsOf<T>(parse: () => T): T | { readonly error: string } {
-  try {
-    return parse();
-  } catch (err) {
-    if (!isParseArgsError(err)) throw err;
-    return { error: err.message };
-  }
-}
-
-function parseFreezeArgs(argv: readonly string[]): ReplayArgs | { readonly error: string } {
-  const flags = flagsOf(() => parseArgs({
-    args: [...argv],
-    options: { config: CONFIG, issues: { type: "string" }, logs: { type: "string" }, out: { type: "string" } },
-    strict: true,
-    allowPositionals: false,
-  }));
-  if ("error" in flags) return flags;
-  const { config, issues, logs, out } = flags.values;
-  if (issues === undefined || logs === undefined || out === undefined) {
-    return { error: "freeze needs --issues, --logs and --out" };
-  }
-  const numbers = issues.split(",");
-  if (!numbers.every((issue) => COUNT.test(issue)) || new Set(numbers).size !== numbers.length) {
-    return { error: "--issues wants distinct issue numbers, comma-separated" };
-  }
-  return { verb: "freeze", config, issues: numbers.map(Number), logs, out };
-}
-
-function parseRunArgs(argv: readonly string[]): ReplayArgs | { readonly error: string } {
-  const flags = flagsOf(() => parseArgs({
-    args: [...argv],
-    options: {
-      config: CONFIG,
-      cases: { type: "string" },
-      label: { type: "string" },
-      repeat: { type: "string", default: "1" },
-      parallel: { type: "string", default: "1" },
-    },
-    strict: true,
-    allowPositionals: false,
-  }));
-  if ("error" in flags) return flags;
-  const { config, cases, label, repeat, parallel } = flags.values;
-  if (cases === undefined || label === undefined) return { error: "run needs --cases and --label" };
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(label)) {
-    return { error: "--label wants a name of letters, digits, '.', '_' and '-'" };
-  }
-  if (!COUNT.test(repeat) || !COUNT.test(parallel)) {
-    return { error: "--repeat and --parallel want positive counts" };
-  }
-  return { verb: "run", config, cases, label, repeat: Number(repeat), parallel: Number(parallel) };
-}
-
-function parseReplayArgs(argv: readonly string[]): ReplayArgs | { readonly error: string } {
-  const [verb, ...rest] = argv;
-  if (verb === "freeze") return parseFreezeArgs(rest);
-  if (verb === "run") return parseRunArgs(rest);
-  return { error: `unknown verb ${verb ?? "(none)"}` };
-}
 
 async function replay(args: ReplayArgs): Promise<number> {
   const configPath = resolve(args.config);

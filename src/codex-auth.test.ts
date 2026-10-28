@@ -94,10 +94,10 @@ describe("existingCodexAuth (#195)", () => {
   it("mounts the daemon's file as it is, and refuses when there is none", async () => {
     const stateDir = await mkdtemp(join(tmpdir(), "sandbar-codex-existing-"));
     try {
-      expect(() => existingCodexAuth(stateDir, undefined)).toThrow(/does not exist/);
+      await expect(existingCodexAuth(stateDir, undefined)).rejects.toThrow(/does not exist/);
       const held = auth("2026-10-01T00:00:00Z", "daemon");
       await writeFile(join(stateDir, CODEX_AUTH_FILE_NAME), held);
-      expect(existingCodexAuth(stateDir, "/codex")).toEqual({
+      expect(await existingCodexAuth(stateDir, "/codex")).toEqual({
         hostPath: join(stateDir, CODEX_AUTH_FILE_NAME),
         sandboxPath: "/codex/auth.json",
       });

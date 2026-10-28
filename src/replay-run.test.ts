@@ -3,7 +3,7 @@
 // ordinary run records the scorecard reads, that nothing it hands a sandbox
 // holds a forge credential, and how a quota stop closes the session.
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -16,6 +16,10 @@ const seams = vi.hoisted(() => ({
   cleanup: [] as (() => unknown)[],
   terminals: new Map<string, Terminal>(),
   loops: [] as { readonly issue: string; readonly env: Record<string, string>; readonly issueTitle: unknown }[],
+  // Issues whose loop rejects, and how many loops run at once.
+  rejects: new Set<string>(),
+  active: 0,
+  maxActive: 0,
 }));
 
 vi.mock("./cleanup.js", async (importOriginal) => ({
@@ -90,6 +94,13 @@ vi.mock("./inner-loop.js", async (importOriginal) => ({
       env: opts.config.env,
       issueTitle: (await opts.config.issueSource(issue.id)).title,
     });
+    if (seams.rejects.has(issue.id)) throw new Error(`loop #${issue.id} exploded`);
+    seams.maxActive = Math.max(seams.maxActive, ++seams.active);
+    try {
+      await new Promise((done) => setTimeout(done, 30));
+    } finally {
+      seams.active--;
+    }
     const base = await ensureIssueBranch(repoDir, issue.branch, opts.config.sourceBranch);
     const event = (e: EventInput) => opts.onEvent(e);
     await event({
@@ -132,6 +143,9 @@ beforeEach(async () => {
   seams.cleanup.length = 0;
   seams.terminals.clear();
   seams.loops.length = 0;
+  seams.rejects.clear();
+  seams.active = 0;
+  seams.maxActive = 0;
 });
 
 afterEach(async () => {
@@ -140,7 +154,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-const config = () => resolveConfig({
+const config = (extra: Record<string, unknown> = {}) => resolveConfig({
   ghOwner: "acme", ghRepo: "app", developers: "anyone", cwd: checkout, workDir: ".sandbar",
   sandboxImage: "image", botName: "bot", botEmail: "bot@example.com",
   sandboxHooks: {}, env: { GH_TOKEN: "token", CLAUDE_CODE_OAUTH_TOKEN: "claude" },
@@ -148,29 +162,46 @@ const config = () => resolveConfig({
     containers: [{ name: "app", image: "image", mountWorktree: "/work", hold: true }],
     steps: [{ name: "test", in: "app", command: ["true"] }],
   },
+  ...extra,
 });
 
-async function casesFile(): Promise<string> {
-  await ensureRepoCache(replayLayout(config()), () => undefined);
-  const replayCase = (issue: number) => ({
-    issue, title: `Issue ${issue}`, seedSha: seed, seedFrom: "recorded",
-    issueJson: { title: `Issue ${issue} as admitted`, body: "", comments: [] },
-    issueFrom: "recorded", original: null, landed: null,
-  });
+const replayCase = (issue: number) => ({
+  issue, title: `Issue ${issue}`, seedSha: seed, seedFrom: "recorded",
+  issueJson: { title: `Issue ${issue} as admitted`, body: "", comments: [] },
+  issueFrom: "recorded", original: null, landed: null,
+});
+
+const caseFileOf = (value: Record<string, unknown> = {}) => ({
+  replayCases: 1, repo: "acme/app", sourceBranch: "main", cases: [replayCase(7), replayCase(8)], ...value,
+});
+
+async function writeCases(value: unknown = caseFileOf()): Promise<string> {
   const path = join(root, "cases.json");
-  await writeFile(path, JSON.stringify({ replayCases: 1, repo: "acme/app", sourceBranch: "main", cases: [replayCase(7), replayCase(8)] }));
+  await writeFile(path, typeof value === "string" ? value : JSON.stringify(value));
   return path;
 }
 
-const replay = async (label: string, repeats: number) => runReplay({
-  config: config(),
+async function casesFile(value?: unknown): Promise<string> {
+  await ensureRepoCache(replayLayout(config()), () => undefined);
+  return await writeCases(value);
+}
+
+const replay = async (
+  label: string,
+  repeats: number,
+  opts: { readonly parallel?: number; readonly config?: ReturnType<typeof config>; readonly cases?: string } = {},
+) => runReplay({
+  config: opts.config ?? config(),
   configPath: join(checkout, "sandbar.config.mjs"),
-  casesFile: await casesFile(),
+  casesFile: opts.cases ?? await casesFile(),
   label,
   repeats,
-  parallel: 1,
+  parallel: opts.parallel ?? 1,
   log: () => undefined,
 });
+
+const sessionOf = (label: string): string => join(replayLayout(config()).stateDir, "sessions", label);
+const manifestOf = async (label: string) => JSON.parse(await readFile(join(sessionOf(label), "replay.json"), "utf8"));
 
 describe("replay run (#195)", () => {
   it("records every case × repeat into a session the scorecard reads", async () => {
@@ -207,28 +238,103 @@ describe("replay run (#195)", () => {
     ]);
   });
 
-  it("stops at a quota, recording every case not yet started as not run, and answers 3", async () => {
-    seams.terminals.set("7", { type: "QUOTA", provider: "codex", window: "five_hour", specGaps: [] } as Terminal);
+  it.each<[string, Terminal, string]>([
+    ["QUOTA", { type: "QUOTA", provider: "codex", window: "five_hour", specGaps: [] } as Terminal, "QUOTA: codex five_hour"],
+    ["CREDENTIAL", { type: "CREDENTIAL", provider: "codex", detail: "expired", specGaps: [] } as Terminal, "CREDENTIAL: codex: expired"],
+  ])("stops at a %s, recording every case not yet started as not run, and answers 3", async (type, terminal, reason) => {
+    seams.terminals.set("7", terminal);
 
-    await expect(replay("quota", 2)).resolves.toBe(3);
+    await expect(replay("stop", 2)).resolves.toBe(3);
 
     expect(seams.loops.map((loop) => loop.issue)).toEqual(["7"]);
-    const session = join(replayLayout(config()).stateDir, "sessions", "quota");
-    const { results } = JSON.parse(await readFile(join(session, "replay.json"), "utf8"));
+    const session = sessionOf("stop");
+    const { results } = await manifestOf("stop");
     expect(results.map((r: Record<string, unknown>) => [r.repeat, r.issue, r.status, r.terminal ?? r.reason])).toEqual([
-      [1, 7, "ran", "QUOTA"],
-      [1, 8, "not-run", "QUOTA: codex five_hour"],
-      [2, 7, "not-run", "QUOTA: codex five_hour"],
-      [2, 8, "not-run", "QUOTA: codex five_hour"],
+      [1, 7, "ran", type],
+      [1, 8, "not-run", reason],
+      [2, 7, "not-run", reason],
+      [2, 8, "not-run", reason],
     ]);
+    expect(results[1].run).toBe(results[0].run);
     expect(results[2].run).toBeNull();
     const stats = await readStatsInput(join(session, "logs"), { last: 10 }, { withProse: false });
     expect(stats.runs).toHaveLength(1);
+  });
+
+  it("caps --parallel at maxParallelIssues, so no two loops overlap", async () => {
+    await expect(replay("capped", 1, { parallel: 2, config: config({ maxParallelIssues: 1 }) })).resolves.toBe(0);
+
+    expect((await manifestOf("capped")).parallel).toBe(1);
+    expect(seams.maxActive).toBe(1);
+  });
+
+  it("runs --parallel loops at once when maxParallelIssues allows it", async () => {
+    await expect(replay("wide", 1, { parallel: 2, config: config({ maxParallelIssues: 2 }) })).resolves.toBe(0);
+
+    expect((await manifestOf("wide")).parallel).toBe(2);
+    expect(seams.maxActive).toBe(2);
+  });
+
+  it("records a REJECTED terminal, admits no further case, keeps the finished results and rejects", async () => {
+    const cases = await casesFile(caseFileOf({ cases: [replayCase(7), replayCase(8), replayCase(9)] }));
+    seams.rejects.add("8");
+
+    await expect(replay("boom", 1, { parallel: 2, config: config({ maxParallelIssues: 2 }), cases }))
+      .rejects.toThrow("loop #8 exploded");
+
+    expect(seams.loops.map((loop) => loop.issue).sort()).toEqual(["7", "8"]);
+    const { results } = await manifestOf("boom");
+    expect(results.map((r: Record<string, unknown>) => [r.issue, r.status])).toEqual([[7, "ran"]]);
+    const logs = join(sessionOf("boom"), "logs");
+    const [run] = await readdir(logs);
+    const events = (await readFile(join(logs, run ?? "", "events.jsonl"), "utf8"))
+      .split("\n").filter((line) => line !== "").map((line) => JSON.parse(line));
+    expect(events.filter((e) => e.kind === "terminal").map((e) => [e.issue, e.terminal, e.reason])).toEqual([
+      [8, "REJECTED", "loop #8 exploded"],
+      [7, "DONE", null],
+    ]);
   });
 
   it("refuses a label that already exists", async () => {
     await expect(replay("again", 1)).resolves.toBe(0);
     await expect(replay("again", 1)).rejects.toThrow(/already exists/);
     expect(seams.loops).toHaveLength(2);
+  });
+
+  describe("refusals before a token is spent", () => {
+    it("refuses a case file that is not JSON", async () => {
+      const cases = await writeCases("{nope");
+      await expect(replay("bad", 1, { cases })).rejects.toThrow(/cases\.json is not JSON: /);
+      expect(seams.loops).toEqual([]);
+    });
+
+    it("refuses an invalid case file, listing every violation", async () => {
+      const cases = await writeCases(caseFileOf({ replayCases: 2, cases: [] }));
+      await expect(replay("bad", 1, { cases })).rejects.toThrow(
+        /cases\.json:\nreplayCases is not 1\ncases is not a non-empty array$/,
+      );
+    });
+
+    it.each([
+      ["repo", { repo: "other/app" }, "other/app main, but the config names acme/app main"],
+      ["source branch", { sourceBranch: "dev" }, "acme/app dev, but the config names acme/app main"],
+    ])("refuses a case file frozen from another %s", async (_, change, named) => {
+      const cases = await writeCases(caseFileOf(change));
+      await expect(replay("bad", 1, { cases })).rejects.toThrow(new RegExp(`was frozen from ${named}$`));
+    });
+
+    it("refuses with no base cache, telling the human to freeze first", async () => {
+      const cases = await writeCases();
+      await expect(replay("bad", 1, { cases })).rejects.toThrow(/No replay base cache at .*; run `replay freeze` first\./);
+    });
+
+    it("refuses a seed the base cache lacks, listing the issue and sha", async () => {
+      const lost = "1".repeat(40);
+      const cases = await casesFile(caseFileOf({ cases: [replayCase(7), { ...replayCase(8), seedSha: lost }] }));
+      await expect(replay("bad", 1, { cases })).rejects.toThrow(
+        new RegExp(`Seed\\(s\\) missing from .*; freeze again:\\n#8 ${lost}$`),
+      );
+      expect(seams.loops).toEqual([]);
+    });
   });
 });

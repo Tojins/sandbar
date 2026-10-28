@@ -73,6 +73,47 @@ describe("parseReplayCases (#195)", () => {
     });
   });
 
+  const LANDED = "cases[0].landed is neither null nor { merge, tip, diff } with 40-hex shas and counts";
+  const goodLanded = { merge: "b".repeat(40), tip: "c".repeat(40), diff: { files: 1, insertions: 2, deletions: 0 } };
+  it.each<[string, Record<string, unknown>, string]>([
+    ["a non-object original", { original: "run-1" }, "cases[0].original is neither null nor { logsDir, run }"],
+    ["an original without a run", { original: { logsDir: "/logs" } }, "cases[0].original is neither null nor { logsDir, run }"],
+    ["an original without logsDir", { original: { run: "run-1" } }, "cases[0].original is neither null nor { logsDir, run }"],
+    ["a non-object landed", { landed: "merged" }, LANDED],
+    ["a landed merge that is no sha", { landed: { ...goodLanded, merge: "nope" } }, LANDED],
+    ["a landed tip that is no sha", { landed: { ...goodLanded, tip: 7 } }, LANDED],
+    ["a landed with no diff", { landed: { merge: goodLanded.merge, tip: goodLanded.tip } }, LANDED],
+    ["a negative diff count", { landed: { ...goodLanded, diff: { ...goodLanded.diff, files: -1 } } }, LANDED],
+    ["a fractional diff count", { landed: { ...goodLanded, diff: { ...goodLanded.diff, insertions: 1.5 } } }, LANDED],
+    ["a string diff count", { landed: { ...goodLanded, diff: { ...goodLanded.diff, deletions: "0" } } }, LANDED],
+    [
+      "editedAfterAdmission on a recorded issue",
+      { editedAfterAdmission: false },
+      "cases[0].editedAfterAdmission is set on a recorded issue",
+    ],
+    ["an issueJson with no object", { issueJson: "text" }, "cases[0].issueJson is not an object"],
+    ["an issueJson title that is no string", { issueJson: { title: 7 } }, "cases[0].issueJson title is not a string"],
+    ["an issueJson body that is no string", { issueJson: { body: null } }, "cases[0].issueJson body is not a string"],
+    ["issueJson comments that are no array", { issueJson: { comments: {} } }, "cases[0].issueJson comments is not an array"],
+    [
+      "an issueJson comment that is no object",
+      { issueJson: { comments: ["late"] } },
+      "cases[0].issueJson comments[0] is not an object",
+    ],
+    [
+      "an issueJson comment time that is no string",
+      { issueJson: { comments: [{ createdAt: 5 }] } },
+      "cases[0].issueJson comments[0].createdAt is not a string",
+    ],
+    [
+      "an issueJson comment author login that is no string",
+      { issueJson: { comments: [{ author: { login: 5 } }] } },
+      "cases[0].issueJson comments[0].author.login is not a string",
+    ],
+  ])("names %s", (_, extra, error) => {
+    expect(parseReplayCases(caseFile([{ ...replayCase(1), ...extra }]))).toEqual({ errors: [error] });
+  });
+
   it.each([
     [null, "the case file is not a JSON object"],
     [[], "the case file is not a JSON object"],

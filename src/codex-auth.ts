@@ -14,8 +14,7 @@
 // a missing `last_refresh`, or an invalid date refuses preflight and names the
 // exact value whose ordering could not be established.
 
-import { existsSync } from "node:fs";
-import { chmod, readFile, mkdir, rename, writeFile } from "node:fs/promises";
+import { access, chmod, readFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 import { SandbarError, isErrno } from "./errors.js";
@@ -100,9 +99,15 @@ export async function prepareCodexAuth(args: {
 // seeded copy would fork the refresh-token family and log the daemon out. The
 // shared-file protocol above is what makes concurrent holders safe. Absent, a
 // Codex-routed replay is refused.
-export function existingCodexAuth(stateDir: string, codexHome: string | undefined): CodexAuthMount {
+export async function existingCodexAuth(
+  stateDir: string,
+  codexHome: string | undefined,
+): Promise<CodexAuthMount> {
   const mount = codexAuthMount(stateDir, codexHome);
-  if (!existsSync(mount.hostPath)) {
+  try {
+    await access(mount.hostPath);
+  } catch (err) {
+    if (!isErrno(err, "ENOENT")) throw err;
     throw new SandbarError(
       `Codex is routed but ${mount.hostPath} does not exist. Replay mounts the ` +
         "daemon's credential file and never seeds one; start the daemon once first.",

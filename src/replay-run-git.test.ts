@@ -184,21 +184,30 @@ describe("replay freeze (#195)", () => {
   }
 
   // Issue 8's last DONE, admitted with both replay fields.
-  async function recordedRun(logsDir: string): Promise<void> {
-    const run = join(logsDir, "run-2026-10-28T00-00-00-000Z");
+  async function recordedRun(
+    logsDir: string,
+    opts: { readonly name?: string; readonly title?: string; readonly snapshot?: unknown } = {},
+  ): Promise<void> {
+    const run = join(logsDir, opts.name ?? "run-2026-10-28T00-00-00-000Z");
     await mkdir(join(run, "issue-8"), { recursive: true });
     const events = [
       { kind: "run-start", schemaVersion: 6, seq: 1, ts: "2026-10-28T00:00:00.000Z" },
       {
-        kind: "admitted", issue: 8, title: "Recorded", branch: "sandbar/issue-8-recorded", chunk: null,
+        kind: "admitted", issue: 8, title: opts.title ?? "Recorded", branch: "sandbar/issue-8-recorded", chunk: null,
         seedRef: "origin/main", seedSha: fixture.seed, issueSnapshot: "issue-snapshot-1.json",
         seq: 2, ts: "2026-10-28T00:00:01.000Z",
       },
       { kind: "terminal", issue: 8, terminal: "DONE", reason: null, durationMs: 1, seq: 3, ts: "2026-10-28T00:00:02.000Z" },
     ];
     await writeFile(join(run, "events.jsonl"), events.map((e) => `${JSON.stringify(e)}\n`).join(""));
-    await writeFile(join(run, "issue-8", "issue-snapshot-1.json"), JSON.stringify({ title: "Recorded", body: "then" }));
+    await writeFile(join(run, "issue-8", "issue-snapshot-1.json"), JSON.stringify(opts.snapshot ?? { title: "Recorded", body: "then" }));
   }
+
+  const frozenCases = async (issues: readonly number[], logsDir: string): Promise<ReplayCases["cases"]> => {
+    const out = join(fixture.root, `cases-${issues.join("-")}.json`);
+    await freeze({ config: config(), issues, logsDir, out, log: () => undefined });
+    return (JSON.parse(await readFile(out, "utf8")) as ReplayCases).cases;
+  };
 
   it("seeds from the landing merge's base or the record, and reconstructs or reads the issue", async () => {
     await ghShim();
@@ -244,6 +253,45 @@ describe("replay freeze (#195)", () => {
     const base = replayLayout(config());
     expect(await git(base.repoDir, ["config", "--get", "remote.origin.pushurl"]))
       .toBe(join(base.stateDir, "push-forbidden"));
+  });
+
+  it("takes an issue's admission from the newest run that has a DONE for it", async () => {
+    const logsDir = join(fixture.root, "logs");
+    await recordedRun(logsDir, { name: "run-2026-10-01T00-00-00-000Z", title: "Older" });
+    await recordedRun(logsDir, { name: "run-2026-10-02T00-00-00-000Z", title: "Newer" });
+
+    expect((await frozenCases([8], logsDir)).map((c) => [c.title, c.original?.run]))
+      .toEqual([["Newer", "run-2026-10-02T00-00-00-000Z"]]);
+  });
+
+  it("skips a newer run whose record is missing or unreadable, and anything that is no run", async () => {
+    const logsDir = join(fixture.root, "logs");
+    await recordedRun(logsDir, { name: "run-2026-10-01T00-00-00-000Z", title: "Older" });
+    await mkdir(join(logsDir, "run-2026-10-02T00-00-00-000Z"), { recursive: true });
+    await mkdir(join(logsDir, "run-2026-10-03T00-00-00-000Z"), { recursive: true });
+    await writeFile(join(logsDir, "run-2026-10-03T00-00-00-000Z", "events.jsonl"), "not json\n");
+    await mkdir(join(logsDir, "scratch"), { recursive: true });
+
+    expect((await frozenCases([8], logsDir)).map((c) => [c.title, c.original?.run]))
+      .toEqual([["Older", "run-2026-10-01T00-00-00-000Z"]]);
+  });
+
+  it("reconstructs from the landing merge when the logs directory does not exist", async () => {
+    await ghShim();
+
+    const [c] = await frozenCases([7], join(fixture.root, "no-such-logs"));
+
+    expect(c).toMatchObject({ issue: 7, seedFrom: "merge-base", issueFrom: "reconstructed", original: null });
+  });
+
+  it("refuses a recorded issue snapshot that is not an issue", async () => {
+    const logsDir = join(fixture.root, "logs");
+    await recordedRun(logsDir, { snapshot: { title: 7 } });
+    const out = join(fixture.root, "cases.json");
+
+    await expect(freeze({ config: config(), issues: [8], logsDir, out, log: () => undefined }))
+      .rejects.toThrow(/issue-snapshot-1\.json is not an issue snapshot: title is not a string/);
+    await expect(readFile(out)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("writes nothing when an issue has no seed source", async () => {

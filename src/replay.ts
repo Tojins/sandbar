@@ -18,7 +18,7 @@
 // run — because a quota or credential stop closed the session — says why, and
 // a repeat whose record never started has no `run`.
 
-import type { IssueComment, IssueJson } from "./issue-anchor.js";
+import { type IssueComment, type IssueJson, issueJsonErrors } from "./issue-anchor.js";
 import type { Terminal } from "./inner-loop.js";
 
 export type DiffSize = {
@@ -130,7 +130,7 @@ function caseErrors(value: unknown, at: string, seen: Set<number>): readonly str
   if (!["recorded", "merge-base", "manual"].includes(c.seedFrom as string)) {
     errors.push(`${at}.seedFrom is not recorded, merge-base or manual`);
   }
-  if (asObject(c.issueJson) === null) errors.push(`${at}.issueJson is not an object`);
+  errors.push(...issueJsonErrors(c.issueJson).map((error) => `${at}.issueJson ${error}`));
   if (c.issueFrom === "recorded") {
     if (c.editedAfterAdmission !== undefined) {
       errors.push(`${at}.editedAfterAdmission is set on a recorded issue`);
