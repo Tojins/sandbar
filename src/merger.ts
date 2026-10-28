@@ -550,13 +550,13 @@ export function buildStackChangeComment(args: {
   readonly stackChange: StackChange;
   readonly target: MergeTarget;
   readonly branch: string;
-  readonly stuckLabel: string;
+  readonly handoffLabel: string;
 }): string {
   return (
     `**Sandbar:** merge into ${describeMergeTarget(args.target)} stopped: ` +
     `${renderLandingStackChange(args.stackChange)}\n\n` +
     "Action: land the stack change on the source branch by hand, or remove " +
-    `it from \`${args.branch}\`; drop \`${args.stuckLabel}\` and re-apply ` +
+    `it from \`${args.branch}\`; drop \`${args.handoffLabel}\` and re-apply ` +
     `\`${READY_FOR_AGENT_LABEL}\`.`
   );
 }
@@ -592,7 +592,7 @@ function buildAbandonComment(args: {
   conflictPaths: readonly string[];
   target: MergeTarget;
   branch: string;
-  stuckLabel: string;
+  handoffLabel: string;
 }): string {
   const where = describeMergeTarget(args.target);
   const n = args.attempts.length;
@@ -609,7 +609,7 @@ function buildAbandonComment(args: {
     `**Sandbar:** ${stopped}\n\n` +
     `Agent's reason: ${args.reason}\n\n` +
     `<details><summary>Resolve diagnostics</summary>\n\n${diagnostics}\n\n</details>\n\n` +
-    `Action: push a fix on \`${args.branch}\`; drop \`${args.stuckLabel}\` and ` +
+    `Action: push a fix on \`${args.branch}\`; drop \`${args.handoffLabel}\` and ` +
     `re-apply \`${READY_FOR_AGENT_LABEL}\`.`
   );
 }
@@ -784,14 +784,14 @@ export function buildChunkRefreshFailedComment(args: {
   readonly chunkBranch: string;
   readonly sourceBranch: string;
   readonly outcome: Exclude<MergeAttempt, { readonly kind: "merged" }>;
-  readonly stuckLabel: string;
+  readonly handoffLabel: string;
 }): string {
   const { stopped, details } = chunkRefreshStop(args.outcome);
   return (
     `**Sandbar:** refresh of chunk branch \`${args.chunkBranch}\` stopped because ${stopped}\n\n` +
     (details ? `${details}\n\n` : "") +
     `Action: merge \`${args.sourceBranch}\` into \`${args.chunkBranch}\`, then drop ` +
-    `\`${args.stuckLabel}\` and re-apply \`${READY_FOR_AGENT_LABEL}\`.`
+    `\`${args.handoffLabel}\` and re-apply \`${READY_FOR_AGENT_LABEL}\`.`
   );
 }
 
@@ -1263,7 +1263,7 @@ export type MergerResolveAttemptSink = (
 
 export type RunMergerOptions = {
   // Configured human-handoff label named in the resolve-loop action line.
-  readonly agentStuckLabel: string;
+  readonly handoffLabel: string;
   // Full set of planner-visible ongoing issues in this run.
   // The resolve loop lists all *other* entries so the agent has multi-issue
   // context when reasoning about an integration failure.
@@ -1650,7 +1650,7 @@ export async function runMergerWithAdapter(
   // that write to Phase 4. The loop below comments on an issue and drops
   // `ready-for-agent`, but applying the HANDOFF label is Phase 4b's job — so
   // between those two moments the issue is on no queue at all, invisible to
-  // the planner and to a human filtering on `agent-stuck`. `MergerError.partial`
+  // the planner and to a human filtering on `needs-human`. `MergerError.partial`
   // is the only channel that survives a halt (run.ts finalises it, then stops),
   // and run.ts's `instanceof MergerError` check is what routes to it, so
   // anything else thrown out of the loop or the landing is re-thrown WRAPPED
@@ -1824,7 +1824,7 @@ export async function runMergerWithAdapter(
             stackChange: outcome.stackChange,
             target,
             branch: issue.branch,
-            stuckLabel: opts.agentStuckLabel,
+            handoffLabel: opts.handoffLabel,
           }),
           "",
         );
@@ -1853,7 +1853,7 @@ export async function runMergerWithAdapter(
           conflictPaths: outcome.conflictPaths,
           target,
           branch: issue.branch,
-          stuckLabel: opts.agentStuckLabel,
+          handoffLabel: opts.handoffLabel,
         }),
         ` resolve-abandon: ${outcome.reason}`,
       );
@@ -2439,7 +2439,7 @@ export async function runMergerWithAdapter(
             chunkBranch: refresh.branch,
             sourceBranch,
             outcome,
-            stuckLabel: opts.agentStuckLabel,
+            handoffLabel: opts.handoffLabel,
           }),
         };
         failedChunkRefreshes.push(failure);

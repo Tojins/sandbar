@@ -896,7 +896,7 @@ describe("runVerifiedLanding", () => {
 
   it("is FATAL, not a parked cycle, when the forge builds nothing for the ref", async () => {
     // Systemic, not this cycle's fault: parking would convert the whole
-    // backlog to `agent-stuck` one cycle at a time for a misconfigured
+    // backlog to `needs-human` one cycle at a time for a misconfigured
     // trigger nobody was told about.
     const { result, calls } = await land(
       { checks: [{ kind: "no-checks" }], heads: ["sha-A"] },
@@ -1602,7 +1602,7 @@ describe("waitForChecks — a required check that never appears", () => {
   it("is missing-required, not a timeout, once everything else has concluded", async () => {
     // The overwhelmingly likely cause is a name that doesn't match what the
     // forge reports ("test" vs "test (20.x)"). Parking burns a full CI timeout
-    // every cycle and drains the backlog into agent-stuck for a typo.
+    // every cycle and drains the backlog into needs-human for a typo.
     const clock = fakeClock(1_000);
     const out = await waitForChecks(
       "sha1",

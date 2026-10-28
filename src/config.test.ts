@@ -1210,12 +1210,24 @@ describe("resolveConfig", () => {
     ).toThrow(/reviewerQualityModelId/);
   });
 
-  it("merges a partial label override onto the default vocabulary", () => {
-    const r = resolveConfig({ ...minimal, labels: { agentStuck: "blocked" } });
-    expect(r.labels).toEqual({
-      needsInfo: DEFAULT_LABELS.needsInfo,
-      agentStuck: "blocked",
-    });
+  it("defaults the one handoff label and takes a host's override", () => {
+    expect(resolveConfig(minimal).labels).toEqual({ handoff: "needs-human" });
+    expect(DEFAULT_LABELS).toEqual({ handoff: "needs-human" });
+    const r = resolveConfig({ ...minimal, labels: { handoff: "blocked" } });
+    expect(r.labels).toEqual({ handoff: "blocked" });
+  });
+
+  // #242: the two labels became one; an old config naming either must not be
+  // spread into the labels and silently ignored.
+  it.each([
+    [{ needsInfo: "needs-info" }, /config\.labels\.needsInfo was removed.*config\.labels\.handoff/s],
+    [{ agentStuck: "agent-stuck" }, /config\.labels\.agentStuck was removed.*config\.labels\.handoff/s],
+    [
+      { needsInfo: "needs-info", agentStuck: "agent-stuck" },
+      /config\.labels\.needsInfo and config\.labels\.agentStuck were removed/,
+    ],
+  ])("refuses the removed label key(s) %o by name", (labels, message) => {
+    expect(() => resolveConfig({ ...minimal, labels } as never)).toThrow(message);
   });
 
   it("defaults images to building the sandbox image from ./Containerfile", () => {

@@ -48,7 +48,7 @@ export type IssueOutcome = {
  *
  * Exhaustive on purpose (the `never` assignment). A ternary chain with a
  * catch-all silently gave every future skip reason `merge-gate-red`, which
- * pushes the branch and applies `agent-stuck` — plausible for some reasons and
+ * pushes the branch and applies `needs-human` — plausible for some reasons and
  * wrong for others, with nothing to catch the difference. `silent-noop` is
  * handled by mergeFinalizeInputs itself (it needs the per-issue retry count)
  * and never reaches here.

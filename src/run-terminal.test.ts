@@ -209,14 +209,14 @@ describe("tracker finalization read-back (#87)", () => {
   };
 
   it("accepts the intended not-ready state", async () => {
-    await expect(verifyFinalizedTrackerState([result], async () => ["needs-info"]))
+    await expect(verifyFinalizedTrackerState([result], async () => ["needs-human"]))
       .resolves.toBeUndefined();
   });
 
   it("halts loudly when the queue label remains", async () => {
     await expect(verifyFinalizedTrackerState(
       [result],
-      async () => ["ready-for-agent", "needs-info"],
+      async () => ["ready-for-agent", "needs-human"],
     )).rejects.toThrow(/Tracker read-back mismatch for issue #87.*not-ready.*ready-for-agent/);
   });
 

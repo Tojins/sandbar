@@ -136,8 +136,8 @@ export default {
   // Keep the host awake even while no work is available.
   // keepAwakeWhileIdle: false,
 
-  // Override only the tracker labels whose names differ in this repository.
-  // labels: { needsInfo: "needs-info", agentStuck: "agent-stuck" },
+  // Rename the handoff label every park applies, if it differs in this repository.
+  // labels: { handoff: "needs-human" },
   // Copy host-only paths into each issue worktree before setup runs.
   // copyToWorktree: [],
 

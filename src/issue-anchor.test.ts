@@ -134,15 +134,15 @@ const BRANCH = "sandbar/issue-9-t";
 const templated: readonly { readonly name: string; readonly body: string }[] = [
   {
     name: "needs-human (gate red, with an earlier report)",
-    body: NEEDS_HUMAN_COMMENT_TEMPLATE(BRANCH, "tests", 3, TRACE, PROSE, "agent-stuck", "ready-for-agent"),
+    body: NEEDS_HUMAN_COMMENT_TEMPLATE(BRANCH, "tests", 3, TRACE, PROSE, "needs-human", "ready-for-agent"),
   },
   {
     name: "needs-human (no signal)",
-    body: NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE(BRANCH, 3, TRACE, "agent-stuck", "ready-for-agent"),
+    body: NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE(BRANCH, 3, TRACE, "needs-human", "ready-for-agent"),
   },
   {
     name: "needs-human (uncommittable)",
-    body: NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE(BRANCH, 2, TRACE, "agent-stuck", "ready-for-agent"),
+    body: NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE(BRANCH, 2, TRACE, "needs-human", "ready-for-agent"),
   },
   {
     name: "needs-human (off branch)",
@@ -152,17 +152,17 @@ const templated: readonly { readonly name: string; readonly body: string }[] = [
       TRACE,
       { branch: BRANCH, headRef: null, headSha: "abc", branchSha: "def" },
       { kind: "removed" },
-      "agent-stuck",
+      "needs-human",
       "ready-for-agent",
     ),
   },
   {
     name: "needs-human (reviewer harness, with an earlier report)",
-    body: NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE(BRANCH, TRACE, PROSE, "agent-stuck", "ready-for-agent"),
+    body: NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE(BRANCH, TRACE, PROSE, "needs-human", "ready-for-agent"),
   },
   {
     name: "review budget exhausted",
-    body: REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(BRANCH, 2, PROSE, "agent-stuck", "ready-for-agent"),
+    body: REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(BRANCH, 2, PROSE, "needs-human", "ready-for-agent"),
   },
   {
     name: "push refused",
@@ -170,7 +170,7 @@ const templated: readonly { readonly name: string; readonly body: string }[] = [
       branch: BRANCH,
       reasons: [TRACE],
       recovery: { tipSha: "abc", ref: `refs/heads/${BRANCH}`, repoDir: "/cache" },
-      stuckLabel: "agent-stuck",
+      handoffLabel: "needs-human",
       readyLabel: "ready-for-agent",
     }),
   },
@@ -189,7 +189,7 @@ const templated: readonly { readonly name: string; readonly body: string }[] = [
         gateTrace: TRACE,
         durationMs: 0,
       },
-      stuckLabel: "agent-stuck",
+      handoffLabel: "needs-human",
     }),
   },
   {
@@ -210,7 +210,7 @@ const templated: readonly { readonly name: string; readonly body: string }[] = [
 const legacy = (leadIn: string, tail: string): string =>
   `**Sandbar:** stopped.\n\n${leadIn}\n\n${PROSE}\n\n- more ${PROSE}\n\n${tail}`;
 const DETAILS = `<details><summary>Gate trace</summary>\n\n\`\`\`\n${TRACE}\n\`\`\`\n\n</details>`;
-const ACTION = "Action: use `b`; push a fix, then drop `agent-stuck` and re-apply `ready-for-agent`.";
+const ACTION = "Action: use `b`; push a fix, then drop `needs-human` and re-apply `ready-for-agent`.";
 const legacyFixtures = [
   "Latest quality review from the red round:",
   "Latest correctness review (an earlier round):",
@@ -240,14 +240,14 @@ describe("dropSandbarTraces", () => {
 
   it("replaces a block and a quote with one stub each", () => {
     const dropped = dropSandbarTraces(
-      NEEDS_HUMAN_COMMENT_TEMPLATE(BRANCH, "tests", 3, TRACE, PROSE, "agent-stuck", "ready-for-agent"),
+      NEEDS_HUMAN_COMMENT_TEMPLATE(BRANCH, "tests", 3, TRACE, PROSE, "needs-human", "ready-for-agent"),
     );
     expect(dropped).toBe(
       "**Sandbar:** stopped after 3 consecutive attempts without a green gate-1; " +
         "latest failing step: `tests`.\n\n" +
         "_(quoted review omitted.)_\n\n" +
         "_(Gate trace omitted.)_\n\n" +
-        `Action: use \`${BRANCH}\`; push a fix, then drop \`agent-stuck\` and re-apply \`ready-for-agent\`.`,
+        `Action: use \`${BRANCH}\`; push a fix, then drop \`needs-human\` and re-apply \`ready-for-agent\`.`,
     );
   });
 
@@ -280,7 +280,7 @@ describe("renderIssueText — sandbar traces", () => {
         { author: { login: "operator" }, body: `Human.\n\n${DETAILS}` },
         {
           author: { login: "operator" },
-          body: NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE(BRANCH, 3, "BOT-TRACE", "agent-stuck", "ready-for-agent"),
+          body: NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE(BRANCH, 3, "BOT-TRACE", "needs-human", "ready-for-agent"),
         },
       ],
     });
@@ -416,7 +416,7 @@ describe("condenseKey", () => {
   const key = condenseKey(thread);
 
   it("ignores the title and anything else outside the body and thread", () => {
-    expect(condenseKey({ ...thread, title: "Renamed", labels: ["agent-stuck"] } as IssueJson)).toBe(key);
+    expect(condenseKey({ ...thread, title: "Renamed", labels: ["needs-human"] } as IssueJson)).toBe(key);
   });
 
   it("changes when any comment, the body or the thread length does", () => {

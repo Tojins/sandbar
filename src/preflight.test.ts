@@ -538,7 +538,7 @@ describe("checkInvariants", () => {
 // `podman run` at bringup, and a gate container is `attempt`-lifecycle, so #24
 // D5 charges that to the BRANCH: a gate red about a statfs source no agent can
 // see or fix, repeated until the quality budget parks the issue as
-// `agent-stuck` with an "environment" trace. Host state belongs in preflight,
+// `needs-human` with an "environment" trace. Host state belongs in preflight,
 // beside `missingImages`, which is the identical class.
 describe("checkInvariants — gate-stack mount sources exist (#51)", () => {
   // The path AND the container, because a stack with several containers
@@ -661,7 +661,7 @@ describe("classifySandbarBranches", () => {
   });
 
   it("parked: an open issue that is not queued keeps its branch and is not refused", () => {
-    // `queued`, `needs-info`, `agent-stuck` — preflight does not read the
+    // `queued`, `needs-human` — preflight does not read the
     // label, only that the issue is still open.
     const r = classify(["sandbar/issue-76-held", "sandbar/issue-93-stuck"], {
       openIssues: new Set([76, 93]),

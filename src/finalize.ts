@@ -36,7 +36,7 @@
 // `[remote rejected]` ref line as a fact about this branch's content or ref,
 // distinct from a non-fast-forward race and from transport. Finalise comments
 // with the exact refusal, tip sha, cache ref/path and recovery command, then
-// swaps `ready-for-agent` for `agentStuck`; the rest of the queue continues.
+// swaps `ready-for-agent` for `handoff`; the rest of the queue continues.
 // Races and transport failures still halt loudly except at the reviewer-write
 // handoff: that pre-existing evidence-preservation path parks after any failed
 // publish because its authoritative state is the deliberately retained clone.
@@ -57,7 +57,7 @@
 // `-d` refusing is never on its own a licence to force.
 //
 // Human-handoff terminals are guarded on live issue state (#16): stamping
-// `agentStuck` + a failure comment on an already-CLOSED issue contradicts its
+// `handoff` + a failure comment on an already-CLOSED issue contradicts its
 // state and reads as "merged work is broken". The planner's stale-listing
 // re-pick (the root cause) is fixed in plan-resolver, but a human can also
 // close an issue mid-run, so finalize re-checks `issueState` before any handoff
@@ -66,16 +66,14 @@
 // finalizeOne is pure orchestration over a FinalizeAdapter. realAdapter wires
 // the adapter to git/gh.
 //
-// Handoff labels are configurable (LabelConfig in config.ts) and NOT
+// The handoff label is configurable (LabelConfig in config.ts) and NOT
 // auto-created — a missing/misconfigured label is a host config error. Every
-// agent-failure terminal (merge-conflict, merge-gate-red, forge-unverified,
-// chunk-refresh-failed, silent-noop-exhausted, needs-human,
-// review-budget-exhausted, stack-change) parks the issue under the single
-// `agentStuck` label;
-// the *reason* lives in the bot comment. A chunk-refresh failure is the one
-// pre-execution handoff: it posts the merger's branch/conflict-or-gate evidence
-// and flips the dependent directly, without inventing or reclaiming an issue
-// branch.
+// handoff terminal (HANDOFF_KINDS: questions, a missing prototype or partition,
+// and every agent failure) parks the issue under the single `handoff` label
+// (#242); the *reason* and the human's next step live in the bot comment. A
+// chunk-refresh failure is the one pre-execution handoff: it posts the
+// merger's branch/conflict-or-gate evidence and flips the dependent directly,
+// without inventing or reclaiming an issue branch.
 //
 // `chunk-landed` (#60) must remove `ready-for-agent`: on a published member that
 // label now requests rework (#94). It also applies the display-only
@@ -144,7 +142,7 @@ export const PUSH_REFUSED_COMMENT_TEMPLATE = (args: {
   readonly branch: string;
   readonly reasons: readonly string[];
   readonly recovery: LocalBranchRecovery;
-  readonly stuckLabel: string;
+  readonly handoffLabel: string;
   readonly readyLabel: string;
   readonly context?: string;
 }): string =>
@@ -153,7 +151,7 @@ export const PUSH_REFUSED_COMMENT_TEMPLATE = (args: {
   (args.context ? `\n\n${args.context}` : "") +
   `\n\nAction: use \`${args.branch}\`; ` +
   (args.context ? "resolve the handoff above, then " : "") +
-  `drop \`${args.stuckLabel}\` and re-apply ` +
+  `drop \`${args.handoffLabel}\` and re-apply ` +
   `\`${args.readyLabel}\`.`;
 
 // A note that applies to every template below, and to the ones in
@@ -191,7 +189,7 @@ const handoffAction = (
 export const NEEDS_INFO_COMMENT_TEMPLATE = (
   branch: string,
   questions: string,
-  needsInfoLabel: string,
+  handoffLabel: string,
   readyLabel: string,
   strandedHead: StrandedHead | null,
   reclaim: IssueCloneReclaim,
@@ -200,12 +198,12 @@ export const NEEDS_INFO_COMMENT_TEMPLATE = (
   `${questions}` +
   (strandedHead === null ? "" : STRANDED_COMMITS_NOTE(strandedHead, reclaim)) +
   `\n\n` +
-  handoffAction(branch, needsInfoLabel, readyLabel, "answer the questions");
+  handoffAction(branch, handoffLabel, readyLabel, "answer the questions");
 
 // #21 — the implementer stopped before writing code because the issue implies
 // non-trivial user-visible UI and carries no prototype. Same human round-trip
-// as NEEDS-INFO (supply the missing artifact, re-label), so it reuses the
-// needsInfo label; the comment is what makes the ask concrete.
+// as NEEDS-INFO (supply the missing artifact, re-label) under the same handoff
+// label; the comment is what makes the ask concrete.
 //
 // The unblocking routes are spelled out because most of them silently don't
 // work: the agent reads this issue as text (`gh issue view --json`), so a
@@ -231,7 +229,7 @@ const needsUiPrototypeExplanation = (
 export const NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE = (
   issueNum: number,
   uiImpact: string,
-  needsInfoLabel: string,
+  handoffLabel: string,
   readyLabel: string,
   // Null on the ordinary pre-code escalation; named on a late escalation whose
   // partial branch was published.
@@ -245,7 +243,7 @@ export const NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE = (
   `\n\n` +
   handoffAction(
     branchPushed,
-    needsInfoLabel,
+    handoffLabel,
     readyLabel,
     "supply a readable prototype or the exact opt-out reply",
   );
@@ -277,7 +275,7 @@ export const NEEDS_PARTITION_COMMENT_TEMPLATE = (
   size: number,
   budget: number,
   detail: string,
-  needsInfoLabel: string,
+  handoffLabel: string,
   readyLabel: string,
   branchPushed: string | null,
 ): string =>
@@ -286,7 +284,7 @@ export const NEEDS_PARTITION_COMMENT_TEMPLATE = (
   `${needsPartitionExplanation(budget, detail)}\n\n` +
   handoffAction(
     branchPushed,
-    needsInfoLabel,
+    handoffLabel,
     readyLabel,
     "partition the work and select the first ready issue",
   );
@@ -307,12 +305,12 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   roundsUsed: number,
   failureTrace: string,
   latestReviewerProse: string | null,
-  stuckLabel: string,
+  handoffLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} ${gateRedStop(failedStep, roundsUsed)}\n\n` +
   `${needsHumanGateExplanation(failureTrace, latestReviewerProse)}\n\n` +
-  handoffAction(branch, stuckLabel, readyLabel, "push a fix");
+  handoffAction(branch, handoffLabel, readyLabel, "push a fix");
 
 // #186: the branch edits its gate stack beyond container env. Gate-1 ran once
 // on the source branch's stack, and its verdict tells the human whether the
@@ -337,14 +335,14 @@ export const STACK_CHANGE_COMMENT_TEMPLATE = (
   branch: string,
   stackChange: StackChange,
   gate: Gate1Result,
-  stuckLabel: string,
+  handoffLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} ${stackChangeStop(stackChange.path)}\n\n` +
   `${stackChangeExplanation(stackChange, gate)}\n\n` +
   handoffAction(
     branch,
-    stuckLabel,
+    handoffLabel,
     readyLabel,
     "land the stack change on the source branch by hand",
   );
@@ -373,12 +371,12 @@ export const NEEDS_HUMAN_NO_SIGNAL_COMMENT_TEMPLATE = (
   branch: string,
   roundsUsed: number,
   failureTrace: string,
-  stuckLabel: string,
+  handoffLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} ${noSignalStop(roundsUsed)}\n\n` +
   `${needsHumanNoSignalExplanation(failureTrace)}\n\n` +
-  handoffAction(branch, stuckLabel, readyLabel, "inspect the transcripts and push a fix");
+  handoffAction(branch, handoffLabel, readyLabel, "inspect the transcripts and push a fix");
 
 // The worktree could not be brought to a committed state, so no gate ever ran
 // (#24 D1). Distinct from NEEDS_HUMAN_COMMENT_TEMPLATE, which names a failing
@@ -402,12 +400,12 @@ export const NEEDS_HUMAN_UNCOMMITTABLE_COMMENT_TEMPLATE = (
   branch: string,
   gateRounds: number | null,
   failureTrace: string,
-  stuckLabel: string,
+  handoffLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} ${uncommittableStop(gateRounds)}\n\n` +
   `${needsHumanUncommittableExplanation(failureTrace)}\n\n` +
-  handoffAction(branch, stuckLabel, readyLabel, "commit or ignore the paths");
+  handoffAction(branch, handoffLabel, readyLabel, "commit or ignore the paths");
 
 // Appended to any handoff comment whose run left commits off the issue branch
 // (#27). Split out because three arms need it and only one of them is the
@@ -479,13 +477,13 @@ export const NEEDS_HUMAN_OFF_BRANCH_COMMENT_TEMPLATE = (
   failureTrace: string,
   strandedHead: StrandedHead,
   reclaim: IssueCloneReclaim,
-  stuckLabel: string,
+  handoffLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} ${offBranchStop(branch, gateRounds)}\n\n` +
   `${needsHumanOffBranchExplanation(failureTrace)}` +
   `${STRANDED_COMMITS_NOTE(strandedHead, reclaim)}\n\n` +
-  handoffAction(branch, stuckLabel, readyLabel, "fold in the stranded commits");
+  handoffAction(branch, handoffLabel, readyLabel, "fold in the stranded commits");
 
 // A second reviewer-harness failure (#41) is not a review rejection. The stop
 // line names the harness count, the diagnostic stays collapsed, and the action
@@ -514,12 +512,12 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   branch: string,
   failureTrace: string,
   latestReviewerProse: string | null,
-  stuckLabel: string,
+  handoffLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} ${REVIEWER_HARNESS_STOP}\n\n` +
   `${needsHumanReviewerHarnessExplanation(failureTrace, latestReviewerProse)}\n\n` +
-  handoffAction(branch, stuckLabel, readyLabel, "review the branch or repair the harness");
+  handoffAction(branch, handoffLabel, readyLabel, "review the branch or repair the harness");
 
 const reviewBudgetExhaustedExplanation = (latestReviewerProse: string): string =>
   quoted("Latest verifier report:", latestReviewerProse);
@@ -528,22 +526,22 @@ export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   branch: string,
   roundsUsed: number,
   latestReviewerProse: string,
-  stuckLabel: string,
+  handoffLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} the verifier stopped after ${roundsUsed} ` +
   `consecutive rejection${roundsUsed === 1 ? "" : "s"}.\n\n` +
   `${reviewBudgetExhaustedExplanation(latestReviewerProse)}\n\n` +
-  handoffAction(branch, stuckLabel, readyLabel, "push a fix or correct the governing instructions");
+  handoffAction(branch, handoffLabel, readyLabel, "push a fix or correct the governing instructions");
 
 export const SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE = (
   attempts: number,
-  stuckLabel: string,
+  handoffLabel: string,
   readyLabel: string,
 ): string =>
   `${BOT_COMMENT_PREFIX} merge resolution aborted without a merge commit ` +
   `${attempts} time${attempts === 1 ? "" : "s"}.\n\n` +
-  handoffAction(null, stuckLabel, readyLabel, "resolve manually or re-scope the issue");
+  handoffAction(null, handoffLabel, readyLabel, "resolve manually or re-scope the issue");
 
 // #60 — one line for a chunk member: the durable chunk branch and, when the PR
 // write succeeded before finalization, the review surface that will land it.
@@ -593,7 +591,7 @@ type FinalizeKindInput =
   | {
       // #174 — the issue never entered execution, so there is no issue branch
       // to publish or reclaim. The merger supplies the refresh diagnostics;
-      // finalise owns the comment and ready -> agent-stuck transition.
+      // finalise owns the comment and ready -> handoff transition.
       readonly kind: "chunk-refresh-failed";
       readonly issue: IssueRef;
       readonly comment: string;
@@ -607,7 +605,7 @@ type FinalizeKindInput =
       readonly strandedHead: StrandedHead | null;
     }
   // #21 — implementer escalated on non-trivial UI impact with no prototype.
-  // Same handoff shape as needs-info (comment + `ready-for-agent` → needsInfo),
+  // Same handoff shape as needs-info (comment + `ready-for-agent` → handoff),
   // but the branch is pushed only when structurally ahead of its seed: the
   // escalation normally fires before code exists, and pushing then would
   // publish a remote branch identical to the source tip — one junk ref per
@@ -888,7 +886,7 @@ function needsHumanComments(
             input.issue.branch,
             input.failureTrace,
             input.latestReviewerProse,
-            labels.agentStuck,
+            labels.handoff,
             READY_FOR_AGENT_LABEL,
           ),
           refused:
@@ -904,7 +902,7 @@ function needsHumanComments(
             input.issue.branch,
             gateRounds,
             input.failureTrace,
-            labels.agentStuck,
+            labels.handoff,
             READY_FOR_AGENT_LABEL,
           ),
           refused:
@@ -922,7 +920,7 @@ function needsHumanComments(
             input.failureTrace,
             input.strandedHead,
             reclaim,
-            labels.agentStuck,
+            labels.handoff,
             READY_FOR_AGENT_LABEL,
           ),
           refused:
@@ -942,7 +940,7 @@ function needsHumanComments(
             gateRounds,
             input.failureTrace,
             input.latestReviewerProse,
-            labels.agentStuck,
+            labels.handoff,
             READY_FOR_AGENT_LABEL,
           ),
           refused:
@@ -959,7 +957,7 @@ function needsHumanComments(
             input.issue.branch,
             gateRounds,
             input.failureTrace,
-            labels.agentStuck,
+            labels.handoff,
             READY_FOR_AGENT_LABEL,
           ),
           refused:
@@ -1015,7 +1013,7 @@ async function parkRefusedPush(
       branch: input.issue.branch,
       reasons: push.reasons,
       recovery,
-      stuckLabel: labels.agentStuck,
+      handoffLabel: labels.handoff,
       readyLabel: READY_FOR_AGENT_LABEL,
       ...(options.context === undefined ? {} : { context: options.context }),
     }),
@@ -1023,7 +1021,7 @@ async function parkRefusedPush(
   const flip = await adapter.editLabels(
     n,
     options.queueAlreadyRemoved ? [] : [READY_FOR_AGENT_LABEL],
-    [labels.agentStuck],
+    [labels.handoff],
   );
   requireFlip(flip, n);
   return { kind: "parked-local" };
@@ -1176,7 +1174,7 @@ export async function finalizeOne(
       if (refused) return refused;
       // The merger already dropped `ready-for-agent`; finalize only parks it
       // under the handoff label.
-      const r = await adapter.editLabels(n, [], [labels.agentStuck]);
+      const r = await adapter.editLabels(n, [], [labels.handoff]);
       requireFlip(r, n);
       return { kind: "pushed" };
     }
@@ -1188,14 +1186,14 @@ export async function finalizeOne(
         queueAlreadyRemoved: true,
       });
       if (refused) return refused;
-      const r = await adapter.editLabels(n, [], [labels.agentStuck]);
+      const r = await adapter.editLabels(n, [], [labels.handoff]);
       requireFlip(r, n);
       return { kind: "pushed" };
     }
     case "landing-push-refused": {
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
-      const r = await adapter.editLabels(n, [], [labels.agentStuck]);
+      const r = await adapter.editLabels(n, [], [labels.handoff]);
       requireFlip(r, n);
       return { kind: "parked-local" };
     }
@@ -1205,7 +1203,7 @@ export async function finalizeOne(
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [labels.agentStuck],
+        [labels.handoff],
       );
       requireFlip(r, n);
       return { kind: "noop" };
@@ -1216,7 +1214,7 @@ export async function finalizeOne(
       const body = NEEDS_INFO_COMMENT_TEMPLATE(
         input.issue.branch,
         input.questions,
-        labels.needsInfo,
+        labels.handoff,
         READY_FOR_AGENT_LABEL,
         input.strandedHead,
         reclaim,
@@ -1236,7 +1234,7 @@ export async function finalizeOne(
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [labels.needsInfo],
+        [labels.handoff],
       );
       requireFlip(r, n);
       return { kind: "pushed" };
@@ -1262,7 +1260,7 @@ export async function finalizeOne(
         NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
           n,
           input.uiImpact,
-          labels.needsInfo,
+          labels.handoff,
           READY_FOR_AGENT_LABEL,
           aheadOfSeed ? input.issue.branch : null,
           input.strandedHead,
@@ -1272,7 +1270,7 @@ export async function finalizeOne(
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [labels.needsInfo],
+        [labels.handoff],
       );
       requireFlip(r, n);
       if (aheadOfSeed) return { kind: "pushed" };
@@ -1326,7 +1324,7 @@ export async function finalizeOne(
           input.size,
           input.budget,
           input.detail,
-          labels.needsInfo,
+          labels.handoff,
           READY_FOR_AGENT_LABEL,
           aheadOfSeed ? input.issue.branch : null,
         ),
@@ -1334,7 +1332,7 @@ export async function finalizeOne(
       const labelsResult = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [labels.needsInfo],
+        [labels.handoff],
       );
       requireFlip(labelsResult, n);
       if (aheadOfSeed) return { kind: "pushed" };
@@ -1357,7 +1355,7 @@ export async function finalizeOne(
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [labels.agentStuck],
+        [labels.handoff],
       );
       requireFlip(r, n);
       return { kind: "pushed" };
@@ -1377,14 +1375,14 @@ export async function finalizeOne(
           input.issue.branch,
           input.stackChange,
           input.gate,
-          labels.agentStuck,
+          labels.handoff,
           READY_FOR_AGENT_LABEL,
         ),
       );
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [labels.agentStuck],
+        [labels.handoff],
       );
       requireFlip(r, n);
       return { kind: "pushed" };
@@ -1432,7 +1430,7 @@ export async function finalizeOne(
         input.issue.branch,
         input.roundsUsed,
         input.latestReviewerProse,
-        labels.agentStuck,
+        labels.handoff,
         READY_FOR_AGENT_LABEL,
       );
       const refused = await pushBranchOrPark(input, adapter, labels, {
@@ -1446,7 +1444,7 @@ export async function finalizeOne(
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [labels.agentStuck],
+        [labels.handoff],
       );
       requireFlip(r, n);
       return { kind: "pushed" };
@@ -1481,7 +1479,7 @@ export async function finalizeOne(
           `${readOnlyAgentWroteExplanation(input, reclaim, pushFailure)}\n\n` +
           handoffAction(
             input.issue.branch,
-            labels.agentStuck,
+            labels.handoff,
             READY_FOR_AGENT_LABEL,
             "inspect the preserved clone",
           ),
@@ -1489,7 +1487,7 @@ export async function finalizeOne(
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [labels.agentStuck],
+        [labels.handoff],
       );
       requireFlip(r, n);
       return { kind: pushFailure === undefined ? "pushed" : "parked-local" };
@@ -1537,14 +1535,14 @@ export async function finalizeOne(
         n,
         SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE(
           input.attempts,
-          labels.agentStuck,
+          labels.handoff,
           READY_FOR_AGENT_LABEL,
         ),
       );
       const r2 = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],
-        [labels.agentStuck],
+        [labels.handoff],
       );
       requireFlip(r2, n);
       return { kind: "deleted-local" };

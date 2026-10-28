@@ -223,7 +223,7 @@ describe("UI-prototype prompt contracts (#126)", () => {
       NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
         42,
         "impact",
-        "needs-info",
+        "needs-human",
         "ready-for-agent",
         null,
         null,

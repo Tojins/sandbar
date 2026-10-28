@@ -1588,7 +1588,7 @@ export async function run(
   // Issue numbers merged+closed earlier in THIS run. The listing endpoint the
   // planner uses lags label/close writes, so without this an issue
   // merged in a prior iteration can resurface as a candidate, get re-planned,
-  // and get stamped agent-stuck on a closed-COMPLETED issue (#16). Fed to
+  // and get stamped `needs-human` on a closed-COMPLETED issue (#16). Fed to
   // buildPlan as a hard exclusion alongside its live-state CLOSED check.
   const mergedThisRun = new Set<number>();
 
@@ -2951,7 +2951,7 @@ export async function run(
             (line) => landingLogger.appendMerger(line),
             (issueId, gate) => landingLogger.writeMergerGate(issueId, gate),
             {
-              agentStuckLabel: config.labels.agentStuck,
+              handoffLabel: config.labels.handoff,
               ongoingIssues: pool.ongoingIssues(),
               projectAnchor,
               repoSlug: repoSlug(repo),
@@ -3083,7 +3083,7 @@ export async function run(
             // merger already commented on and stripped `ready-for-agent` from.
             // Those need their handoff label applied before we stop, or they
             // sit on no queue at all — invisible to the planner and to a human
-            // filtering on `agent-stuck`. Nothing here lands code ON THE SOURCE
+            // filtering on `needs-human`. Nothing here lands code ON THE SOURCE
             // BRANCH: `merged` is always empty on this path. `chunkLanded`
             // (#60) may not be, and that is not a contradiction — those commits
             // are on origin's chunk branch and the issues receive `needs-review`

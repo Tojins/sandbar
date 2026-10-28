@@ -121,7 +121,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       });
 
       await guarded.postComment(42, "handoff body");
-      await guarded.editLabels(42, ["ready-for-agent"], ["agent-stuck"]);
+      await guarded.editLabels(42, ["ready-for-agent"], ["needs-human"]);
       expect(beforeOriginWrite).toHaveBeenCalledTimes(3);
     });
 
@@ -143,7 +143,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
     // the flag — a labelled-in-one-repo, de-queued-in-another split would
     // re-pick the issue forever.
     it("names the repo on both halves of the label flip", async () => {
-      await adapter().editLabels(42, ["ready-for-agent"], ["agent-stuck"]);
+      await adapter().editLabels(42, ["ready-for-agent"], ["needs-human"]);
 
       const recorded = await calls();
       expect(recorded).toHaveLength(2);
