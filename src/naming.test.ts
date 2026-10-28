@@ -34,8 +34,10 @@ import {
   branchNameFromOriginRef,
   chunkBranchName,
   issueBranchName,
+  issueMergeSubject,
   issueNumberFromBranch,
   kebabSlug,
+  parseIssueMergeSubject,
   rootIssueFromChunkBranch,
   strandedHeadRef,
 } from "./naming.js";
@@ -245,6 +247,30 @@ describe("branch names (#58)", () => {
     expect(matches(issueBranchName(1, "a"))).toBe(true);
     expect(matches(chunkBranchName(1, "a"))).toBe(true);
     expect(matches("sandbar/something-else")).toBe(false);
+  });
+});
+
+describe("issue merge subject (#198)", () => {
+  it("round-trips the number and title", () => {
+    const subject = issueMergeSubject(763, "Fix: the map: again");
+    expect(subject).toBe("Merge sandbar/issue-763: Fix: the map: again");
+    expect(parseIssueMergeSubject(subject)).toEqual({
+      issue: 763,
+      title: "Fix: the map: again",
+    });
+  });
+
+  it.each([
+    "Merge sandbar/chunk-12-deploy-watch: Deploy watch",
+    "Merge origin/main into sandbar/chunk-1-c",
+    "Merge origin/main into sandbar integration result",
+    "Merge sandbar/issue-42-slug: t",
+    "Merge sandbar/issue-: t",
+    "Merge sandcastle/issue-42: t",
+    "fix: Merge sandbar/issue-42: t",
+    "Merge branch 'sandbar/issue-42'",
+  ])("rejects %j", (subject) => {
+    expect(parseIssueMergeSubject(subject)).toBeNull();
   });
 });
 

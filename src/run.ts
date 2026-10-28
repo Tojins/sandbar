@@ -263,6 +263,7 @@ import { runInnerLoop, type Terminal } from "./inner-loop.js";
 import { requiredAgentProviders } from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
 import {
+  OriginLeaseLostDuringCleanupError,
   OriginLockHeldError,
   ORIGIN_LOCK_RENEW_INTERVAL_MS,
   acquireOriginLock,
@@ -427,16 +428,6 @@ export function decideOriginLockWake(
       "landing nothing, and preserving every issue clone.",
     exit: haltedExit(["origin-lock-lost"]),
   };
-}
-
-// A named control-flow condition for a remote-write barrier racing terminal
-// cleanup. Cleanup and the heartbeat classify it; adapter callers receive the
-// rejection unchanged, which is what prevents their write after lease release.
-export class OriginLeaseLostDuringCleanupError extends SandbarError {
-  constructor(message: string) {
-    super(message);
-    this.name = "OriginLeaseLostDuringCleanupError";
-  }
 }
 
 export function terminalReason(terminal: Terminal): string | null {

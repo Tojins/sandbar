@@ -141,7 +141,7 @@ import type { RepoRef } from "./repo-ref.js";
 
 const execFileAsync = promisify(execFile);
 
-const MAX_BUFFER = 50 * 1024 * 1024;
+export const MAX_BUFFER = 50 * 1024 * 1024;
 
 // How many push→verify rounds a cycle may spend. Round 1 is the initial
 // verification; each further round costs a full CI wall-clock, so the budget is
@@ -347,6 +347,7 @@ export function jobIdFromDetailsUrl(detailsUrl: string): string | null {
  */
 export function buildForgeRedTrace(
   jobs: readonly { readonly name: string; readonly log: string }[],
+  linesPerJob: number = FORGE_LOG_LINES_PER_JOB,
 ): string {
   if (jobs.length === 0) {
     return "(the forge reported a failure but no job log could be retrieved)";
@@ -357,7 +358,7 @@ export function buildForgeRedTrace(
         `### ${j.name}`,
         "",
         j.log.trim()
-          ? summarizeGateFailure(stripAnsi(j.log), FORGE_LOG_LINES_PER_JOB)
+          ? summarizeGateFailure(stripAnsi(j.log), linesPerJob)
           : // A job can be red with no failing *step* — cancelled, or the runner
             // never started. Say so, rather than leaving a bare heading that
             // reads as "the log was empty, so this probably passed".
@@ -1077,7 +1078,11 @@ export async function runVerifiedLanding(
 export type ExecFn = (
   file: string,
   args: readonly string[],
-  opts: { readonly cwd: string; readonly maxBuffer?: number },
+  opts: {
+    readonly cwd: string;
+    readonly maxBuffer?: number;
+    readonly timeout?: number;
+  },
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
 export type RealVerifyAdapterDeps = {
@@ -1104,8 +1109,47 @@ export function pushErrorReason(err: unknown): string {
   return parts.join("\n") || e.message || "unknown git error";
 }
 
-const defaultExec: ExecFn = (file, args, opts) =>
+export const defaultExec: ExecFn = (file, args, opts) =>
   execFileAsync(file, [...args], opts);
+
+export type FailedJobLogArgs = {
+  readonly exec: ExecFn;
+  readonly cwd: string;
+  readonly repoFlag: string;
+  readonly jobId: string;
+  readonly name: string;
+  readonly conclusion: string | null;
+  readonly url: string;
+};
+
+/**
+ * One Actions job's failed-step log, tailed to what a trace can use. Shared by
+ * the verify adapter and the deploy watch (#198), which read the same job logs
+ * for different audiences.
+ */
+export async function fetchJobFailedLog(args: FailedJobLogArgs): Promise<string> {
+  const { name, url } = args;
+  try {
+    const { stdout } = await args.exec(
+      "gh",
+      ["run", "view", "--repo", args.repoFlag, "--job", args.jobId, "--log-failed"],
+      { cwd: args.cwd, maxBuffer: MAX_BUFFER },
+    );
+    // `--log-failed` is empty when nothing failed at the STEP level — a
+    // cancelled job, a runner that never started. Report the conclusion
+    // instead of an empty section.
+    if (!stdout.trim()) {
+      return `(job "${name}" concluded "${args.conclusion ?? "unknown"}" with no failing step output; see ${url})`;
+    }
+    return lastNLines(stdout, FORGE_LOG_LINES_PER_JOB * 4);
+  } catch (err) {
+    // Best-effort by contract: a missing log degrades the trace, it does not
+    // abort the landing or the bug report it feeds.
+    return `(could not fetch log for "${name}": ${
+      err instanceof Error ? err.message : String(err)
+    }; see ${url || "the forge"})`;
+  }
+}
 
 export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
   const cwd = deps.cwd;
@@ -1335,26 +1379,15 @@ export function realVerifyAdapter(deps: RealVerifyAdapterDeps): VerifyAdapter {
       if (!jobId) {
         return `(no Actions job behind check "${run.name}"; see ${run.detailsUrl || "the forge"})`;
       }
-      try {
-        const { stdout } = await exec(
-          "gh",
-          ["run", "view", "--repo", repoFlag, "--job", jobId, "--log-failed"],
-          { cwd, maxBuffer: MAX_BUFFER },
-        );
-        // `--log-failed` is empty when nothing failed at the STEP level — a
-        // cancelled job, a runner that never started. Report the conclusion
-        // instead of an empty section.
-        if (!stdout.trim()) {
-          return `(job "${run.name}" concluded "${run.conclusion ?? "unknown"}" with no failing step output; see ${run.detailsUrl})`;
-        }
-        return lastNLines(stdout, FORGE_LOG_LINES_PER_JOB * 4);
-      } catch (err) {
-        // Best-effort by contract: a missing log degrades the resolve prompt,
-        // it does not abort the landing.
-        return `(could not fetch log for "${run.name}": ${
-          err instanceof Error ? err.message : String(err)
-        }; see ${run.detailsUrl || "the forge"})`;
-      }
+      return fetchJobFailedLog({
+        exec,
+        cwd,
+        repoFlag,
+        jobId,
+        name: run.name,
+        conclusion: run.conclusion,
+        url: run.detailsUrl,
+      });
     },
 
     async fastForwardSource(sha) {

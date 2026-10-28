@@ -304,8 +304,12 @@ import {
   runPreflightAfterReachability,
 } from "./preflight.js";
 import { startKeepawake } from "./keepawake.js";
-import { OriginLeaseLostDuringCleanupError, run } from "./run.js";
-import { OriginLockHeldError, acquireOriginLock } from "./origin-lock.js";
+import { run } from "./run.js";
+import {
+  OriginLeaseLostDuringCleanupError,
+  OriginLockHeldError,
+  acquireOriginLock,
+} from "./origin-lock.js";
 import { ensureRepoCache } from "./repo-cache.js";
 import { startEventRecord } from "./events.js";
 import { beginCleanup } from "./cleanup.js";

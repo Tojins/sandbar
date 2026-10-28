@@ -15,6 +15,7 @@ import {
   type VerifyAdapter,
   aggregateCheckRuns,
   buildForgeRedTrace,
+  fetchJobFailedLog,
   jobIdFromDetailsUrl,
   POLL_CEILING_SLACK,
   latestPerCheck,
@@ -236,6 +237,14 @@ describe("buildForgeRedTrace", () => {
     const t = buildForgeRedTrace([{ name: "tests", log: "  \n " }]);
     expect(t).toContain("### tests");
     expect(t).toContain("no step output captured");
+  });
+
+  it("tails each job to the caller's line budget", () => {
+    const log = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
+    const t = buildForgeRedTrace([{ name: "deploy", log }], 60);
+    expect(t).toContain("line 99");
+    expect(t).toContain("line 40");
+    expect(t).not.toContain("line 39");
   });
 });
 
@@ -1721,5 +1730,32 @@ describe("realVerifyAdapter.fetchFailureLog — argv", () => {
       "--log-failed",
     ]);
     expect(gh?.cwd).toBe("/wt");
+  });
+});
+
+describe("fetchJobFailedLog", () => {
+  const args = {
+    cwd: "/wt",
+    repoFlag: "o/r",
+    jobId: "345",
+    name: "deploy",
+    conclusion: "cancelled",
+    url: "https://j/345",
+  };
+
+  it("reports the conclusion when the failed-step log is empty", async () => {
+    const exec = vi.fn(async () => ({ stdout: " \n", stderr: "" }));
+    expect(await fetchJobFailedLog({ ...args, exec })).toBe(
+      '(job "deploy" concluded "cancelled" with no failing step output; see https://j/345)',
+    );
+  });
+
+  it("degrades to a could-not-fetch note when the fetch throws", async () => {
+    const exec = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    expect(await fetchJobFailedLog({ ...args, exec })).toBe(
+      '(could not fetch log for "deploy": boom; see https://j/345)',
+    );
   });
 });
