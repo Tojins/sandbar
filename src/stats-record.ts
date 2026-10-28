@@ -124,7 +124,7 @@ export function normalizeV5(raw: readonly RawEvent[]): NormalizedEvents {
   };
 }
 
-export const STATS_SCHEMAS: Readonly<Record<number, (raw: readonly RawEvent[]) => NormalizedEvents>> = {
+const STATS_SCHEMAS: Readonly<Record<number, (raw: readonly RawEvent[]) => NormalizedEvents>> = {
   5: normalizeV5,
   6: normalizeV6,
 };
@@ -187,13 +187,11 @@ async function readStatsRun(dir: string, run: string, withProse: boolean): Promi
   try {
     parsed = parseEventLines(await readFile(path, "utf8"), path);
   } catch (err) {
-    if (isErrno(err, "ENOENT")) {
-      return { kind: "skipped", skipped: { run, reason: "no events.jsonl" } };
-    }
-    if (err instanceof EventRecordReadError) {
-      return { kind: "skipped", skipped: { run, reason: err.message } };
-    }
-    throw err;
+    const reason = isErrno(err, "ENOENT")
+      ? "no events.jsonl"
+      : err instanceof EventRecordReadError ? err.message : null;
+    if (reason === null) throw err;
+    return { kind: "skipped", skipped: { run, reason } };
   }
   const { schemaVersion } = parsed;
   if (typeof schemaVersion !== "number") {

@@ -38,6 +38,7 @@
 import type { StatsEvent, StatsInput, StatsWindow } from "./stats-record.js";
 import { proseKey } from "./stats-record.js";
 import type { UsageFields } from "./events.js";
+import type { Lane } from "./lanes.js";
 
 export type Agg = {
   readonly of: number;
@@ -64,7 +65,7 @@ const ROLE_KEYS = {
   condenser: true, resolve: true,
 } as const;
 export type Role = keyof typeof ROLE_KEYS;
-export const ROLES = Object.keys(ROLE_KEYS) as readonly Role[];
+const ROLES = Object.keys(ROLE_KEYS) as readonly Role[];
 
 type TerminalKind = Extract<StatsEvent, { kind: "terminal" }>["terminal"];
 export type Outcome = TerminalKind | "interrupted";
@@ -74,8 +75,6 @@ const OUTCOME_KEYS = {
   CREDENTIAL: true, REJECTED: true, interrupted: true,
 } as const satisfies Record<Outcome, true>;
 const OUTCOMES = Object.keys(OUTCOME_KEYS) as readonly Outcome[];
-
-export type Lane = "auto" | "review";
 
 export type InvocationRow = {
   readonly run: string;
@@ -231,7 +230,7 @@ const tokensOf = (usage: UsageFields | undefined): TokenSum => ({
   reasoning: usage?.reasoningTokens ?? null,
 });
 
-export function sumTokens(sums: readonly TokenSum[]): TokenSum {
+function sumTokens(sums: readonly TokenSum[]): TokenSum {
   const bucket = (name: keyof TokenSum): number | null =>
     agg(sums.map((sum) => sum[name])).sum;
   return {

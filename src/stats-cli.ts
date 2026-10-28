@@ -28,6 +28,11 @@ type StatsArgs = {
   readonly withProse: boolean;
 };
 
+// How parseArgs names an unknown or malformed flag.
+const isParseArgsError = (err: unknown): err is TypeError =>
+  err instanceof TypeError && "code" in err &&
+  String(err.code).startsWith("ERR_PARSE_ARGS_");
+
 function parseStatsArgs(argv: readonly string[]): StatsArgs | { readonly error: string } {
   let values;
   try {
@@ -44,10 +49,7 @@ function parseStatsArgs(argv: readonly string[]): StatsArgs | { readonly error: 
       allowPositionals: false,
     }));
   } catch (err) {
-    // parseArgs names an unknown or malformed flag with ERR_PARSE_ARGS_*.
-    if (!(err instanceof TypeError && "code" in err && String(err.code).startsWith("ERR_PARSE_ARGS_"))) {
-      throw err;
-    }
+    if (!isParseArgsError(err)) throw err;
     return { error: err.message };
   }
   if (values.last !== undefined && values.since !== undefined) {
