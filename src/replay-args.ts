@@ -10,6 +10,7 @@ import { isParseArgsError } from "./errors.js";
 export const USAGE =
   "usage: replay-cli.js freeze --issues <n,n…> --logs <dir> --out <file> [--config <path>]\n" +
   "       replay-cli.js run --cases <file> --label <name> [--repeat k] [--parallel P] [--config <path>]\n" +
+  "       replay-cli.js report <sessionDir>… [--json]\n" +
   "       npm run replay -- <verb> […]";
 
 export type ReplayArgs =
@@ -27,6 +28,11 @@ export type ReplayArgs =
       readonly label: string;
       readonly repeat: number;
       readonly parallel: number;
+    }
+  | {
+      readonly verb: "report";
+      readonly sessions: readonly string[];
+      readonly json: boolean;
     };
 
 const COUNT = /^[1-9][0-9]*$/;
@@ -86,9 +92,22 @@ function parseRunArgs(argv: readonly string[]): ReplayArgs | { readonly error: s
   return { verb: "run", config, cases, label, repeat: Number(repeat), parallel: Number(parallel) };
 }
 
+function parseReportArgs(argv: readonly string[]): ReplayArgs | { readonly error: string } {
+  const flags = flagsOf(() => parseArgs({
+    args: [...argv],
+    options: { json: { type: "boolean", default: false } },
+    strict: true,
+    allowPositionals: true,
+  }));
+  if ("error" in flags) return flags;
+  if (flags.positionals.length === 0) return { error: "report needs at least one session directory" };
+  return { verb: "report", sessions: flags.positionals, json: flags.values.json };
+}
+
 export function parseReplayArgs(argv: readonly string[]): ReplayArgs | { readonly error: string } {
   const [verb, ...rest] = argv;
   if (verb === "freeze") return parseFreezeArgs(rest);
   if (verb === "run") return parseRunArgs(rest);
+  if (verb === "report") return parseReportArgs(rest);
   return { error: `unknown verb ${verb ?? "(none)"}` };
 }

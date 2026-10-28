@@ -1,7 +1,8 @@
 // #195 — `replay run` end to end over real git, with podman, the images and
 // the inner loop faked: what a session leaves on disk, that its records are
 // ordinary run records the scorecard reads, that nothing it hands a sandbox
-// holds a forge credential, and how a quota stop closes the session.
+// holds a forge credential, and how a quota stop closes the session; and
+// `replay report` over the sessions it leaves.
 import { execFile } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -121,7 +122,7 @@ vi.mock("./inner-loop.js", async (importOriginal) => ({
 const { readStatsInput } = await import("./stats-record.js");
 const { resolveConfig } = await import("./config.js");
 const { ensureRepoCache } = await import("./repo-cache.js");
-const { replayLayout, runReplay } = await import("./replay-run.js");
+const { replayLayout, report, runReplay } = await import("./replay-run.js");
 
 let root: string;
 let checkout: string;
@@ -336,5 +337,69 @@ describe("replay run (#195)", () => {
       );
       expect(seams.loops).toEqual([]);
     });
+  });
+});
+
+describe("replay report (#195)", () => {
+  // A case file whose #7 names an earlier session's first run as its original.
+  async function casesWithOriginal(): Promise<string> {
+    await expect(replay("orig", 1)).resolves.toBe(0);
+    const logsDir = join(sessionOf("orig"), "logs");
+    const [run] = await readdir(logsDir);
+    const landed = { merge: "b".repeat(40), tip: "c".repeat(40), diff: { files: 4, insertions: 40, deletions: 2 } };
+    return await writeCases(caseFileOf({
+      cases: [{ ...replayCase(7), original: { logsDir, run }, landed }, replayCase(8)],
+    }));
+  }
+
+  it("lays each case's original beside every session, each repeat read from its own run", async () => {
+    const cases = await casesWithOriginal();
+    seams.terminals.set("8", {
+      type: "NEEDS-HUMAN", cause: "gate-red", failureTrace: "red", latestReviewerProse: null,
+      budgetExhausted: null, strandedHead: null, specGaps: [],
+    } as Terminal);
+    await expect(replay("base", 2, { cases })).resolves.toBe(0);
+    seams.terminals.clear();
+    await expect(replay("cand", 1, { cases })).resolves.toBe(0);
+
+    const result = await report([sessionOf("base"), sessionOf("cand")]);
+
+    expect(result.sessions.map((session) => [session.label, session.repeats])).toEqual([["base", 2], ["cand", 1]]);
+    const columns = (issue: number) => result.cases.find((c) => c.issue === issue)!.columns.map((col) => ({
+      label: col.label, runs: col.runs, outcomes: col.outcomes, gate: col.gate,
+      gateRounds: col.rounds.gate, files: col.diff.files,
+    }));
+    const one = (value: number) => ({ of: 1, n: 1, min: value, median: value, max: value });
+    const two = (value: number) => ({ of: 2, n: 2, min: value, median: value, max: value });
+    expect(columns(7)).toEqual([
+      { label: "original", runs: 1, outcomes: { DONE: 1 }, gate: { green: 1, red: 0, unknown: 0 }, gateRounds: one(1), files: one(4) },
+      { label: "base", runs: 2, outcomes: { DONE: 2 }, gate: { green: 2, red: 0, unknown: 0 }, gateRounds: two(1), files: two(1) },
+      { label: "cand", runs: 1, outcomes: { DONE: 1 }, gate: { green: 1, red: 0, unknown: 0 }, gateRounds: one(1), files: one(1) },
+    ]);
+    expect(columns(8).map((col) => [col.label, col.runs, col.outcomes])).toEqual([
+      ["original", 0, {}],
+      ["base", 2, { "NEEDS-HUMAN": 2 }],
+      ["cand", 1, { DONE: 1 }],
+    ]);
+  });
+
+  it("refuses sessions that ran different case files", async () => {
+    await expect(replay("base", 1)).resolves.toBe(0);
+    await expect(replay("cand", 1, { cases: await casesWithOriginal() })).resolves.toBe(0);
+
+    await expect(report([sessionOf("base"), sessionOf("cand")])).rejects.toThrow(/^The sessions ran different case files:\n/);
+  });
+
+  it("refuses a case file that has changed since the sessions ran it", async () => {
+    await expect(replay("base", 1)).resolves.toBe(0);
+    await writeCases(caseFileOf({ cases: [replayCase(7)] }));
+
+    await expect(report([sessionOf("base")])).rejects.toThrow(/cases\.json has changed since the sessions ran it\.$/);
+  });
+
+  it("refuses a directory whose replay.json is no session manifest", async () => {
+    await writeFile(join(root, "replay.json"), JSON.stringify({ replayCases: 1 }));
+
+    await expect(report([root])).rejects.toThrow(/replay\.json is not a replay session manifest$/);
   });
 });

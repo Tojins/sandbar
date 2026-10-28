@@ -49,6 +49,12 @@
 // finish, every case not yet started is recorded `not-run` with that reason,
 // and `runReplay` answers 3. Any rejection stops it too, after its REJECTED
 // terminal is recorded, and propagates.
+//
+// REPORT only reads, so it takes no lock and no guard: the sessions'
+// manifests, the one case file they all ran (refused when they ran different
+// ones or it has changed since), and each run's record through `computeStats`
+// over a `{ runs: [run] }` window — every session repeat's, and each case's
+// original run — for `compareReplay`.
 
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
@@ -102,12 +108,14 @@ import {
   type RecordedAdmission,
   type ReplayCase,
   type ReplayCases,
+  type ReplayReport,
   type ReplayResult,
   type ReplaySession,
   type RoleRouting,
   type SeedFrom,
   caseCacheRefUpdates,
   commentsAtCutoff,
+  compareReplay,
   lastDoneAdmission,
   parseNumstat,
   parseReplayCases,
@@ -117,6 +125,8 @@ import {
 } from "./replay.js";
 import { innerLoopConfigOf, rejectedEnding, sandboxEnvOf, terminalEventOf, terminalReason } from "./run.js";
 import { type StackSource, openStackSource, stackSpecToken } from "./stack-source.js";
+import { type StatsReport, computeStats } from "./stats.js";
+import { readStatsInput } from "./stats-record.js";
 import { startTimer } from "./timing.js";
 
 export const GH_DISABLED_EXIT = 97;
@@ -363,27 +373,23 @@ export function replayRouting(config: ResolvedConfig): Readonly<Record<string, R
   };
 }
 
-async function readCases(casesFile: string, config: ResolvedConfig): Promise<{
+async function readJsonFile(path: string): Promise<{ readonly bytes: Buffer; readonly json: unknown }> {
+  const bytes = await readFile(path);
+  try {
+    return { bytes, json: JSON.parse(bytes.toString("utf8")) };
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    throw new SandbarError(`${path} is not JSON: ${err.message}`);
+  }
+}
+
+async function readCases(casesFile: string): Promise<{
   readonly cases: ReplayCases;
   readonly sha256: string;
 }> {
-  const bytes = await readFile(casesFile);
-  let json: unknown;
-  try {
-    json = JSON.parse(bytes.toString("utf8"));
-  } catch (err) {
-    if (!(err instanceof SyntaxError)) throw err;
-    throw new SandbarError(`${casesFile} is not JSON: ${err.message}`);
-  }
+  const { bytes, json } = await readJsonFile(casesFile);
   const parsed = parseReplayCases(json);
   if ("errors" in parsed) throw new SandbarError(`${casesFile}:\n${parsed.errors.join("\n")}`);
-  const configured = repoSlug({ owner: config.ghOwner, name: config.ghRepo });
-  if (parsed.cases.repo !== configured || parsed.cases.sourceBranch !== config.sourceBranch) {
-    throw new SandbarError(
-      `${casesFile} was frozen from ${parsed.cases.repo} ${parsed.cases.sourceBranch}, ` +
-        `but the config names ${configured} ${config.sourceBranch}`,
-    );
-  }
   return { cases: parsed.cases, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
@@ -399,6 +405,9 @@ async function missingSeeds(baseRepoDir: string, cases: readonly ReplayCase[]): 
   }));
   return cases.filter((_, i) => !present[i]).map((c) => `#${c.issue} ${c.seedSha}`);
 }
+
+// A session's run records: one per repeat, as `npm run stats` reads them.
+const sessionLogsDir = (sessionDir: string): string => join(sessionDir, "logs");
 
 // The session manifest: `replay.json`, rewritten whole (tmp + rename) after
 // every result. Pool workers share one, so the writes are chained inside it:
@@ -503,7 +512,14 @@ async function prepareSession(
 ): Promise<PreparedSession> {
   const { config, log } = opts;
   const casesFile = resolve(opts.casesFile);
-  const { cases, sha256 } = await readCases(casesFile, config);
+  const { cases, sha256 } = await readCases(casesFile);
+  const configured = repoSlug({ owner: config.ghOwner, name: config.ghRepo });
+  if (cases.repo !== configured || cases.sourceBranch !== config.sourceBranch) {
+    throw new SandbarError(
+      `${casesFile} was frozen from ${cases.repo} ${cases.sourceBranch}, ` +
+        `but the config names ${configured} ${config.sourceBranch}`,
+    );
+  }
   if (!existsSync(layout.repoDir)) {
     throw new SandbarError(`No replay base cache at ${layout.repoDir}; run \`replay freeze\` first.`);
   }
@@ -649,7 +665,7 @@ async function runRepeats(opts: ReplayRunOptions, session: PreparedSession): Pro
         return;
       }
       repeatRecord.open ??= startEventRecord({
-        baseDir: join(session.sessionDir, "logs"),
+        baseDir: sessionLogsDir(session.sessionDir),
         start: {
           driver: session.driver,
           configPath: opts.configPath,
@@ -753,4 +769,56 @@ async function replayCase(
       diff: parseNumstat(await gitStdout(layout.repoDir, ["diff", "--numstat", c.seedSha, tip])),
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// report
+// ---------------------------------------------------------------------------
+
+// A manifest is only ever written by `run` above, so its version tag is the
+// one thing checked; a case file, which a human may edit, is parsed whole.
+async function readSession(sessionDir: string): Promise<ReplaySession> {
+  const path = join(sessionDir, "replay.json");
+  const { json } = await readJsonFile(path);
+  if (typeof json !== "object" || json === null || !("replaySession" in json) || json.replaySession !== 1) {
+    throw new SandbarError(`${path} is not a replay session manifest`);
+  }
+  return json as ReplaySession;
+}
+
+export async function report(sessionDirs: readonly string[]): Promise<ReplayReport> {
+  const sessions = await Promise.all(sessionDirs.map(async (dir) => ({ dir, session: await readSession(dir) })));
+  if (new Set(sessions.map(({ session }) => session.casesSha256)).size !== 1) {
+    throw new SandbarError(`The sessions ran different case files:\n${
+      sessions.map(({ dir, session }) => `${dir}: ${session.casesFile} ${session.casesSha256}`).join("\n")
+    }`);
+  }
+  const { casesFile, casesSha256 } = sessions[0]!.session;
+  const { cases, sha256 } = await readCases(casesFile);
+  if (sha256 !== casesSha256) throw new SandbarError(`${casesFile} has changed since the sessions ran it.`);
+
+  // One report per run directory, however many cases or sessions name it.
+  const reports = new Map<string, Promise<StatsReport>>();
+  const reportOf = (logsDir: string, run: string): Promise<StatsReport> => {
+    const dir = join(logsDir, run);
+    let read = reports.get(dir);
+    if (read === undefined) {
+      read = readStatsInput(logsDir, { runs: [run] }, { withProse: false }).then(computeStats);
+      reports.set(dir, read);
+    }
+    return read;
+  };
+  const [originals, records] = await Promise.all([
+    Promise.all(cases.cases.flatMap((c) => c.original === null ? [] : [
+      reportOf(c.original.logsDir, c.original.run).then((stats) => [c.issue, stats] as const),
+    ])),
+    Promise.all(sessions.map(async ({ dir, session }) => {
+      const runs = [...new Set(session.results.flatMap((result) => result.run === null ? [] : [result.run]))];
+      return {
+        session,
+        runs: new Map(await Promise.all(runs.map(async (run) => [run, await reportOf(sessionLogsDir(dir), run)] as const))),
+      };
+    })),
+  ]);
+  return compareReplay({ cases: cases.cases, originals: new Map(originals), sessions: records });
 }
