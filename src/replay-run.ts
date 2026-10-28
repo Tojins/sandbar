@@ -579,6 +579,7 @@ async function prepareSession(
       configEnv: config.env,
       images: config.images,
       sandboxImage: config.sandboxImage,
+      databaseCopies: config.databaseCopies,
       // A case cache never moves, so the stack read here is the one every
       // gate of the case runs, checked below.
       hostChecks: (stack) => checkStackOnHost(stack, config.images, hostUid),

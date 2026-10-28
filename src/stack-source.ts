@@ -20,7 +20,9 @@
 // builds, so they are not repeated here. Inside the run, a NEW tip blob is
 // accepted only once it validates and passes those same host checks
 // (`hostChecks`: pulled images present, absolute mount sources readable, D3's
-// uid rule). A tip that fails leaves the run on the last accepted stack and
+// uid rule). Validation includes `config.databaseCopies`' target container
+// (#201), so a tip that breaks it is refused like any invalid stack. A tip
+// that fails leaves the run on the last accepted stack and
 // raises one complaint per blob; the failure is not cached, so a tip that
 // becomes acceptable — the play has pulled its new image — is taken at the
 // next resolution. Halting instead would wait on a consumer landing that a
@@ -58,9 +60,11 @@ import { promisify } from "node:util";
 import { canonicalSha256 } from "./canonical-json.js";
 import {
   type BuiltImage,
+  type DatabaseCopiesSettings,
   type ResolvedGateStack,
   type ResolvedStack,
   type ResolvedStackSource,
+  assertDatabaseCopiesTarget,
   checkRebuildOnIsUsed,
   resolveStackFile,
 } from "./config.js";
@@ -104,6 +108,8 @@ export type StackSourceOptions = {
   // inline one included: a stack is not known until it is read.
   readonly images: readonly BuiltImage[];
   readonly sandboxImage: string;
+  // Whose target container every stack this source accepts must have (#201).
+  readonly databaseCopies: DatabaseCopiesSettings | null;
   // The host checks a new tip has to pass. Throws a SandbarError saying what
   // fails.
   readonly hostChecks: (stack: ResolvedGateStack) => Promise<void>;
@@ -192,6 +198,9 @@ export async function openStackSource(
   const read = async (blob: string | null) => {
     const resolved = await readStackBlob(cache, blob, label, opts.configEnv);
     checkImages(resolved);
+    if (opts.databaseCopies !== null) {
+      assertDatabaseCopiesTarget(resolved.stack, opts.databaseCopies, label);
+    }
     return resolved;
   };
 

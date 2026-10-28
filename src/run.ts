@@ -1201,6 +1201,7 @@ export async function run(
         configEnv: config.env,
         images: config.images,
         sandboxImage: config.sandboxImage,
+        databaseCopies: config.databaseCopies,
         hostChecks: (stack) => checkStackOnHost(stack, config.images, hostUid),
         onEvent: (event) => runRecord.emit(event).then(() => undefined),
       }),
