@@ -450,21 +450,6 @@ export async function createAgentImages(opts: {
   const toolsUsed = new Set<string>();
   const order: string[] = [];
 
-  const buildGenerated = (
-    tag: string,
-    containerfile: string,
-    fingerprint: string,
-    identity: string,
-  ): Promise<void> =>
-    buildGeneratedImage({
-      tag,
-      identity,
-      files: { Containerfile: containerfile },
-      fingerprint,
-      scope: opts.scope,
-      build,
-    });
-
   const toolsImage = (libc: "glibc" | "musl"): Promise<string> => {
     let promise = toolsPending.get(libc);
     if (promise === undefined) {
@@ -475,16 +460,20 @@ export async function createAgentImages(opts: {
         toolsUsed.add(tag);
         if ((await inputsLabel(tag)) !== fingerprint) {
           log(`Building persistent agent tools image '${tag}' for ${toolset}...`);
-          await buildGenerated(
+          await buildGeneratedImage({
             tag,
-            agentToolsImageContainerfile(
-              opts.declaredBaseTag,
-              opts.providers,
-              { arch, libc },
-            ),
+            identity: "<generated-agent-tools-download>",
+            files: {
+              Containerfile: agentToolsImageContainerfile(
+                opts.declaredBaseTag,
+                opts.providers,
+                { arch, libc },
+              ),
+            },
             fingerprint,
-            "<generated-agent-tools-download>",
-          );
+            scope: opts.scope,
+            build,
+          });
           await opts.onImage?.({
             tag,
             built: true,
@@ -547,12 +536,14 @@ export async function createAgentImages(opts: {
             `Augmenting '${baseTag}' as '${tag}' with agent tools ` +
               `${toolset}...`,
           );
-          await buildGenerated(
+          await buildGeneratedImage({
             tag,
-            containerfile,
+            identity: "<generated-agent-tools-augmentation>",
+            files: { Containerfile: containerfile },
             fingerprint,
-            "<generated-agent-tools-augmentation>",
-          );
+            scope: opts.scope,
+            build,
+          });
           await opts.onImage?.({
             tag,
             built: true,

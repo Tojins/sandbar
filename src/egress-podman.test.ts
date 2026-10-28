@@ -19,6 +19,7 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 
 import { EGRESS_BASE_IMAGE, type EgressHandle, ensureEgressImage, startEgress } from "./egress.js";
 import { type EgressPolicy, proxyIpInspectArgs } from "./egress-policy.js";
+import type { ImageBuildRecord } from "./ensure-images.js";
 import {
   egressProxyNameFor,
   sandboxNetworkNameFor,
@@ -141,6 +142,16 @@ const exists = async (kind: "container" | "network", name: string): Promise<bool
   });
 
 describe.runIf(available)("egress proxy against real podman", () => {
+  it.concurrent("reuses the proxy image while its inputs are unchanged", async ({ expect }) => {
+    const records: ImageBuildRecord[] = [];
+    expect(await ensureEgressImage(SCOPE, (record) => {
+      records.push(record);
+    })).toBe(image);
+    expect(records).toEqual([
+      expect.objectContaining({ tag: image, built: false, reason: "egress-current" }),
+    ]);
+  });
+
   it.concurrent(
     "lets an agent and its sibling reach only allowlisted hosts, and records every refusal",
     async ({ expect, task }) => {

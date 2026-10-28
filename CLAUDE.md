@@ -90,6 +90,9 @@ With `config.deployWatch`, polls and landings also kick the deploy watch
 - **Isolation**: per-issue hardlink clones, scoped resource names
   (`naming.ts`, `containers.ts`); `reclaimIssueClone` in `agent-sandbox.ts` is
   the one way to remove a clone. Branch shapes are owned by `naming.ts`.
+  Egress (#202): `egress-policy.ts` (pure allowlist and log fold),
+  `egress-proxy-server.ts` (the DNS-sink, SNI/Host-splicing proxy program),
+  `egress.ts` (its image, one proxy per network owner); not yet wired.
 - **Origin owns issue and chunk branches** (`git-ops.ts`, `chunks.ts`).
 - **Locks**: per-workdir `lock.ts` (#32), repo-wide origin lease
   `origin-lock.ts` (#139), host wake lock `keepawake.ts` (#117).

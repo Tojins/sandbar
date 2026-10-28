@@ -297,7 +297,10 @@ async function serve(): Promise<void> {
   const udp = createSocket("udp4");
   udp.on("message", (packet: Buffer, peer: RemoteInfo) => {
     const reply = answer(packet, peer.address);
-    if (reply !== null) udp.send(reply, peer.port, peer.address);
+    // With a callback, a reply the asker can no longer receive is reported
+    // there rather than as an `error` event that would end the proxy. The
+    // asker retries or gives up on its own; there is nothing to record.
+    if (reply !== null) udp.send(reply, peer.port, peer.address, () => undefined);
   });
 
   // DNS over TCP frames each message with a two-byte length.
@@ -353,6 +356,8 @@ async function serve(): Promise<void> {
       (addresses) => addresses,
       () => [],
     );
+    // Gone while the proxy looked its destination up: nothing to splice.
+    if (socket.destroyed) return;
     if (resolved.length === 0) {
       record({ t: "upstream-error", via, host, port });
       socket.destroy();

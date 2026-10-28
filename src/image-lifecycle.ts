@@ -8,7 +8,9 @@
 // removes every owned ID outside the live set.
 //
 // The live set has two independent sources. Tags retain the declared images
-// and the variants/tools pins the driver can still use. Image IDs retain
+// and the variants/tools pins the driver can still use, and the egress proxy
+// image the running driver builds (#202), so a fingerprint it no longer
+// computes is pruned like a stale tools pin. Image IDs retain
 // anything referenced by an existing container, including stopped
 // issue-lifecycle containers. `--external` includes Buildah storage containers
 // as well as ordinary Podman containers.
