@@ -1895,6 +1895,22 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
     ]));
   });
 
+  it.each([
+    ["a refused credential", new AgentCredentialError("refresh refused")],
+    ["a provider size refusal", new AgentInputTooLargeError("input_too_large")],
+  ])("rethrows %s ahead of an earlier group's plain failure, after every lister settled", async (_name, closure) => {
+    const died = new EgressProxyDiedError("egress proxy p died (gone)");
+    const { events, list } = reviewer({ sandbar: [died], project: [closure] });
+    const rejection = await list(listAction).then(() => null, (err: unknown) => err);
+    expect(rejection).not.toBe(died);
+    if (closure instanceof AgentCredentialError) expect(rejection).toBe(closure);
+    else expect(rejection).toMatchObject({ verdict: { type: "NEEDS-PARTITION" } });
+    expect(events.filter((event) => event.kind === "quality-review")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ group: "sandbar", result: "failed" }),
+      expect.objectContaining({ group: "project" }),
+    ]));
+  });
+
   it("rethrows the first other failure when no lister closed its provider", async () => {
     const died = new EgressProxyDiedError("egress proxy p died (gone)");
     const { list } = reviewer({ sandbar: approve, project: [died] });
