@@ -11,7 +11,8 @@
 // A cluster survives only when it spans two or more distinct issues: a
 // one-off is not a lesson. Prose is never keyed; it is bucketed by source for
 // the tagger (#208), which labels each finding against the bucket's
-// vocabulary, and `tagClusters` then keys those labels the same way.
+// vocabulary in a closed line grammar (`parseTags`), and `tagClusters` then
+// keys those labels the same way.
 //
 // Buckets: `correctness` holds the review invocations of a rejecting round,
 // `quality` the quality fixers that committed (until #204 names the rule
@@ -78,6 +79,9 @@ export type Outlier = {
   readonly outcome: Outcome;
   readonly reason: string | null;
 };
+
+// How the synthesizer cites an outlier issue.
+export const outlierKey = (outlier: Pick<Outlier, "issue">): string => `outlier:${outlier.issue}`;
 
 export type Mining = {
   readonly structured: readonly Cluster[];
@@ -263,6 +267,53 @@ export function extractRules(groupText: string): Rule[] {
     .map((title, index) => ({ label: `R${index + 1}`, title }));
 }
 
+export const TAGS_END = "<tags-end/>";
+export const MAX_GIST_CHARS = 160;
+
+const NEW_LABEL = /^new:[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const TAG_LINE = /^(F\d+) (\S+) ::(.*)$/;
+
+// A tagger's answer over one chunk (#182 Decision 4): a line
+// `F<n> <label> :: <gist>` per tag, then the literal `<tags-end/>` as the
+// answer's last line. Any other line is the model's own prose and is skipped,
+// but a line that leads with a finding id must be a whole tag. A finding may
+// carry several labels, each once. An id outside the chunk, a label outside
+// its vocabulary (the rules, or a `new:<kebab-slug>` for an open bucket), an
+// empty or over-long gist, or a missing end token rejects the whole answer:
+// a tag that is half right is not a key.
+export function parseTags(
+  text: string,
+  bucket: Bucket,
+): { readonly tags: readonly Tag[] } | { readonly error: string } {
+  const lines = text.trimEnd().split("\n");
+  if (lines.at(-1)?.trim() !== TAGS_END) return { error: `the answer does not end with ${TAGS_END}` };
+  const ids = new Set(bucket.findings.map((finding) => finding.id));
+  const { vocabulary } = bucket;
+  const inVocabulary = (label: string): boolean => vocabulary.kind === "open"
+    ? NEW_LABEL.test(label)
+    : vocabulary.rules.some((rule) => rule.label === label);
+  const tags: Tag[] = [];
+  for (const line of lines.slice(0, -1).map((raw) => raw.trim())) {
+    if (!/^F\d+\b/.test(line)) continue;
+    const match = TAG_LINE.exec(line);
+    if (match === null) return { error: `not a tag line: ${line}` };
+    const [, id = "", label = "", rawGist = ""] = match;
+    const gist = rawGist.trim();
+    if (!ids.has(id)) return { error: `${id} names no finding of this chunk` };
+    if (!inVocabulary(label)) return { error: `${label} is not in the ${bucket.source} vocabulary` };
+    if (gist.length === 0 || gist.length > MAX_GIST_CHARS) {
+      return { error: `${id} ${label}: the gist must be 1-${MAX_GIST_CHARS} chars` };
+    }
+    if (tags.some((tag) => tag.id === id && tag.label === label)) {
+      return { error: `${id} ${label} is tagged twice` };
+    }
+    tags.push({ id, label, gist });
+  }
+  return { tags };
+}
+
+export const tagKey = (source: string, label: string): string => `tag:${source}:${label}`;
+
 // `tag:<source>:<label>` over the tagged findings, two or more issues each.
 export function tagClusters(tagged: readonly TaggedBucket[]): Cluster[] {
   return clusters(tagged.flatMap(({ bucket, tags }) => tags.map((tag) => {
@@ -271,7 +322,7 @@ export function tagClusters(tagged: readonly TaggedBucket[]): Cluster[] {
       throw new Error(`tag ${tag.id} names no finding of bucket ${bucket.source}`);
     }
     return {
-      key: `tag:${bucket.source}:${tag.label}`,
+      key: tagKey(bucket.source, tag.label),
       member: { run: finding.run, issue: finding.issue, transcript: finding.transcript },
     };
   })));

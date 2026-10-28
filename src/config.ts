@@ -725,6 +725,11 @@ export type RunConfig = {
   // verifier's code-review (`reviewer*`) routing, not the quality pass's.
   readonly adjudicatorModelId?: string;
   readonly mergerModelId?: string;
+  // `npm run reflect`'s two steps (#182, #208), never run by the daemon: the
+  // tagger labels findings against a closed vocabulary ("sonnet"), the
+  // synthesizer turns recurring clusters into proposals ("opus").
+  readonly reflectTaggerModelId?: string;
+  readonly reflectSynthesizerModelId?: string;
 
   // Which CLI each role runs (#72, #74) — the vendor knob beside the tiering one.
   // `agent-providers.ts` owns the set, the credential each member needs, and
@@ -745,6 +750,8 @@ export type RunConfig = {
   readonly reviewerQualityAgent?: AgentProviderName;
   readonly adjudicatorAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
+  readonly reflectTaggerAgent?: AgentProviderName;
+  readonly reflectSynthesizerAgent?: AgentProviderName;
 
   // Reasoning effort per call, beside the model id and the CLI (#130). A plain
   // string the provider spells for its own CLI — `claude --effort <level>`,
@@ -754,7 +761,8 @@ export type RunConfig = {
   // the first invocation, loudly. A claude-routed role that leaves it unset
   // gets the driver default beside its default model — implementer, UI
   // checker and reviewer `high`, reviewer-quality and merger `medium`, the
-  // adjudicator the reviewer's. A role routed elsewhere has no driver default:
+  // adjudicator the reviewer's, the reflect tagger `medium` and its
+  // synthesizer `high`. A role routed elsewhere has no driver default:
   // UNSET MEANS ABSENT, no flag is emitted and the CLI's own default applies
   // (for codex the per-model default the server ships, `low` for gpt-5.6-sol
   // when this was written). The level a run used is on its log line
@@ -765,6 +773,8 @@ export type RunConfig = {
   readonly reviewerQualityEffort?: string;
   readonly adjudicatorEffort?: string;
   readonly mergerEffort?: string;
+  readonly reflectTaggerEffort?: string;
+  readonly reflectSynthesizerEffort?: string;
 
   // Trailer appended to merge commits. Default: a `Co-authored-by:` line built
   // from botName/botEmail.
@@ -952,6 +962,8 @@ export type ResolvedConfig = Required<
     | "reviewerQualityEffort"
     | "adjudicatorEffort"
     | "mergerEffort"
+    | "reflectTaggerEffort"
+    | "reflectSynthesizerEffort"
     | "maxConcurrentGates"
     | "copyToWorktree"
   >
@@ -966,6 +978,8 @@ export type ResolvedConfig = Required<
   readonly reviewerQualityEffort?: string;
   readonly adjudicatorEffort?: string;
   readonly mergerEffort?: string;
+  readonly reflectTaggerEffort?: string;
+  readonly reflectSynthesizerEffort?: string;
   // Optional after resolution because absence is the unlimited default.
   readonly maxConcurrentGates?: number;
   readonly copyToWorktree: readonly ResolvedCopyToWorktreeEntry[];
@@ -985,6 +999,8 @@ export const DEFAULT_MAX_CONTEXT_CHARS = 600_000;
 export const DEFAULT_REVIEWER_MODEL_ID = "opus";
 export const DEFAULT_REVIEWER_QUALITY_MODEL_ID = "sonnet";
 export const DEFAULT_MERGER_MODEL_ID = "opus";
+export const DEFAULT_REFLECT_TAGGER_MODEL_ID = "sonnet";
+export const DEFAULT_REFLECT_SYNTHESIZER_MODEL_ID = "opus";
 export const DEFAULT_UI_CHECK_MODEL_ID = "sonnet";
 // Reasoning effort for a claude-routed role that names none (#130's field).
 // Unattended work whose output decides something runs at `high`: the
@@ -997,6 +1013,8 @@ export const DEFAULT_UI_CHECK_EFFORT = "high";
 export const DEFAULT_REVIEWER_EFFORT = "high";
 export const DEFAULT_REVIEWER_QUALITY_EFFORT = "medium";
 export const DEFAULT_MERGER_EFFORT = "medium";
+export const DEFAULT_REFLECT_TAGGER_EFFORT = "medium";
+export const DEFAULT_REFLECT_SYNTHESIZER_EFFORT = "high";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
@@ -2524,6 +2542,20 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     },
   );
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
+  const reflectTaggerAgent = parseAgentProviderName(
+    "reflectTaggerAgent",
+    config.reflectTaggerAgent,
+  );
+  const reflectSynthesizerAgent = parseAgentProviderName(
+    "reflectSynthesizerAgent",
+    config.reflectSynthesizerAgent,
+  );
+  assertRoleModelIdNamed("reflectTagger", reflectTaggerAgent, config.reflectTaggerModelId);
+  assertRoleModelIdNamed(
+    "reflectSynthesizer",
+    reflectSynthesizerAgent,
+    config.reflectSynthesizerModelId,
+  );
   // Shape only (#130): a non-empty string or absent. The level itself is the
   // CLI's to refuse — see the field's note.
   for (const field of [
@@ -2533,6 +2565,8 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "reviewerQualityEffort",
     "adjudicatorEffort",
     "mergerEffort",
+    "reflectTaggerEffort",
+    "reflectSynthesizerEffort",
   ] as const) {
     const value = config[field];
     if (value !== undefined && (typeof value !== "string" || value.length === 0)) {
@@ -2567,12 +2601,17 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       inheritedAdjudicatorModelId ??
       DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
+    reflectTaggerModelId: config.reflectTaggerModelId ?? DEFAULT_REFLECT_TAGGER_MODEL_ID,
+    reflectSynthesizerModelId:
+      config.reflectSynthesizerModelId ?? DEFAULT_REFLECT_SYNTHESIZER_MODEL_ID,
     implementerAgent,
     uiCheckAgent,
     reviewerAgent,
     reviewerQualityAgent,
     adjudicatorAgent,
     mergerAgent,
+    reflectTaggerAgent,
+    reflectSynthesizerAgent,
     implementerEffort:
       config.implementerEffort ??
       claudeEffort(implementerAgent, DEFAULT_IMPLEMENTER_EFFORT),
@@ -2589,6 +2628,12 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       claudeEffort(adjudicatorAgent, DEFAULT_REVIEWER_EFFORT),
     mergerEffort:
       config.mergerEffort ?? claudeEffort(mergerAgent, DEFAULT_MERGER_EFFORT),
+    reflectTaggerEffort:
+      config.reflectTaggerEffort ??
+      claudeEffort(reflectTaggerAgent, DEFAULT_REFLECT_TAGGER_EFFORT),
+    reflectSynthesizerEffort:
+      config.reflectSynthesizerEffort ??
+      claudeEffort(reflectSynthesizerAgent, DEFAULT_REFLECT_SYNTHESIZER_EFFORT),
     coauthorTrailer:
       config.coauthorTrailer ??
       defaultCoauthorTrailer(config.botName, config.botEmail),

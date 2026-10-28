@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// `npm run reflect` (#182, #207): mine one installation's run records for
-// recurring corrections into a local report. A repo script like `npm run
+// `npm run reflect` (#182, #207, #208): mine one installation's run records
+// for recurring corrections into a local report of proposals. A repo script like `npm run
 // stats` (#194), started by a human and never by the daemon: `cli.ts` does not
 // dispatch it, `index.ts` does not export it, and nothing in the daemon
 // imports a `reflect-*` module. On the box it runs from a build:
 //
-//   node /opt/sandbar/builds/<sha>/dist/reflect-cli.js --no-agents \
+//   node /opt/sandbar/builds/<sha>/dist/reflect-cli.js \
 //     --config ~/installation/sandbar.config.mjs
 //
 // Through npm the flags follow `--` (`npm run reflect -- --no-agents`), since
@@ -16,38 +16,35 @@
 // `--logs <dir>` defaults to `<stateDir>/logs`, and any record tree works;
 // `--last N` or `--since YYYY-MM-DD` picks the window as #194 does.
 // `--no-agents` stops after the deterministic pass (`reflect-mine.ts`) and
-// renders only its tables. It is the only mode until the tagger and
-// synthesizer land (#208), so it is required, and a run without it means the
-// same thing before and after. A bad flag exits 2.
+// renders only its tables; without it the tagger and synthesizer run
+// (`reflect.ts`). A bad flag exits 2; a fault that stops the agents (a quota,
+// a credential, podman, an unbuilt image) exits 1 with no report.
 //
-// It reads the records through #194 only, with prose, and writes one file:
-// the report, under `<stateDir>/reflect/` (tmp + rename), named by
-// `reportFileName` so a re-run over the same window rewrites the same bytes.
-// It prints the report, then its path. No GitHub call, no other write.
+// It reads the records through #194 only, with prose. It writes the report
+// under `<stateDir>/reflect/`, named by `reportFileName` so a re-run over
+// the same window rewrites the same bytes, plus reflect's own cache and
+// throwaway workspace beside it. It prints the report, then its path, and
+// each agent step's progress on stderr. No GitHub call, no other write.
 
-import { mkdir, rename, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { loadConfig, withDefaultCwd } from "./cli.js";
 import { resolveConfig } from "./config.js";
 import { isParseArgsError } from "./errors.js";
-import { loadTemplate } from "./prompts.js";
-import { mine } from "./reflect-mine.js";
-import { renderReport, reportFileName } from "./reflect-report.js";
+import { reflect } from "./reflect.js";
 import { repoLayout } from "./repo-cache.js";
-import { repoSlug } from "./repo-ref.js";
-import { computeStats } from "./stats.js";
-import { parseStatsWindow, readStatsInput, type StatsWindow } from "./stats-record.js";
+import { parseStatsWindow, type StatsWindow } from "./stats-record.js";
 
 const USAGE =
-  "usage: reflect-cli.js --no-agents [--config <path>] [--logs <dir>] [--last N | --since YYYY-MM-DD]\n" +
-  "       npm run reflect -- --no-agents […]";
+  "usage: reflect-cli.js [--no-agents] [--config <path>] [--logs <dir>] [--last N | --since YYYY-MM-DD]\n" +
+  "       npm run reflect -- […]";
 
 type ReflectArgs = {
   readonly config: string;
   readonly logs: string | undefined;
   readonly window: StatsWindow;
+  readonly agents: boolean;
 };
 
 function parseReflectArgs(argv: readonly string[]): ReflectArgs | { readonly error: string } {
@@ -69,12 +66,9 @@ function parseReflectArgs(argv: readonly string[]): ReflectArgs | { readonly err
     if (!isParseArgsError(err)) throw err;
     return { error: err.message };
   }
-  if (!values["no-agents"]) {
-    return { error: "the tagger and synthesizer are not built yet (#208); pass --no-agents" };
-  }
   const window = parseStatsWindow(values);
   if ("error" in window) return window;
-  return { config: values.config, logs: values.logs, window };
+  return { config: values.config, logs: values.logs, window, agents: !values["no-agents"] };
 }
 
 const args = parseReflectArgs(process.argv.slice(2));
@@ -84,22 +78,11 @@ if ("error" in args) {
 } else {
   const configPath = resolve(args.config);
   const config = resolveConfig(withDefaultCwd(await loadConfig(configPath), configPath));
-  const layout = repoLayout(config.cwd, config.workDir);
-  const logsDir = resolve(args.logs ?? layout.logsDir);
-  const stats = computeStats(await readStatsInput(logsDir, args.window, { withProse: true }));
-  const report = renderReport({
-    stats,
-    mining: mine(stats, { quality: loadTemplate("coding-standards") }),
-    // Only a tagged bucket can show a rule unused, and no agent ran.
-    candidates: [],
-    logsDir,
-    repo: repoSlug({ owner: config.ghOwner, name: config.ghRepo }),
+  const { reportPath, report } = await reflect(config, {
+    logsDir: resolve(args.logs ?? repoLayout(config.cwd, config.workDir).logsDir),
+    window: args.window,
+    agents: args.agents,
+    log: (line) => console.error(`reflect: ${line}`),
   });
-  const dir = join(layout.stateDir, "reflect");
-  await mkdir(dir, { recursive: true });
-  const path = join(dir, reportFileName(stats, report));
-  const incoming = `${path}.tmp-${process.pid}`;
-  await writeFile(incoming, report);
-  await rename(incoming, path);
-  process.stdout.write(`${report}\n${path}\n`);
+  process.stdout.write(`${report}\n${reportPath}\n`);
 }

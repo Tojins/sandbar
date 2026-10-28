@@ -5,7 +5,9 @@ import {
   chunkBucket,
   deletionCandidates,
   extractRules,
+  MAX_GIST_CHARS,
   mine,
+  parseTags,
   REFLECT_DELETION_MIN_ISSUES,
   tagClusters,
   type Bucket,
@@ -283,6 +285,38 @@ describe("chunkBucket", () => {
   it("keeps a bucket that fits whole, and yields nothing for an empty one", () => {
     expect(ids(chunkBucket(bucketOf([finding(1, 1, 4), finding(2, 2, 4)])))).toEqual([["F1", "F2"]]);
     expect(chunkBucket(bucketOf([]))).toEqual([]);
+  });
+});
+
+describe("parseTags (#182 Decision 4)", () => {
+  const rules = bucketOf([finding(1, 1, 1), finding(2, 2, 1)]);
+  const open: Bucket = { ...rules, source: "correctness", vocabulary: { kind: "open" } };
+
+  it("reads each tag line, skips the model's prose, and lets a finding carry two labels", () => {
+    expect(parseTags("Labels follow.\n\nF1 R1 :: helper wraps one call \nF1 R2 :: any in a contract\n" +
+      "F2 R1 :: three layers for one value\n<tags-end/>\n", rules)).toEqual({ tags: [
+      { id: "F1", label: "R1", gist: "helper wraps one call" },
+      { id: "F1", label: "R2", gist: "any in a contract" },
+      { id: "F2", label: "R1", gist: "three layers for one value" },
+    ] });
+    expect(parseTags("F2 new:missing-null-check :: no guard\n<tags-end/>", open))
+      .toEqual({ tags: [{ id: "F2", label: "new:missing-null-check", gist: "no guard" }] });
+    expect(parseTags("Nothing recurs.\n<tags-end/>", rules)).toEqual({ tags: [] });
+  });
+
+  it.each([
+    ["a missing end token", "F1 R1 :: a", rules, "does not end with <tags-end/>"],
+    ["an end token that is not last", "<tags-end/>\nF1 R1 :: a", rules, "does not end with"],
+    ["an unknown id", "F3 R1 :: a\n<tags-end/>", rules, "F3 names no finding"],
+    ["a label outside the rules", "F1 R7 :: a\n<tags-end/>", rules, "R7 is not in the quality vocabulary"],
+    ["a rule label in an open bucket", "F1 R1 :: a\n<tags-end/>", open, "R1 is not in the correctness"],
+    ["a slug that is not kebab", "F1 new:Not_Kebab :: a\n<tags-end/>", open, "is not in the correctness"],
+    ["a malformed tag line", "F1 R1 - a\n<tags-end/>", rules, "not a tag line: F1 R1 - a"],
+    ["an empty gist", "F1 R1 :: \n<tags-end/>", rules, "the gist must be"],
+    ["an over-long gist", `F1 R1 :: ${"g".repeat(MAX_GIST_CHARS + 1)}\n<tags-end/>`, rules, "the gist must be"],
+    ["a repeated tag", "F1 R1 :: a\nF1 R1 :: b\n<tags-end/>", rules, "F1 R1 is tagged twice"],
+  ])("rejects the whole answer on %s", (_name, text, bucket, error) => {
+    expect(parseTags(text, bucket)).toEqual({ error: expect.stringContaining(error) });
   });
 });
 

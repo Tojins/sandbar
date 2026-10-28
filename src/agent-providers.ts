@@ -414,7 +414,14 @@ export function requiredAgentProviders(roles: {
 // too, and each pass is asserted against its own provider rather than against
 // the role's.
 export function assertRoleModelIdNamed(
-  role: "implementer" | "uiCheck" | "reviewer" | "adjudicator" | "merger",
+  role:
+    | "implementer"
+    | "uiCheck"
+    | "reviewer"
+    | "adjudicator"
+    | "merger"
+    | "reflectTagger"
+    | "reflectSynthesizer",
   provider: AgentProviderName,
   rawModelId: string | undefined,
   fields: {

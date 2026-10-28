@@ -49,9 +49,8 @@ async function consumer(): Promise<{ readonly dir: string; readonly config: stri
   return { dir, config };
 }
 
-describe("npm run reflect (#182, #207)", () => {
+describe("npm run reflect (#182, #207, #208)", () => {
   it.each([
-    ["no --no-agents", []],
     ["an unknown flag", ["--no-agents", "--verbose"]],
     ["both windows", ["--no-agents", "--last", "3", "--since", "2026-09-01"]],
     ["a count that is not one", ["--no-agents", "--last", "0"]],
@@ -100,5 +99,14 @@ describe("npm run reflect (#182, #207)", () => {
     expect(result.stdout).toContain("| `fail:implementer:FAILED` | 2 | 2 |");
     expect(result.stdout).toContain(`- acme/floorplan#7 attempt 1: \`${join(run, "issue-7")}/implementer-1.log\``);
     expect(result.stdout).toContain(`- acme/floorplan#8 attempt 1: \`${join(run, "issue-8")}/implementer-1.log\``);
+  });
+
+  it("exits 1 and writes no report when the agents cannot read the source tip", async () => {
+    const { dir, config } = await consumer();
+    const result = await reflect(["--config", config, "--logs", FIXTURE_LOGS]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("refs/remotes/origin/main");
+    await expect(readdir(join(dir, ".sandbar", "reflect"))).rejects.toThrow("ENOENT");
   });
 });
