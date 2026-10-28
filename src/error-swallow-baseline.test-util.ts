@@ -65,9 +65,10 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // origin lease — none of which happens if it escapes `run()` instead.
   "run.ts": 11,
   "sandbox-stack.ts": 2,
-  // The scenario writer (#203): a sandbox that would not come up and a run
-  // that ended without an answer are its named failures, and anything else
-  // is rethrown; a container that would not close is reported (#83).
+  // The scenario writer (#203): a run, and the host steps around it, that
+  // failed with anything but sandbar's own SandbarError are its named
+  // failures, and that is rethrown; a container that would not close is
+  // reported (#83).
   "scenario-writer-run.ts": 3,
   // The HTTP request boundary maps record/reducer failures to a 500 response
   // for the polling page (#132).

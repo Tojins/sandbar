@@ -306,14 +306,18 @@ describe("createScenarioWriterTask (#203)", () => {
     await expect(task.settled()).resolves.toMatchObject({ kind: "failed" });
   });
 
-  it("holds an error sandbar did not expect for the join, which rethrows it", async () => {
-    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([async () => ran(WRITTEN)]));
-    const { deps, writeScenarios } = harness();
-    writeScenarios.mockRejectedValue(new Error("EEXIST"));
+  it("holds sandbar's own error for the join, which rethrows it, and closes the sandbox", async () => {
+    const sandbox = fakeSandbox([async () => {
+      throw new SandbarError("inconsistent");
+    }]);
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(sandbox);
+    const { deps, events } = harness();
     const task = createScenarioWriterTask(deps);
     task.start(input);
-    await expect(task.settled()).rejects.toThrow("EEXIST");
+    await expect(task.settled()).rejects.toThrow("inconsistent");
     expect(task.status()).toEqual({ kind: "running" });
+    expect(writerEvents(events)).toEqual([]);
+    expect(sandbox.close).toHaveBeenCalledWith({});
     await expect(task.abort()).resolves.toBeUndefined();
   });
 
@@ -338,29 +342,80 @@ describe("createScenarioWriterTask (#203)", () => {
     );
   });
 
-  it("closes the sandbox when an unexpected error escapes the conversation", async () => {
-    const sandbox = fakeSandbox([async () => ran(WRITTEN)]);
-    mocks.createSeedSnapshotSandbox.mockResolvedValue(sandbox);
-    const { deps, writeScenarios } = harness();
-    writeScenarios.mockRejectedValue(new Error("EEXIST"));
-    const task = createScenarioWriterTask(deps);
-    task.start(input);
-    await expect(task.settled()).rejects.toThrow("EEXIST");
-    expect(sandbox.close).toHaveBeenCalledWith({});
-  });
-
-  it("propagates a run step's non-harness error without recording a writer failure", async () => {
+  // A stored host error would be rethrown at the join of every HARD-ERROR
+  // retry, turning a green issue into HARD-ERROR.
+  it("settles a run's podman failure failed, recorded with its transcript, so no join rethrows it", async () => {
     const sandbox = fakeSandbox([async () => {
-      throw new Error("host broke");
+      throw new Error("podman exec failed: container state improper");
     }]);
     mocks.createSeedSnapshotSandbox.mockResolvedValue(sandbox);
     const { deps, events } = harness();
     const task = createScenarioWriterTask(deps);
     task.start(input);
-    await expect(task.settled()).rejects.toThrow("host broke");
-    expect(task.status()).toEqual({ kind: "running" });
-    expect(writerEvents(events)).toEqual([]);
+    const outcome = { kind: "failed", detail: "podman exec failed: container state improper" };
+    await expect(task.settled()).resolves.toEqual(outcome);
+    expect(task.status()).toEqual({ kind: "settled", outcome });
+    expect(writerEvents(events)).toMatchObject([
+      { invocation: 1, result: "failed", transcript: expect.stringContaining("scenario-writer-1") },
+    ]);
     expect(sandbox.close).toHaveBeenCalledWith({});
+  });
+
+  type Harness = ReturnType<typeof harness>;
+  const hostDown = () => {
+    throw new Error("gh: HTTP 502");
+  };
+  it.each<[string, number, () => ReturnType<typeof fakeSandbox>, (h: Harness) => void]>([
+    ["the prompt's issue anchor", 1, () => {
+      mocks.buildScenarioWriterPrompt.mockImplementation(async () => hostDown());
+      return fakeSandbox([]);
+    }, () => undefined],
+    ["the first run's write check", 1, () => fakeSandbox([async () => ran(WRITTEN)], async () => hostDown()), () => undefined],
+    ["the nudge's write check", 2, () => {
+      let checks = 0;
+      return fakeSandbox(
+        [async () => ran("Here are my thoughts."), async () => ran(WRITTEN)],
+        async () => ((checks += 1) === 2 ? hostDown() : null),
+      );
+    }, () => undefined],
+    ["filing the set", 1, () => fakeSandbox([async () => ran(WRITTEN)]), (h) => {
+      h.writeScenarios.mockImplementation(async () => hostDown());
+    }],
+  ])("settles failed when %s fails on the host, recorded against invocation %i", async (
+    _step,
+    invocation,
+    sandboxOf,
+    arrange,
+  ) => {
+    const sandbox = sandboxOf();
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(sandbox);
+    const h = harness();
+    arrange(h);
+    const task = createScenarioWriterTask(h.deps);
+    task.start(input);
+    await expect(task.settled()).resolves.toEqual({ kind: "failed", detail: "gh: HTTP 502" });
+    expect(task.status()).toMatchObject({ kind: "settled" });
+    const recorded = writerEvents(h.events);
+    expect(recorded.map((event) => event.invocation)).toEqual(
+      Array.from({ length: invocation }, (_, k) => k + 1),
+    );
+    expect(recorded.at(-1)).toMatchObject({ invocation, result: "failed" });
+    expect(sandbox.close).toHaveBeenCalledWith({});
+  });
+
+  it("records the invocation aborted when the abort's close breaks a host step", async () => {
+    const sandbox = fakeSandbox([async () => ran(WRITTEN)]);
+    const { deps, events } = harness();
+    const task = createScenarioWriterTask(deps);
+    sandbox.changed.mockImplementation(async () => {
+      void task.abort();
+      await new Promise((resolve) => setImmediate(resolve));
+      throw new Error("not a git repository");
+    });
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(sandbox);
+    task.start(input);
+    await expect(task.settled()).resolves.toMatchObject({ kind: "failed", detail: expect.stringContaining("aborted") });
+    expect(writerEvents(events)).toMatchObject([{ invocation: 1, result: "aborted" }]);
   });
 
   it("settles wrote when the run threw a harness error after changing the snapshot", async () => {

@@ -172,7 +172,8 @@ export type QualityOutcome = {
 };
 
 // How the scenario writer's one run per admission ended (#203). `failed`
-// covers every harness failure and an answer still malformed after its nudge.
+// covers every failure that is not sandbar's own and an answer still
+// malformed after its nudge.
 export type ScenarioWriterOutcome =
   | { readonly kind: "written"; readonly set: ScenarioSet }
   | { readonly kind: "none"; readonly reason: string }

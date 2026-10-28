@@ -5,7 +5,7 @@
 // it across the admission's sandbox cycles; the state machine decides when it
 // starts and where it is joined (inner-loop-machine.ts). `start` returns at
 // once and is idempotent. `settled` is the join. `status` is what the machine
-// is told at each cycle's start: a write, or a failure sandbar did not expect,
+// is told at each cycle's start: a write, or sandbar's own `SandbarError`,
 // stays `running` so that the join hears it.
 //
 // The writer runs in its OWN container over a read-only, ref-less snapshot of
@@ -17,15 +17,19 @@
 // park detail carries scenario text.
 //
 // One invocation, then at most one same-session format nudge carrying the
-// parser's correction, parsed over both outputs. A harness failure (an agent
-// error or timeout, a closed provider, a size refusal, a writer that could
-// not come up), a prompt over `maxContextChars`, or an answer still malformed
-// after the nudge settles `failed`: no scenarios, recorded, and nothing else
-// changes. A closed provider is still recorded in the run's provider state,
-// and the issue's own roles meet it themselves. A change to the snapshot's
-// HEAD or status after any invocation settles `wrote`, and the snapshot is
-// kept. `abort` ends a writer the admission no longer needs: it closes the
-// container, which kills the run, and the invocation is recorded `aborted`.
+// parser's correction, parsed over both outputs. Any failure that is not
+// sandbar's own (an agent error or timeout, a closed provider, a size refusal,
+// podman, a writer that could not come up, a host step around the runs such
+// as the anchor's fetch or the set's file), a prompt over `maxContextChars`,
+// or an answer still malformed after the nudge settles `failed`: no
+// scenarios, recorded against the invocation it ended, and nothing else
+// changes: a stored host error would instead be rethrown at the join of
+// every HARD-ERROR retry. A closed provider is still recorded in the run's
+// provider state, and the issue's own roles meet it themselves. A change to
+// the snapshot's HEAD or status after any invocation settles `wrote`, and the
+// snapshot is kept. `abort` ends a writer the admission no longer needs: it
+// closes the container, which kills the run, and the invocation is recorded
+// `aborted`.
 // Every invocation is one `scenario-writer` event and one
 // `scenario-writer-<n>.log`, numbered across the run's admissions.
 
@@ -50,7 +54,6 @@ import {
   type IssueRef,
   agentFailureResult,
   agentSandboxNotice,
-  endedWithoutAnswer,
   issueAnchorOptionsOf,
   runWithProviderState,
 } from "./inner-loop.js";
@@ -109,6 +112,11 @@ const SNAPSHOT_KEPT =
 
 const errorText = (err: unknown): string => err instanceof Error ? err.message : String(err);
 
+// Sandbar's own inconsistency, which the join rethrows; anything else the
+// writer meets is its harness or its host failing.
+const sandbarsOwn = (err: unknown): boolean =>
+  err instanceof SandbarError && !(err instanceof ContainerBringupError);
+
 export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWriterTask {
   const { issue, config, attemptLogger, onEvent, providerState } = deps;
   const agent = config.scenarioWriterAgent;
@@ -122,13 +130,16 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
     | { readonly kind: "settled"; readonly settlement: Settlement } = { kind: "pending" };
   let aborted = false;
   let sandbox: SeedSnapshotSandbox | null = null;
+  // The first invocation with no event yet, which a failure outside a run
+  // ends.
+  let unrecorded = 1;
 
   type Fields = Pick<
     Extract<EventInput, { kind: "scenario-writer" }>,
     "durationMs" | "endedBy" | "transcript" | "maxGapMs" | "scenarios" | "usage"
   > & ReturnType<typeof agentPartialContainerResources>;
-  const record = (invocation: number, result: ScenarioWriterResult, fields: Fields) =>
-    onEvent({
+  const record = async (invocation: number, result: ScenarioWriterResult, fields: Fields) => {
+    await onEvent({
       kind: "scenario-writer",
       issue: Number(issue.id),
       title: issue.title,
@@ -139,9 +150,11 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
       result,
       ...fields,
     });
+    unrecorded = invocation + 1;
+  };
   const failed = (detail: string): ScenarioWriterOutcome => ({ kind: "failed", detail });
 
-  // An invocation that threw: aborted, a harness failure, or the host's.
+  // An invocation that threw: aborted, sandbar's own error, or a failure.
   const ranAndThrew = async (
     open: SeedSnapshotSandbox,
     invocation: number,
@@ -165,7 +178,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
       await record(invocation, "aborted", fields);
       return ABORTED;
     }
-    if (!endedWithoutAnswer(err)) throw err;
+    if (sandbarsOwn(err)) throw err;
     const wrote = await snapshotWrote(open, invocation, fields);
     if (wrote !== null) return wrote;
     await record(invocation, agentFailureResult(err), fields);
@@ -267,9 +280,8 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
   }
 
   async function write(input: ScenarioWriterInput): Promise<ScenarioWriterOutcome> {
-    let open: SeedSnapshotSandbox;
     try {
-      open = await createSeedSnapshotSandbox({
+      const open = await createSeedSnapshotSandbox({
         layout: config.layout,
         issueId: issue.id,
         seedSha: input.seedSha,
@@ -284,20 +296,24 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
         }],
         onNotice: (severity, message) => onEvent(agentSandboxNotice(severity, message)),
       });
+      sandbox = open;
+      const outcome = await converse(open, input);
+      await closeSandbox(outcome.kind === "wrote" ? { preserve: SNAPSHOT_KEPT } : {});
+      return outcome;
     } catch (err) {
-      // A writer that cannot come up — podman, the snapshot's git — is its
-      // harness failing. Sandbar's own inconsistencies still propagate.
-      if (err instanceof SandbarError && !(err instanceof ContainerBringupError)) throw err;
-      await record(1, "failed", {});
-      return failed(`the writer's sandbox did not come up: ${errorText(err)}`);
-    }
-    sandbox = open;
-    const outcome = await converse(open, input).catch(async (err: unknown) => {
+      // Outside a run: the bring-up (podman, the snapshot's git), the
+      // prompt's anchor, a write check or the set's file.
       await closeSandbox({});
-      throw err;
-    });
-    await closeSandbox(outcome.kind === "wrote" ? { preserve: SNAPSHOT_KEPT } : {});
-    return outcome;
+      if (sandbarsOwn(err)) throw err;
+      if (aborted) {
+        await record(unrecorded, "aborted", {});
+        return ABORTED;
+      }
+      await record(unrecorded, "failed", {});
+      return failed(sandbox === null
+        ? `the writer's sandbox did not come up: ${errorText(err)}`
+        : errorText(err));
+    }
   }
 
   // A teardown whose failure says nothing about the scenarios: a leaked
