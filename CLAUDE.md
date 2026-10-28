@@ -80,7 +80,9 @@ and the gate stack (`config.gateStack`, #24).
    (#10): `merger.ts`, `merger-worktree.ts`, `resolve-loop.ts` (#67),
    `version-conflict.ts` (#68), `forge-verify.ts` (`mergeMode`, #22),
    `chunk-land.ts` / `chunk-pr.ts` / `forge-pr.ts` (chunk branches, draft PRs,
-   `land` label #64).
+   `land` label #64). With `config.landingWindow`, nothing lands on the
+   source branch while it is closed but a `land-hotfix` chunk
+   (`landing-window.ts`, #244).
 4. **Finalise** — `finalize.ts` + `finalize-inputs.ts`: branch publish, bot
    comments, label flips.
 

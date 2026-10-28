@@ -51,6 +51,28 @@ describe("continuous pool", () => {
     expect(pool.takeLandingBatch().map((event) => event.issue.id)).toEqual(["2", "10"]);
   });
 
+  it("keeps a held terminal ongoing but out of landing until released (#244)", async () => {
+    const pool = new ContinuousPool<Issue, string>(2, (i) => i.id);
+    const admitted = pool.admit([issue("1"), issue("2")]);
+    admitted.forEach((item, i) => pool.start(item, Promise.resolve(i === 0 ? "held" : "lands")));
+    await pool.waitForFreedSlot();
+    await pool.waitForFreedSlot();
+
+    const held = pool.holdTerminals((event) =>
+      event.status === "fulfilled" && event.value === "held"
+    );
+    expect(held.map((event) => event.issue.id)).toEqual(["1"]);
+    expect(pool.holdTerminals(() => true).map((event) => event.issue.id)).toEqual(["2"]);
+    expect(pool.hasPendingTerminals).toBe(false);
+    expect(pool.takeLandingBatch()).toEqual([]);
+    expect(pool.ongoingCount).toBe(2);
+    expect(pool.admit([issue("1"), issue("2")])).toEqual([]);
+
+    pool.releaseHeldTerminals();
+    expect(pool.hasPendingTerminals).toBe(true);
+    expect(pool.takeLandingBatch().map((event) => event.issue.id)).toEqual(["1", "2"]);
+  });
+
   it("serves a silent-noop retry ahead of candidates", () => {
     const pool = new ContinuousPool<Issue, string>(1, (i) => i.id);
     const target = pool.admit([issue("4")])[0]!;

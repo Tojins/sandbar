@@ -69,7 +69,7 @@ import {
   selectReconciliations,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
-import type { LandedChunk } from "./chunks.js";
+import { type LandedChunk, LAND_REQUEST_LABELS } from "./chunks.js";
 import { hasExitCode } from "./errors.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
@@ -187,7 +187,7 @@ export async function fetchPullRequestsForBranches(
       "--state",
       "all",
       "--json",
-      "number,headRefName,title,state",
+      PULL_REQUEST_FIELDS,
     ]);
     if (!r.ok) continue;
     found.push(...parsePullRequests(r.stdout, new Set(["OPEN", "MERGED"])));
@@ -196,8 +196,10 @@ export async function fetchPullRequestsForBranches(
 }
 
 /**
- * Every open pull request carrying `land`, whatever its head branch is —
- * `selectLandRequests` is what decides which of them name a chunk.
+ * Every open pull request carrying `land` or `land-hotfix`, whatever its head
+ * branch is — `selectLandRequests` is what decides which of them name a chunk.
+ * One listing per label, because `gh` ANDs repeated `--label`s; a pull request
+ * carrying both is listed once.
  *
  * Fail-soft, like the rest of discovery here: a forge that could not be listed
  * means no chunk is landed this cycle, and the label is still on the pull
@@ -205,25 +207,32 @@ export async function fetchPullRequestsForBranches(
  */
 export async function fetchLandRequestPullRequests(
   repo: RepoRef,
-  label: string,
 ): Promise<readonly PullRequestSummary[]> {
-  const r = await capture("gh", [
-    "pr",
-    "list",
-    "--repo",
-    repoSlug(repo),
-    "--label",
-    label,
-    "--state",
-    "open",
-    "--json",
-    "number,headRefName,title,state",
-    "--limit",
-    "200",
-  ]);
-  if (!r.ok) return [];
-  return parsePullRequests(r.stdout, new Set(["OPEN"]));
+  const byNumber = new Map<number, PullRequestSummary>();
+  for (const label of LAND_REQUEST_LABELS) {
+    const r = await capture("gh", [
+      "pr",
+      "list",
+      "--repo",
+      repoSlug(repo),
+      "--label",
+      label,
+      "--state",
+      "open",
+      "--json",
+      PULL_REQUEST_FIELDS,
+      "--limit",
+      "200",
+    ]);
+    if (!r.ok) continue;
+    for (const pr of parsePullRequests(r.stdout, new Set(["OPEN"]))) {
+      byNumber.set(pr.number, pr);
+    }
+  }
+  return [...byNumber.values()];
 }
+
+const PULL_REQUEST_FIELDS = "number,headRefName,title,state,labels";
 
 // `gh pr list --json` output, defensively. A field the forge answered in a
 // shape this cannot read drops the pull request rather than the whole list: an
@@ -247,17 +256,32 @@ function parsePullRequests(
     const number = o["number"];
     const headRefName = o["headRefName"];
     const state = o["state"];
+    const labels = labelNames(o["labels"]);
     if (
       typeof number !== "number" || typeof headRefName !== "string" ||
-      typeof state !== "string" || !acceptedStates.has(state)
+      typeof state !== "string" || !acceptedStates.has(state) ||
+      labels === null
     ) continue;
     out.push({
       number,
       headRefName,
       title: typeof o["title"] === "string" ? o["title"] : "",
+      labels,
     });
   }
   return out;
+}
+
+// `labels` as gh writes it, `[{ name }]`; null for any other shape.
+function labelNames(raw: unknown): readonly string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const names = raw.map((label: unknown) =>
+    typeof label === "object" && label !== null && "name" in label &&
+      typeof label.name === "string"
+      ? label.name
+      : null
+  );
+  return names.every((name): name is string => name !== null) ? names : null;
 }
 
 export type ReconcileResult = {

@@ -26,6 +26,13 @@
 // branch (`forge-pr.ts`), so the PR is a unique handle on the chunk — which an
 // issue is not.
 //
+// `land-hotfix` (#244) is `land` that does not wait for a closed landing
+// window (`landing-window.ts`); while one is closed, `run.ts` keeps every other
+// request out of the merger and tells its pull request why. Everything below
+// says `land` and means either: whichever of the two a pull request carries
+// is a `ChunkLandTarget.landLabels` entry, and every path that spends the
+// request takes all of them off.
+//
 // `land` is HARDCODED on the same ground as `AUTO_LAND_LABEL` in `lanes.ts`:
 // the configurable labels (`LabelConfig`) name a host's own handoff conventions,
 // while this one is protocol — a human addressing sandbar. Its SPELLING is
@@ -247,7 +254,9 @@ import {
   type ChunkBranchDrift,
   type ChunkMember,
   NEEDS_REVIEW_LABEL,
+  LAND_HOTFIX_LABEL,
   LAND_LABEL,
+  LAND_REQUEST_LABELS,
   type LandedChunk,
 } from "./chunks.js";
 import { SandbarError } from "./errors.js";
@@ -275,7 +284,7 @@ const exec = promisify(execFile);
 // Re-exported because every consumer of this module wants the label and the
 // behaviour together, and none of them should have to know the string lives one
 // module down. `chunks.ts` owns the spelling; this file owns what it means.
-export { LAND_LABEL };
+export { LAND_HOTFIX_LABEL, LAND_LABEL };
 
 // One chunk that is to be landed on the source branch, or that already has
 // been. Built by the two selectors below and consumed by the merge phase and
@@ -302,6 +311,9 @@ export type ChunkLandTarget = {
   // The pull request carrying the chunk. 0 when there is none to act on —
   // a reconciled chunk whose PR a human already closed.
   readonly pullRequest: number;
+  // The landing labels (`land`, `land-hotfix`) that pull request carries:
+  // what a landing or a park takes off it. Empty without one.
+  readonly landLabels: readonly string[];
 };
 
 export type ChunkLandOngoingIssue = {
@@ -340,11 +352,21 @@ export type PullRequestSummary = {
   readonly number: number;
   readonly headRefName: string;
   readonly title: string;
+  readonly labels: readonly string[];
 };
 
 export type ChunkLandRefusal = ChunkBranchDrift & {
   readonly pullRequest: number;
+  readonly landLabels: readonly string[];
 };
+
+const landLabelsOf = (pr: PullRequestSummary | undefined): readonly string[] =>
+  pr?.labels.filter((label) => LAND_REQUEST_LABELS.includes(label)) ?? [];
+
+// Whether a closed landing window (#244, `landing-window.ts`) holds this
+// request: every one does unless a human asked for it as a hotfix.
+export const waitsForLandingWindow = (request: ChunkLandTarget): boolean =>
+  !request.landLabels.includes(LAND_HOTFIX_LABEL);
 
 export type ChunkLandSelection = {
   readonly requests: readonly ChunkLandTarget[];
@@ -394,6 +416,7 @@ function targetFor(
     closeOrder: chunk?.closeOrder ?? [],
     rework: chunk?.rework ?? [],
     pullRequest: pr?.number ?? 0,
+    landLabels: landLabelsOf(pr),
   };
 }
 
@@ -427,7 +450,7 @@ export function selectLandRequests(
   for (const pr of pullRequestsByHead(prs).values()) {
     const drift = driftByBranch.get(pr.headRefName);
     if (drift && drift.members.length > 0) {
-      refusals.push({ ...drift, pullRequest: pr.number });
+      refusals.push({ ...drift, pullRequest: pr.number, landLabels: landLabelsOf(pr) });
       continue;
     }
     const target = targetFor(
@@ -681,6 +704,17 @@ export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
     `you would rather look again first.`;
 };
 
+// A closed landing window holds the request (#244). Nothing is merged and the
+// label stays, so the first run after the window opens lands the chunk.
+export const CHUNK_LAND_WINDOW_PR_COMMENT = (args: {
+  readonly sourceBranch: string;
+  readonly closedUntil: string;
+}): string =>
+  `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it waits for ` +
+  `the landing window: nothing lands on \`${args.sourceBranch}\` until ` +
+  `${args.closedUntil}. The label stays on, and the first run after that lands ` +
+  `it. To land it now, add \`${LAND_HOTFIX_LABEL}\`.`;
+
 export const CHUNK_BRANCH_MISSING_PR_COMMENT = (args: {
   readonly chunkBranch: string;
 }): string =>
@@ -736,7 +770,18 @@ export async function refuseLandRequest(
     refusal.pullRequest,
     CHUNK_LAND_REFUSED_PR_COMMENT(refusal),
   );
-  await adapter.removePullRequestLabel(refusal.pullRequest, LAND_LABEL);
+  await removeLandLabels(adapter, refusal);
+}
+
+// Spends the request: every landing label its pull request carried comes off,
+// whichever of them made it.
+export async function removeLandLabels(
+  adapter: Pick<ChunkWrapupAdapter, "removePullRequestLabel">,
+  request: { readonly pullRequest: number; readonly landLabels: readonly string[] },
+): Promise<void> {
+  for (const label of request.landLabels) {
+    await adapter.removePullRequestLabel(request.pullRequest, label);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,10 +1209,11 @@ export async function wrapUpLandedChunk(
       );
     }
     try {
-      await adapter.removePullRequestLabel(target.pullRequest, LAND_LABEL);
+      await removeLandLabels(adapter, target);
     } catch (err) {
       residue.push(
-        `the pull request #${target.pullRequest} for ${target.branch} kept its \`${LAND_LABEL}\` label: ${detail(err)}`,
+        `the pull request #${target.pullRequest} for ${target.branch} kept its ` +
+          `${target.landLabels.map((label) => `\`${label}\``).join("/")} label: ${detail(err)}`,
       );
     }
     let closeOutcome: PullRequestCloseOutcome | undefined;

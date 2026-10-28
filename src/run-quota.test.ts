@@ -3064,6 +3064,7 @@ describe("run quota orchestration (#109)", () => {
       number: 9,
       headRefName: target.branch,
       title: target.title,
+      labels: ["land"],
     }]);
     seams.merger.mockResolvedValue({
       ...summary([]),
@@ -3351,6 +3352,7 @@ describe("run quota orchestration (#109)", () => {
         number: target.pullRequest,
         headRefName: target.branch,
         title: target.title,
+        labels: ["land"],
       }])
       .mockResolvedValue([]);
     seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "member" }] });
@@ -3368,7 +3370,7 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.merger).toHaveBeenCalledOnce();
     expect(seams.merger.mock.calls[0]?.[0]).toEqual([member]);
     expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkLanding).toEqual({
-      requests: [target],
+      requests: [{ ...target, landLabels: ["land"] }],
       sourceBranch: "main",
     });
   });
@@ -3396,6 +3398,7 @@ describe("run quota orchestration (#109)", () => {
         number: 305,
         headRefName: branch,
         title: "Old root",
+        labels: ["land"],
       }])
       .mockResolvedValue([]);
     vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
@@ -3450,6 +3453,7 @@ describe("run quota orchestration (#109)", () => {
         number: request.pullRequest,
         headRefName: request.branch,
         title: request.title,
+        labels: ["land"],
       })))
       .mockResolvedValue([]);
     seams.innerLoop.mockImplementation((candidate: ReturnType<typeof issue>) =>
@@ -3511,6 +3515,133 @@ describe("run quota orchestration (#109)", () => {
         kind: "landing", step: "push", reason: "landing together with PR #306",
       } },
     ]);
+  });
+
+  describe("landing window (#244)", () => {
+    const landingWindow = {
+      timeZone: "Europe/Brussels",
+      closedFrom: "Fri 12:00",
+      closedUntil: "Mon 08:00",
+    };
+    // Saturday noon and Wednesday noon in Brussels.
+    const CLOSED = new Date("2026-10-31T11:00:00Z");
+    const OPEN = new Date("2026-11-04T11:00:00Z");
+    const target = {
+      root: 42,
+      branch: "sandbar/chunk-42-test",
+      title: "Chunk 42",
+      members: [{ number: 42, title: "Issue 42" }],
+      closeOrder: [{ number: 42, title: "Issue 42" }],
+      rework: [],
+      pullRequest: 9,
+    };
+    // Listed until the first landing pass, as a landed request's label is
+    // gone by the next listing.
+    const requestedWith = (labels: readonly string[]) => {
+      seams.plan.mockResolvedValue({ ...resolution([]), landedChunks: [target] });
+      seams.landRequestPullRequests.mockImplementation(async () =>
+        seams.merger.mock.calls.length > 0
+          ? []
+          : [{ number: target.pullRequest, headRefName: target.branch, title: target.title, labels }]
+      );
+    };
+    const runAt = async (now: Date): Promise<void> => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(now);
+      vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`EXIT:${code}`);
+      }) as never);
+      try {
+        await expect(run({ ...config, landingWindow, maxParallelIssues: 1, pollIntervalMs: 1 }))
+          .rejects.toThrow("EXIT:1");
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+
+    it("holds a `land` request while closed and tells its pull request once", async () => {
+      requestedWith(["land"]);
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockRejectedValueOnce(new Error("stop after a second closed poll"));
+
+      await runAt(CLOSED);
+
+      expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
+      expect(seams.merger).not.toHaveBeenCalled();
+      expect(seams.commentOnChunkPullRequest).toHaveBeenCalledOnce();
+      expect(seams.commentOnChunkPullRequest).toHaveBeenCalledWith(
+        9,
+        expect.stringMatching(
+          /waits for the landing window: nothing lands on `main` until Mon 08:00 \(Europe\/Brussels\)[\s\S]*add `land-hotfix`/,
+        ),
+      );
+      expect(seams.removeChunkPullRequestLabel).not.toHaveBeenCalled();
+      expect(eventsOf("land-request")).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          pullRequest: 9,
+          status: {
+            kind: "deferred",
+            reason: "landing window closed · lands after Mon 08:00 (Europe/Brussels)",
+          },
+        }),
+      ]));
+    });
+
+    it("lands a `land-hotfix` request while closed", async () => {
+      requestedWith(["land-hotfix"]);
+      seams.merger.mockResolvedValue(summary([]));
+
+      await runAt(CLOSED);
+
+      expect(seams.commentOnChunkPullRequest).not.toHaveBeenCalled();
+      expect(seams.merger).toHaveBeenCalledOnce();
+      expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkLanding).toEqual({
+        requests: [{ ...target, landLabels: ["land-hotfix"] }],
+        sourceBranch: "main",
+      });
+    });
+
+    it("lands a `land` request as before with no window configured", async () => {
+      requestedWith(["land"]);
+      seams.merger.mockResolvedValue(summary([]));
+      vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`EXIT:${code}`);
+      }) as never);
+
+      await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+        .rejects.toThrow("EXIT:1");
+
+      expect(seams.commentOnChunkPullRequest).not.toHaveBeenCalled();
+      expect(seams.merger).toHaveBeenCalledOnce();
+    });
+
+    it("holds a DONE auto-lane issue until the window opens, then lands it", async () => {
+      const work = issue("7");
+      seams.plan.mockResolvedValue(resolution([work]));
+      seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
+      seams.merger.mockImplementation(async (batch: typeof work[]) => summary(batch));
+      let landingsWhileClosed: number | undefined;
+      vi.mocked(fetchOriginRefs)
+        .mockImplementationOnce(async () => {
+          landingsWhileClosed = seams.merger.mock.calls.length;
+          vi.setSystemTime(OPEN);
+          return { sourceChanged: false, failures: [] };
+        })
+        .mockRejectedValueOnce(new Error("stop after the landing"));
+
+      await runAt(CLOSED);
+
+      expect(eventsOf("notice")).toEqual(expect.arrayContaining([{
+        kind: "notice",
+        message: "#7 is done and waits for the landing window: nothing lands on " +
+          "main until Mon 08:00 (Europe/Brussels).",
+      }]));
+      expect(seams.innerLoop).toHaveBeenCalledOnce();
+      expect(landingsWhileClosed).toBe(0);
+      expect(seams.merger).toHaveBeenCalledOnce();
+      expect(seams.merger.mock.calls[0]?.[0]).toEqual([work]);
+    });
   });
 
   it("exits quota from the shared provider state when the closing issue returned no terminal", async () => {

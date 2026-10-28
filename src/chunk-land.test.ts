@@ -17,12 +17,15 @@ import {
   CHUNK_LAND_ABANDONED_PR_COMMENT,
   CHUNK_LAND_DEFERRED_PR_COMMENT,
   CHUNK_MEMBER_CLOSED_COMMENT,
+  CHUNK_LAND_WINDOW_PR_COMMENT,
   type ChunkWrapupAdapter,
+  LAND_HOTFIX_LABEL,
   LAND_LABEL,
   type PullRequestSummary,
   refuseLandRequest,
   selectLandRequests,
   selectReconciliations,
+  waitsForLandingWindow,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
 import { NEEDS_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
@@ -71,7 +74,8 @@ const pr = (
   number: number,
   headRefName: string,
   title = "pr title",
-): PullRequestSummary => ({ number, headRefName, title });
+  labels: readonly string[] = [LAND_LABEL],
+): PullRequestSummary => ({ number, headRefName, title, labels });
 
 describe("selectLandRequests (#64)", () => {
   it("matches a land-labelled PR to its derived chunk and takes its members", () => {
@@ -100,6 +104,7 @@ describe("selectLandRequests (#64)", () => {
         ],
         rework: [],
         pullRequest: 9,
+        landLabels: [LAND_LABEL],
       },
     ]);
   });
@@ -117,6 +122,7 @@ describe("selectLandRequests (#64)", () => {
       closeOrder: [],
       rework: [],
       pullRequest: 9,
+      landLabels: [LAND_LABEL],
     });
   });
 
@@ -187,6 +193,7 @@ describe("selectLandRequests (#64)", () => {
         derived: "sandbar/chunk-40-new-root",
       },
       pullRequest: 9,
+      landLabels: [LAND_LABEL],
     }]);
   });
 });
@@ -204,6 +211,7 @@ describe("refuseLandRequest (#176)", () => {
       derived: "sandbar/chunk-40-new-root",
     },
     pullRequest: 9,
+    landLabels: [LAND_LABEL],
   };
 
   it("comments before removing land and performs no other write", async () => {
@@ -256,6 +264,31 @@ describe("refuseLandRequest (#176)", () => {
   });
 });
 
+describe("land-hotfix and the landing window (#244)", () => {
+  const requestWith = (labels: readonly string[]) =>
+    selectLandRequests([pr(9, "sandbar/chunk-42-alpha", "t", labels)], []).requests[0]!;
+
+  it("carries the pull request's landing labels, and only those", () => {
+    expect(requestWith(["bug", LAND_HOTFIX_LABEL, LAND_LABEL]).landLabels)
+      .toEqual([LAND_HOTFIX_LABEL, LAND_LABEL]);
+  });
+
+  it("holds every request but a hotfix", () => {
+    expect(waitsForLandingWindow(requestWith([LAND_LABEL]))).toBe(true);
+    expect(waitsForLandingWindow(requestWith([LAND_HOTFIX_LABEL]))).toBe(false);
+    expect(waitsForLandingWindow(requestWith([LAND_LABEL, LAND_HOTFIX_LABEL]))).toBe(false);
+  });
+
+  it("tells the pull request when it lands and how to land it now", () => {
+    const body = CHUNK_LAND_WINDOW_PR_COMMENT({
+      sourceBranch: "main",
+      closedUntil: "Mon 08:00 (Europe/Brussels)",
+    });
+    expect(body).toContain("nothing lands on `main` until Mon 08:00 (Europe/Brussels)");
+    expect(body).toContain(`add \`${LAND_HOTFIX_LABEL}\``);
+  });
+});
+
 describe("chunkLandDeferral (#168)", () => {
   const target = selectLandRequests(
     [pr(9, "sandbar/chunk-42-alpha")],
@@ -304,6 +337,7 @@ describe("selectReconciliations (#64)", () => {
         closeOrder: [{ number: 42, title: "alpha" }],
         rework: [],
         pullRequest: 9,
+        landLabels: [LAND_LABEL],
       },
     ]);
   });
@@ -400,6 +434,7 @@ const target = {
     { number: 42, title: "alpha" },
   ],
   pullRequest: 9,
+  landLabels: [LAND_LABEL],
 };
 
 describe("wrapUpLandedChunk (#64)", () => {
