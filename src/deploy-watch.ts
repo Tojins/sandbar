@@ -71,6 +71,7 @@ import {
   isForgeRateLimit,
   isForgeTransportFailure,
 } from "./errors.js";
+import type { DeployWatchSettings } from "./config.js";
 import type { EventInput } from "./events.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import {
@@ -107,16 +108,6 @@ const TRUNCATED_NOTE = "\n\n(truncated)";
 // ---------------------------------------------------------------------------
 // Types.
 // ---------------------------------------------------------------------------
-
-export type DeployWatchSettings = {
-  // The workflow FILE name, e.g. "deploy.yml".
-  readonly workflow: string;
-  // The GitHub login the bug body @-mentions.
-  readonly notifyLogin: string;
-  // The dedupe label every bug issue carries.
-  readonly label: string;
-  readonly timeoutMs: number;
-};
 
 export type DeployRun = {
   readonly id: number;

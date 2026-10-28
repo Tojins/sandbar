@@ -147,6 +147,12 @@ export default {
   // forge reports them.
   // mergeMode: { kind: "verified", requiredChecks: ["tests"] },
 
+  // Watch the deploy workflow a push to the source branch runs. A red run that
+  // deployed a sandbar merge files one `ready-for-human` bug issue mentioning
+  // `notifyLogin`, who must not be the token's own login. The `deploy-red`
+  // label (or `label`) and `ready-for-human` must already exist.
+  // deployWatch: { workflow: "deploy.yml", notifyLogin: "your-login" },
+
   // `auto` lets the gate decide. `review` lands connected review-gated issues
   // on a draft chunk pull request. An issue's `auto-land` label overrides the
   // default, unless review-gating reaches it through `## Blocked by`; inherited

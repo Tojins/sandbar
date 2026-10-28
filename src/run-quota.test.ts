@@ -67,6 +67,9 @@ const seams = vi.hoisted(() => ({
   originRelease: vi.fn(async () => undefined),
   recordFinalize: vi.fn(async () => undefined),
   reclaimIssueClone: vi.fn(async () => ({ kind: "removed" as const })),
+  deployWatchKick: vi.fn(),
+  deployWatchStop: vi.fn(async () => undefined),
+  deployWatchDeps: null as null | { onRateLimited: () => Promise<void> },
 }));
 
 vi.mock("./codex-auth.js", async (importOriginal) => ({
@@ -74,6 +77,14 @@ vi.mock("./codex-auth.js", async (importOriginal) => ({
   prepareCodexAuth: seams.prepareCodexAuth,
 }));
 
+vi.mock("./deploy-watch.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./deploy-watch.js")>(),
+  realDeployWatchAdapter: vi.fn(() => ({})),
+  createDeployWatcher: vi.fn((deps: { onRateLimited: () => Promise<void> }) => {
+    seams.deployWatchDeps = deps;
+    return { kick: seams.deployWatchKick, stop: seams.deployWatchStop };
+  }),
+}));
 vi.mock("./driver-identity.js", () => ({
   readDriverIdentity: vi.fn(async () => ({ kind: "unknown" })),
   formatDriverIdentity: vi.fn(() => "driver: test"),
@@ -423,6 +434,12 @@ describe("run quota orchestration (#109)", () => {
     seams.reclaimIssueClone.mockReset();
     seams.reclaimIssueClone.mockResolvedValue({ kind: "removed" });
     seams.cleanupOrder.length = 0;
+    seams.deployWatchKick.mockReset();
+    seams.deployWatchStop.mockReset();
+    seams.deployWatchStop.mockImplementation(async () => {
+      seams.cleanupOrder.push("deploy-watch-stop");
+    });
+    seams.deployWatchDeps = null;
     seams.trackWakeStop = false;
     seams.cleanupDrain = null;
     seams.cleanupReporter = async () => undefined;
@@ -873,6 +890,82 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.cleanupOrder).toEqual([
       "origin-release", "wake-lock-stop", "record-finalize",
     ]);
+  });
+
+  describe("deploy watch (#198)", () => {
+    const watched: RunConfig = {
+      ...config,
+      deployWatch: { workflow: "deploy.yml", notifyLogin: "ops" },
+      maxParallelIssues: 1,
+      pollIntervalMs: 1,
+    };
+    const exitOne = () => vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+    const refreshed = { sourceChanged: false, failures: [] };
+
+    it("builds no watcher without the config key", async () => {
+      seams.plan.mockResolvedValue(resolution([]));
+      vi.mocked(fetchOriginRefs).mockResolvedValueOnce(refreshed);
+      exitOne();
+
+      await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+      expect(seams.deployWatchDeps).toBeNull();
+      expect(seams.deployWatchKick).not.toHaveBeenCalled();
+    });
+
+    it("kicks once per refreshed poll, and stops before the lease is released", async () => {
+      seams.plan.mockResolvedValue(resolution([]));
+      vi.mocked(fetchOriginRefs).mockResolvedValueOnce(refreshed);
+      exitOne();
+
+      await expect(run(watched)).rejects.toThrow("EXIT:1");
+      expect(seams.deployWatchKick).toHaveBeenCalledOnce();
+      expect(seams.cleanupOrder.slice(0, 2)).toEqual(["deploy-watch-stop", "origin-release"]);
+      expect(seams.cleanupOrder).toContain("record-finalize");
+      expect(seams.cleanupOrder.indexOf("deploy-watch-stop"))
+        .toBeLessThan(seams.cleanupOrder.indexOf("record-finalize"));
+    });
+
+    it("kicks after a landing that landed something, not after one that landed nothing", async () => {
+      seams.plan.mockResolvedValue(resolution([issue("139")]));
+      seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
+      seams.merger.mockResolvedValue(summary([issue("139")]));
+      exitOne();
+      await expect(run(watched)).rejects.toThrow("EXIT:1");
+      // No poll refresh succeeded, so every kick here is the landing's.
+      expect(seams.deployWatchKick).toHaveBeenCalledOnce();
+
+      seams.deployWatchKick.mockClear();
+      seams.cleanupCallbacks.length = 0;
+      seams.cleanupDrain = null;
+      seams.merger.mockResolvedValue(summary([], false));
+      await expect(run(watched)).rejects.toThrow("EXIT:1");
+      expect(seams.merger).toHaveBeenCalledTimes(2);
+      expect(seams.deployWatchKick).not.toHaveBeenCalled();
+    });
+
+    it("holds tracker reads on a rate limit, says so, and stops kicking while held", async () => {
+      const heldUntil = Date.now() + 3_600_000;
+      vi.mocked(fetchRateLimitResumeAt).mockResolvedValueOnce(heldUntil);
+      seams.plan.mockResolvedValue(resolution([]));
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce(refreshed)
+        .mockResolvedValueOnce(refreshed);
+      seams.deployWatchKick.mockImplementationOnce(() => {
+        void seams.deployWatchDeps?.onRateLimited();
+      });
+      exitOne();
+
+      await expect(run(watched)).rejects.toThrow("EXIT:1");
+      expect(vi.mocked(fetchOriginRefs)).toHaveBeenCalledTimes(3);
+      expect(seams.deployWatchKick).toHaveBeenCalledOnce();
+      expect(eventsOf("notice")).toContainEqual({
+        kind: "notice",
+        message: "Deploy watch hit GitHub's rate limit; holding tracker reads until " +
+          new Date(heldUntil).toISOString(),
+      });
+    });
   });
 
   it("threads the serialized lease barrier into finalization and landing adapters", async () => {

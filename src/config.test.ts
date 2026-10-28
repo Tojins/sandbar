@@ -7,6 +7,8 @@ import {
   DEFAULT_ADR_DIR,
   DEFAULT_CHECK_POLL_INTERVAL_MS,
   DEFAULT_CHECK_TIMEOUT_MS,
+  DEFAULT_DEPLOY_WATCH_LABEL,
+  DEFAULT_DEPLOY_WATCH_TIMEOUT_MS,
   DEFAULT_INTEGRATION_BRANCH,
   DEFAULT_NO_CHECKS_GRACE_MS,
   DEFAULT_READINESS_TIMEOUT_MS,
@@ -1483,5 +1485,49 @@ describe("resolveConfig — defaultLane (#57)", () => {
     expect(() =>
       resolveConfig({ ...minimal, defaultLane: true as never }),
     ).toThrow(/defaultLane/);
+  });
+});
+
+describe("resolveConfig — deployWatch (#198)", () => {
+  const watch = { workflow: "deploy.yml", notifyLogin: "Tojins" };
+
+  it("is off without the key", () => {
+    expect(resolveConfig(minimal).deployWatch).toBeNull();
+  });
+
+  it("fills the label and timeout defaults", () => {
+    expect(resolveConfig({ ...minimal, deployWatch: watch }).deployWatch).toEqual({
+      ...watch,
+      label: DEFAULT_DEPLOY_WATCH_LABEL,
+      timeoutMs: DEFAULT_DEPLOY_WATCH_TIMEOUT_MS,
+    });
+  });
+
+  it("keeps deviating knobs, trimming the label", () => {
+    expect(
+      resolveConfig({
+        ...minimal,
+        deployWatch: { workflow: "ship.yaml", notifyLogin: "a-b", label: " broke ", timeoutMs: 5 },
+      }).deployWatch,
+    ).toEqual({ workflow: "ship.yaml", notifyLogin: "a-b", label: "broke", timeoutMs: 5 });
+  });
+
+  it.each([
+    ["a non-object", "deploy.yml", /config\.deployWatch must be/],
+    ["a display name for the workflow", { ...watch, workflow: "Deploy" }, /deployWatch\.workflow/],
+    ["a workflow path", { ...watch, workflow: ".github/workflows/deploy.yml" }, /deployWatch\.workflow/],
+    ["a missing workflow", { notifyLogin: "Tojins" }, /deployWatch\.workflow/],
+    ["an @-prefixed login", { ...watch, notifyLogin: "@Tojins" }, /deployWatch\.notifyLogin/],
+    ["a login over 39 characters", { ...watch, notifyLogin: "a".repeat(40) }, /deployWatch\.notifyLogin/],
+    ["a login starting with a hyphen", { ...watch, notifyLogin: "-x" }, /deployWatch\.notifyLogin/],
+    ["a blank label", { ...watch, label: "  " }, /deployWatch\.label/],
+    ["a non-string label", { ...watch, label: 3 }, /deployWatch\.label/],
+    ["a zero timeout", { ...watch, timeoutMs: 0 }, /deployWatch\.timeoutMs/],
+    ["a NaN timeout", { ...watch, timeoutMs: Number.NaN }, /deployWatch\.timeoutMs/],
+    ["an infinite timeout", { ...watch, timeoutMs: Infinity }, /deployWatch\.timeoutMs/],
+    ["a string timeout", { ...watch, timeoutMs: "60000" }, /deployWatch\.timeoutMs/],
+  ])("refuses %s", (_, deployWatch, message) => {
+    expect(() => resolveConfig({ ...minimal, deployWatch: deployWatch as never })).toThrow(message);
+    expect(() => resolveConfig({ ...minimal, deployWatch: deployWatch as never })).toThrow(SandbarError);
   });
 });

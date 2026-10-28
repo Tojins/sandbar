@@ -70,6 +70,13 @@
 // report only (#82). NEEDS-STACK-CHANGE is the terminal a stack edit beyond
 // env parks with.
 //
+// `deploy` (#198, `deploy-watch.ts`) is one verdict on a run of the
+// consumer's deploy workflow — green, red or unverified — with the issues
+// whose merges it shipped and, for a red, the bug issue it was filed as;
+// `filed` says this process filed it. An unverified landing that no run
+// covered within the deadline has null `runId` and `attempt`, and `sha` is
+// its merge commit. A new kind, so no bump.
+//
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
@@ -81,6 +88,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ChunkBlockReason } from "./chunks.js";
+import type { DeployEvent } from "./deploy-watch.js";
 import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
 import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
@@ -312,6 +320,7 @@ export type EventInput =
   | { readonly kind: "follow-up"; readonly action: "route" | "re-queued" | "lane-override"; readonly detail: string; readonly issue?: number; readonly title?: string }
   | { readonly kind: "reconcile"; readonly action: "trace" | "landed-chunk" | "land-requested" | "chunk-refreshed" | "chunk-refresh-failed"; readonly detail: string }
   | { readonly kind: "notice"; readonly message: string }
+  | DeployEvent
   | {
       readonly kind: "complaint";
       readonly severity: "warning" | "error";

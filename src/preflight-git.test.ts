@@ -163,6 +163,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // merger, so the set the credential check walks is the one every
     // pre-#72 config produces.
     agentProviders: ["claude"] as readonly AgentProviderName[],
+    deployWatch: null,
     onEvent: () => undefined,
   });
   // What `runPreflight` hands `gatherState` once its own `gh` checks pass.
@@ -427,6 +428,83 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     await expect(
       git(origin, "show-ref", "--verify", `refs/heads/${branch}`),
     ).rejects.toBeDefined();
+  });
+
+  it("asks the deploy watch's questions with the token login an \"anyone\" queue never read (#198)", async () => {
+    await writeGhShim([
+      "#!/bin/sh",
+      'if [ "$1 $2" = "auth status" ]; then exit 0; fi',
+      'if [ "$1 $2" = "issue list" ]; then printf "[]"; exit 0; fi',
+      'if [ "$1 $2" = "api user" ]; then exit 0; fi',
+      'case "$*" in *viewer*) printf \'{"data":{"viewer":{"login":"tojins"}}}\'; exit 0;; esac',
+      'if [ "$1 $2" = "workflow view" ]; then exit 0; fi',
+      'if [ "$1 $2" = "label list" ]; then printf \'[{"name":"ready-for-human"},{"name":"deploy-red"}]\'; exit 0; fi',
+      "exit 1",
+    ]);
+    await writeFile(join(shimBin, "podman"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await giveTargetBareOrigin();
+
+    const error = await runPreflight(
+      {
+        ...passingCfg(),
+        deployWatch: { workflow: "deploy.yml", notifyLogin: "Tojins", label: "deploy-red", timeoutMs: 1 },
+      },
+      localReachability,
+    ).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(PreflightError);
+    expect((error as PreflightError).message).toMatch(/notifyLogin is Tojins.*self-mention/s);
+    expect((error as PreflightError).message).not.toMatch(/workflow|no label/);
+  });
+
+  it("takes the deploy watch's token login from a developers queue's policy, without asking again (#198)", async () => {
+    const viewerLog = join(shimBin, "viewer-reads");
+    await writeGhShim([
+      "#!/bin/sh",
+      'if [ "$1 $2" = "auth status" ]; then exit 0; fi',
+      'if [ "$1 $2" = "issue list" ]; then printf "[]"; exit 0; fi',
+      'if [ "$1 $2" = "api user" ]; then exit 0; fi',
+      `case "$*" in *viewer*) echo viewer >> ${viewerLog}; printf '{"data":{"viewer":{"login":"tojins"}}}'; exit 0;; esac`,
+      'if [ "$1 $2" = "workflow view" ]; then exit 0; fi',
+      'if [ "$1 $2" = "label list" ]; then printf \'[{"name":"ready-for-human"},{"name":"deploy-red"}]\'; exit 0; fi',
+      "exit 1",
+    ]);
+    await writeFile(join(shimBin, "podman"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await giveTargetBareOrigin();
+
+    const error = await runPreflight(
+      {
+        ...passingCfg(),
+        developers: ["alice"],
+        deployWatch: { workflow: "deploy.yml", notifyLogin: "Tojins", label: "deploy-red", timeoutMs: 1 },
+      },
+      localReachability,
+    ).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(PreflightError);
+    expect((error as PreflightError).message).toMatch(/notifyLogin is Tojins.*self-mention/s);
+    // Only the queue policy read the viewer.
+    expect((await readFile(viewerLog, "utf8")).trim().split("\n")).toEqual(["viewer"]);
+  });
+
+  it("asks no deploy-watch question when the watch is off (#198)", async () => {
+    await writeGhShim([
+      "#!/bin/sh",
+      'if [ "$1 $2" = "auth status" ]; then exit 0; fi',
+      'if [ "$1 $2" = "issue list" ]; then printf "[]"; exit 0; fi',
+      'if [ "$1 $2" = "api user" ]; then exit 0; fi',
+      'if [ "$1 $2" = "api graphql" ]; then',
+      '  printf \'{"data":{"repository":{"i7":{"state":"CLOSED","labels":{"nodes":[]}}}}}\'',
+      "  exit 0",
+      "fi",
+      "exit 1",
+    ]);
+    await writeFile(join(shimBin, "podman"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await giveTargetBareOrigin();
+
+    await expect(
+      runPreflight({ ...passingCfg(), deployWatch: null }, localReachability),
+    ).resolves.toMatchObject({ readyLabelPolicy: "anyone" });
   });
 
   it("starts with unsafe closed work and sends its typed complaint to the UI", async () => {

@@ -32,6 +32,36 @@ describe("run event reducer", () => {
       .toBe("held: no chunk to land on");
   });
 
+  it("feeds deploy verdicts and raises only a filed red into the header (#198)", () => {
+    const deploy = (seq: number, fields: object) => at(seq, "2026-10-28T09:00:00Z", {
+      kind: "deploy", workflow: "deploy.yml", sha: "0123456789abcdef", issues: [7, 8],
+      bugIssue: null, filed: false, ...fields,
+    });
+    const state = reduceRunEvents([
+      at(1, "2026-10-28T08:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      deploy(2, { outcome: "green", runId: 11, attempt: 1 }),
+      deploy(3, { outcome: "unverified", runId: null, attempt: null, issues: [9] }),
+      deploy(4, { outcome: "red", runId: 12, attempt: 1, bugIssue: 40, filed: true }),
+      // A later process repairing the missing comment of a bug already filed.
+      deploy(5, { outcome: "red", runId: 12, attempt: 1, bugIssue: 40, filed: false }),
+    ], { now: new Date("2026-10-28T09:01:00Z"), pidAlive: true });
+
+    expect(state.events.slice(0, 4).map(({ text, tone, issue }) => ({ text, tone, issue }))).toEqual([
+      { text: "deploy red · deploy.yml run 12 attempt 1 · #7, #8 · bug #40", tone: "bad", issue: null },
+      { text: "deploy red · deploy.yml run 12 attempt 1 · #7, #8 · filed #40", tone: "bad", issue: null },
+      { text: "deploy unverified · deploy.yml no run within the deadline for 0123456 · #9", tone: "warn", issue: null },
+      { text: "deploy green · deploy.yml run 11 attempt 1 · #7, #8", tone: "good", issue: null },
+    ]);
+    expect(state.run.complaints).toEqual([{
+      seq: 4,
+      severity: "error",
+      text: "deploy red · deploy.yml run 12 attempt 1 · #7, #8 · filed #40",
+    }]);
+  });
+
   // A drain can take an hour, and a reader who cannot see the request would
   // see only a pool that stopped admitting (#146).
   it("keeps a pending restart visible for the whole drain", () => {

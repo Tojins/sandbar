@@ -5,8 +5,10 @@ import {
   checkForgeReachability,
   checkInvariants,
   classifySandbarBranches,
+  deployWatchRefusals,
   type RepoState,
 } from "./preflight.js";
+import type { ExecFn } from "./forge-verify.js";
 
 describe("forge reachability gate (#118)", () => {
   it("retries only the unanswered host check and succeeds when it recovers", async () => {
@@ -721,5 +723,100 @@ describe("classifySandbarBranches", () => {
   it("an unparseable issue branch is unmerged even when nothing is closed", () => {
     const r = classify(["sandbar/issue-notanumber"], { openIssues: new Set([1]) });
     expect(r.unmerged).toEqual(["sandbar/issue-notanumber"]);
+  });
+});
+
+describe("deployWatchRefusals (#198)", () => {
+  const watch = {
+    workflow: "deploy.yml",
+    notifyLogin: "Tojins",
+    label: "deploy-red",
+    timeoutMs: 60_000,
+  };
+  const exitError = (stderr: string) =>
+    Object.assign(new Error("gh failed"), { code: 1, stderr });
+  // `gh` answers by subcommand; `labels` null makes the listing fail.
+  const fakeGh = (opts: {
+    readonly workflowError?: string;
+    readonly labels?: readonly string[] | null;
+  }) => {
+    const calls: (readonly string[])[] = [];
+    const exec: ExecFn = async (file, args, options) => {
+      expect(file).toBe("gh");
+      expect(options.cwd).toBe("/cache");
+      calls.push(args);
+      if (args[0] === "workflow") {
+        if (opts.workflowError !== undefined) throw exitError(opts.workflowError);
+        return { stdout: "name: deploy\n", stderr: "" };
+      }
+      if (opts.labels === null) throw exitError("HTTP 403");
+      const labels = opts.labels ?? ["ready-for-human", "deploy-red", "bug"];
+      return { stdout: JSON.stringify(labels.map((name) => ({ name }))), stderr: "" };
+    };
+    return { exec, calls };
+  };
+  const refusals = (exec: ExecFn, tokenLogin = "demanthomas-ci") =>
+    deployWatchRefusals({
+      repo: { owner: "Tojins", name: "outdoor" },
+      watch,
+      tokenLogin,
+      cwd: "/cache",
+      exec,
+    });
+
+  it("passes a repository with the workflow and both labels, naming it in every call", async () => {
+    const { exec, calls } = fakeGh({});
+    expect(await refusals(exec)).toEqual([]);
+    expect(calls).toHaveLength(2);
+    for (const argv of calls) {
+      expect(argv.slice(argv.indexOf("--repo"), argv.indexOf("--repo") + 2)).toEqual([
+        "--repo",
+        "Tojins/outdoor",
+      ]);
+    }
+  });
+
+  it("refuses a workflow the repository does not have, with gh's reason", async () => {
+    const { exec } = fakeGh({ workflowError: "could not find any workflows named deploy.yml" });
+    const [refusal, ...rest] = await refusals(exec);
+    expect(rest).toEqual([]);
+    expect(refusal).toMatch(/deployWatch\.workflow.*deploy\.yml.*could not find any workflows/);
+  });
+
+  it.each([
+    [["deploy-red"], /`ready-for-human`/],
+    [["ready-for-human"], /`deploy-red`/],
+  ])("refuses a missing label (%j listed)", async (labels, missing) => {
+    const [refusal, ...rest] = await refusals(fakeGh({ labels }).exec);
+    expect(rest).toEqual([]);
+    expect(refusal).toMatch(missing);
+    expect(refusal).toMatch(/never creates labels/);
+  });
+
+  it("refuses when the labels cannot be listed", async () => {
+    expect(await refusals(fakeGh({ labels: null }).exec)).toEqual([
+      expect.stringMatching(/could not list Tojins\/outdoor's labels \(HTTP 403\)/),
+    ]);
+  });
+
+  it("throws when gh label list answers something that is not a list", async () => {
+    const exec: ExecFn = async (_file, args) => ({
+      stdout: args[0] === "workflow" ? "name: deploy\n" : "{}",
+      stderr: "",
+    });
+    await expect(refusals(exec)).rejects.toThrow(/gh label list answered/);
+  });
+
+  it("refuses a notifyLogin that is the token's own login, whatever its case", async () => {
+    expect(await refusals(fakeGh({}).exec, "tojins")).toEqual([
+      expect.stringMatching(/notifyLogin is Tojins.*self-mention/),
+    ]);
+  });
+
+  it("propagates a failure that is not gh answering", async () => {
+    const exec: ExecFn = async () => {
+      throw new TypeError("bug");
+    };
+    await expect(refusals(exec)).rejects.toThrow(TypeError);
   });
 });
