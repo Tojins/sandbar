@@ -34,8 +34,12 @@
 // measured has null statistics, never 0. Quantiles are nearest-rank. A token
 // sum is null where no invocation in it reported that bucket. The rows for
 // scenarios (#180, #203), quality rule groups (#204), DB copies (#201),
-// deploys (#198), anchors (#197) and the janitor (#205) are empty until those
-// issues emit their events; each adds its own reducer arm here.
+// anchors (#197) and the janitor (#205) are empty until those issues emit
+// their events; each adds its own reducer arm here.
+//
+// Deploys (#198) count one verdict per run attempt, or per landing no run
+// covered: the watcher re-emits a red when it repairs a crash's missing
+// comment, and that is the same verdict again.
 //
 // `gates` and `terminals` list every gate run and every terminal in the
 // window, in record order, for a reader that keys on their typed fields
@@ -43,6 +47,7 @@
 
 import type { StatsEvent, StatsInput, StatsWindow } from "./stats-record.js";
 import { proseKey } from "./stats-record.js";
+import type { DeployOutcome } from "./deploy-watch.js";
 import type { UsageFields } from "./events.js";
 import type { Lane } from "./lanes.js";
 
@@ -392,6 +397,7 @@ export function computeStats(input: StatsInput): StatsReport {
     scenarios: { rulings: 0, overruled: 0 },
   };
   const gate2 = { runs: 0, red: 0 };
+  const deploys = new Map<string, DeployOutcome>();
 
   for (const { run, events, prose } of input.runs) {
     // Each issue's latest cycle in this run; it keeps the events that follow
@@ -455,6 +461,12 @@ export function computeStats(input: StatsInput): StatsReport {
             gate2.runs += 1;
             if (!event.ok) gate2.red += 1;
           }
+          break;
+        case "deploy":
+          deploys.set(
+            event.runId === null ? `landing ${event.sha}` : `run ${event.runId}/${event.attempt}`,
+            event.outcome,
+          );
           break;
         case "quality-review":
           if (event.verdict !== null) {
@@ -529,7 +541,12 @@ export function computeStats(input: StatsInput): StatsReport {
     }),
     landedThenBroken: {
       gate2,
-      deploy: { watched: 0, green: 0, red: 0, unverified: 0 },
+      deploy: {
+        watched: deploys.size,
+        green: [...deploys.values()].filter((o) => o === "green").length,
+        red: [...deploys.values()].filter((o) => o === "red").length,
+        unverified: [...deploys.values()].filter((o) => o === "unverified").length,
+      },
     },
     scenarios: { issues: 0, perIssue: agg([]), pass: 0, fail: 0, unverified: 0, writerFailed: 0 },
     qualityGroups: {},

@@ -240,6 +240,18 @@ describe("computeStats passes and context (#194)", () => {
     const report = computeStats(input([run("run-1", [gate2(false), gate2(true), gate2(true)])]));
     expect(report.landedThenBroken.gate2).toEqual({ runs: 3, red: 1 });
   });
+
+  it("counts each deploy verdict once per run attempt or uncovered landing (#198)", () => {
+    const deploy = (outcome: string, runId: number | null, attempt: number | null, sha = "s") =>
+      ev({ kind: "deploy", outcome, workflow: "deploy.yml", runId, attempt, sha, issues: [1],
+        bugIssue: null, filed: false });
+    const report = computeStats(input([
+      run("run-1", [deploy("red", 10, 1), deploy("green", 11, 1), deploy("unverified", null, null, "m1")]),
+      // A restart repairing run 10's missing comment, then its green rerun.
+      run("run-2", [deploy("red", 10, 1), deploy("green", 10, 2)]),
+    ]));
+    expect(report.landedThenBroken.deploy).toEqual({ watched: 4, green: 2, red: 1, unverified: 1 });
+  });
 });
 
 describe("computeStats prose (#182)", () => {

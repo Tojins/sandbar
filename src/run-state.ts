@@ -21,6 +21,8 @@
 // its mode and verdict; the fixer's row names its commits and whatever the
 // host discarded after it; a round's row names how its quality pass ended
 // when that was not an approval.
+// A `deploy` verdict (#198) is a feed line; a red one this process filed is
+// also a header complaint, because the bug issue waits on a human.
 
 import type {
   GateStepEvent,
@@ -326,6 +328,10 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = event.message;
       tone = event.severity === "error" ? "bad" : "warn";
       break;
+    case "deploy":
+      text = deployText(event);
+      tone = event.outcome === "green" ? "good" : event.outcome === "red" ? "bad" : "warn";
+      break;
     case "follow-up":
       text = event.detail;
       tone = "dim";
@@ -408,6 +414,17 @@ function finishRunningSpan(issue: MutableIssue, at: string): void {
 }
 
 const REVIEW_PHASES: ReadonlySet<string> = new Set(["quality", "gate-1", "review"]);
+
+function deployText(event: Extract<RunEvent, { kind: "deploy" }>): string {
+  const run = event.runId === null
+    ? `no run within the deadline for ${event.sha.slice(0, 7)}`
+    : `run ${event.runId} attempt ${event.attempt}`;
+  const issues = event.issues.map((n) => `#${n}`).join(", ");
+  const bug = event.bugIssue === null
+    ? ""
+    : ` · ${event.filed ? "filed" : "bug"} #${event.bugIssue}`;
+  return `deploy ${event.outcome} · ${event.workflow} ${run} · ${issues}${bug}`;
+}
 
 // What the host discarded after a quality pass, in feed form (#185); "" when
 // the pass left nothing to settle.
@@ -748,6 +765,11 @@ export function reduceRunEvents(
         complaints.push({ seq: event.seq, severity: event.severity, text: event.message });
         if (event.subject?.kind === "closed-issue-branch") {
           closedBranchIssues.add(event.subject.issue);
+        }
+        break;
+      case "deploy":
+        if (event.outcome === "red" && event.filed) {
+          complaints.push({ seq: event.seq, severity: "error", text: deployText(event) });
         }
         break;
       case "exit":

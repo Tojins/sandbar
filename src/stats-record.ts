@@ -103,7 +103,7 @@ const V6_KINDS = {
   "partition-check": true, implementer: true, "gate-stack": true, gate: true,
   "quality-review": true, "quality-pass": true, "review-pass": true, adjudication: true,
   "resolve-attempt": true, container: true, "review-round": true, repair: true,
-  "hard-error": true, terminal: true, landed: true, finalise: true,
+  "hard-error": true, terminal: true, landed: true, finalise: true, deploy: true,
 } as const satisfies Record<RunEvent["kind"], true>;
 
 const knownKinds = (
