@@ -97,6 +97,9 @@ export type InvocationRow = {
   readonly verdict: string | null;
   // The commits the invocation made, where the record carries them.
   readonly commits: number | null;
+  // The quality fixer's commits by sha (#209 reads their paths); null for
+  // every other role and for a fixer that reached no exit.
+  readonly shas: readonly string[] | null;
   readonly durationMs: number;
   readonly tokens: TokenSum;
   readonly firstContext: number | null;
@@ -348,6 +351,7 @@ function invocationRow(
     commits: event.kind === "quality-pass" ? ("commits" in event ? event.commits.length : null)
       : event.kind === "implementer" ? event.commits ?? null
       : null,
+    shas: event.kind === "quality-pass" && "commits" in event ? event.commits : null,
     durationMs: event.durationMs,
     tokens: tokensOf(event.usage),
     firstContext: event.usage?.firstContext ?? null,

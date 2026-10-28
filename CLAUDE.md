@@ -35,6 +35,8 @@ reduces); nothing in the daemon imports it.
 `npm run reflect -- --no-agents` (`src/reflect-cli.ts`, #182/#207) is another:
 it mines that report (`reflect-mine.ts`) into typed clusters and outlier
 issues and writes the tables (`reflect-report.ts`) under `<stateDir>/reflect/`.
+`scripts/stats-classify.mjs` (#209) classes the `--json --with-prose` report's
+quality findings and fixer commits for #183; plain ESM, not shipped.
 The config is a **program**, imported not parsed; `src/config.ts` is the one
 validation boundary and owns all defaults. Sandbar drives a GitHub-Issues coding
 agent loop against a consumer repo, which supplies Containerfiles, anchor docs
