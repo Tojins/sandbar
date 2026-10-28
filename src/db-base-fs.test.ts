@@ -17,6 +17,7 @@ import {
   type UsernsRun,
   createDbBaseWatch,
   dbBaseLayout,
+  importRunArgs,
   publishBase,
   readImportStatus,
   runDbBaseJob,
@@ -56,6 +57,49 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
+});
+
+describe("importRunArgs", () => {
+  it("runs the target's server on the new base alone, offline, with the import args last", () => {
+    const cfg = resolveDatabaseCopies({
+      dump: "/d", root: "/r", container: "db", database: "app", datadir: "/data",
+      importBufferPoolBytes: 1024,
+    })!;
+    const [target] = resolveGateStack({
+      containers: [
+        {
+          name: "db",
+          image: "docker.io/library/mariadb:10.11",
+          inSandbox: true,
+          env: { MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1" },
+          args: ["--ft-min-word-len=2"],
+          // The fixture schema: its init must not run on a base.
+          mounts: [{ hostPath: "tests/fixtures/schema.sql", containerPath: "/docker-entrypoint-initdb.d/schema.sql" }],
+          readiness: { kind: "healthcheck", command: ["healthcheck.sh", "--connect"] },
+        },
+        { name: "runner", image: "localhost/runner", mountWorktree: "/w", hold: true },
+      ],
+      steps: [{ name: "s", in: "runner", command: ["true"] }],
+    }).containers;
+
+    expect(importRunArgs("sandbar-wx-db-import", assertDatabaseCopiesTarget({ containers: [target!], steps: [] }, cfg), cfg, "/r/bases/b1"))
+      .toEqual({
+        argv: [
+          "run", "-d", "--name", "sandbar-wx-db-import",
+          "--network", "none",
+          "--image-volume=ignore",
+          "--label", "sandbar=true",
+          "-v", "/r/bases/b1:/data:rw,z",
+          "--health-cmd", JSON.stringify(["healthcheck.sh", "--connect"]), "--health-interval=disable",
+          "docker.io/library/mariadb:10.11",
+          "--ft-min-word-len=2",
+          "--innodb-buffer-pool-size=1024",
+          "--innodb-flush-log-at-trx-commit=0",
+          "--skip-log-bin",
+        ],
+        env: { MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1" },
+      });
+  });
 });
 
 describe("publishBase", () => {

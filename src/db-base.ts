@@ -125,7 +125,7 @@ const USERNS_TIMEOUT_MS = 30 * 60_000;
 // Throws when it fails.
 export type UsernsRun = (argv: readonly string[]) => Promise<string>;
 
-export const podmanUnshare: UsernsRun = async (argv) => {
+const podmanUnshare: UsernsRun = async (argv) => {
   const r = await boundedPodman(["unshare", ...argv], USERNS_TIMEOUT_MS);
   if (!boundedOk(r)) {
     throw new Error(`${RUNTIME} unshare ${argv.join(" ")} failed: ${r.errorMessage || "timed out"}`);
