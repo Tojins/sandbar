@@ -1552,18 +1552,18 @@ describe("resolveConfig — egress (#202)", () => {
   });
 
   it("enforces GitHub and the claude API by default", () => {
-    const egress = allowlist({ allow: [] });
-    expect(egress.mode).toBe("enforce");
-    expect(egress.entries).toEqual(defaults());
+    const { policy } = allowlist({ allow: [] });
+    expect(policy.mode).toBe("enforce");
+    expect(policy.entries).toEqual(defaults());
   });
 
   it("adds the hosts of every provider the run invokes", () => {
     const hosts = allowlist(
       { allow: [] },
       { mergerAgent: "codex", mergerModelId: "gpt-5.6-sol" },
-    ).entries.map((e) => e.host);
+    ).policy.entries.map((e) => e.host);
     expect(hosts).toEqual(expect.arrayContaining(["api.openai.com", "chatgpt.com", "auth.openai.com"]));
-    expect(allowlist({ allow: [] }).entries.map((e) => e.host)).not.toContain("api.openai.com");
+    expect(allowlist({ allow: [] }).policy.entries.map((e) => e.host)).not.toContain("api.openai.com");
   });
 
   it.each([
@@ -1581,17 +1581,17 @@ describe("resolveConfig — egress (#202)", () => {
       { host: "rec.example.com", ports: [443, 80], private: false },
     ]],
   ])("resolves %s", (_, entry, expected) => {
-    const entries = allowlist({ allow: [entry] }).entries;
+    const entries = allowlist({ allow: [entry] }).policy.entries;
     expect(entries).toEqual(expect.arrayContaining(expected));
     expect(entries).toHaveLength(defaults().length + expected.length);
   });
 
   it("deduplicates an entry the defaults already hold", () => {
-    expect(allowlist({ allow: ["github.com", "GitHub.com."] }).entries).toEqual(defaults());
+    expect(allowlist({ allow: ["github.com", "GitHub.com."] }).policy.entries).toEqual(defaults());
   });
 
   it("keeps report mode", () => {
-    expect(allowlist({ mode: "report", allow: [] }).mode).toBe("report");
+    expect(allowlist({ mode: "report", allow: [] }).policy.mode).toBe("report");
   });
 
   it("digests the mode and the entries, not their order", () => {

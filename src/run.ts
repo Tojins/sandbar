@@ -1401,7 +1401,7 @@ export async function run(
       egressContext = {
         scope,
         image: await ensureEgressImage(scope, recordImage),
-        policy: { mode: config.egress.mode, entries: config.egress.entries },
+        policy: config.egress.policy,
         logDir: join(runRecord.runDir, "egress"),
       };
     }

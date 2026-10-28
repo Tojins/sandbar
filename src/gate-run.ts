@@ -571,7 +571,7 @@ async function gate(
   const egress = config.egress.kind === "open" ? undefined : ownerEgress({
     scope,
     image: await ensureEgressImage(scope),
-    policy: { mode: config.egress.mode, entries: config.egress.entries },
+    policy: config.egress.policy,
     logDir: join(tmpdir(), `${scopedResourcePrefix(scope)}egress`),
   }, printedEgressReport(err));
 

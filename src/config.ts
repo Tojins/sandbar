@@ -13,6 +13,7 @@ import type { SandboxHooks } from "./agent-sandbox.js";
 import { canonicalSha256 } from "./canonical-json.js";
 import {
   type EgressMode,
+  type EgressPolicy,
   GITHUB_HOSTS,
   PRESETS,
   type ResolvedEgressEntry,
@@ -650,16 +651,15 @@ export type EgressConfig = {
 };
 
 // The resolved allowlist (`resolveEgress`). `open` is the sandbox without a
-// proxy, every argv as it was before #202. `entries` are the defaults (GitHub
-// and the hosts of every provider the run invokes) and the consumer's own,
-// deduplicated and sorted; `digest` hashes them with the mode, for the
-// standalone gate's reuse token.
+// proxy, every argv as it was before #202. The policy's `entries` are the
+// defaults (GitHub and the hosts of every provider the run invokes) and the
+// consumer's own, deduplicated and sorted; `digest` hashes the policy, for
+// the standalone gate's reuse token.
 export type ResolvedEgress =
   | { readonly kind: "open" }
   | {
       readonly kind: "allowlist";
-      readonly mode: EgressMode;
-      readonly entries: readonly ResolvedEgressEntry[];
+      readonly policy: EgressPolicy;
       readonly digest: string;
     };
 
@@ -1497,7 +1497,8 @@ export function resolveEgress(
   const entries = [...byKey.entries()]
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .map(([, entry]) => entry);
-  return { kind: "allowlist", mode, entries, digest: canonicalSha256({ mode, entries }) };
+  const policy = { mode, entries };
+  return { kind: "allowlist", policy, digest: canonicalSha256(policy) };
 }
 
 // Prod data with open egress is never silent (#202): the startup warning when
@@ -1509,7 +1510,7 @@ export function egressStartupWarning(config: ResolvedConfig): string | null {
     return "egress is open while databaseCopies is configured: prod data can leave the " +
       "sandbox. Set config.egress to enforce an allowlist.";
   }
-  if (config.egress.mode === "report") {
+  if (config.egress.policy.mode === "report") {
     return "egress is in report mode while databaseCopies is configured: prod data can " +
       'leave the sandbox, and refusals are only recorded. Set config.egress.mode to "enforce".';
   }
