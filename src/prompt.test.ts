@@ -18,7 +18,7 @@ import {
 import { parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
 import { loadTemplate } from "./prompts.js";
-import { combineStandards, parseStandards } from "./standards-groups.js";
+import { type RuleGroup, combineStandards, parseStandards } from "./standards-groups.js";
 
 const baseInputs = {
   issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
@@ -636,19 +636,22 @@ describe("renderQualityFixSlot (#185, #187)", () => {
 
 describe("renderQualityReviewSlot (#187)", () => {
   const picture = { commits: "a1 first", stat: " whole | 1 +" } as const;
+  const sandbarGroup = qualityInputs.standards.groups[0];
   const list = (
     scope: ReviewScope = { kind: "full" },
     overrules: readonly QualityOverrule[] = [],
-  ) => ({ kind: "list", scope, overrules }) as const;
+    group: RuleGroup = sandbarGroup!,
+  ) => ({ kind: "list", scope, overrules, group }) as const;
   const renderList = (
     scope?: ReviewScope,
     changedSinceStat: string | null = null,
     overrules?: readonly QualityOverrule[],
+    group?: RuleGroup,
   ) =>
     renderQualityReviewSlot({
       ...qualityInputs,
       ...picture,
-      mode: list(scope, overrules),
+      mode: list(scope, overrules, group),
       changedSinceStat,
     });
   const renderVerify = (changedSinceStat: string | null = " fixed | 2 +") =>
@@ -769,8 +772,49 @@ describe("renderQualityReviewSlot (#187)", () => {
     });
     expect(slot).toContain("## This branch is part of a chunk");
     expect(slot).toContain("## Coding standards");
-    expect(slot).toContain("## Naming\n\nNo abbreviations.");
     expect(slot).not.toContain("{{");
+  });
+
+  // One lister per rule group (#204): the built-in group's lister owns the
+  // tests dimension and the conventions, a project group's only its rules.
+  it("gives the built-in group's lister tests, its own standards and the conventions", () => {
+    const slot = renderList();
+    expect(slot).toContain("## Coding standards");
+    expect(slot).not.toContain("## Naming");
+    expect(slot).toMatch(/## Leave alone\n\n- Pure taste[\s\S]*\n\nGenerated files\./);
+    expect(slot).toContain("Review these two\ndimensions:");
+    expect(slot).toContain("the conventions in\n   @CLAUDE.md");
+    expect(slot).toContain("the only pass that lists this branch's tests and standards findings");
+  });
+
+  it("gives a project group's lister that group, Leave alone and the preamble, without tests", () => {
+    const standards = combineStandards(
+      builtinStandards,
+      parseStandards("Shared intro.\n\n## Naming\n\nNo abbreviations.\n\n## Leave alone\n\nGenerated files.\n", "project"),
+    );
+    const slot = renderQualityReviewSlot({
+      ...qualityInputs,
+      ...picture,
+      standards,
+      mode: list({ kind: "full" }, [], standards.groups[1]!),
+      changedSinceStat: null,
+    });
+    expect(slot).toContain("Shared intro.\n\n## Naming\n\nNo abbreviations.\n\n## Leave alone");
+    expect(slot).not.toContain("## Coding standards");
+    expect(slot).toContain("the project rule group `Naming` above. Put each finding under\n`### Standards`");
+    expect(slot).not.toContain("Test quality and coverage");
+    expect(slot).not.toContain("@CLAUDE.md");
+    expect(slot).toContain("the only pass that lists rule group Naming findings");
+    expect(slot).toMatch(/raise it under `### Tests`\s+as the test that would fail on it/);
+    expect(slot).not.toContain("{{");
+  });
+
+  it("verifies against every group and keeps each finding under its group tag", () => {
+    const slot = renderVerify();
+    expect(slot).toContain("## Coding standards");
+    expect(slot).toContain("## Naming\n\nNo abbreviations.");
+    expect(slot).toContain("Review these two\ndimensions:");
+    expect(slot).toContain("Keep each finding you restate under the `[group: …]` line it came from.");
   });
 
   it("keeps built-in standards when no project standards file is provided", () => {

@@ -107,6 +107,9 @@
 // volume's used bytes, or `failed` with a reason code. The feed does not
 // show it. A new kind, so no bump.
 //
+// `quality-review.group` (#204) names the rule group a lister read; the
+// quality pass runs one lister per group. A new optional field, so no bump.
+//
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
@@ -288,9 +291,12 @@ export type QualityPassEvent =
 // One quality lister or verify invocation (#187). `scope` is what it was told
 // to read: the whole branch, or the lines since a sha (the last approved
 // quality head for a lister, the head before the fixer for a verify).
+// `group` is a lister's rule group id (#204), absent on a verify and on
+// records from before the fan-out.
 // `verdict` is null when the invocation produced none; `prose` is its output.
 export type QualityReviewEvent = {
   readonly mode: "list" | "verify";
+  readonly group?: string;
   readonly scope: "full" | `since:${string}`;
   readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential";
   readonly verdict: "APPROVED" | "CHANGES-REQUESTED" | null;

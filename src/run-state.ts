@@ -18,9 +18,9 @@
 // A round's serial steps — each quality role, gate-1, correctness (#185,
 // #187) — are one review-coloured lane span each, labelled by phase, so a red
 // gate or a rejection marks its own bar. A quality lister or verify row names
-// its mode and verdict; the fixer's row names its commits and whatever the
-// host discarded after it; a round's row names how its quality pass ended
-// when that was not an approval.
+// its mode and verdict, a lister's also its rule group (#204); the fixer's row
+// names its commits and whatever the host discarded after it; a round's row
+// names how its quality pass ended when that was not an approval.
 // The anchor step (#217) is a pre-attempt phase like the UI check: no lane
 // span, and a feed row naming how it ended and what it dropped, warning when
 // the thread fell back uncondensed.
@@ -304,7 +304,9 @@ function feedText(event: RunEvent): FeedEvent | null {
       tone = event.result === "completed" || event.result === "failed" ? "" : "bad";
       break;
     case "quality-review":
-      text = `round ${event.round} · quality ${event.mode} · invocation ${event.invocation} · ${
+      text = `round ${event.round} · quality ${event.mode}${
+        event.group === undefined ? "" : ` [${event.group}]`
+      } · invocation ${event.invocation} · ${
         event.verdict ?? (event.result === "completed" ? "no verdict" : event.result)
       }`;
       tone = event.verdict === "APPROVED"

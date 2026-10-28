@@ -76,10 +76,12 @@
 // cold correctness review on its own separately configured provider and model
 // (#121), whose result `combineVerifier` (verifier.ts) turns into the
 // machine's outcome. The quality pass's three roles all route through
-// `reviewerQuality*` and `promptExtensions.reviewerQuality`. Its lister and
+// `reviewerQuality*` and `promptExtensions.reviewerQuality`. Its listers and
 // verify are read-only reviews run like the white-box review (reviewer-run.ts
 // owns their one cold retry), each invocation recorded as a `quality-review`
-// event. Its fixer runs in this same writable sandbox, committing under a
+// event. The lister step is a fan-out the state machine never sees (#204):
+// one lister per rule group, all at once in this sandbox, settled together and
+// folded by `combineGroupReviews` into the one result the machine reads. Its fixer runs in this same writable sandbox, committing under a
 // `<botName> (quality)` author the host sets for that invocation only; its
 // text is ignored. Whatever it leaves, `settleQualityResidue` (git-ops.ts)
 // discards uncommitted residue, puts HEAD back on the branch (with #127's
@@ -116,8 +118,8 @@
 // extension; prompt.ts probes path extensions in the issue worktree so a
 // branch can introduce the instructions it is expected to follow (#78, #91).
 // The quality pass is the exception (#204): its standards are the grader, so
-// each lister reads them at the source tip (`readQualityStandards`) and that
-// pass's fixer and verify reuse the same read.
+// the lister step reads them at the source tip (`readQualityStandards`) and
+// that pass's fixer and verify reuse the same read.
 // Successful white-box rounds accumulate here beside the commits they judged
 // and are handed to the next white-box prompt (#88), which from then on reads
 // only the change since the last of those heads that HEAD still contains
@@ -230,6 +232,7 @@ import type {
   EventInput,
   IssueAnchorResult,
   QualityPassEvent,
+  QualityReviewEvent,
   UsageFields,
 } from "./events.js";
 import { parseVerdict } from "./verdict-parser.js";
@@ -298,7 +301,11 @@ import {
   startSandboxStack,
 } from "./sandbox-stack.js";
 import { stackChangeOf, type StackChange } from "./stack-change.js";
-import { type QualityStandards, readQualityStandards } from "./standards-groups.js";
+import {
+  type QualityStandards,
+  combineGroupReviews,
+  readQualityStandards,
+} from "./standards-groups.js";
 import {
   type BoundStack,
   type HeadStack,
@@ -1731,8 +1738,9 @@ async function executeAction(
     case "run-implementer":
       return runImplementer(action, ctx);
     case "run-quality-list":
+      return runQualityList(action, ctx);
     case "run-quality-verify":
-      return runQualityReview(action, ctx);
+      return runQualityVerify(action, ctx);
     case "run-quality-fix":
       return runQualityFix(action, ctx);
     case "run-gate":
@@ -2183,79 +2191,165 @@ export const qualityAuthorEnv = (
   GIT_AUTHOR_EMAIL: config.botEmail,
 });
 
-// A quality lister or verify (#187): a cold, read-only review of the branch
-// the fixer works on. The lister opens the round's record; a verify reads
-// what changed since the head before the fixer, against the report the fixer
-// was given. Its picture is measured before it runs, and reviewer-run.ts owns
-// what its invocations mean.
-export async function runQualityReview(
-  action: Extract<LoopAction, { kind: "run-quality-list" | "run-quality-verify" }>,
+// The quality listers (#187, #204): one cold, read-only review of the branch
+// per rule group of the standards the source tip has, all at once. The
+// lister step opens the round's record and reads the standards its fixer and
+// verify reuse. Every lister's picture is measured before any runs; all of
+// them settle before the step returns, so none is left running in the sandbox,
+// and a provider closure or size refusal from any one then stops the step as
+// a single lister's would. `combineGroupReviews` folds the rest into one
+// result.
+export async function runQualityList(
+  action: Extract<LoopAction, { kind: "run-quality-list" }>,
   ctx: ExecuteActionCtx,
 ): Promise<Extract<LoopEvent, { kind: "quality-review-result" | "context-over-budget" }>> {
-  const { issue, sandbox, opts, config, quality } = ctx;
-  const mode: QualityReviewMode = action.kind === "run-quality-list"
-    ? { kind: "list", scope: action.scope, overrules: [...quality.overrules] }
-    : { kind: "verify", anchor: action.anchor, report: action.report };
-  if (mode.kind === "list") {
-    quality.openRound = { attempt: action.attempt, timer: startTimer(), quality: null };
-    quality.standards = await readQualityStandards({
-      repoDir: config.layout.repoDir,
-      sourceBranch: config.sourceBranch,
-      extension: config.promptExtensions?.reviewerQuality,
-      onEvent: opts.onEvent,
-    });
+  const { sandbox, opts, config, quality } = ctx;
+  quality.openRound = { attempt: action.attempt, timer: startTimer(), quality: null };
+  const standards = await readQualityStandards({
+    repoDir: config.layout.repoDir,
+    sourceBranch: config.sourceBranch,
+    extension: config.promptExtensions?.reviewerQuality,
+    onEvent: opts.onEvent,
+  });
+  quality.standards = standards;
+  const head = await requireIssueTip(ctx, "before the quality listers");
+  const overrules = [...quality.overrules];
+  const [prompts, netDiffChars] = await Promise.all([
+    Promise.all(standards.groups.map((group) => buildQualityReviewPrompt({
+      ...branchRoleInputs(ctx),
+      standards,
+      mode: { kind: "list", scope: action.scope, overrules, group },
+    }))),
+    measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
+  ]);
+  const listers = standards.groups.map((group, i) => {
+    const prompt = prompts[i]!;
+    return { group, prompt, measuredContextChars: contextChars(prompt, netDiffChars) };
+  });
+  const largest = Math.max(...listers.map((lister) => lister.measuredContextChars));
+  if (largest > config.maxContextChars) {
+    return overQualityBudget(ctx, largest, "listers");
   }
-  const role = mode.kind === "list" ? "lister" : "verify";
-  const head = await requireIssueTip(ctx, `before the quality ${role}`);
+  const settled = await Promise.allSettled(listers.map((lister) => runQualityReviewer(ctx, {
+    attempt: action.attempt,
+    mode: "list",
+    scope: action.scope.kind === "full" ? "full" : `since:${action.scope.sha}`,
+    group: lister.group.id,
+    prompt: lister.prompt,
+    measuredContextChars: lister.measuredContextChars,
+  })));
+  const failures = settled.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+  if (failures.length > 0) {
+    throw failures.find((err) =>
+      err instanceof AgentQuotaError ||
+      err instanceof AgentCredentialError ||
+      err instanceof PartitionRequiredError
+    ) ?? failures[0];
+  }
+  return {
+    kind: "quality-review-result",
+    mode: "list",
+    head,
+    review: combineGroupReviews(settled.flatMap((result, i) => result.status === "fulfilled"
+      ? [{ group: listers[i]!.group, review: reviewerResult(result.value, "quality") }]
+      : [])),
+  };
+}
+
+// A quality verify (#187): a cold, read-only review of what changed since the
+// head before the fixer, against the report the fixer was given and every
+// rule group the pass's listers read. Its picture is measured before it runs.
+export async function runQualityVerify(
+  action: Extract<LoopAction, { kind: "run-quality-verify" }>,
+  ctx: ExecuteActionCtx,
+): Promise<Extract<LoopEvent, { kind: "quality-review-result" | "context-over-budget" }>> {
+  const head = await requireIssueTip(ctx, "before the quality verify");
   const prompt = await buildQualityReviewPrompt({
     ...branchRoleInputs(ctx),
-    standards: passStandards(quality),
-    mode,
+    standards: passStandards(ctx.quality),
+    mode: { kind: "verify", anchor: action.anchor, report: action.report },
   });
   const measuredContextChars = contextChars(
     prompt,
-    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
+    await measureNetDiffChars(ctx.sandbox.worktreePath, ctx.base.ref),
   );
-  if (measuredContextChars > config.maxContextChars) {
-    return {
-      kind: "context-over-budget",
-      slot: "review-quality",
-      size: measuredContextChars,
-      budget: config.maxContextChars,
-      detail: `The completed branch exceeds the configured context budget before the quality ${role}.`,
-    };
+  if (measuredContextChars > ctx.config.maxContextChars) {
+    return overQualityBudget(ctx, measuredContextChars, "verify");
   }
-  const anchor = qualityReviewAnchor(mode);
-  const scope = anchor === null ? "full" : `since:${anchor}` as const;
-  const fixRound = action.kind === "run-quality-verify" ? action.fixRound : null;
-  const outcome = await runReadOnlyReview(ctx, {
-    role: "Quality reviewer",
+  const outcome = await runQualityReviewer(ctx, {
     attempt: action.attempt,
-    describe: `quality ${mode.kind}`,
+    mode: "verify",
+    scope: `since:${action.anchor}`,
+    fixRound: action.fixRound,
+    prompt,
+    measuredContextChars,
+  });
+  return {
+    kind: "quality-review-result",
+    mode: "verify",
+    head,
+    review: reviewerResult(outcome, "quality"),
+  };
+}
+
+const overQualityBudget = (
+  ctx: ExecuteActionCtx,
+  size: number,
+  role: "listers" | "verify",
+): Extract<LoopEvent, { kind: "context-over-budget" }> => ({
+  kind: "context-over-budget",
+  slot: "review-quality",
+  size,
+  budget: ctx.config.maxContextChars,
+  detail: `The completed branch exceeds the configured context budget before the quality ${role}.`,
+});
+
+// One quality lister or verify: its invocations on the quality routing, each
+// recorded as a `quality-review` event; reviewer-run.ts owns what they mean.
+// A lister names its rule group, a verify its fixer round.
+function runQualityReviewer(
+  ctx: ExecuteActionCtx,
+  spec: {
+    readonly attempt: number;
+    readonly scope: QualityReviewEvent["scope"];
+    readonly prompt: string;
+    readonly measuredContextChars: number;
+  } & (
+    | { readonly mode: "list"; readonly group: string }
+    | { readonly mode: "verify"; readonly fixRound: number }
+  ),
+): Promise<ReviewerOutcome> {
+  const { issue, opts, config } = ctx;
+  const { attempt } = spec;
+  return runReadOnlyReview(ctx, {
+    role: "Quality reviewer",
+    attempt,
+    describe: spec.mode === "list" ? `quality list [${spec.group}]` : "quality verify",
     agent: config.reviewerQualityAgent,
     modelId: config.reviewerQualityModelId,
     effort: config.reviewerQualityEffort,
-    prompt,
-    measuredContextChars,
+    prompt: spec.prompt,
+    measuredContextChars: spec.measuredContextChars,
     slot: "review-quality",
     name: (invocation) =>
-      `quality-${mode.kind}-${issue.id}-attempt-${action.attempt}` +
-      (fixRound === null ? "" : `-fix-${fixRound}`) +
+      `quality-${spec.mode}-${issue.id}-attempt-${attempt}` +
+      (spec.mode === "list" ? `-group-${spec.group}` : `-fix-${spec.fixRound}`) +
       (invocation > 1 ? `-invocation-${invocation}` : ""),
     filename: (invocation) => ctx.invocationSequence.filename(
-      fixRound === null
-        ? { role: "quality-list", attempt: action.attempt, invocation }
-        : { role: "quality-verify", attempt: action.attempt, fixRound, invocation },
+      spec.mode === "list"
+        ? { role: "quality-list", attempt, group: spec.group, invocation }
+        : { role: "quality-verify", attempt, fixRound: spec.fixRound, invocation },
     ),
     record: (r) => opts.onEvent({
       kind: "quality-review",
       issue: Number(issue.id),
       title: issue.title,
-      attempt: action.attempt,
-      round: action.attempt,
+      attempt,
+      round: attempt,
       invocation: r.invocation,
-      mode: mode.kind,
-      scope,
+      mode: spec.mode,
+      ...(spec.mode === "list" ? { group: spec.group } : {}),
+      scope: spec.scope,
       provider: config.reviewerQualityAgent,
       model: config.reviewerQualityModelId,
       effort: config.reviewerQualityEffort ?? null,
@@ -2270,12 +2364,6 @@ export async function runQualityReview(
       ...r.resources,
     }),
   });
-  return {
-    kind: "quality-review-result",
-    mode: mode.kind,
-    head,
-    review: reviewerResult(outcome, "quality"),
-  };
 }
 
 // A fixer invocation that fails is retried once (#187): a crash is not a

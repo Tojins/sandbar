@@ -64,10 +64,10 @@ and the gate stack (`config.gateStack`, #24).
    `inner-loop.ts` (I/O). One sandbox per issue: anchor condenser (#217, only
    above `condenseAboveChars`, once per thread change, falls back
    uncondensed), partition check (#158), UI check (#126), then implementer
-   attempts → quality pass (read-only lister →
-   fixer that writes commits → read-only verify, #187; graded by the
-   standards' rule groups as the source tip has them, `standards-groups.ts`,
-   #204) → gate-1 → verifier
+   attempts → quality pass (read-only listers, one per rule group of the
+   standards as the source tip has them, run in parallel and folded into one
+   report, `standards-groups.ts`, #204; then a fixer that writes commits →
+   read-only verify, #187) → gate-1 → verifier
    (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
    patch-scoped from round 2) → adjudicator on dispute of either pass (#167).
    Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`. Read-only
@@ -147,8 +147,9 @@ inner loop.
   (shared by every branch role; incl. 10 commit subjects and
   `background-tasks.md`); implementer attempt slot 6.2k (2.3k of it
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
-  configured, +0.2k an enforced egress allowlist); quality lister 5.0k, verify 5.3k, fixer 4.8k; verifier
-  white-box 4.1k; adjudicator 1.1k + the report; UI check 1.6k and partition
+  configured, +0.2k an enforced egress allowlist); quality lister 5.0k for the
+  built-in group, 2.8k + its group for a project group; verify 5.4k, fixer
+  4.8k; verifier white-box 4.1k; adjudicator 1.1k + the report; UI check 1.6k and partition
   check 1.5k + the issue anchor; scenario writer 2.2k + the issue anchor;
   resolve 1.2k + anchor + paths/trace; reflect
   tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser

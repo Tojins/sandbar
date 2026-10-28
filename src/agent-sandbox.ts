@@ -124,6 +124,8 @@
 //
 // safe.directory is set per-run() (not just at create time): the bind-mounted
 // worktree is owned by a different UID, and sandbar's common case has no hooks.
+// Runs may overlap in one sandbox (the parallel quality listers, #204), so a
+// sandbox serializes those global git config writes.
 // Issue workspaces are standalone hardlink clones (#98), so no container sees
 // the host cache — and so the clone, not the cache, is where an attempt's
 // commits live until a host-side fetch publishes them. Removing a clone is
@@ -3206,6 +3208,10 @@ export const createSandbox = async (
   let closed = false;
   let keepReason: string | undefined;
   let reclaimDeferred = false;
+  // The quality listers run in parallel in this one container (#204), and two
+  // concurrent `git config --global` writes race on its lock file, so each
+  // run's identity writes wait for the previous run's to settle.
+  let gitIdentityWrites: Promise<unknown> = Promise.resolve();
 
   const runOneIteration = async (
     agent: AgentProvider,
@@ -3227,22 +3233,26 @@ export const createSandbox = async (
       gitConfigOrEmpty(["config", "user.email"], hostCwd),
     ]);
 
-    await sandboxGitSetup(
-      providerHandle,
-      `git config --global --add safe.directory "${sandboxRepoDir}"`,
-    );
-    if (hostGitName) {
+    const identityWrites = gitIdentityWrites.then(async () => {
       await sandboxGitSetup(
         providerHandle,
-        `git config --global user.name "${hostGitName.replace(/"/g, '\\"')}"`,
+        `git config --global --add safe.directory "${sandboxRepoDir}"`,
       );
-    }
-    if (hostGitEmail) {
-      await sandboxGitSetup(
-        providerHandle,
-        `git config --global user.email "${hostGitEmail.replace(/"/g, '\\"')}"`,
-      );
-    }
+      if (hostGitName) {
+        await sandboxGitSetup(
+          providerHandle,
+          `git config --global user.name "${hostGitName.replace(/"/g, '\\"')}"`,
+        );
+      }
+      if (hostGitEmail) {
+        await sandboxGitSetup(
+          providerHandle,
+          `git config --global user.email "${hostGitEmail.replace(/"/g, '\\"')}"`,
+        );
+      }
+    });
+    gitIdentityWrites = Promise.allSettled([identityWrites]);
+    await identityWrites;
 
     // Left edge of the rev-list range, read before the agent runs. Taken from
     // the BRANCH REF, not from the worktree's HEAD, so that both edges name the

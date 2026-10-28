@@ -2631,6 +2631,27 @@ describe("createSandbox integration (local provider)", () => {
     }
   });
 
+  // Parallel quality listers share one sandbox (#204): their identity writes
+  // must not race on the global config's lock file.
+  it("runs parallel invocations without racing on the global git config lock", async () => {
+    await git(["branch", "sandbar/issue-3-parallel"], dir);
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-3-parallel",
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+    });
+    try {
+      const agent = scriptedAgent(`printf '%s\\n' 'ok'`);
+      const runs = await Promise.allSettled(Array.from({ length: 6 }, () =>
+        sandbox.run({ agent, prompt: "go", completionSignal: [] })));
+      expect(runs.map((run) => run.status === "rejected" ? String(run.reason) : run.status))
+        .toEqual(Array.from({ length: 6 }, () => "fulfilled"));
+    } finally {
+      await sandbox.close();
+    }
+  });
+
   it("classifies an unset host git identity and still marks safe.directory", async () => {
     const root = await mkdtemp(join(tmpdir(), "asb-no-identity-"));
     const isolatedGlobal = join(root, "empty.gitconfig");

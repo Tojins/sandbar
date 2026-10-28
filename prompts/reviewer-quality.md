@@ -13,14 +13,7 @@ Issue #{{issueId}}: {{issueTitle}}
 ## Review process
 
 You are the read-only half of the quality pass. A fixer receives your report
-and commits the changes; gate-1 and the verifier follow. Review these two
-dimensions:
-
-1. Test quality and coverage. A test finding must name a line whose deletion
-   leaves the suite green: either a production line no test covers, or a test
-   line whose deletion changes nothing.
-2. Project standards: the coding standards above plus the conventions in
-   {{conventionsRef}}.
+and commits the changes; gate-1 and the verifier follow. {{dimensions}}
 
 Do not search for correctness or spec defects: the verifier owns
 whether the implementation works and whether it delivers what the issue asks.
@@ -46,7 +39,7 @@ or a restatement of the change. When approving, emit the verdict token alone.
 
 End your review with a single verdict token on its own:
 
-- `<verdict>APPROVED</verdict>` — both dimensions meet the bar.
+- `<verdict>APPROVED</verdict>` — every dimension you review meets the bar.
 - `<verdict>CHANGES-REQUESTED</verdict>` — at least one dimension has findings
   under its heading above.
 

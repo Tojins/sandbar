@@ -534,11 +534,11 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
 
     expect(events.filter((event) => event.kind === "quality-review")).toEqual([{
       kind: "quality-review", issue: 125, title: "Issue 125", attempt: 1, round: 1,
-      invocation: 1, mode: "list", scope: "full",
+      invocation: 1, mode: "list", group: "sandbar", scope: "full",
       provider: "claude", model: "model", effort: null, result: "completed",
       verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>",
       durationMs: 5, maxGapMs: 1,
-      transcript: "attempt-1-quality-list-1.log",
+      transcript: "attempt-1-quality-list-sandbar-1.log",
       usage: { toolCalls: 2, peakContext: 40, firstContext: 30, contextChars: 14 },
     }]);
     expect(events.filter((event) => event.kind === "review-pass")).toEqual([
@@ -752,10 +752,10 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(seams.sandboxRun).toHaveBeenCalledTimes(2);
     expect(events.filter((event) => event.kind === "quality-review")).toEqual([{
       kind: "quality-review", issue: 136, title: "Issue 136", attempt: 1, round: 1,
-      invocation: 1, mode: "list", scope: "full",
+      invocation: 1, mode: "list", group: "sandbar", scope: "full",
       provider: "codex", model: "model", effort: null, result: "credential",
       verdict: null, prose: "", durationMs: expect.any(Number), usage: { contextChars: 14 },
-      transcript: "attempt-1-quality-list-1.log",
+      transcript: "attempt-1-quality-list-sandbar-1.log",
     }]);
     expect(state.get("codex")).toEqual({ cause: "credential", detail });
   });
