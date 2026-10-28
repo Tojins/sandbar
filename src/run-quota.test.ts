@@ -13,6 +13,10 @@ const seams = vi.hoisted(() => ({
   finalize: vi.fn(async () => []),
   issueLabels: vi.fn(async () => [] as string[]),
   mergerStackRunGate: vi.fn(),
+  stackSourceOverride: null as null | {
+    current: () => Promise<unknown>;
+    accepted: () => unknown;
+  },
   mergerStackStop: vi.fn(async () => undefined),
   mergerWorktreeRemove: vi.fn(async () => undefined),
   landRequestPullRequests: vi.fn(async () => [] as PullRequestSummary[]),
@@ -179,7 +183,7 @@ vi.mock("./preflight.js", async (importOriginal) => ({
   // The config's inline stack opens without git, so the real source is used.
   runPreflightAfterReachability: vi.fn(async (cfg: { openStackSource: () => Promise<StackSource> }) => ({
     readyLabelPolicy: "anyone" as const,
-    stackSource: await cfg.openStackSource(),
+    stackSource: seams.stackSourceOverride ?? await cfg.openStackSource(),
   })),
   fetchOriginRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
   fetchPlanningRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
@@ -304,6 +308,7 @@ import { startEventRecord } from "./events.js";
 import { beginCleanup } from "./cleanup.js";
 import { RESTART_REQUEST_FILE } from "./restart-request.js";
 import type { StackSource } from "./stack-source.js";
+import { startStack } from "./gate-stack.js";
 
 const config: RunConfig = {
   ghOwner: "o", ghRepo: "r", developers: "anyone", cwd: "/tmp", workDir: "sandbar-run-quota-test",
@@ -377,6 +382,7 @@ describe("run quota orchestration (#109)", () => {
     seams.finalize.mockReset(); seams.finalize.mockResolvedValue([]);
     seams.issueLabels.mockReset(); seams.issueLabels.mockResolvedValue([]);
     seams.mergerStackRunGate.mockReset();
+    seams.stackSourceOverride = null;
     seams.mergerStackStop.mockReset(); seams.mergerStackStop.mockResolvedValue(undefined);
     seams.mergerWorktreeRemove.mockReset();
     seams.mergerWorktreeRemove.mockResolvedValue(undefined);
@@ -2380,6 +2386,36 @@ describe("run quota orchestration (#109)", () => {
       n: 1,
       durationMs: expect.any(Number),
     }]);
+  });
+
+  it("starts the merger stack on the tip's current stack, not the startup one", async () => {
+    const done = issue("1");
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    seams.merger.mockResolvedValue(summary([done]));
+    const startup = { stack: config.gateStack, attachments: {} };
+    const landed = {
+      stack: {
+        containers: [{ name: "landed", image: "image", mountWorktree: "/work", hold: true }],
+        steps: [{ name: "landed-test", in: "landed", command: ["true"] }],
+      },
+      attachments: {},
+    };
+    seams.stackSourceOverride = {
+      accepted: () => startup,
+      current: async () => landed,
+    };
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    const merger = vi.mocked(startStack).mock.calls
+      .map(([opts]) => opts)
+      .find((opts) => opts.stackId === "merger");
+    expect(merger?.spec).toBe(landed.stack);
   });
 
   it("records a rejected issue task as its terminal outcome", async () => {
