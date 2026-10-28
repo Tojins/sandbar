@@ -136,7 +136,10 @@ inner loop.
   edit to it applies to its gates only when it is env-only
   (`stack-change.ts`); any other edit parks `NEEDS-STACK-CHANGE` at gate-1
   and is reverted as skip reason `stack-change` at landing. A gate
-  verdict is about a clean, on-branch commit (D1, #27, #127).
+  verdict is about a clean, on-branch commit (D1, #27, #127). A step's
+  `settles` (#183) names rules it checks mechanically; while one does, the
+  implementer and quality prompts drop that rule's prose fragment
+  (`prompts/quality-tests-missing-*.md`, `prompts/commit-ritual-*.md`).
 - **Providers**: `agent-providers.ts` (closed set, credentials), per-role
   agent/model/effort routing (`env.ts`, `env-file.ts`), `codex-auth.ts`.
 - **Tokens**: literal-only scanning in `token-scan.ts` (#113); prompt prose in

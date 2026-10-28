@@ -200,6 +200,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         worktreePath: target,
         lastFailureTrace: "",
         base: sourceBranchBase("main"),
+        settled: new Set(),
       },
       {
         issueSource: ghIssueSource(CONFIGURED),
@@ -346,6 +347,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         worktreePath: launchedFrom,
         lastFailureTrace: "",
         base: sourceBranchBase("main"),
+        settled: new Set(),
         promptExtension: { path: "CODING_STANDARDS.md" },
       },
       {
@@ -373,6 +375,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         worktreePath: launchedFrom,
         lastFailureTrace: "",
         base: sourceBranchBase("main"),
+        settled: new Set(),
         promptExtension: { path: "CODING_STANDARDS.md" },
       },
       {

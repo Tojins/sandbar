@@ -15,7 +15,8 @@
 //   - `same` — nothing the gate reads differs;
 //   - `env-only` — the container names and order, every container field but
 //     `env`, and the steps are all equal. Adding, removing or changing an env
-//     key all count as env;
+//     key all count as env. A step's `settles` is a step field, so no branch
+//     drops its own prompts' rule prose (#183);
 //   - `non-env` — anything else, and a branch stack file that is missing or
 //     does not validate. Differences name fields, never values.
 //
