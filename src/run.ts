@@ -324,12 +324,11 @@ import {
 } from "./scheduler.js";
 import {
   checkForgeReachabilityForPreflight,
+  checkStackOnHost,
   fetchOriginRefs,
   fetchPlanningRefs,
   PreflightError,
   runPreflightAfterReachability,
-  stackHostFailures,
-  stackHostState,
 } from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
 import {
@@ -1086,13 +1085,7 @@ export async function run(
         repoDir: layout.repoDir,
         sourceBranch: config.sourceBranch,
         configEnv: config.env,
-        // The checks the startup stack passes in preflight and after the
-        // image builds, asked of every new tip before it is accepted (#186).
-        hostChecks: async (stack) => {
-          const failures = stackHostFailures(await stackHostState(stack, config.images));
-          if (failures.length > 0) throw new SandbarError(failures.join("\n\n"));
-          await checkWorktreeImageUids(stack, hostUid);
-        },
+        hostChecks: (stack) => checkStackOnHost(stack, config.images, hostUid),
         onEvent: (event) => runRecord.emit(event).then(() => undefined),
       }),
     }));

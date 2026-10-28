@@ -1111,8 +1111,9 @@ async function runSandboxCycle(
       ...(stackMs === null ? {} : { stackMs }),
     });
 
-    // startStack already registered stack.stop with the cleanup registry before
-    // it created any podman resource, so no re-registration is needed here.
+    // Every startStack behind the bound stack registers its own stop with the
+    // cleanup registry before it creates any podman resource, so no
+    // re-registration is needed here.
     const gateStack: BoundStack = stack;
 
     // No probe tree here on purpose (#34): `buildPrompt` derives it from

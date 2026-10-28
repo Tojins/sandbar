@@ -2205,6 +2205,43 @@ describe("runGate admission (#142)", () => {
       containerLogs: "db tail",
     });
   });
+
+  // #186: a stack change that landed mid-issue reaches the next gate-1.
+  it("re-reads the stack source and runs gate-1 on the stack bound to it", async () => {
+    const tipStack = { containers: [], steps: [] };
+    const gate: GateResult = {
+      ok: true, stdout: "", stderr: "", exitCode: 0, failedStep: null,
+      durationMs: 1, steps: [], containerLogs: "",
+    };
+    const runGateOnBound = vi.fn(async () => gate);
+    const ensure = vi.fn(async () => ({ runGate: runGateOnBound }));
+    const current = vi.fn(async () => ({ stack: tipStack }));
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
+    const ctx = {
+      issue: { id: "186", title: "stack", branch: "sandbar/issue-186" },
+      worktreePath: "/worktree",
+      opts: {
+        gateSemaphore: createGateSemaphore(undefined),
+        attemptLogger: { writeGate: vi.fn() },
+        onEvent: () => undefined,
+        stackSource: { current },
+      },
+      gateStack: { ensure },
+      quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 1, timer: () => 0, quality: null } },
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+    } as unknown as Parameters<typeof runGate>[1];
+
+    const result = await runGate({
+      kind: "run-gate",
+      attempt: 1,
+      quality: { verdict: "APPROVED", rounds: 0 },
+    }, ctx);
+
+    expect(current).toHaveBeenCalledOnce();
+    expect(ensure).toHaveBeenCalledExactlyOnceWith(tipStack);
+    expect(runGateOnBound).toHaveBeenCalledOnce();
+    expect(result.gate.ok).toBe(true);
+  });
 });
 
 describe("runInnerLoop context terminals (#158)", () => {

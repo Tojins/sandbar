@@ -233,7 +233,7 @@ import type {
   ResolvedGateStack,
   ResolvedStackContainer,
 } from "./config.js";
-import { pulledImagesOf } from "./ensure-images.js";
+import { checkWorktreeImageUids, pulledImagesOf } from "./ensure-images.js";
 import type { EnvReader } from "./env.js";
 import { SandbarError, hasExitCode, isErrno, isExitStatus } from "./errors.js";
 import { LOG_READ_TIMEOUT_MS, boundedOk, boundedPodman } from "./gate-stack.js";
@@ -411,7 +411,20 @@ export async function missingPulledImages(
   return missing;
 }
 
-export function stackHostFailures(s: StackHostState): readonly string[] {
+// What a new source-tip stack must pass before a run accepts it (#186): the
+// same host state preflight refuses on, and D3's uid rule, which the startup
+// stack passes after the image builds.
+export async function checkStackOnHost(
+  stack: ResolvedGateStack,
+  images: readonly BuiltImage[],
+  hostUid: number,
+): Promise<void> {
+  const failures = stackHostFailures(await stackHostState(stack, images));
+  if (failures.length > 0) throw new SandbarError(failures.join("\n\n"));
+  await checkWorktreeImageUids(stack, hostUid);
+}
+
+function stackHostFailures(s: StackHostState): readonly string[] {
   const out: string[] = [];
   if (s.missingImages.length > 0) {
     const list = s.missingImages
