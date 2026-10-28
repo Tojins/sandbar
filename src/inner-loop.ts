@@ -81,7 +81,8 @@
 // owns their one cold retry), each invocation recorded as a `quality-review`
 // event. The lister step is a fan-out the state machine never sees (#204):
 // one lister per rule group, all at once in this sandbox, settled together and
-// folded by `combineGroupReviews` into the one result the machine reads. Its fixer runs in this same writable sandbox, committing under a
+// folded by `combineGroupReviews` into the one result the machine reads. Its
+// fixer runs in this same writable sandbox, committing under a
 // `<botName> (quality)` author the host sets for that invocation only; its
 // text is ignored. Whatever it leaves, `settleQualityResidue` (git-ops.ts)
 // discards uncommitted residue, puts HEAD back on the branch (with #127's
@@ -334,7 +335,6 @@ import {
   type PromptAnchorOptions,
   type PriorReviewRound,
   type QualityOverrule,
-  type QualityReviewMode,
   type ReviewerPromptInputs,
   buildPrompt,
   buildAdjudicatorPrompt,
@@ -344,7 +344,6 @@ import {
   buildQualityFixPrompt,
   buildQualityReviewPrompt,
   buildUiCheckPrompt,
-  qualityReviewAnchor,
   contextChars,
   measureNetDiffChars,
   branchIsAheadOfSeed,
