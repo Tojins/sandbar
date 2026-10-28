@@ -286,6 +286,7 @@ import {
 import { type Stack, startStack } from "./gate-stack.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
 import { containerResourcesOf } from "./container-resources.js";
+import { usageFields } from "./agent-usage.js";
 import {
   CHUNK_ISSUE_BRANCHES_KEPT_BANNER,
   CHUNK_LANDED_UNNAMED_BANNER,
@@ -450,6 +451,22 @@ export function terminalReason(terminal: Terminal): string | null {
     case "QUOTA": return `${terminal.provider} ${terminal.window}`;
     case "CREDENTIAL": return `${terminal.provider}: ${terminal.detail}`;
   }
+}
+
+// What a terminal event records of the issue's outcome: its prose reason, and
+// the machine's typed cause and spec-gap count beside it (#194).
+export function terminalEventFields(
+  terminal: Terminal,
+): Pick<
+  Extract<EventInput, { kind: "terminal" }>,
+  "terminal" | "reason" | "cause" | "specGaps"
+> {
+  return {
+    terminal: terminal.type,
+    reason: terminalReason(terminal),
+    ...("cause" in terminal ? { cause: terminal.cause } : {}),
+    specGaps: terminal.specGaps.length,
+  };
 }
 
 export async function verifyFinalizedTrackerState(
@@ -2472,8 +2489,7 @@ export async function run(
               kind: "terminal",
               issue: Number(issue.id),
               title: issue.title,
-              terminal: terminal.type,
-              reason: terminalReason(terminal),
+              ...terminalEventFields(terminal),
               durationMs,
             });
             return terminal;
@@ -2702,6 +2718,7 @@ export async function run(
               // the path, which is what the abandon comment points at.
               onResolveAttempt: async (key, record) => {
                 const path = await landingLogger.writeResolveAttempt(key, record);
+                const usage = usageFields(record, record.rateLimit);
                 await runRecord.emit({
                   kind: "resolve-attempt",
                   issue: Number(record.issueId),
@@ -2711,6 +2728,9 @@ export async function run(
                   exitCode: record.exitCode,
                   signal: record.signal,
                   durationMs: record.durationMs,
+                  provider: config.mergerAgent,
+                  model: config.mergerModelId,
+                  ...(usage === undefined ? {} : { usage }),
                   ...containerResourcesOf(record),
                 });
                 return path;

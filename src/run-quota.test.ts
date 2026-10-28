@@ -245,7 +245,10 @@ vi.mock("./lanes.js", async (importOriginal) => ({
   postLaneOverrideNotices: vi.fn(async () => []),
 }));
 vi.mock("./inner-loop.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./inner-loop.js")>(), runInnerLoop: seams.innerLoop,
+  ...await importOriginal<typeof import("./inner-loop.js")>(),
+  // A real terminal always carries its spec gaps (#194 records their count);
+  // the fixtures below leave them out unless a test is about them.
+  runInnerLoop: async (...args: unknown[]) => ({ specGaps: [], ...await seams.innerLoop(...args) }),
 }));
 vi.mock("./finalize.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./finalize.js")>(),

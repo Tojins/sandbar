@@ -231,6 +231,7 @@ describe("runUiCheck (#126)", () => {
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
       durationMs: expect.any(Number), maxGapMs: 3, result: "CLEAR",
+      transcript: "ui-check-1.log",
       usage: { toolCalls: 1 },
     }]);
   });
@@ -258,6 +259,7 @@ describe("runUiCheck (#126)", () => {
       },
       toolCalls: 7,
       peakContext: 8,
+      firstContext: 3,
       peakMemoryBytes: 344_000_000,
       oomKilled: true,
       rateLimit: {
@@ -272,10 +274,11 @@ describe("runUiCheck (#126)", () => {
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
       durationMs: 17, endedBy: "result-then-silence", maxGapMs: 9, result: "CLEAR",
+      transcript: "ui-check-1.log",
       peakMemoryBytes: 344_000_000, oomKilled: true,
       usage: { inputTokens: 1, cachedInputTokens: 2, cacheWriteInputTokens: 3,
         outputTokens: 4, reasoningTokens: 5, apiMs: 6, resolvedModel: "resolved",
-        models: 2, terminalReason: "end_turn", toolCalls: 7, peakContext: 8,
+        models: 2, terminalReason: "end_turn", toolCalls: 7, peakContext: 8, firstContext: 3,
         quota: { status: "allowed_warning", window: "five_hour", utilization: 0.9,
           resetsAt: 42 } },
     }]);
@@ -291,6 +294,7 @@ describe("runUiCheck (#126)", () => {
           13,
           14,
           { status: "rejected", window: "weekly", utilization: 1 },
+          10,
         ),
         { peakMemoryBytes: 512_000_000, oomKilled: true },
       ),
@@ -318,9 +322,9 @@ describe("runUiCheck (#126)", () => {
     expect(failureEvents).toEqual([{
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
-      durationMs: 19, result: "failed",
+      durationMs: 19, result: "failed", transcript: "ui-check-1.log",
       peakMemoryBytes: 512_000_000, oomKilled: true,
-      usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14,
+      usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14, firstContext: 10,
         quota: { status: "rejected", window: "weekly", utilization: 1 } },
     }]);
   });
@@ -1150,6 +1154,21 @@ describe("runCorrectness (#121, #185)", () => {
       ),
     };
   };
+
+  // #194: each invocation's event names the log it was written to.
+  it("names each invocation's log as its event's transcript", async () => {
+    const { ctx, filenames, run } = scripted([
+      { output: "", error: new Error("review provider failed"), durationMs: 11, resources: {} },
+      { output: "<verdict>APPROVED</verdict>", error: null, durationMs: 33, resources: {} },
+    ]);
+    await run();
+    const transcripts = vi.mocked(ctx.opts.onEvent).mock.calls
+      .map(([event]) => event)
+      .filter((event) => event.kind === "review-pass")
+      .map((event) => event.transcript);
+    expect(transcripts).toEqual(filenames);
+    expect(filenames).toHaveLength(2);
+  });
 
   it("records failed and retried invocations separately and keeps the verdict", async () => {
     const { ctx, filenames, sandbox, run } = scripted([

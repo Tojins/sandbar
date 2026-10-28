@@ -14,6 +14,11 @@
 // Codex rollout last_token_usage records because Codex input already includes
 // cached tokens. It is evidence only, never a bound or completion signal, and
 // malformed/unavailable measurements stay absent.
+// `usageFields` is the one projection of a run's measurements, the first
+// command's depth among them (#194), onto its event's `usage`.
+
+import type { RateLimitMeasurement } from "./agent-run-end.js";
+import type { UsageFields } from "./events.js";
 
 export type AgentUsage = {
   readonly inputTokens?: number;
@@ -192,4 +197,40 @@ export function formatUsageFields(
     (usage?.terminalReason === undefined
       ? ""
       : ` terminalReason=${usage.terminalReason}`);
+}
+
+// What one agent run measured beside its speech (#85, #124, #194): its token
+// ledger, its tool-call count, and the context depth at its first command and
+// at its peak. Each is absent when unmeasured.
+export type AgentRunMeasurement = {
+  readonly usage?: AgentUsage;
+  readonly toolCalls?: number;
+  readonly peakContext?: number;
+  readonly firstContext?: number;
+};
+
+// Undefined when the run measured nothing.
+export function usageFields(
+  run: AgentRunMeasurement,
+  quota?: RateLimitMeasurement,
+  contextChars?: number,
+): UsageFields | undefined {
+  const { usage, toolCalls, peakContext, firstContext } = run;
+  const fields: UsageFields = {
+    ...(usage?.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage?.cachedInputTokens === undefined ? {} : { cachedInputTokens: usage.cachedInputTokens }),
+    ...(usage?.cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens: usage.cacheWriteInputTokens }),
+    ...(usage?.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage?.reasoningTokens === undefined ? {} : { reasoningTokens: usage.reasoningTokens }),
+    ...(usage?.apiMs === undefined ? {} : { apiMs: usage.apiMs }),
+    ...(usage?.resolvedModel === undefined ? {} : { resolvedModel: usage.resolvedModel }),
+    ...(usage?.models === undefined ? {} : { models: usage.models }),
+    ...(usage?.terminalReason === undefined ? {} : { terminalReason: usage.terminalReason }),
+    ...(toolCalls === undefined ? {} : { toolCalls }),
+    ...(peakContext === undefined ? {} : { peakContext }),
+    ...(firstContext === undefined ? {} : { firstContext }),
+    ...(contextChars === undefined ? {} : { contextChars }),
+    ...(quota === undefined ? {} : { quota }),
+  };
+  return Object.keys(fields).length === 0 ? undefined : fields;
 }

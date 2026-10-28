@@ -184,6 +184,7 @@ export type ResolveAgentRun = ContainerResources & {
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
   readonly peakContext?: number;
+  readonly firstContext?: number;
   readonly rateLimit?: RateLimitMeasurement;
 };
 

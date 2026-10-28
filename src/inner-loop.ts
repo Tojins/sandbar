@@ -151,8 +151,8 @@ import {
 } from "./agent-sandbox.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
 import type { AgentInvocationRecord, AgentRunEndedBy, Sandbox, SandboxHooks } from "./agent-sandbox.js";
-import { maxContextDepth, sumAgentUsage } from "./agent-usage.js";
-import type { AgentUsage } from "./agent-usage.js";
+import { maxContextDepth, sumAgentUsage, usageFields } from "./agent-usage.js";
+import type { AgentRunMeasurement, AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
 import type { CodexAuthMount } from "./codex-auth.js";
@@ -642,31 +642,6 @@ type SandboxCycleOutcome = {
   readonly accumulatedCommits: readonly { sha: string }[];
   readonly specGaps: readonly SpecGap[];
 };
-
-function eventUsage(
-  usage: AgentUsage | undefined,
-  toolCalls: number | undefined,
-  peakContext: number | undefined,
-  quota?: RateLimitMeasurement,
-  measuredContextChars?: number,
-): UsageFields | undefined {
-  const fields: UsageFields = {
-    ...(usage?.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
-    ...(usage?.cachedInputTokens === undefined ? {} : { cachedInputTokens: usage.cachedInputTokens }),
-    ...(usage?.cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens: usage.cacheWriteInputTokens }),
-    ...(usage?.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
-    ...(usage?.reasoningTokens === undefined ? {} : { reasoningTokens: usage.reasoningTokens }),
-    ...(usage?.apiMs === undefined ? {} : { apiMs: usage.apiMs }),
-    ...(usage?.resolvedModel === undefined ? {} : { resolvedModel: usage.resolvedModel }),
-    ...(usage?.models === undefined ? {} : { models: usage.models }),
-    ...(usage?.terminalReason === undefined ? {} : { terminalReason: usage.terminalReason }),
-    ...(toolCalls === undefined ? {} : { toolCalls }),
-    ...(peakContext === undefined ? {} : { peakContext }),
-    ...(measuredContextChars === undefined ? {} : { contextChars: measuredContextChars }),
-    ...(quota === undefined ? {} : { quota }),
-  };
-  return Object.keys(fields).length === 0 ? undefined : fields;
-}
 
 const invocationLog = (
   logger: AttemptLogger,
@@ -1521,22 +1496,18 @@ export async function runPartitionCheck(
   for (let invocation = 1; invocation <= 2; invocation += 1) {
     const before = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
     const timer = startTimer();
+    const transcript = ctx.invocationSequence.filename({
+      role: "partition-check",
+      invocation,
+    });
     const log = async (
       result: Extract<EventInput, { kind: "partition-check" }>["result"],
       durationMs: number,
-      usage: AgentUsage | undefined,
-      toolCalls: number | undefined,
-      peakContext: number | undefined,
+      measurement: AgentRunMeasurement,
       resources: ContainerResources,
       endedBy?: AgentRunEndedBy,
     ): Promise<void> => {
-      const usageFields = eventUsage(
-        usage,
-        toolCalls,
-        peakContext,
-        undefined,
-        size,
-      );
+      const usage = usageFields(measurement, undefined, size);
       await opts.onEvent({
         kind: "partition-check",
         issue: Number(issue.id),
@@ -1547,8 +1518,9 @@ export async function runPartitionCheck(
         effort: config.implementerEffort ?? null,
         durationMs,
         ...(endedBy === undefined ? {} : { endedBy }),
+        transcript,
         result,
-        ...(usageFields === undefined ? {} : { usage: usageFields }),
+        ...(usage === undefined ? {} : { usage }),
         ...resources,
       });
     };
@@ -1564,10 +1536,7 @@ export async function runPartitionCheck(
         }),
         prompt,
         completionSignal: [],
-        ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
-          role: "partition-check",
-          invocation,
-        })),
+        ...invocationLog(opts.attemptLogger, transcript),
       }),
     ).then(
       (run) => ({ kind: "completed" as const, run }),
@@ -1575,7 +1544,6 @@ export async function runPartitionCheck(
     );
     if (outcome.kind === "failed") {
       const { err } = outcome;
-      const partial = agentPartialUsage(err);
       await log(
         err instanceof AgentInputTooLargeError
           ? "input-too-large"
@@ -1585,9 +1553,7 @@ export async function runPartitionCheck(
               ? "credential"
               : "failed",
         agentPartialDurationMs(err) ?? timer(),
-        partial.usage,
-        partial.toolCalls,
-        partial.peakContext,
+        agentPartialUsage(err),
         agentPartialContainerResources(err),
       );
       const wrote = await enforceReadOnlyAgentSnapshot(
@@ -1615,13 +1581,11 @@ export async function runPartitionCheck(
       run.stdout,
     );
     if (wrote !== null) {
-      await log("wrote", run.durationMs, run.usage, run.toolCalls, run.peakContext,
-        containerResourcesOf(run), run.endedBy);
+      await log("wrote", run.durationMs, run, containerResourcesOf(run), run.endedBy);
       return { kind: "partition-checker-wrote", detail: wrote };
     }
     const result = parsePartitionCheck(run.stdout);
-    await log(result.kind, run.durationMs, run.usage, run.toolCalls, run.peakContext,
-      containerResourcesOf(run), run.endedBy);
+    await log(result.kind, run.durationMs, run, containerResourcesOf(run), run.endedBy);
     if (result.kind !== "NO-SIGNAL") {
       return {
         kind: "partition-check-result",
@@ -1660,17 +1624,17 @@ export async function runUiCheck(
       issue.branch,
     );
     const timer = startTimer();
+    const transcript = ctx.invocationSequence.filename({ role: "ui-check", invocation });
     const logInvocation = async (
       result: Extract<EventInput, { kind: "ui-check" }>["result"],
       durationMs: number,
       maxGapMs: number | undefined,
-      usage: AgentUsage | undefined,
-      toolCalls: number | undefined,
-      peakContext: number | undefined,
+      measurement: AgentRunMeasurement,
       rateLimit: RateLimitMeasurement | undefined,
       resources: ContainerResources,
       endedBy?: AgentRunEndedBy,
     ): Promise<void> => {
+      const usage = usageFields(measurement, rateLimit);
       await opts.onEvent({
         kind: "ui-check",
         issue: Number(issue.id),
@@ -1682,10 +1646,9 @@ export async function runUiCheck(
         durationMs,
         ...(endedBy === undefined ? {} : { endedBy }),
         ...(maxGapMs === undefined ? {} : { maxGapMs }),
+        transcript,
         result,
-        ...(eventUsage(usage, toolCalls, peakContext, rateLimit) === undefined
-          ? {}
-          : { usage: eventUsage(usage, toolCalls, peakContext, rateLimit) }),
+        ...(usage === undefined ? {} : { usage }),
         ...resources,
       });
     };
@@ -1701,9 +1664,7 @@ export async function runUiCheck(
           }),
           prompt,
           completionSignal: [],
-          ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
-            role: "ui-check", invocation,
-          })),
+          ...invocationLog(opts.attemptLogger, transcript),
         }),
       );
     } catch (err) {
@@ -1719,9 +1680,7 @@ export async function runUiCheck(
             : "failed",
         agentPartialDurationMs(err) ?? timer(),
         undefined,
-        partial.usage,
-        partial.toolCalls,
-        partial.peakContext,
+        partial,
         partial.rateLimit ??
           (err instanceof AgentQuotaError ? err.measurement : undefined),
         resources,
@@ -1754,9 +1713,7 @@ export async function runUiCheck(
         "wrote",
         run.durationMs,
         run.maxGapMs,
-        run.usage,
-        run.toolCalls,
-        run.peakContext,
+        run,
         run.rateLimit,
         containerResourcesOf(run),
         run.endedBy,
@@ -1768,9 +1725,7 @@ export async function runUiCheck(
       result.kind,
       run.durationMs,
       run.maxGapMs,
-      run.usage,
-      run.toolCalls,
-      run.peakContext,
+      run,
       run.rateLimit,
       containerResourcesOf(run),
       run.endedBy,
@@ -1898,6 +1853,7 @@ export async function runQualityReview(
       prose: r.output,
       durationMs: r.durationMs,
       ...(r.endedBy === undefined ? {} : { endedBy: r.endedBy }),
+      transcript: r.transcript,
       ...(r.maxGapMs === undefined ? {} : { maxGapMs: r.maxGapMs }),
       ...(r.usage === undefined ? {} : { usage: r.usage }),
       ...r.resources,
@@ -1966,24 +1922,21 @@ export async function runQualityFix(
     }
     const before = await requireIssueTip(ctx, "before the quality fixer");
     const timer = startTimer();
-    type Measurements = {
+    const transcript = ctx.invocationSequence.filename({
+      role: "quality-fix",
+      attempt: action.attempt,
+      fixRound: action.fixRound,
+      invocation,
+    });
+    type Measurements = AgentRunMeasurement & {
       readonly durationMs: number;
       readonly endedBy?: AgentRunEndedBy;
       readonly maxGapMs?: number;
-      readonly usage?: AgentUsage;
-      readonly toolCalls?: number;
-      readonly peakContext?: number;
       readonly rateLimit?: RateLimitMeasurement;
       readonly resources: ContainerResources;
     };
     const record = async (outcome: QualityPassEvent, m: Measurements): Promise<void> => {
-      const usageFields = eventUsage(
-        m.usage,
-        m.toolCalls,
-        m.peakContext,
-        m.rateLimit,
-        measuredContextChars,
-      );
+      const usage = usageFields(m, m.rateLimit, measuredContextChars);
       await opts.onEvent({
         kind: "quality-pass",
         issue: Number(issue.id),
@@ -1997,7 +1950,8 @@ export async function runQualityFix(
         durationMs: m.durationMs,
         ...(m.endedBy === undefined ? {} : { endedBy: m.endedBy }),
         ...(m.maxGapMs === undefined ? {} : { maxGapMs: m.maxGapMs }),
-        ...(usageFields === undefined ? {} : { usage: usageFields }),
+        transcript,
+        ...(usage === undefined ? {} : { usage }),
         ...m.resources,
       });
     };
@@ -2018,12 +1972,7 @@ export async function runQualityFix(
           prompt,
           completionSignal: [],
           env: qualityAuthorEnv(config),
-          ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
-            role: "quality-fix",
-            attempt: action.attempt,
-            fixRound: action.fixRound,
-            invocation,
-          })),
+          ...invocationLog(opts.attemptLogger, transcript),
         }),
       );
       exited = "completed";
@@ -2034,6 +1983,7 @@ export async function runQualityFix(
         ...(run.usage === undefined ? {} : { usage: run.usage }),
         toolCalls: run.toolCalls,
         ...(run.peakContext === undefined ? {} : { peakContext: run.peakContext }),
+        ...(run.firstContext === undefined ? {} : { firstContext: run.firstContext }),
         ...(run.rateLimit === undefined ? {} : { rateLimit: run.rateLimit }),
         resources: containerResourcesOf(run),
       };
@@ -2042,10 +1992,8 @@ export async function runQualityFix(
       const rateLimit = partial.rateLimit ??
         (err instanceof AgentQuotaError ? err.measurement : undefined);
       measurements = {
+        ...partial,
         durationMs: agentPartialDurationMs(err) ?? timer(),
-        ...(partial.usage === undefined ? {} : { usage: partial.usage }),
-        ...(partial.toolCalls === undefined ? {} : { toolCalls: partial.toolCalls }),
-        ...(partial.peakContext === undefined ? {} : { peakContext: partial.peakContext }),
         ...(rateLimit === undefined ? {} : { rateLimit }),
         resources: agentPartialContainerResources(err),
       };
@@ -2130,6 +2078,10 @@ export async function runImplementer(
   const implementerTimer = startTimer();
   const runAgent = (options: Parameters<Sandbox["run"]>[0]) =>
     runSandboxAndPublish(sandbox, options, issue.id, opts.onEvent);
+  // The attempt's event names its first run's log; a nudge's sits beside it.
+  const transcript = ctx.invocationSequence.filename({
+    role: "implementer", attempt: action.attempt, nudge: false,
+  });
   const logFailure = async (
     err: unknown,
     prior?: Awaited<ReturnType<typeof runAgent>>,
@@ -2141,12 +2093,15 @@ export async function runImplementer(
     const toolCalls = prior?.toolCalls === undefined && partial.toolCalls === undefined
       ? undefined
       : (prior?.toolCalls ?? 0) + (partial.toolCalls ?? 0);
-    const usage = eventUsage(
-      prior === undefined
-        ? partial.usage
-        : sumAgentUsage(prior.usage, partial.usage),
-      toolCalls,
-      maxContextDepth(prior?.peakContext, partial.peakContext),
+    const usage = usageFields(
+      {
+        usage: prior === undefined
+          ? partial.usage
+          : sumAgentUsage(prior.usage, partial.usage),
+        toolCalls,
+        peakContext: maxContextDepth(prior?.peakContext, partial.peakContext),
+        firstContext: prior?.firstContext ?? partial.firstContext,
+      },
       partial.rateLimit ?? prior?.rateLimit ??
         (err instanceof AgentQuotaError ? err.measurement : undefined),
       measuredContextChars,
@@ -2175,6 +2130,7 @@ export async function runImplementer(
       effort: config.implementerEffort ?? null,
       durationMs: (prior?.durationMs ?? 0) +
         (agentPartialDurationMs(err) ?? (prior === undefined ? implementerTimer() : 0)),
+      transcript,
       ...(usage === undefined ? {} : { usage }),
       ...resources,
     });
@@ -2189,9 +2145,7 @@ export async function runImplementer(
       }),
       prompt,
       completionSignal: PROMISE_COMPLETION_SIGNALS,
-      ...invocationLog(opts.attemptLogger, ctx.invocationSequence.filename({
-        role: "implementer", attempt: action.attempt, nudge: false,
-      })),
+      ...invocationLog(opts.attemptLogger, transcript),
     }));
   } catch (err) {
     await logFailure(err);
@@ -2211,6 +2165,7 @@ export async function runImplementer(
   let attemptToolCalls = run.toolCalls;
   let attemptCommits = run.commits.length;
   let attemptPeakContext = run.peakContext;
+  let attemptFirstContext = run.firstContext;
   let attemptRateLimit = run.rateLimit;
   let attemptMaxGapMs = run.maxGapMs;
   let attemptDurationMs = run.durationMs;
@@ -2277,6 +2232,7 @@ export async function runImplementer(
     attemptUsage = sumAgentUsage(attemptUsage, nudge.usage);
     attemptToolCalls += nudge.toolCalls;
     attemptPeakContext = maxContextDepth(attemptPeakContext, nudge.peakContext);
+    attemptFirstContext ??= nudge.firstContext;
     attemptRateLimit = nudge.rateLimit ?? attemptRateLimit;
     attemptMaxGapMs = Math.max(attemptMaxGapMs, nudge.maxGapMs);
     attemptDurationMs += nudge.durationMs;
@@ -2308,6 +2264,7 @@ export async function runImplementer(
         usage: attemptUsage,
         toolCalls: attemptToolCalls,
         peakContext: attemptPeakContext,
+        firstContext: attemptFirstContext,
         rateLimit: attemptRateLimit,
         durationMs: attemptDurationMs,
         ...attemptResources,
@@ -2319,6 +2276,7 @@ export async function runImplementer(
         attemptToolCalls,
         attemptPeakContext,
         nudge.rateLimit ?? run.rateLimit,
+        attemptFirstContext,
       ), attemptResources);
     }
   }
@@ -2372,6 +2330,16 @@ export async function runImplementer(
       detail: `from=${fastForwarded.fromSha} to=${fastForwarded.toSha}`,
     });
   }
+  const attemptUsageFields = usageFields(
+    {
+      usage: attemptUsage,
+      toolCalls: attemptToolCalls,
+      peakContext: attemptPeakContext,
+      firstContext: attemptFirstContext,
+    },
+    attemptRateLimit,
+    measuredContextChars,
+  );
   await opts.onEvent({
     kind: "implementer",
     issue: Number(issue.id),
@@ -2385,10 +2353,9 @@ export async function runImplementer(
     durationMs: implementerMs,
     endedBy: run.endedBy,
     ...(run.signalMs === undefined ? {} : { signalMs: run.signalMs }),
+    transcript,
     maxGapMs: attemptMaxGapMs,
-    ...(eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit, measuredContextChars) === undefined
-      ? {}
-      : { usage: eventUsage(attemptUsage, attemptToolCalls, attemptPeakContext, attemptRateLimit, measuredContextChars) }),
+    ...(attemptUsageFields === undefined ? {} : { usage: attemptUsageFields }),
     ...attemptResources,
   });
   const head = await branchTip(ctx.worktreePath, issue.branch);
@@ -2594,6 +2561,7 @@ export async function runAdjudicator(
   let usage: AgentUsage | undefined;
   let toolCalls: number | undefined;
   let peakContext: number | undefined;
+  let firstContext: number | undefined;
   let resources: ContainerResources = {};
   const details: string[] = [];
   for (let invocation = 1; invocation <= REVIEWER_MAX_INVOCATIONS; invocation += 1) {
@@ -2604,6 +2572,15 @@ export async function runAdjudicator(
           `rejected head ${rejection.head} moved to ${before.tip}`,
       );
     }
+    // The invocation that rules is the one the event names.
+    const transcript = ctx.invocationSequence.filename(action.pass === "quality"
+      ? {
+          role: "quality-adjudicator",
+          attempt: action.attempt,
+          fixRound: action.fixRound,
+          invocation,
+        }
+      : { role: "adjudicator", attempt: action.attempt, invocation });
     const [settled] = await Promise.allSettled([
       runWithProviderState(
         opts.providerState,
@@ -2619,17 +2596,7 @@ export async function runAdjudicator(
           }),
           prompt,
           completionSignal: [],
-          ...invocationLog(
-            opts.attemptLogger,
-            ctx.invocationSequence.filename(action.pass === "quality"
-              ? {
-                  role: "quality-adjudicator",
-                  attempt: action.attempt,
-                  fixRound: action.fixRound,
-                  invocation,
-                }
-              : { role: "adjudicator", attempt: action.attempt, invocation }),
-          ),
+          ...invocationLog(opts.attemptLogger, transcript),
         }),
       ),
     ]);
@@ -2653,6 +2620,7 @@ export async function runAdjudicator(
       ? undefined
       : (toolCalls ?? 0) + (invocationToolCalls ?? 0);
     peakContext = maxContextDepth(peakContext, invocationPeakContext);
+    firstContext ??= completed?.firstContext ?? partial.firstContext;
     resources = mergeContainerResources(resources, invocationResources);
 
     const after = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
@@ -2681,10 +2649,8 @@ export async function runAdjudicator(
     if (ruling !== null) {
       // A decision emitted before a teardown failure is still a decision,
       // matching reviewer invocation semantics (#41).
-      const measuredUsage = eventUsage(
-        usage,
-        toolCalls,
-        peakContext,
+      const measuredUsage = usageFields(
+        { usage, toolCalls, peakContext, firstContext },
         invocationRateLimit,
         measuredContextChars,
       );
@@ -2703,6 +2669,7 @@ export async function runAdjudicator(
         durationMs: timer(),
         ...(completed === null ? {} : { endedBy: completed.endedBy }),
         ...(completed?.maxGapMs === undefined ? {} : { maxGapMs: completed.maxGapMs }),
+        transcript,
         ...(measuredUsage === undefined ? {} : { usage: measuredUsage }),
         ...resources,
       });
@@ -2801,6 +2768,7 @@ export async function runCorrectness(
       result: r.result,
       durationMs: r.durationMs,
       ...(r.endedBy === undefined ? {} : { endedBy: r.endedBy }),
+      transcript: r.transcript,
       ...(r.maxGapMs === undefined ? {} : { maxGapMs: r.maxGapMs }),
       ...(r.usage === undefined ? {} : { usage: r.usage }),
       ...r.resources,
@@ -2831,6 +2799,7 @@ type ReviewInvocationRecord = {
   readonly output: string;
   readonly durationMs: number;
   readonly endedBy?: AgentRunEndedBy;
+  readonly transcript: string;
   readonly maxGapMs?: number;
   readonly usage?: UsageFields;
   readonly resources: ContainerResources;
@@ -2884,6 +2853,7 @@ async function runReadOnlyReview(
       // attempt 1 through the HARD-ERROR path, discarding the round so far to
       // re-run a reviewer.
       const timer = startTimer();
+      const filename = spec.filename(invocation);
       try {
         const run = await runWithProviderState(opts.providerState, spec.agent, () => sandbox.run({
           name: spec.name(invocation),
@@ -2896,15 +2866,9 @@ async function runReadOnlyReview(
           // successful result and then silence (#189), is the honest end of
           // its single artefact; inherited role contracts are banned.
           completionSignal: [],
-          ...invocationLog(opts.attemptLogger, spec.filename(invocation)),
+          ...invocationLog(opts.attemptLogger, filename),
         }));
-        const usage = eventUsage(
-          run.usage,
-          run.toolCalls,
-          run.peakContext,
-          run.rateLimit,
-          spec.measuredContextChars,
-        );
+        const usage = usageFields(run, run.rateLimit, spec.measuredContextChars);
         await spec.record({
           invocation,
           result: "completed",
@@ -2912,6 +2876,7 @@ async function runReadOnlyReview(
           durationMs: run.durationMs,
           endedBy: run.endedBy,
           maxGapMs: run.maxGapMs,
+          transcript: filename,
           ...(usage === undefined ? {} : { usage }),
           resources: containerResourcesOf(run),
         });
@@ -2923,10 +2888,8 @@ async function runReadOnlyReview(
         // in a second is a different fault entirely.
         const partial = agentPartialUsage(err);
         const transcript = agentPartialOutput(err);
-        const usage = eventUsage(
-          partial.usage,
-          partial.toolCalls,
-          partial.peakContext,
+        const usage = usageFields(
+          partial,
           partial.rateLimit ??
             (err instanceof AgentQuotaError ? err.measurement : undefined),
           spec.measuredContextChars,
@@ -2936,6 +2899,7 @@ async function runReadOnlyReview(
           result: providerClosedResult(err) ?? "failed",
           output: transcript,
           durationMs: agentPartialDurationMs(err) ?? timer(),
+          transcript: filename,
           ...(usage === undefined ? {} : { usage }),
           resources: agentPartialContainerResources(err),
         });
