@@ -36,7 +36,8 @@
 // An idle janitor run (#205) is no issue: its events, which name a task
 // instead (`EventSubject`), are feed lines tagged with that task and drive
 // one header row — the task and its phase, gone once its loop finishes — and
-// never reach the pool, waiting or finished tables.
+// never reach the pool, waiting or finished tables. Its runner's
+// `janitor-start` and `janitor-run` are feed lines.
 
 import type {
   GateStepEvent,
@@ -390,6 +391,17 @@ function feedText(event: RunEvent): FeedEvent | null {
     case "deploy":
       text = deployText(event);
       tone = event.outcome === "green" ? "good" : event.outcome === "red" ? "bad" : "warn";
+      break;
+    case "janitor-start":
+      text = `janitor ${event.task} started · ${event.scope.length} path(s) · ` +
+        `run ${event.runsToday} of ${event.runsPerDay} today`;
+      tone = "dim";
+      break;
+    case "janitor-run":
+      text = `janitor ${event.task} ${event.outcome}` +
+        (event.cause === undefined ? "" : ` · ${event.cause}`) +
+        (event.pullRequest === undefined ? "" : ` · PR #${event.pullRequest}`);
+      tone = event.outcome === "committed" ? "good" : event.outcome === "failed" ? "warn" : "dim";
       break;
     case "follow-up":
       text = event.detail;

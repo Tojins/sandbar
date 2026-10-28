@@ -115,6 +115,13 @@
 // member names the task where an issue's `issue` would be. It emits no
 // `admitted`, `origin-sync` or pre-attempt check event. A new union
 // member, so no bump.
+// Its runner (`janitor.ts`) brackets that loop: `janitor-start` once the
+// task's rolling branch has a base and the run its scope, with the day's
+// run count; `janitor-run` when it has ended, with its outcome, the commits
+// a `committed` run pushed and its pull request. A run that failed before
+// it started has an empty scope and no `janitor-start`. A held task is a
+// `notice`. New kinds, so no bump; a recompute the run's end woke is
+// trigger `janitor-finished`.
 //
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
@@ -133,6 +140,7 @@ import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
 import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
 import type { QualityOutcome, Verdict } from "./inner-loop-machine.js";
+import type { JanitorOutcome } from "./janitor-plan.js";
 import type { RestartDueReason } from "./scheduler.js";
 import type { StackClassification } from "./stack-change.js";
 import type { AgentRunEndedBy } from "./agent-sandbox.js";
@@ -167,6 +175,7 @@ export type RecomputeTrigger =
   | "slot-freed"
   | "landing-finished"
   | "terminal-finalized"
+  | "janitor-finished"
   | "poll";
 
 export type EventIssue = {
@@ -352,6 +361,17 @@ export type ChunkLandingEvent = {
   readonly members: readonly number[];
 };
 
+export type JanitorRunEvent = {
+  readonly task: string;
+  readonly branch: string;
+  readonly outcome: JanitorOutcome;
+  readonly cause?: string;
+  readonly commits?: number;
+  readonly pullRequest?: number;
+  readonly scope: readonly string[];
+  readonly durationMs: number;
+};
+
 export type EventInput =
   | {
       readonly kind: "run-start";
@@ -396,6 +416,18 @@ export type EventInput =
   | { readonly kind: "reconcile"; readonly action: "trace" | "landed-chunk" | "land-requested" | "chunk-refreshed" | "chunk-refresh-failed"; readonly detail: string }
   | { readonly kind: "notice"; readonly message: string }
   | DeployEvent
+  | {
+      readonly kind: "janitor-start";
+      readonly task: string;
+      readonly branch: string;
+      // The sha the run's commits are measured from.
+      readonly base: string;
+      readonly fresh: boolean;
+      readonly scope: readonly string[];
+      readonly runsToday: number;
+      readonly runsPerDay: number;
+    }
+  | ({ readonly kind: "janitor-run" } & JanitorRunEvent)
   | DbBaseEvent
   | DbCopyEvent
   | {
