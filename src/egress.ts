@@ -230,14 +230,22 @@ export async function startEgress(opts: {
     );
   };
 
-  // The slice starts at `offset` as it stands after the read, so two drains
-  // that overlap still fold each line once.
-  const drain = async (): Promise<{ readonly firstRefusals: readonly EgressRefusal[] }> => {
+  const drainOnce = async (): Promise<{ readonly firstRefusals: readonly EgressRefusal[] }> => {
     const { lines, end } = await readLogFrom(logPath, offset);
     const folded = foldEgressLog(lines, tally);
     offset = end;
     tally = folded.tally;
     return { firstRefusals: folded.firstRefusals };
+  };
+  // Each drain starts after the previous one settles, so overlapping drains
+  // (a checkpoint and stop's own) read from the advanced `offset` and fold
+  // each line once. A previous drain's rejection is its own caller's; the
+  // next drain runs regardless.
+  let draining: Promise<unknown> = Promise.resolve();
+  const drain = (): Promise<{ readonly firstRefusals: readonly EgressRefusal[] }> => {
+    const next = draining.then(drainOnce, drainOnce);
+    draining = next;
+    return next;
   };
 
   const assertAlive = async (): Promise<void> => {

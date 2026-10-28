@@ -1,5 +1,6 @@
-// startEgress's cleanup.ts registration, against a scripted podman: the
-// registered disposable tears the proxy down, and `stop` withdraws it.
+// startEgress against a scripted podman: the registered cleanup.ts disposable
+// tears the proxy down, `stop` withdraws it, and overlapping drains fold each
+// log line once.
 
 import { appendFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -79,5 +80,35 @@ describe("startEgress cleanup registration", () => {
     await Promise.all([handle.stop(), handle.stop()]);
     await handle.stop();
     expect(registered.withdraw).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("startEgress drain", () => {
+  it("folds each line once when drains overlap, including stop's own", async () => {
+    const logDir = await mkdtemp(join(tmpdir(), "egress-drain-"));
+    podman.logPath = join(logDir, "owner.jsonl");
+    const handle = await startEgress({
+      scope: gateScope("/egress-drain-test"),
+      owner: "owner",
+      networkName: "net",
+      createNetwork: false,
+      image: "img",
+      policy: { mode: "enforce", entries: [] } as never,
+      logDir,
+    });
+    await appendFile(
+      podman.logPath,
+      '{"t":"allow","via":"tls","host":"a.test","port":443}\n' +
+        '{"t":"refuse","via":"dns","host":"evil.test","port":null}\n',
+    );
+    const [first, second, summary] = await Promise.all([
+      handle.drain(),
+      handle.drain(),
+      handle.stop(),
+    ]);
+    expect([...first.firstRefusals, ...second.firstRefusals, ...summary.firstRefusals])
+      .toEqual([{ host: "evil.test", port: null, via: "dns", enforced: true }]);
+    expect(summary.allowed).toEqual({ "a.test:443": 1 });
+    expect(summary.refused).toEqual({ "evil.test": 1 });
   });
 });
