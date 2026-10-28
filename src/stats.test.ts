@@ -261,6 +261,41 @@ describe("computeStats prose (#182)", () => {
     const bare = computeStats(input([run("run-1", events)]));
     expect(bare.invocations[0]).not.toHaveProperty("prose");
     expect(bare.issues[0]).not.toHaveProperty("reason");
+    expect(bare.terminals[0]).not.toHaveProperty("reason");
+  });
+
+  it("lists every gate with its red steps and every terminal with its cause", () => {
+    const step = (ok: boolean) => ({ ok, durationMs: 1 });
+    const report = computeStats(input([run("run-1", [
+      admitted(1),
+      ev({ kind: "gate", issue: 1, attempt: 1, gate: "gate-1", ok: false, durationMs: 1,
+        steps: { build: step(true), smoke: step(false) } }),
+      terminal(1, "NEEDS-HUMAN", { cause: "gate-red", reason: "red twice" }),
+      ev({ kind: "gate", issue: 1, gate: "gate-2", ok: false, durationMs: 1 }),
+    ])], true));
+    expect(report.gates).toEqual([
+      { run: "run-1", issue: 1, gate: "gate-1", attempt: 1, ok: false, redSteps: ["smoke"] },
+      { run: "run-1", issue: 1, gate: "gate-2", attempt: null, ok: false, redSteps: [] },
+    ]);
+    expect(report.terminals).toEqual([
+      { run: "run-1", issue: 1, terminal: "NEEDS-HUMAN", cause: "gate-red", reason: "red twice" },
+    ]);
+  });
+
+  it("carries the commits an implementer or quality fixer made", () => {
+    const fixer = (fields: Record<string, unknown>) => ev({
+      kind: "quality-pass", issue: 1, attempt: 1, round: 1, provider: "codex", model: "m",
+      effort: null, durationMs: 1, ...fields,
+    });
+    const report = computeStats(input([run("run-1", [
+      admitted(1),
+      implementer(1, 1),
+      fixer({ result: "completed", commits: ["a", "b"], discarded: {} }),
+      fixer({ result: "quota" }),
+    ])]));
+    expect(report.invocations.map((row) => [row.role, row.commits])).toEqual([
+      ["implementer", 1], ["quality-fix", 2], ["quality-fix", null],
+    ]);
   });
 });
 

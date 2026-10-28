@@ -1009,6 +1009,7 @@
       "effort": "high",
       "result": "COMPLETE",
       "verdict": null,
+      "commits": 2,
       "durationMs": 612000,
       "tokens": {
         "input": 310,
@@ -1037,6 +1038,7 @@
       "effort": "medium",
       "result": "completed",
       "verdict": null,
+      "commits": 1,
       "durationMs": 201000,
       "tokens": {
         "input": 410000,
@@ -1065,6 +1067,7 @@
       "effort": "high",
       "result": "completed",
       "verdict": "CHANGES-REQUESTED",
+      "commits": null,
       "durationMs": 240000,
       "tokens": {
         "input": 520000,
@@ -1093,6 +1096,7 @@
       "effort": "high",
       "result": "COMPLETE",
       "verdict": null,
+      "commits": 1,
       "durationMs": 180000,
       "tokens": {
         "input": 90,
@@ -1121,6 +1125,7 @@
       "effort": "medium",
       "result": "completed",
       "verdict": null,
+      "commits": 0,
       "durationMs": 120000,
       "tokens": {
         "input": 300000,
@@ -1149,6 +1154,7 @@
       "effort": "high",
       "result": "completed",
       "verdict": "APPROVED",
+      "commits": null,
       "durationMs": 200000,
       "tokens": {
         "input": 480000,
@@ -1177,6 +1183,7 @@
       "effort": "high",
       "result": "FAILED",
       "verdict": null,
+      "commits": null,
       "durationMs": 300000,
       "tokens": {
         "input": 40,
@@ -1205,6 +1212,7 @@
       "effort": "high",
       "result": "PARTITION",
       "verdict": null,
+      "commits": null,
       "durationMs": 41000,
       "tokens": {
         "input": 12,
@@ -1233,6 +1241,7 @@
       "effort": "high",
       "result": "COMPLETE",
       "verdict": null,
+      "commits": 3,
       "durationMs": 420000,
       "tokens": {
         "input": 200,
@@ -1261,6 +1270,7 @@
       "effort": "medium",
       "result": "completed",
       "verdict": null,
+      "commits": 2,
       "durationMs": 150000,
       "tokens": {
         "input": 350000,
@@ -1289,6 +1299,7 @@
       "effort": "high",
       "result": "COMPLETE",
       "verdict": null,
+      "commits": 1,
       "durationMs": 160000,
       "tokens": {
         "input": 70,
@@ -1317,6 +1328,7 @@
       "effort": "medium",
       "result": "failed",
       "verdict": null,
+      "commits": 0,
       "durationMs": 60000,
       "tokens": {
         "input": null,
@@ -1345,6 +1357,7 @@
       "effort": "high",
       "result": "completed",
       "verdict": "CHANGES-REQUESTED",
+      "commits": null,
       "durationMs": 210000,
       "tokens": {
         "input": 500000,
@@ -1373,6 +1386,7 @@
       "effort": "high",
       "result": "OVERRULED",
       "verdict": "OVERRULED",
+      "commits": null,
       "durationMs": 95000,
       "tokens": {
         "input": 30,
@@ -1401,6 +1415,7 @@
       "effort": null,
       "result": "exit",
       "verdict": null,
+      "commits": null,
       "durationMs": 130000,
       "tokens": {
         "input": null,
@@ -1416,6 +1431,84 @@
       "peakMemoryBytes": 800000000,
       "oomKilled": null,
       "transcript": null
+    }
+  ],
+  "gates": [
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "gate": "gate-1",
+      "attempt": 1,
+      "ok": true,
+      "redSteps": []
+    },
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "gate": "gate-1",
+      "attempt": 2,
+      "ok": true,
+      "redSteps": []
+    },
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "gate": "gate-2",
+      "attempt": null,
+      "ok": true,
+      "redSteps": []
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "gate": "gate-1",
+      "attempt": 1,
+      "ok": false,
+      "redSteps": []
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "gate": "gate-1",
+      "attempt": 2,
+      "ok": true,
+      "redSteps": []
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "gate": "gate-2",
+      "attempt": null,
+      "ok": false,
+      "redSteps": []
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "gate": "gate-2",
+      "attempt": null,
+      "ok": true,
+      "redSteps": []
+    }
+  ],
+  "terminals": [
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "terminal": "DONE",
+      "cause": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 43,
+      "terminal": "NEEDS-PARTITION",
+      "cause": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "terminal": "DONE",
+      "cause": null
     }
   ]
 }
