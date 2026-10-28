@@ -93,8 +93,9 @@ holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 - **Gate stack**: `gate-stack.ts`, `sandbox-stack.ts` (#44); a stack file
   (`gateStack: { path }`) is read from the source tip at gate time by
   `stack-source.ts` (#186), never from the operator's clone. A branch's own
-  edit to it applies to its gate-1 only when it is env-only
-  (`stack-change.ts`); any other edit parks `NEEDS-STACK-CHANGE`. A gate
+  edit to it applies to its gates only when it is env-only
+  (`stack-change.ts`); any other edit parks `NEEDS-STACK-CHANGE` at gate-1
+  and is reverted as skip reason `stack-change` at landing. A gate
   verdict is about a clean, on-branch commit (D1, #27, #127).
 - **Providers**: `agent-providers.ts` (closed set, credentials), per-role
   agent/model/effort routing (`env.ts`, `env-file.ts`), `codex-auth.ts`.

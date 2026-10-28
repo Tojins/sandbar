@@ -268,6 +268,7 @@ import {
   formatConflictPaths,
   formatResolveAttempts,
 } from "./resolve-loop.js";
+import { type StackChange, renderLandingStackChange } from "./stack-change.js";
 
 const exec = promisify(execFile);
 
@@ -621,6 +622,18 @@ export const CHUNK_LAND_ABANDONED_PR_COMMENT = (args: {
       : "") +
     `Action: fix \`${args.chunkBranch}\`; re-apply \`${LAND_LABEL}\`.`;
 };
+
+// The chunk's merge result changes the gate stack beyond container env (#186),
+// so it was reverted: a landing never changes the gate it is graded by.
+export const CHUNK_LAND_STACK_CHANGE_PR_COMMENT = (args: {
+  readonly chunkBranch: string;
+  readonly sourceBranch: string;
+  readonly stackChange: StackChange;
+}): string =>
+  `${BOT_COMMENT_PREFIX} merge into \`${args.sourceBranch}\` stopped: ` +
+  `${renderLandingStackChange(args.stackChange)}\n\n` +
+  `Action: land the stack change on \`${args.sourceBranch}\` by hand, or ` +
+  `remove it from \`${args.chunkBranch}\`; re-apply \`${LAND_LABEL}\`.`;
 
 // Verified merge mode (#22) rejected the cycle's composed result, and this
 // chunk's commits were in it. Cycle-level, exactly as for an auto-lane issue:

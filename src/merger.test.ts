@@ -4,11 +4,17 @@ import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { SandbarError } from "./errors.js";
 import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
 import type { ChunkRefLookup, MergerGateOutput } from "./merger.js";
-import { LAND_LABEL, type ChunkLandTarget } from "./chunk-land.js";
+import {
+  CHUNK_LAND_STACK_CHANGE_PR_COMMENT,
+  LAND_LABEL,
+  type ChunkLandTarget,
+} from "./chunk-land.js";
 import { NEEDS_REVIEW_LABEL, type ChunkRefresh } from "./chunks.js";
+import type { StackChange } from "./stack-change.js";
 import {
   SOURCE_TARGET,
   buildInstallFailedComment,
+  buildStackChangeComment,
   buildForgeUnverifiedComment,
   MergerError,
   READY_FOR_AGENT_LABEL,
@@ -74,6 +80,8 @@ type Calls = {
   bodies: string[];
   aborts: number;
   resets: { sha: string }[];
+  // #186: how many times the merge result's stack file was classified.
+  stackChecks: number;
   installs: number;
   gates: number;
   order: string[];
@@ -156,6 +164,8 @@ type Script = {
   // Files visible only after the scripted merge, matching a branch-authored
   // prompt extension entering the merger worktree.
   promptExtensionPaths?: string[];
+  // #186: what each `stackChange` call answers, in order. Absent ⇒ null.
+  stackChanges?: (StackChange | null)[];
 };
 
 function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
@@ -167,6 +177,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     bodies: [],
     aborts: 0,
     resets: [],
+    stackChecks: 0,
     installs: 0,
     gates: 0,
     order: [],
@@ -286,6 +297,11 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.resets.push({ sha });
       calls.order.push("reset");
       merging = false;
+    },
+    async stackChange() {
+      const answer = script.stackChanges?.[calls.stackChecks] ?? null;
+      calls.stackChecks++;
+      return answer;
     },
     async npmInstall() {
       const r = script.installs?.[iIdx++] ?? true;
@@ -3404,5 +3420,143 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       "conflict",
     ]);
     expect((err as MergerError).partial?.mergedChunks).toEqual([]);
+  });
+});
+
+describe("runMergerWithAdapter — a merge result that changes the gate stack beyond env (#186)", () => {
+  const change: StackChange = {
+    path: "gate/stack.json",
+    differences: [{ where: "container 'db'", what: "image" }],
+  };
+
+  it("reverts a clean merge before installing or gating it, comments and skips", async () => {
+    const outcomes: unknown[] = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      stackChanges: [change],
+      heads: ["pre-sha"],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, {
+      observations: {
+        onGate: () => undefined,
+        onOutcome: (outcome) => { outcomes.push(outcome); },
+      },
+    });
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.skipped.map((s) => ({ id: s.issue.id, reason: s.reason }))).toEqual([
+      { id: "42", reason: "stack-change" },
+    ]);
+    expect(calls.order).toEqual(["merge", "reset"]);
+    expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
+    expect(calls.comments).toEqual([{
+      n: 42,
+      msg: buildStackChangeComment({
+        stackChange: change,
+        target: SOURCE_TARGET,
+        branch: issue(42).branch,
+        stuckLabel: "agent-stuck",
+      }),
+    }]);
+    expect(calls.comments[0]!.msg).toContain("- container 'db': image");
+    expect(calls.removedLabels).toEqual([{ n: 42, label: READY_FOR_AGENT_LABEL }]);
+    expect(outcomes).toEqual([{
+      kind: "skipped",
+      issue: issue(42),
+      reason: "stack-change",
+      durationMs: expect.any(Number),
+    }]);
+  });
+
+  it("asks once per clean merge and keeps one that changes nothing beyond env", async () => {
+    const { adapter, calls } = makeAdapter({ merges: ["ok"], gates: [{ ok: true }] });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
+    expect(calls.stackChecks).toBe(1);
+  });
+
+  it("refuses what a gate-red resolve attempt did to the stack file", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [gateRed(), { ok: true }],
+      stackChanges: [null, change],
+      heads: ["pre-sha", "post-sha"],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.skipped.map((s) => s.reason)).toEqual(["stack-change"]);
+    expect(calls.agentRuns).toHaveLength(1);
+    expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
+    expect(calls.pushes).toBe(0);
+  });
+
+  it("refuses what a conflict resolve attempt did to the stack file", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      stackChanges: [change],
+      heads: ["pre-sha", "post-sha"],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.skipped.map((s) => s.reason)).toEqual(["stack-change"]);
+    expect(calls.stackChecks).toBe(1);
+    expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
+  });
+
+  it("parks a reviewed chunk and takes `land` off its pull request", async () => {
+    const request: ChunkLandTarget = {
+      root: 42,
+      branch: "sandbar/chunk-42-c",
+      title: "chunk 42",
+      members: [{ number: 42, title: "t-42" }],
+      closeOrder: [{ number: 42, title: "t-42" }],
+      rework: [],
+      pullRequest: 542,
+    };
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      stackChanges: [change],
+      chunkRefs: {
+        [request.branch]: { kind: "present", ref: `refs/remotes/origin/${request.branch}` },
+      },
+    });
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, {
+      chunkLanding: { requests: [request], sourceBranch: "main" },
+    });
+
+    expect(summary.skippedChunks).toEqual([{ target: expect.objectContaining({ branch: request.branch }), reason: "stack-change" }]);
+    expect(summary.mergedChunks).toEqual([]);
+    expect(calls.gates).toBe(0);
+    expect(calls.prComments).toEqual([{
+      pr: 542,
+      body: CHUNK_LAND_STACK_CHANGE_PR_COMMENT({
+        chunkBranch: request.branch,
+        sourceBranch: "main",
+        stackChange: change,
+      }),
+    }]);
+    expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
+  });
+
+  it("parks a chunk refresh's dependents with the differences", async () => {
+    const request = refresh();
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      stackChanges: [change],
+      chunkRefs: {
+        [request.branch]: { kind: "present", ref: `refs/remotes/origin/${request.branch}` },
+      },
+    });
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, refreshing(request));
+
+    const [failure] = summary.failedChunkRefreshes;
+    expect(failure?.comment).toContain("changes `gate/stack.json` beyond container `env`");
+    expect(failure?.comment).toContain("- container 'db': image");
+    expect(calls.chunkPushes).toEqual([]);
   });
 });

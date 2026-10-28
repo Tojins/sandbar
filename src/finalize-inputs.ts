@@ -67,6 +67,7 @@ export function finalizeKindForSkip(
       return "landing-push-refused";
     case "gate-red":
     case "install-failed":
+    case "stack-change":
       return "merge-gate-red";
     default: {
       const never: never = reason;
