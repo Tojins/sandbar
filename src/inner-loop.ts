@@ -237,7 +237,7 @@ import {
   sandboxContainers,
   startSandboxStack,
 } from "./sandbox-stack.js";
-import type { StackChange } from "./stack-change.js";
+import { stackChangeOf, type StackChange } from "./stack-change.js";
 import {
   type BoundStack,
   type HeadStack,
@@ -2568,9 +2568,7 @@ export async function runGate(
   return {
     kind: "gate-result",
     head,
-    stackChange: classification.kind === "non-env"
-      ? { path: classification.path, differences: classification.differences }
-      : null,
+    stackChange: stackChangeOf(classification),
     gate: {
       ok: gate1.ok,
       failedStep: gate1.failedStep,

@@ -66,6 +66,17 @@ export type StackInEffect = ResolvedStack & {
   readonly classification: StackClassification;
 };
 
+const nonEnv = (path: string, what: string): StackClassification => ({
+  kind: "non-env",
+  path,
+  differences: [{ where: path, what }],
+});
+
+// The park report of a classification: null unless the branch changed the
+// stack beyond env.
+export const stackChangeOf = (c: StackClassification): StackChange | null =>
+  c.kind === "non-env" ? { path: c.path, differences: c.differences } : null;
+
 const equal = (a: unknown, b: unknown): boolean =>
   canonicalSha256(a) === canonicalSha256(b);
 
@@ -122,14 +133,10 @@ export function classifyStackChange(
   branch: BranchStackRead,
 ): StackClassification {
   if (branch.kind === "missing") {
-    return { kind: "non-env", path, differences: [{ where: path, what: "missing" }] };
+    return nonEnv(path, "missing");
   }
   if (branch.kind === "invalid") {
-    return {
-      kind: "non-env",
-      path,
-      differences: [{ where: path, what: `does not validate: ${branch.message}` }],
-    };
+    return nonEnv(path, `does not validate: ${branch.message}`);
   }
   const differences = [
     ...listDifferences(
@@ -190,11 +197,7 @@ export function stackInEffect(
     if (!(err instanceof SandbarError)) throw err;
     return {
       ...tip,
-      classification: {
-        kind: "non-env",
-        path,
-        differences: [{ where: path, what: `does not validate: ${err.message}` }],
-      },
+      classification: nonEnv(path, `does not validate: ${err.message}`),
     };
   }
 }

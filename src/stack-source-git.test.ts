@@ -287,6 +287,22 @@ describe("openStackSource over a stack file", () => {
       expect(head.stack.containers[0]!.mounts).toHaveLength(1);
     });
 
+    it("classifies the branch's file when it shares no history with the source", async () => {
+      await git(repo, "checkout", "-q", "--orphan", "issue");
+      await git(repo, "rm", "-rfq", "--cached", ".");
+      await writeFile(join(repo, "gate", "stack.json"), JSON.stringify(mounted()));
+      await git(repo, "add", "gate/stack.json");
+      await git(repo, "commit", "-qm", "orphan");
+      await git(repo, "checkout", "-qf", "main");
+      const source = await open();
+
+      expect((await source.forHead(repo, "issue")).classification).toEqual({
+        kind: "non-env",
+        path: "gate/stack.json",
+        differences: [{ where: "container 'db'", what: "mounts" }],
+      });
+    });
+
     it("is `same` for a branch carrying the very edit that has since landed", async () => {
       await edit(JSON.stringify(mounted()));
       await land(JSON.stringify(mounted()));

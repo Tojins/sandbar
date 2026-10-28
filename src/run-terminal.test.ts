@@ -47,6 +47,23 @@ describe("terminal event reasons (#132)", () => {
       },
       "correctness-budget-exhausted: review",
     ],
+    ...[true, false].map((ok): [Terminal, string] => [
+      {
+        type: "NEEDS-STACK-CHANGE",
+        stackChange: {
+          path: "gate/stack.json",
+          differences: [
+            { where: "container 'db'", what: "mounts" },
+            { where: "gate/stack.json", what: "missing" },
+          ],
+        },
+        gate: { ok, failureTrace: "", failedStep: null },
+        specGaps: [],
+      },
+      "gate/stack.json changed beyond env (gate-1 " +
+        `${ok ? "green" : "red"} on the source tip's stack):\n` +
+        "- container 'db': mounts\n- gate/stack.json: missing",
+    ]),
     [{ type: "QUOTA", provider: "codex", window: "five_hour" }, "codex five_hour"],
     [{ type: "CREDENTIAL", provider: "codex", detail: "refresh refused" }, "codex: refresh refused"],
     [{ type: "HARD-ERROR", reason: "bringup failed\nstack", commits: [] }, "bringup failed\nstack"],
