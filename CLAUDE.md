@@ -80,7 +80,7 @@ and the gate stack (`config.gateStack`, #24).
    verifier; its failure changes nothing.
 3. **Landing** — serialized, in an ephemeral worktree at `origin/<source>`
    (#10): `merger.ts`, `merger-worktree.ts`, `resolve-loop.ts` (#67),
-   `version-conflict.ts` (#68), `forge-verify.ts` (`mergeMode`, #22),
+   `version-conflict.ts` (#68, #235), `forge-verify.ts` (`mergeMode`, #22),
    `chunk-land.ts` / `chunk-pr.ts` / `forge-pr.ts` (chunk branches, draft PRs,
    `land` label #64).
 4. **Finalise** — `finalize.ts` + `finalize-inputs.ts`: branch publish, bot

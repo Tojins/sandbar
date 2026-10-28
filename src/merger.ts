@@ -328,7 +328,7 @@
 // The conflict the agent is never asked about (#68)
 // ---------------------------------------------------------------------------
 //
-// AGENTS.md makes every commit move `version` in `package.json` and its two
+// AGENTS.md makes every branch move `version` in `package.json` and its two
 // mirrors in `package-lock.json`, so two branches landing in one cycle conflict
 // in those files BY CONSTRUCTION — every multi-landing cycle, not occasionally.
 // `resolveVersionCollision` settles it before `runResolveLoop` is called, and
@@ -351,6 +351,13 @@
 // + gate, so a mechanically-resolved merge and a clean one are the same code
 // from there on. Everything it did is in the merger log, including a version
 // file it looked at and declined.
+//
+// Two branches cut from one tip usually bump to the SAME value instead, and
+// that merge is clean at a value the target already carries, which the gate's
+// `version` check calls not above its source (#235). `settleIdenticalBump`
+// moves it one patch up before gate-2 on every merge — amended into a clean
+// merge commit, staged ahead of the resolve agent on a conflicted one — and
+// on a push race's clean re-merge onto origin's new tip.
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -471,9 +478,11 @@ import {
   startTimer,
 } from "./timing.js";
 import {
+  identicalBump,
   isVersionConflictFile,
   planVersionCollision,
   renderVersionResolution,
+  rewriteRootVersion,
 } from "./version-conflict.js";
 
 // `failedStep` is a free-form step name since #24 — it comes from the
@@ -878,6 +887,21 @@ export type MergerAdapter = ResolveAdapter & {
   // throws: a merge that cannot be committed still has a resolve loop behind
   // it, and the staged resolution is visible to the agent as staged.
   commitMerge(): Promise<{ readonly ok: boolean }>;
+  // --- the identical bump (#235) ---
+  // The two sides of the merge at HEAD as revs: `HEAD` and `MERGE_HEAD` while
+  // it is in progress, `HEAD^1` and `HEAD^2` once committed; null when HEAD
+  // is neither (`--no-ff` onto a branch already merged commits nothing).
+  mergeSides(): Promise<{
+    readonly ours: string;
+    readonly theirs: string;
+    readonly inProgress: boolean;
+  } | null>;
+  // `path` as committed at `rev`, or null when `rev` has no such file.
+  readFileAt(rev: string, path: string): Promise<string | null>;
+  mergeBaseOf(a: string, b: string): Promise<string>;
+  // `git commit --amend --no-edit`: folds what is staged into the merge
+  // commit, keeping its parents, subject and co-author trailer.
+  amendHead(): Promise<void>;
   // --- chunk landing (#60) ---
   // The ref a chunk's members are merged onto: `origin/<chunkBranch>` when
   // origin has that branch, else `origin/<sourceBranch>` — which is where a
@@ -1349,7 +1373,7 @@ type MergeAttemptDeps = {
 
 // The version collision, resolved before the agent is asked anything (#68).
 //
-// AGENTS.md makes every commit move `version` in `package.json` and its two
+// AGENTS.md makes every branch move `version` in `package.json` and its two
 // mirrors in `package-lock.json`, so two branches landing in one cycle conflict
 // there by construction — every time, not occasionally. Spending an agentic
 // attempt on the one conflict in the tree whose answer is not a judgement call
@@ -1427,6 +1451,55 @@ export async function resolveVersionCollision(
     `version-collision ${label} resolved the whole conflict at ${plan.version}; no resolve attempt spent`,
   );
   return "completed";
+}
+
+// The identical bump, settled on a merge git did not stop for (#235): both
+// sides moved `version` to the same value, so the merge carries it unchanged
+// and the gate's `version` check would call it not above its source.
+// `version-conflict.ts` owns the rule and the rewrite; this owns the git.
+//
+// Asked of every merge that is about to be gated, committed or still in
+// progress: committed, the rewrite is amended into the merge commit, so the
+// landing stays one merge per unit; in progress (another file conflicted),
+// it is staged for the resolve agent, as a partial #68 resolution is.
+// All or nothing across the two files: a file it cannot rewrite (one still in
+// conflict) leaves both alone, says so in the log, and the gate decides.
+// True when it moved the version.
+export async function settleIdenticalBump(
+  adapter: MergerAdapter,
+  emit: (line: string) => Promise<void>,
+  label: string,
+): Promise<boolean> {
+  const sides = await adapter.mergeSides();
+  if (sides === null) return false;
+  const { ours, theirs, inProgress } = sides;
+  const bump = identicalBump({
+    ours: await adapter.readFileAt(ours, "package.json"),
+    theirs: await adapter.readFileAt(theirs, "package.json"),
+    base: await adapter.readFileAt(await adapter.mergeBaseOf(ours, theirs), "package.json"),
+  });
+  if (bump === null) return false;
+  const rewrites: { path: string; text: string }[] = [];
+  for (const path of ["package.json", "package-lock.json"]) {
+    const text = await adapter.readWorktreeFile(path);
+    if (text === null) continue;
+    const rewritten = rewriteRootVersion(path, text, bump.from, bump.to);
+    if (rewritten === null) {
+      await emit(
+        `version-collision ${label} both sides bumped to ${bump.from}; ` +
+          `${path} is still in conflict or has no root version at it; left to the gate`,
+      );
+      return false;
+    }
+    rewrites.push({ path, text: rewritten });
+  }
+  for (const { path, text } of rewrites) {
+    await adapter.writeWorktreeFile(path, text);
+    await adapter.stagePath(path);
+  }
+  if (!inProgress) await adapter.amendHead();
+  await emit(`version-collision ${label} both sides bumped to ${bump.from} -> ${bump.to}`);
+  return true;
 }
 
 // One ref, merged onto whatever the worktree is currently detached at, with
@@ -1508,11 +1581,12 @@ async function attemptMerge(
 
   // The version collision is settled mechanically first (#68); only what it
   // could not finish reaches the agent. `completed` falls through to the clean
-  // path below, merge commit and all.
-  if (
-    !m.ok &&
-    (await resolveVersionCollision(adapter, emit, label)) !== "completed"
-  ) {
+  // path below, merge commit and all. The identical bump git merged cleanly
+  // (#235) is settled on either path before anything is gated.
+  const conflicted =
+    !m.ok && (await resolveVersionCollision(adapter, emit, label)) !== "completed";
+  await settleIdenticalBump(adapter, emit, label);
+  if (conflicted) {
     await emit(`conflict ${label} entering resolve-loop`);
     const outcome = await runResolveLoop(
       unit,
@@ -2690,6 +2764,8 @@ export async function runMergerWithAdapter(
         nothingLanded(),
       );
     }
+    // Or it bumped to the very value the cycle carries, and merged cleanly.
+    await settleIdenticalBump(adapter, emit, "origin");
     // The tree about to land is no longer the one gate-2 passed: the verdict
     // has to be about the commit that is pushed (D1, #27).
     const inst = await adapter.npmInstall();
@@ -3544,6 +3620,38 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         if (!hasExitCode(err)) throw err;
         return { ok: false };
       }
+    },
+    async mergeSides() {
+      // Exit 1 from `--verify -q` is the rev not existing, and nothing else.
+      const exists = async (rev: string): Promise<boolean> => {
+        try {
+          await exec("git", ["rev-parse", "-q", "--verify", `${rev}^{commit}`], { cwd });
+          return true;
+        } catch (err) {
+          if (!isExitCode(err, 1)) throw err;
+          return false;
+        }
+      };
+      if (await exists("MERGE_HEAD")) {
+        return { ours: "HEAD", theirs: "MERGE_HEAD", inProgress: true };
+      }
+      return (await exists("HEAD^2"))
+        ? { ours: "HEAD^1", theirs: "HEAD^2", inProgress: false }
+        : null;
+    },
+    async readFileAt(rev, path) {
+      const { stdout } = await exec("git", ["ls-tree", "--name-only", rev, "--", path], { cwd });
+      if (stdout.trim() === "") return null;
+      return (await exec("git", ["show", `${rev}:${path}`], { cwd })).stdout;
+    },
+    async mergeBaseOf(a, b) {
+      return (await exec("git", ["merge-base", a, b], { cwd })).stdout.trim();
+    },
+    async amendHead() {
+      await exec("git", ["commit", "--amend", "--no-edit", "--no-verify"], {
+        cwd,
+        env: gitAuthorEnv(deps),
+      });
     },
     async getIssueBody(issueId) {
       // Throws (SandbarError) on fetch failure: a resolve agent reasoning

@@ -4,10 +4,12 @@ import {
   analyzeVersionConflict,
   bumpAboveAll,
   differingPaths,
+  identicalBump,
   isVersionConflictFile,
   parseConflictSegments,
   planVersionCollision,
   renderVersionResolution,
+  rewriteRootVersion,
 } from "./version-conflict.js";
 
 const PKG = (hunk: string): string =>
@@ -361,5 +363,63 @@ describe("isVersionConflictFile", () => {
     // A workspace member's lockfile mirrors are not the two this module knows.
     expect(isVersionConflictFile("packages/web/package.json")).toBe(false);
     expect(isVersionConflictFile("src/version.ts")).toBe(false);
+  });
+});
+
+describe("identicalBump (#235)", () => {
+  const pkg = (v: string): string => JSON.stringify({ name: "sandbar", version: v });
+
+  it.each([
+    ["both sides bumped to one value", pkg("0.20.34"), pkg("0.20.34"), pkg("0.20.33"), { from: "0.20.34", to: "0.20.35" }],
+    ["only one side bumped", pkg("0.20.34"), pkg("0.20.33"), pkg("0.20.33"), null],
+    ["neither side bumped", pkg("0.20.33"), pkg("0.20.33"), pkg("0.20.33"), null],
+    ["the sides bumped to different values", pkg("0.20.34"), pkg("0.20.35"), pkg("0.20.33"), null],
+    ["a side has no package.json", null, pkg("0.20.34"), pkg("0.20.33"), null],
+    ["the base has no package.json", pkg("0.20.34"), pkg("0.20.34"), null, { from: "0.20.34", to: "0.20.35" }],
+    ["the shared value is a prerelease", pkg("1.0.0-rc.1"), pkg("1.0.0-rc.1"), pkg("0.20.33"), null],
+  ])("%s", (_name, ours, theirs, base, expected) => {
+    expect(identicalBump({ ours, theirs, base })).toEqual(expected);
+  });
+});
+
+describe("rewriteRootVersion (#235)", () => {
+  const LOCK = [
+    "{",
+    '  "name": "sandbar",',
+    '  "version": "0.20.34",',
+    '  "packages": {',
+    '    "": {',
+    '      "version": "0.20.34"',
+    "    },",
+    '    "node_modules/dep": {',
+    '      "version": "0.20.34"',
+    "    }",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+
+  it("moves npm's two lockfile mirrors and not a dependency at the same version", () => {
+    expect(rewriteRootVersion("package-lock.json", LOCK, "0.20.34", "0.20.35")).toBe(
+      LOCK.replace('  "version": "0.20.34",', '  "version": "0.20.35",').replace(
+        '      "version": "0.20.34"\n    },',
+        '      "version": "0.20.35"\n    },',
+      ),
+    );
+  });
+
+  it("keeps package.json's formatting byte for byte", () => {
+    const text = PKG('  "version": "0.20.34",');
+    expect(rewriteRootVersion("package.json", text, "0.20.34", "0.20.35")).toBe(
+      PKG('  "version": "0.20.35",'),
+    );
+  });
+
+  it("declines a file still in conflict", () => {
+    expect(rewriteRootVersion("package.json", PKG(VERSION_HUNK), "0.20.34", "0.20.35")).toBeNull();
+  });
+
+  it("declines when the root version is not the one both sides bumped to", () => {
+    expect(rewriteRootVersion("package.json", PKG('  "version": "0.20.36",'), "0.20.34", "0.20.35")).toBeNull();
   });
 });

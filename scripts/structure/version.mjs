@@ -5,11 +5,12 @@
 // must equal it.
 //
 // The branch, not each commit: a commit without a bump cannot be repaired by
-// a later one without rewriting history, and a bump inside a branch carries
-// nothing anyway, because the merger rewrites the value on landing
-// (`version-conflict.ts`). In the landing shape (HEAD a merge onto
-// `origin/main`) the merge base is `origin/main` itself, so the check asks
-// whether the merged value is above the source's.
+// a later one without rewriting history. In the landing shape (gate-2, HEAD a
+// merge onto `origin/main`) the merge base is `origin/main` itself, so the
+// check asks whether the merged value is above the source's. Two branches
+// bumped from one base meet there either conflicting or, bumped to the same
+// value, merging cleanly at the source's own; the merger moves both above
+// the source before the gate (`src/version-conflict.ts`, #68 and #235).
 //
 // Both sides are read from commits, never from the worktree: the verdict is
 // about what was committed (D1).
