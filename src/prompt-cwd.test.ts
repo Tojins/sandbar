@@ -195,7 +195,8 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("fetches the issue from the configured repo, not from any directory's remotes", async () => {
     const prompt = await buildPrompt(
       {
-        issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+        subject: { kind: "issue", id: "1", title: "t" },
+        branch: "sandbar/issue-1-t",
         attempt: 1,
         worktreePath: target,
         lastFailureTrace: "",
@@ -251,7 +252,8 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
   it("assembles adjudication from both anchors and only the rejected report", async () => {
     const prompt = await buildAdjudicatorPrompt({
-      issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+      subject: { kind: "issue", id: "1", title: "t" },
+      branch: "sandbar/issue-1-t",
       issueSource: ghIssueSource(CONFIGURED),
       repo: CONFIGURED,
       repoDir: target,
@@ -341,7 +343,8 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
     const prompt = await buildPrompt(
       {
-        issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+        subject: { kind: "issue", id: "1", title: "t" },
+        branch: "sandbar/issue-1-t",
         attempt: 1,
         worktreePath: launchedFrom,
         lastFailureTrace: "",
@@ -368,7 +371,8 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
     const prompt = await buildPrompt(
       {
-        issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+        subject: { kind: "issue", id: "1", title: "t" },
+        branch: "sandbar/issue-1-t",
         attempt: 1,
         worktreePath: launchedFrom,
         lastFailureTrace: "",
@@ -391,7 +395,8 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   // History is the half that must NOT follow the branch.
   it("builds the reviewer's history from the repo, not from the worktree under review", async () => {
     const prompt = await buildCorrectnessPrompt({
-      issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
+      subject: { kind: "issue", id: "1", title: "t" },
+      branch: "sandbar/issue-1-t",
       issueSource: ghIssueSource(CONFIGURED),
       repo: CONFIGURED,
       repoDir: target,

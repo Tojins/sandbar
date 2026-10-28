@@ -21,7 +21,8 @@ import { loadTemplate } from "./prompts.js";
 import { combineStandards, parseStandards } from "./standards-groups.js";
 
 const baseInputs = {
-  issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
+  subject: { kind: "issue", id: "42", title: "do the thing" },
+  branch: "sandbar/issue-42-do-the-thing",
   sourceBranch: "main",
   // The default shape since #61: a branch seeded from the source branch, which
   // is every auto-lane issue and every chunk ROOT. `chunkBranch: null` is what
@@ -45,7 +46,8 @@ const qualityInputs = {
 } as const;
 
 const implementerInputs = {
-  issue: baseInputs.issue,
+  subject: baseInputs.subject,
+  branch: baseInputs.branch,
   attempt: 1,
   worktreePath: "/tmp/wt",
   lastFailureTrace: "",

@@ -16,6 +16,8 @@
 // `skipped` whole, with the reason; a run's events are never partly counted.
 // A kind the run's version does not define is counted in `ignoredKinds` and
 // dropped, so a feature whose event lands before its reducer arm shows there.
+// So is an idle janitor run's event (#205), as `janitor <kind>`: the reducer
+// counts issue runs, and a task name is no issue.
 //
 // Schema 5 (#185) differs from 6 (#187) where the reducer reads: it has no
 // `quality-review`, its `adjudication` always ruled on the correctness pass,
@@ -60,12 +62,13 @@ export function parseStatsWindow(flags: {
   return DEFAULT_STATS_WINDOW;
 }
 
-type ReviewRound = Extract<RunEvent, { kind: "review-round" }>;
+type IssueRunEvent = Exclude<RunEvent, { readonly janitor: string }>;
+type ReviewRound = Extract<IssueRunEvent, { kind: "review-round" }>;
 
-// The events the reducer reads: today's union, with each field that a
-// supported older schema lacks made optional.
+// The events the reducer reads: today's issue-run union, with each field that
+// a supported older schema lacks made optional.
 export type StatsEvent =
-  | Exclude<RunEvent, { kind: "review-round" }>
+  | Exclude<IssueRunEvent, { kind: "review-round" }>
   | (Omit<ReviewRound, "quality" | "qualityRounds"> &
     Partial<Pick<ReviewRound, "quality" | "qualityRounds">>);
 
@@ -119,7 +122,7 @@ const knownKinds = (
 ): { readonly known: readonly RawEvent[]; readonly ignoredKinds: Record<string, number> } => {
   const ignoredKinds: Record<string, number> = {};
   const known = raw.filter((event) => {
-    const kind = String(event.kind);
+    const kind = typeof event.janitor === "string" ? `janitor ${String(event.kind)}` : String(event.kind);
     if (kinds.has(kind)) return true;
     ignoredKinds[kind] = (ignoredKinds[kind] ?? 0) + 1;
     return false;

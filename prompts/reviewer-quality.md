@@ -6,7 +6,7 @@ this branch was seeded from.
 copies only `origin/*` for the source repository, so the bare local name
 `{{sourceBranch}}` does not resolve.)
 
-Issue #{{issueId}}: {{issueTitle}}
+{{subject}}
 
 {{chunkBase}}{{commits}}{{diffStat}}{{priorRounds}}{{changedSince}}{{qualityMode}}{{standards}}
 

@@ -72,9 +72,11 @@ function render(state, serverNotice=null) {
   // looking at a shrinking pool is told why it is shrinking (#146). A deferred
   // one still admits and says until when.
   const restart=r.restart&&!r.exit?`<span class="pill restart">restart pending · ${r.restart.deferredUntil?`deferred until ${clockTime(r.restart.deferredUntil)}`:"draining"} · ${esc(r.restart.detail)}</span>`:"";
+  // An idle janitor task holds no pool row (#205): one header line names it and its phase.
+  const janitor=r.janitor?`<span class="dim mono">idle task ${esc(r.janitor.task)} · ${esc(r.janitor.phase)} · ${since(r.janitor.phaseSince,state.now)}</span>`:"";
   const visibleComplaints=r.complaints.filter(c=>localStorage.getItem(complaintKey(r.directory,c.seq))===null);
   const complaints=visibleComplaints.length?`<div class="complaints">${visibleComplaints.map(c=>`<div class="complaint ${c.severity==="error"?"bad":"warn"}"><span>⚠ ${esc(c.text)}</span><button type="button" aria-label="Dismiss" onclick="dismissComplaint(${c.seq})">×</button></div>`).join("")}</div>`:"";
-  const top=`<header class="top"><span class="name" title="${esc(r.driver)}">${esc(driverName(r.driver))}</span>${pill}${restart}${r.lastRecompute?`<span class="dim mono">recompute ${r.lastRecompute.n} · ${esc(r.lastRecompute.trigger)} · ${clockTime(r.lastRecompute.at)}</span>`:""}${serverNotice?notice(serverNotice):""}${complaints}</header>`;
+  const top=`<header class="top"><span class="name" title="${esc(r.driver)}">${esc(driverName(r.driver))}</span>${pill}${restart}${janitor}${r.lastRecompute?`<span class="dim mono">recompute ${r.lastRecompute.n} · ${esc(r.lastRecompute.trigger)} · ${clockTime(r.lastRecompute.at)}</span>`:""}${serverNotice?notice(serverNotice):""}${complaints}</header>`;
   // Startup is deliberately one row. Preflight/image detail is still in the
   // event record, but the ledger appears only once the first pool observation
   // exists and there is scheduler state worth rendering.
@@ -89,7 +91,7 @@ function render(state, serverNotice=null) {
   // The page is rebuilt on every poll, so a <details> the reader opened would
   // snap shut two seconds later unless its state is carried across renders.
   const eventsOpen=document.getElementById("events")?.open?" open":"";
-  const events=`<details id="events"${eventsOpen}><summary>Events · ${state.eventCount}</summary><div class="feed">${state.events.map(e=>`<div class="${e.tone}"><span class="dim">${clockTime(e.at)}</span><span class="${e.tone?"":"dim"}">${e.issue?`#${e.issue}`:"run"}</span><span>${esc(e.text)}</span></div>`).join("")}</div></details>`;
+  const events=`<details id="events"${eventsOpen}><summary>Events · ${state.eventCount}</summary><div class="feed">${state.events.map(e=>`<div class="${e.tone}"><span class="dim">${clockTime(e.at)}</span><span class="${e.tone?"":"dim"}">${e.issue?`#${e.issue}`:e.janitor?esc(e.janitor):"run"}</span><span>${esc(e.text)}</span></div>`).join("")}</div></details>`;
   document.getElementById("app").innerHTML=top+pool+waiting+landing+finished+events;
 }
 // A failed poll never leaves the page blank or stale without saying so: a

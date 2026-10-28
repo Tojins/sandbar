@@ -184,6 +184,14 @@ import {
   type ContainerResources,
 } from "./container-resources.js";
 
+// The issue a hand-built action context is about, as the loop derives its
+// event and prompt subjects from it.
+const issueCtx = (issue: { readonly id: string; readonly title: string; readonly branch: string }) => ({
+  issue,
+  subject: { issue: Number(issue.id), title: issue.title },
+  promptSubject: { kind: "issue" as const, id: issue.id, title: issue.title },
+});
+
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -250,7 +258,7 @@ describe("runAnchorCondense (#217)", () => {
     } as unknown as Sandbox;
     const providerState = createRunProviderState();
     const ctx = {
-      issue: { id: "217", title: "condense", branch: "sandbar/issue-217" },
+      ...issueCtx({ id: "217", title: "condense", branch: "sandbar/issue-217" }),
       sandbox,
       opts: {
         attemptLogger: { writeInvocation: vi.fn(async (filename) => writes.push(filename)) },
@@ -433,7 +441,7 @@ describe("runUiCheck (#126)", () => {
     return {
       sandbox,
       ctx: {
-        issue: { id: "126", title: "ui check", branch: "sandbar/issue-126" },
+        ...issueCtx({ id: "126", title: "ui check", branch: "sandbar/issue-126" }),
         sandbox,
         opts: {
           stackSource: { path: null },
@@ -680,7 +688,7 @@ describe("runPartitionCheck (#158)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "158", title: "fan out", branch: "sandbar/issue-158" },
+      ...issueCtx({ id: "158", title: "fan out", branch: "sandbar/issue-158" }),
       sandbox,
       base: { ref: "origin/main", sha: "base" },
       opts: {
@@ -917,7 +925,7 @@ describe("silent implementer attempt policy (#116)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "116", title: "silent", branch: "sandbar/issue-116-silent" },
+      ...issueCtx({ id: "116", title: "silent", branch: "sandbar/issue-116-silent" }),
       sandbox,
       opts: {
         stackSource: { path: null },
@@ -1299,7 +1307,7 @@ describe("silent implementer attempt policy (#116)", () => {
 
 describe("role prompt-extension wiring (#91)", () => {
   const ctxWith = () => ({
-    issue: { id: "91", title: "extensions", branch: "sandbar/issue-91" },
+    ...issueCtx({ id: "91", title: "extensions", branch: "sandbar/issue-91" }),
     sandbox: { worktreePath: "/worktree" },
     worktreePath: "/worktree",
     opts: { stackSource: { path: null } },
@@ -1428,7 +1436,7 @@ describe("runVerifier (#121, #180, #185)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "91", title: "records", branch: "sandbar/issue-91" },
+      ...issueCtx({ id: "91", title: "records", branch: "sandbar/issue-91" }),
       sandbox,
       worktreePath: "/worktree",
       opts: {
@@ -1660,7 +1668,7 @@ describe("runQualityReview (#187)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "187", title: "quality", branch: "sandbar/issue-187" },
+      ...issueCtx({ id: "187", title: "quality", branch: "sandbar/issue-187" }),
       sandbox,
       worktreePath: "/worktree",
       opts: {
@@ -1901,7 +1909,7 @@ describe("runQualityFix (#185, #187)", () => {
       syncBranchToCache: vi.fn(),
     } as unknown as Sandbox;
     const ctx = {
-      issue: { id: "185", title: "fixer", branch: "sandbar/issue-185" },
+      ...issueCtx({ id: "185", title: "fixer", branch: "sandbar/issue-185" }),
       sandbox,
       worktreePath: "/worktree",
       opts: {
@@ -2193,7 +2201,7 @@ describe("runAdjudicator (#167)", () => {
     sandbox: Sandbox,
     events: EventInput[] = [],
   ): Parameters<typeof runAdjudicator>[1] => ({
-    issue: { id: "167", title: "adjudicate", branch: "sandbar/issue-167" },
+    ...issueCtx({ id: "167", title: "adjudicate", branch: "sandbar/issue-167" }),
     sandbox,
     opts: {
       stackSource: { path: null },
@@ -2568,7 +2576,7 @@ describe("runGate admission (#142)", () => {
     };
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
     const context = (id: string, runGate: () => Promise<GateResult>) => ({
-      issue: { id, title: `Issue ${id}`, branch: `sandbar/issue-${id}` },
+      ...issueCtx({ id, title: `Issue ${id}`, branch: `sandbar/issue-${id}` }),
       worktreePath: "/worktree",
       opts: {
         gateSemaphore,
@@ -2642,7 +2650,7 @@ describe("runGate admission (#142)", () => {
     };
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
     const ctx = {
-      issue: { id: "153", title: "gate log", branch: "sandbar/issue-153" },
+      ...issueCtx({ id: "153", title: "gate log", branch: "sandbar/issue-153" }),
       worktreePath: "/worktree",
       opts: {
         gateSemaphore: createGateSemaphore(undefined),
@@ -2692,7 +2700,7 @@ describe("runGate admission (#142)", () => {
       const ensure = vi.fn(async () => ({ runGate: runGateOnBound }));
       const reportGateStack = vi.fn(async () => undefined);
       const ctx = {
-        issue: { id: "186", title: "stack", branch: "sandbar/issue-186" },
+        ...issueCtx({ id: "186", title: "stack", branch: "sandbar/issue-186" }),
         worktreePath: "/worktree",
         opts: {
           gateSemaphore: createGateSemaphore(undefined),

@@ -31,6 +31,9 @@
 // in, beside the `scenario-writer-<n>.log` invocations that produced it. The
 // writer answers with its path. No sandbox mounts this directory, so the
 // scenarios stay hidden from the implementer.
+// An idle janitor run (#205) logs like an issue, under `janitor-<task>/`: its
+// logger is cached per task the same way, so the invocation sequence spans
+// every run of that task in the process.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -195,23 +198,31 @@ export type LandingLogger = {
 export type TranscriptTree = {
   readonly runDir: string;
   issue(issueId: string): Promise<IssueLogger>;
+  janitor(task: string): Promise<IssueLogger>;
   landing(n: number): LandingLogger;
 };
 
+// The run-directory entry an issue's or a janitor task's logs live under.
+export const issueLogDirName = (issueId: string): string => `issue-${issueId}`;
+export const janitorLogDirName = (task: string): string => `janitor-${task}`;
+
 export async function createTranscriptTree(runDir: string): Promise<TranscriptTree> {
   await mkdir(runDir, { recursive: true });
-  const issueCache = new Map<string, Promise<IssueLogger>>();
+  // Keyed by directory name, which keeps issues and janitor tasks apart.
+  const subjectCache = new Map<string, Promise<IssueLogger>>();
   const landingCache = new Map<number, LandingLogger>();
+  const subjectLogger = (dirName: string): Promise<IssueLogger> => {
+    const cached = subjectCache.get(dirName);
+    if (cached) return cached;
+    const created = makeIssueLogger(join(runDir, dirName));
+    subjectCache.set(dirName, created);
+    return created;
+  };
 
   return {
     runDir,
-    issue(issueId) {
-      const cached = issueCache.get(issueId);
-      if (cached) return cached;
-      const created = makeIssueLogger(runDir, issueId);
-      issueCache.set(issueId, created);
-      return created;
-    },
+    issue: (issueId) => subjectLogger(issueLogDirName(issueId)),
+    janitor: (task) => subjectLogger(janitorLogDirName(task)),
     landing(n) {
       const cached = landingCache.get(n);
       if (cached) return cached;
@@ -231,8 +242,7 @@ const formatCommand = (command: AgentInvocationRecord["commands"][number]): stri
   return `[${depth}] ${command.name}: ${args}\n`;
 };
 
-async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLogger> {
-  const dir = join(runDir, `issue-${issueId}`);
+async function makeIssueLogger(dir: string): Promise<IssueLogger> {
   await mkdir(dir, { recursive: true });
   const invocationSequencer = createAgentInvocationSequencer();
   let nextSnapshot = 1;

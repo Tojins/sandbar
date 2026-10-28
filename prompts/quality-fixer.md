@@ -5,7 +5,7 @@ Branch `{{branch}}`, seeded from `{{baseRef}}`.
 copies only `origin/*` for the source repository, so the bare local name
 `{{sourceBranch}}` does not resolve.)
 
-Issue #{{issueId}}: {{issueTitle}}
+{{subject}}
 
 The implementer has reported this issue COMPLETE, and a read-only quality
 review of its branch reported the tests and standards findings below. You fix
