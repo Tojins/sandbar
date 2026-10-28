@@ -4,7 +4,8 @@
 //
 // The config splits the MODEL per call (`implementerModelId`, `uiCheckModelId`,
 // correctness `reviewerModelId`, `reviewerQualityModelId`,
-// `adjudicatorModelId`, `condenserModelId`, `scenarioWriterModelId` and
+// `adjudicatorModelId`, `condenserModelId`, `scenarioWriterModelId`,
+// `scenarioRunnerModelId` and
 // `mergerModelId`); this is the vendor knob beside
 // it, and `*Effort` (#130) is
 // the third per-call knob:
@@ -25,7 +26,9 @@
 // The issue-thread condenser (#217) names `condenserAgent`, defaulting to the
 // quality pass's, and is likewise absent when `condenseAboveChars` is null.
 // The scenario writer (#203) names `scenarioWriterAgent`, defaulting to
-// claude on its own, and is absent when `scenarioWriter` is off.
+// claude on its own, and is absent when `scenarioWriter` is off. So is the
+// scenario runner (#180), `scenarioRunnerAgent`, which runs only the writer's
+// scenarios and follows the reviewer as the adjudicator does.
 // The pressure that wants the vendor
 // knob is the implementer's: a review round is one bounded sequential chain,
 // while an implementer attempt is a long multi-tool session, with several of
@@ -379,7 +382,7 @@ export function parseAgentProviderName(
 //
 // Every invoked routing knob participates, the reviewer's quality pass included
 // (#121); the UI checker (#126), the condenser (#217) and the scenario writer
-// (#203) participate only when enabled. Requiring the routed set up front is
+// (#203) with its runner (#180) participate only when enabled. Requiring the routed set up front is
 // deliberate over discovering a missing credential in the resolve loop, after
 // a run may already have landed work — and for the quality pass it is also
 // what puts its CLI in the sandbox image (#75), a pass that opens every round
@@ -390,6 +393,7 @@ export function requiredAgentProviders(roles: {
   readonly condenserAgent: AgentProviderName;
   readonly scenarioWriter: boolean;
   readonly scenarioWriterAgent: AgentProviderName;
+  readonly scenarioRunnerAgent: AgentProviderName;
   readonly implementerAgent: AgentProviderName;
   readonly uiCheckAgent: AgentProviderName;
   readonly reviewerAgent: AgentProviderName;
@@ -404,7 +408,7 @@ export function requiredAgentProviders(roles: {
     roles.reviewerQualityAgent,
     roles.adjudicatorAgent,
     ...(roles.condenseAboveChars === null ? [] : [roles.condenserAgent]),
-    ...(roles.scenarioWriter ? [roles.scenarioWriterAgent] : []),
+    ...(roles.scenarioWriter ? [roles.scenarioWriterAgent, roles.scenarioRunnerAgent] : []),
     roles.mergerAgent,
   ]);
   // Ordered by the canonical list, not by insertion: the set feeds a refusal
@@ -441,6 +445,7 @@ export function assertRoleModelIdNamed(
     | "adjudicator"
     | "condenser"
     | "scenarioWriter"
+    | "scenarioRunner"
     | "merger"
     | "reflectTagger"
     | "reflectSynthesizer",
@@ -466,6 +471,10 @@ export type BuildAgentProviderOptions = {
   // one — `claude --continue`, `codex exec resume --last`. Sound only inside an
   // agent sandbox; see the option's own note on each provider.
   readonly continueSession?: boolean;
+  // Resume the conversation an earlier run named (`SandboxRunResult.
+  // sessionId`) — `claude --resume <id>`, `codex exec resume <id>`. Sound
+  // where another agent shares the sandbox, as the verifier's do (#238).
+  readonly resumeSession?: string | undefined;
   // Reasoning effort for this call (#130), spelled by the provider — `claude
   // --effort`, `codex -c model_reasoning_effort=` — and omitted when unset so
   // the CLI's own default applies. Not validated here: the level set is
@@ -490,11 +499,14 @@ export function buildAgentProvider(
   options: BuildAgentProviderOptions = {},
 ): AgentProvider {
   const continueSession = options.continueSession === true;
-  const effort = options.effort;
+  const { effort, resumeSession } = options;
+  if (continueSession && resumeSession !== undefined) {
+    throw new Error("an agent run either continues the latest session or resumes a named one");
+  }
   switch (name) {
     case "claude":
-      return claudeCode(modelId, { continueSession, effort });
+      return claudeCode(modelId, { continueSession, resumeSession, effort });
     case "codex":
-      return codex(modelId, { continueSession, effort });
+      return codex(modelId, { continueSession, resumeSession, effort });
   }
 }

@@ -330,6 +330,42 @@ describe("computeStats scenario sets (#203)", () => {
   });
 });
 
+describe("computeStats scenario outcomes (#238)", () => {
+  const round = (scenarios: Record<string, number> | null, correctness = "APPROVED") => ev({
+    kind: "review-round", issue: 1, title: "Issue 1", attempt: 1, round: 1, head: "h",
+    quality: "APPROVED", qualityRounds: 0, gateOk: true, correctness,
+    rejectingPass: scenarios !== null && scenarios.fail! > 0 ? "scenarios" : null,
+    ...(scenarios === null ? {} : { scenarios }), gateFailures: 0, correctnessFailures: 0,
+    durationMs: 5,
+  });
+  const runner = (invocation: number, result: string, fields: Record<string, unknown> = {}) => ev({
+    kind: "scenario-runner", issue: 1, title: "Issue 1", attempt: 1, round: 1, invocation,
+    result, ...fields,
+  });
+  const ran = { provider: "claude", model: "opus", effort: "high" };
+
+  it("sums each round's scenarios, counts the rounds that ran them as a pass, and the runs as invocations", () => {
+    const report = computeStats(input([run("run-1", [
+      admitted(1),
+      runner(0, "completed", { outcomes: [{ id: "S1", outcome: "unverified", reason: "no-db-copy" }] }),
+      round({ selected: 1, pass: 0, fail: 0, unverified: 1 }),
+      runner(1, "completed", { ...ran, durationMs: 9, transcript: "attempt-2-scenario-runner-1.log" }),
+      runner(2, "completed", { ...ran, durationMs: 4, outcomes: [] }),
+      round({ selected: 3, pass: 1, fail: 1, unverified: 1 }),
+      runner(1, "input-too-large", { outcomes: [] }),
+      round({ selected: 2, pass: 0, fail: 0, unverified: 2 }),
+      round(null),
+    ])]));
+    expect(report.scenarios).toMatchObject({ pass: 1, fail: 1, unverified: 4 });
+    expect(report.passes.scenarios).toEqual({ runs: 3, rejected: 1 });
+    expect(report.passes.correctness).toEqual({ runs: 4, rejected: 0 });
+    expect(report.invocations.map((row) => [row.role, row.invocation, row.effort, row.durationMs])).toEqual([
+      ["scenario-runner", 1, "high", 9],
+      ["scenario-runner", 2, "high", 4],
+    ]);
+  });
+});
+
 describe("computeStats prose (#182)", () => {
   it("carries speech and the terminal reason only with --with-prose", () => {
     const events = [

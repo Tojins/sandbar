@@ -74,7 +74,12 @@ and the gate stack (`config.gateStack`, #24).
    report, `standards-groups.ts`, #204; then a fixer that writes commits →
    read-only verify, #187) → gate-1 → verifier
    (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
-   patch-scoped from round 2) → adjudicator on dispute of either pass (#167).
+   patch-scoped from round 2; beside it, when the writer wrote a set, the
+   scenario runner, `verifier-run.ts` with its grammar in
+   `scenario-runner-parser.ts` (#238), runs every scenario in the issue
+   sandbox; each round's evidence is archived in the run's log tree and only a
+   failing scenario's restaged in `/sandbar/verifier/findings`) → adjudicator
+   on dispute of either pass (#167).
    Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`. Read-only
    roles that write park the issue. Beside attempt 1, the scenario writer
    (#203, `scenario-writer-run.ts`, grammar in `scenario-parser.ts`) runs once
@@ -104,8 +109,9 @@ graphroot; startup and quiescence sweep the run's copies.
 `db-copy.ts` makes one reflink copy of the base per issue and a slot swaps it
 into the sandbox stack beside its target sibling (`swapDbCopyIn`/`Out`),
 then runs `onDbCopyReady` (`Sandbox.runHooks`). The inner loop aligns the
-slot before every action (`dbCopyHolderFor`): only the implementer holds a
-copy, a fresh one each round.
+slot before every action (`dbCopyHolderFor`): the implementer holds a copy, a
+fresh one each round, and so does the scenario runner in a verifier round that
+runs scenarios.
 
 ## Invariants — where they live
 
@@ -160,7 +166,10 @@ copy, a fresh one each round.
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
   configured, +0.2k an enforced egress allowlist, +0.6k a held database
   copy); quality lister 5.6k for the built-in group, 2.8k + its group for a
-  project group; verify 6.0k, fixer 5.4k; verifier white-box 4.1k;
+  project group; verify 6.0k, fixer 5.4k; verifier white-box 4.1k (+0.1k
+  beside a held copy); scenario runner 1.9k + its scenarios (no issue
+  anchor; +2.3k sandbox-stack, +0.2k egress, +0.6k a held copy, +0.2k a
+  failed app hook);
   adjudicator 1.1k + the report; UI check 1.6k and partition
   check 1.5k + the issue anchor; scenario writer 2.2k + the issue anchor;
   resolve 1.2k + anchor + paths/trace; reflect

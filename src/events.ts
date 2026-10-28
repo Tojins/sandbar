@@ -116,6 +116,23 @@
 // `admitted`, `origin-sync` or pre-attempt check event. A new union
 // member, so no bump.
 //
+// `scenario-runner` (#180, #238) is one invocation of the verifier's
+// scenario runner, beside the white-box review's `review-pass` in the same
+// sandbox, so the `peakMemoryBytes` on either is the container's peak while
+// both ran. `result` is `completed` (with `outcomes` on the invocation that
+// decided; without, on a run whose answer earned the format nudge),
+// `failed` (a harness failure, or no valid report after the nudge),
+// `wrote`, `input-too-large` (a prompt over budget, then with no agent
+// fields, or a provider's refusal), `quota` or `credential`. `outcomes`
+// hold every scenario the round selected, pre-pass ones included, by id,
+// outcome and reason code; no event carries scenario or runner text.
+// `evidenceBytes` is what the round archived. A round whose scenarios the
+// pre-pass settled is one event with `invocation: 0` and no agent fields.
+// `review-round.scenarios` counts the round's scenarios, and `rejectingPass`
+// may be `scenarios`; when both passes rejected it is `correctness` and
+// `rejectingPasses` names both. `correctness` stays the white-box verdict.
+// A new kind and new optional fields, so no bump.
+//
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
@@ -138,6 +155,7 @@ import type { StackClassification } from "./stack-change.js";
 import type { AgentRunEndedBy } from "./agent-sandbox.js";
 import type { ContainerResources } from "./container-resources.js";
 import type { EgressCounts, EgressMode, EgressRefusal } from "./egress-policy.js";
+import type { ScenarioRoundOutcome, ScenarioTally, UnverifiedReason } from "./verifier.js";
 import {
   createTranscriptTree,
   type TranscriptTree,
@@ -205,6 +223,23 @@ export type ScenarioWriterResult =
   | "quota"
   | "credential"
   | "aborted";
+
+export type ScenarioRunnerResult =
+  | "completed"
+  | "failed"
+  | "wrote"
+  | "input-too-large"
+  | "quota"
+  | "credential";
+
+// One scenario's outcome as the record keeps it: codes, never text.
+export type ScenarioOutcomeRecord = {
+  readonly id: string;
+  readonly outcome: ScenarioRoundOutcome["outcome"];
+  readonly reason?: UnverifiedReason;
+};
+
+export type RejectingPass = "correctness" | "scenarios";
 
 export type HeldReason = ChunkBlockReason | "drifted-branches";
 
@@ -415,6 +450,7 @@ export type EventInput =
   | (EventIssue & ContainerResources & { readonly kind: "issue-anchor"; readonly result: IssueAnchorResult; readonly rawChars: number; readonly tracedChars: number; readonly anchorChars: number; readonly comments: number; readonly dropped: number; readonly provider?: string; readonly model?: string; readonly effort?: string | null; readonly durationMs?: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "scenario-writer"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs?: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly result: ScenarioWriterResult; readonly scenarios?: number; readonly usage?: UsageFields })
+  | (EventSubject & ContainerResources & { readonly kind: "scenario-runner"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider?: string; readonly model?: string; readonly effort?: string | null; readonly durationMs?: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly result: ScenarioRunnerResult; readonly outcomes?: readonly ScenarioOutcomeRecord[]; readonly evidenceBytes?: number; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "partition-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly result: "CLEAR" | "PARTITION" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits?: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & { readonly kind: "gate-stack"; readonly gate: "gate-1"; readonly tipBlob: string | null; readonly classification: StackClassification["kind"]; readonly containers?: readonly string[] })
@@ -428,7 +464,7 @@ export type EventInput =
   | (EgressSubject & EgressRefusal & { readonly kind: "egress-refused" })
   | (EgressSubject & EgressSummaryEvent & { readonly kind: "egress" })
   | (ContainerResources & { readonly kind: "container"; readonly stack: "gate" | "sandbox"; readonly name: string; readonly container: string; readonly lifecycle: "issue" | "attempt"; readonly durationMs: number } & Partial<EventSubject>)
-  | (EventSubject & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly quality: QualityOutcome["verdict"]; readonly qualityRounds: number; readonly gateOk: boolean; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "correctness" | null; readonly gateFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
+  | (EventSubject & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly quality: QualityOutcome["verdict"]; readonly qualityRounds: number; readonly gateOk: boolean; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: RejectingPass | null; readonly rejectingPasses?: readonly RejectingPass[]; readonly scenarios?: ScenarioTally; readonly gateFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
   | (EventSubject & { readonly kind: "repair"; readonly attempt: number; readonly action: "fast-forward" | "re-prompt" | "promise-nudge"; readonly detail: string })
   | (EventSubject & { readonly kind: "hard-error"; readonly retry: number; readonly max: number; readonly reason: string })
   | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-PARTITION" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "NEEDS-STACK-CHANGE" | "HARD-ERROR" | "QUOTA" | "CREDENTIAL" | "REJECTED"; readonly reason: string | null; readonly cause?: TerminalCause; readonly specGaps?: number; readonly durationMs: number })

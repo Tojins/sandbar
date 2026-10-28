@@ -1,7 +1,8 @@
 ## Previous verifier feedback (CHANGES-REQUESTED)
 
 Each finding is tagged with its source: `[white-box]` is a code review of your
-branch.
+branch, and `[scenario S<n>]` a scenario run against it that failed; its
+evidence is under `/sandbar/verifier/findings/S<n>/`.
 
 {{prose}}
 

@@ -53,11 +53,14 @@
 // the agent's writes while git can still read the tree. It needs git in the
 // container, which no stock image here carries, so it builds alpine plus git
 // once per file (a network pull, as ensure-images-podman.test.ts already makes).
+// The fourth (#238) mounts the verifier's workspace read-write through the
+// same provider and asks whether the host can move and remove what the agent
+// wrote there, and whether the agent sees anything beside it.
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -86,6 +89,12 @@ import {
   sandboxRunArgs,
 } from "./agent-sandbox.js";
 import { withRuntimeEnv } from "./runtime.js";
+import {
+  archiveRun,
+  clearRunDir,
+  prepareVerifierWorkspace,
+  restageFindings,
+} from "./verifier-run.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
@@ -571,4 +580,52 @@ describe.runIf(snapshotAvailable)("a seed snapshot sandbox against real podman (
       `Seed snapshot preserved at ${sandbox.worktreePath}: the scenario writer wrote`,
     ]);
   }, 120_000);
+
+  // #238: the verifier's workspace, mounted read-write through the same
+  // provider. The agent's files there belong to the host user (keep-id), so
+  // the host can archive, restage and remove them, and nothing of the host
+  // directory around the workspace is visible to the agent.
+  it.concurrent("mounts the verifier workspace so the host owns what the agent wrote there, and nothing beside it", async ({ expect }) => {
+    const issueLogs = join(root, "logs", "issue-238");
+    const workspace = join(issueLogs, "verifier-workspace");
+    await prepareVerifierWorkspace(workspace);
+    await writeFile(join(issueLogs, "beside.txt"), "SIBLING-SECRET\n");
+    await clearRunDir(workspace);
+    const sandbox = await createSeedSnapshotSandbox({
+      layout,
+      issueId: "238",
+      seedSha,
+      sandbox: podman({ imageName, namePrefix: scopedResourcePrefix(SCOPE) }),
+      env: {},
+      extraMounts: [{ hostPath: workspace, sandboxPath: "/sandbar/verifier" }],
+      onNotice: () => undefined,
+    });
+    try {
+      const probe =
+        "mkdir -p /sandbar/verifier/run/S1 && echo evidence > /sandbar/verifier/run/S1/out.txt && " +
+        "l=$(ls -A /sandbar) && " +
+        "if grep -rqs SIBLING-SECRET / --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev; " +
+        "then s=seen; else s=unseen; fi; " +
+        "printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"%s %s\"}\\n' \"$l\" \"$s\"";
+      const agent: AgentProvider = {
+        name: "claude-code",
+        env: {},
+        buildPrintCommand: () => ({ command: probe, stdin: "" }),
+        parseStreamLine: parseStreamJsonLine,
+      };
+      const result = await sandbox.run({ agent, prompt: "go", completionSignal: [], idleTimeoutSeconds: 60 });
+      expect(result.stdout).toBe("verifier unseen");
+    } finally {
+      await sandbox.close();
+    }
+    const roundDir = join(root, "run", "issue-238", "verifier", "round-1");
+    await archiveRun(workspace, roundDir);
+    await restageFindings(workspace, roundDir, ["S1"]);
+    expect(await readFile(join(roundDir, "S1", "out.txt"), "utf8")).toBe("evidence\n");
+    expect(await readFile(join(workspace, "findings", "S1", "out.txt"), "utf8")).toBe("evidence\n");
+    await rm(roundDir, { recursive: true });
+    await prepareVerifierWorkspace(workspace);
+    expect(existsSync(join(workspace, "findings"))).toBe(false);
+  }, 120_000);
 });
+

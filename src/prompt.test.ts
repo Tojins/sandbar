@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,9 +15,12 @@ import {
   renderAttemptSlot,
   renderQualityFixSlot,
   renderQualityReviewSlot,
+  buildScenarioRunnerPrompt,
   renderReviewerSlot,
   renderSandboxStackSlot,
+  renderScenarioRunnerSlot,
 } from "./prompt.js";
+import type { Scenario } from "./scenario-parser.js";
 import { SETTLED_RULES, type SettledRule } from "./config.js";
 import { parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
@@ -33,6 +39,7 @@ const baseInputs = {
   priorRounds: [],
   scope: { kind: "full" },
   changedSinceStat: null,
+  productionData: false,
 } as const;
 
 const builtinStandards = parseStandards(loadTemplate("coding-standards"), "sandbar");
@@ -450,6 +457,20 @@ describe("renderReviewerSlot", () => {
     expect(slot).toBe(ROUND_ONE_REVIEW);
   });
 
+  // #238: beside a scenario runner holding a production copy.
+  it("tells the review not to read or quote a production copy held beside it", () => {
+    const slot = renderReviewerSlot({
+      ...baseInputs,
+      commits: "a1 first",
+      stat: " x.ts | 1 +",
+      productionData: true,
+    });
+    expect(slot).toBe(ROUND_ONE_REVIEW.replace(
+      "Your role is strictly advisory.",
+      `${loadTemplate("reviewer-db-notice")}\n\nYour role is strictly advisory.`,
+    ));
+  });
+
   describe("from its second round on (#180)", () => {
     const sinceSlot = (changedSinceStat: string | null = " y.ts | 2 +") =>
       renderReviewerSlot({
@@ -648,6 +669,72 @@ describe("renderReviewerSlot", () => {
     expect(slot).toContain("Issue #42: do the thing");
     expect(slot).toContain("`sandbar/issue-42-do-the-thing`");
     expect(slot).toContain("`main`");
+  });
+});
+
+describe("the scenario runner's prompt (#238)", () => {
+  const scenario: Scenario = {
+    id: "S1",
+    title: "Totals survive payment",
+    needs: ["ui", "sql"],
+    area: ["app/Invoices"],
+    given: ["a paid invoice"],
+    when: ["the user opens it"],
+    then: ["the total is unchanged"],
+  };
+  const bare = {
+    sandboxStack: [],
+    sandboxHasGateAttachments: false,
+    egressEnforced: false,
+    dbCopy: null,
+    appHook: "none",
+    scenarios: [scenario],
+  } as const;
+
+  it("renders the scenarios and nothing of an environment the sandbox lacks", () => {
+    const slot = renderScenarioRunnerSlot(bare);
+    expect(slot).toContain("### S1: Totals survive payment\nneeds: ui, sql\narea: app/Invoices\n" +
+      "Given a paid invoice\nWhen the user opens it\nThen the total is unchanged");
+    expect(slot).toContain("- Quote only the rows a failure needs, here and in your evidence.\n\n## Scenarios");
+    expect(slot).not.toMatch(/sandbox stack|allowlist|production database|beforeScenarioRun/);
+    expect(slot).toContain("<scenario-runner>REPORTED</scenario-runner>");
+  });
+
+  it("names the copy, the copy hook, the egress allowlist and the app hook when they apply", () => {
+    const slot = renderScenarioRunnerSlot({
+      ...bare,
+      sandboxStack: [{ name: "db", image: "mariadb", up: true, logPath: "/sandbar/logs/db.log" }],
+      egressEnforced: true,
+      dbCopy: { kind: "held", holder: "scenario-runner", container: "db", dumpDate: "2026-10-27", hook: "failed" },
+      appHook: "failed",
+    });
+    expect(slot).toContain("## Your sandbox stack");
+    expect(slot).toContain(loadTemplate("implementer-sandbox-egress"));
+    expect(slot).toContain("The `db` sibling runs on a fresh copy of the production database dump\nof 2026-10-27");
+    expect(slot).toContain("**The copy hook failed on it**; its output is in `/sandbar/logs/db-copy-hook.log`.");
+    expect(slot).toContain("**The `beforeScenarioRun` hook failed**");
+    expect(slot).toContain("`/sandbar/verifier/run/before-scenario-run.log`");
+  });
+
+  it("is the project anchor, its slot and its extension, with no issue anchor", async () => {
+    // Not a repository: the anchor's history renders as unavailable.
+    const dir = mkdtempSync(join(tmpdir(), "sandbar-runner-prompt-"));
+    const prompt = await buildScenarioRunnerPrompt({
+      ...bare,
+      anchor: { repoDir: dir, claudeMdPath: "CLAUDE.md", sourceBranch: "main" },
+      worktreePath: dir,
+      promptExtension: { text: "Log in as the demo user." },
+    });
+    const layers = prompt.split("\n\n---\n\n");
+    expect(layers[0]).toMatch(/^# Project anchor/);
+    expect(layers[1]).toBe(renderScenarioRunnerSlot(bare));
+    expect(layers[2]).toBe("### Project prompt extension\n\nLog in as the demo user.");
+    expect(prompt).not.toContain("# Issue anchor");
+  });
+
+  // The fixed size the CLAUDE.md prompt budget quotes.
+  it("stays near its measured fixed size", () => {
+    expect(renderScenarioRunnerSlot({ ...bare, scenarios: [] }).length).toBeLessThan(2_300);
   });
 });
 

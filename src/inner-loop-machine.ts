@@ -34,10 +34,16 @@
 // with its budget (`correctnessFailures` against `maxReviewRounds`), its
 // harness rule and its adjudicator path. Its outcome arrives already combined:
 // a write parks, a harness failure takes #41's path, an approval is DONE, and a
-// rejection is a list of tagged units charged once. A rejection is kept in two
-// renderings: `latestReviewerFeedback`, which the implementer reads, and
-// `latestReviewerPublic`, which is the only one any terminal carries, so
-// whatever finalise publishes is the public rendering by construction.
+// rejection is a list of tagged units charged once, whichever agents it came
+// from. `run-verifier` carries the scenario writer's set when it wrote one, so
+// the scenario runner joins the white-box review (#238). A rejection keeps the
+// white-box verdict beside its units, so a white-box review that produced
+// nothing beside a failing scenario is said in both renderings. A rejection is
+// kept in two renderings: `latestReviewerFeedback`, which the implementer
+// reads, and `latestReviewerPublic`, which is the only one any terminal
+// carries, so whatever finalise publishes is the public rendering by
+// construction; beside a scenario unit it withholds an upheld ruling's
+// reasoning, which may quote the scenario.
 //
 // The quality pass (#187) is three cold roles. A read-only LISTER walks the
 // branch — the whole branch until a quality pass has approved a head, then
@@ -118,9 +124,11 @@ import { loadTemplate } from "./prompts.js";
 import type { ScenarioSet } from "./scenario-parser.js";
 import type { StackChange } from "./stack-change.js";
 import {
+  type ScenarioTally,
   type VerifierOutcome,
   type VerifierUnit,
-  renderUnits,
+  type WhiteBoxVerdict,
+  renderRejection,
 } from "./verifier.js";
 
 const ADJUDICATOR_HARNESS_FAILED_REPROMPT = loadTemplate(
@@ -150,6 +158,7 @@ export type PendingRejection = {
 // `report` is the units' private rendering, and the units keep the public one.
 export type VerifierRejection = PendingRejection & {
   readonly units: readonly VerifierUnit[];
+  readonly whiteBox: WhiteBoxVerdict;
 };
 
 // What a quality lister or the verifier's white-box review reads (#187, #180):
@@ -365,6 +374,7 @@ export type Verdict =
       readonly latestReviewerProse: string;
       readonly cause:
         | "reviewer-wrote"
+        | "verifier-wrote"
         | "quality-reviewer-wrote"
         | "adjudicator-wrote"
         | "ui-checker-wrote"
@@ -432,7 +442,13 @@ export type LoopAction =
       readonly quality: QualityOutcome;
     }
   | { readonly kind: "await-scenario-writer" }
-  | { readonly kind: "run-verifier"; readonly attempt: number }
+  | {
+      readonly kind: "run-verifier";
+      readonly attempt: number;
+      // The scenario writer's set when it wrote one; null runs the white-box
+      // review alone.
+      readonly scenarios: ScenarioSet | null;
+    }
   | {
       readonly kind: "run-adjudicator";
       readonly attempt: number;
@@ -557,6 +573,9 @@ export type LoopEvent =
       readonly kind: "verifier-result";
       readonly head: string;
       readonly outcome: VerifierOutcome;
+      // How the round's scenarios ended, null when it selected none. Record
+      // material for the runner's `review-round` event; no transition reads it.
+      readonly scenarios: ScenarioTally | null;
     }
   | {
       readonly kind: "adjudicator-result";
@@ -1355,6 +1374,7 @@ function onGateResult(state: LoopState, gate: Gate1Result): StepResult {
 }
 
 // The verifier slot, behind the scenario writer's join while it still runs.
+// The runner joins the white-box review only when the writer wrote a set.
 function toVerifier(state: LoopState): StepResult {
   if (state.scenarioWriter.kind === "running") {
     return {
@@ -1362,9 +1382,16 @@ function toVerifier(state: LoopState): StepResult {
       action: { kind: "await-scenario-writer" },
     };
   }
+  const writer = state.scenarioWriter;
   return {
     state: { ...state, phase: "needs-verifier" },
-    action: { kind: "run-verifier", attempt: state.attempt },
+    action: {
+      kind: "run-verifier",
+      attempt: state.attempt,
+      scenarios: writer.kind === "settled" && writer.outcome.kind === "written"
+        ? writer.outcome.set
+        : null,
+    },
   };
 }
 
@@ -1389,7 +1416,7 @@ function onVerifierResult(
     case "approved":
       return terminate({ ...state, pendingRejection: null }, { type: "DONE" });
     case "rejected":
-      return onVerifierRejected(state, head, outcome.units);
+      return onVerifierRejected(state, head, outcome);
   }
 }
 
@@ -1397,14 +1424,15 @@ function onVerifierResult(
 function onVerifierRejected(
   state: LoopState,
   head: string,
-  units: readonly VerifierUnit[],
+  { units, whiteBox }: Extract<VerifierOutcome, { kind: "rejected" }>,
 ): StepResult {
   const correctnessFailures = state.correctnessFailures + 1;
   const pendingRejection: VerifierRejection = {
     round: state.attempt,
     head,
-    report: renderUnits(units, "text"),
+    report: renderRejection({ units, whiteBox }, "text"),
     units,
+    whiteBox,
   };
   const feedback = rejectionFeedback(state, pendingRejection);
   const reviewedState: LoopState = {
@@ -1430,17 +1458,27 @@ function onVerifierRejected(
 
 // A verifier rejection in both renderings. One repeated at a head an
 // adjudicator already UPHELD carries that ruling's reasoning, so the
-// implementer is not handed the report as if it were still disputable.
+// implementer is not handed the report as if it were still disputable. The
+// public rendering withholds that reasoning beside a scenario unit, since it
+// may quote the scenario or its evidence.
 function rejectionFeedback(
   state: LoopState,
   rejection: VerifierRejection,
 ): { readonly latestReviewerFeedback: string; readonly latestReviewerPublic: string } {
-  const upheld = state.upheldAdjudication?.head === rejection.head
-    ? ["Independent adjudicator: UPHELD", state.upheldAdjudication.reasoning, ""]
-    : [];
+  const ruling = state.upheldAdjudication?.head === rejection.head
+    ? state.upheldAdjudication.reasoning
+    : null;
+  const upheld = (reasoning: string): string[] => ["Independent adjudicator: UPHELD", reasoning, ""];
+  const publicReasoning = rejection.units.some((unit) => unit.id !== "white-box")
+    ? "(reasoning withheld beside scenario findings)"
+    : ruling;
   return {
-    latestReviewerFeedback: [...upheld, rejection.report].join("\n"),
-    latestReviewerPublic: [...upheld, renderUnits(rejection.units, "publicText")].join("\n"),
+    latestReviewerFeedback: [...(ruling === null ? [] : upheld(ruling)), rejection.report]
+      .join("\n"),
+    latestReviewerPublic: [
+      ...(ruling === null || publicReasoning === null ? [] : upheld(publicReasoning)),
+      renderRejection(rejection, "publicText"),
+    ].join("\n"),
   };
 }
 

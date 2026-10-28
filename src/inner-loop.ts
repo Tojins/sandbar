@@ -72,10 +72,19 @@
 //
 // After a clean, on-branch COMPLETE the round is serial (#185, #187): the
 // quality pass, then gate-1 once on the head it left, then — only on a green
-// gate — the verifier (#180). Today that is its white-box review alone: the
-// cold correctness review on its own separately configured provider and model
-// (#121), whose result `combineVerifier` (verifier.ts) turns into the
-// machine's outcome. The quality pass's three roles all route through
+// gate — the verifier (#180): the white-box review, the cold correctness
+// review on its own separately configured provider and model (#121), and,
+// when the scenario writer wrote a set, the scenario runner (#238,
+// verifier-run.ts) beside it in this sandbox. Both settle before either
+// result is used, and `combineVerifier` (verifier.ts) folds them into the
+// machine's outcome. Before they start, the round's `run/` in the verifier
+// workspace is emptied and the consumer's `beforeScenarioRun` hook serves the
+// app from the head; after, the round's evidence is archived in the issue's
+// log tree and only the failing scenarios' evidence is restaged in
+// `findings/`, again before a verifier report is adjudicated. That workspace
+// is created empty with each sandbox, beside its sibling logs, and mounted
+// read-write at `/sandbar/verifier` whenever the writer's task exists. The
+// quality pass's three roles all route through
 // `reviewerQuality*` and `promptExtensions.reviewerQuality`. Its listers and
 // verify are read-only reviews run like the white-box review (reviewer-run.ts
 // owns their one cold retry), each invocation recorded as a `quality-review`
@@ -137,10 +146,10 @@
 // host cache on success (#98), as does each settled fixer invocation. After an
 // implementer invocation failure the same publish is recovery-only: its
 // failure is logged and may not replace the provider error.
-// Anchor-condenser, partition-check, UI-check, reviewer, quality lister and
-// verify, and adjudicator invocations snapshot tip and status; any mutation
-// parks the issue and preserves the clone rather than trusting that call. The
-// quality fixer is the one cold role exempt (#185).
+// Anchor-condenser, partition-check, UI-check, reviewer, scenario-runner,
+// quality lister and verify, and adjudicator invocations snapshot tip and
+// status; any mutation parks the issue and preserves the clone rather than
+// trusting that call. The quality fixer is the one cold role exempt (#185).
 // Invocation filenames use one run-owned, per-issue sequence across fresh
 // HARD-ERROR cycles and later admissions: the state machine's attempt and
 // UI-check counters restart at both boundaries, but an earlier invocation
@@ -174,10 +183,13 @@
 // run's copies (`createDbCopySlot`) for the target sibling of its stack in
 // effect at setup. Before every action the runner aligns it to that action's
 // holder (`dbCopyHolderFor`): the implementer gets a fresh copy each round,
-// kept across back-to-back implementer actions and dropped at any other, so
-// quality, gate and the verifier run beside the fixtures. Only the
-// implementer's prompt reads the slot's answer; an unavailable copy renders
-// nothing. The teardown drops the copy ahead of the siblings it runs among,
+// kept across back-to-back implementer actions and dropped at any other, and
+// so does the scenario runner in a verifier round that runs scenarios (#238);
+// quality, gate, the adjudicator and a white-box review alone run beside the
+// fixtures. The implementer's and the runner's prompts read the slot's
+// answer, and the white-box review beside a held copy is told not to read it;
+// an unavailable copy renders nothing, and leaves the scenarios that need SQL
+// unverified. The teardown drops the copy ahead of the siblings it runs among,
 // so neither a HARD-ERROR's fresh sandbox nor a preserved clone keeps it.
 // Each duration-bearing agent event carries that invocation's peak-memory/OOM
 // evidence, gate events retain it per step, and both stacks emit each sibling's
@@ -200,7 +212,7 @@
 // clean up on failure while preserving the original error, or report a failed
 // best-effort teardown whose result is unrelated to the issue verdict (#83).
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   type AgentProviderName,
@@ -269,6 +281,7 @@ import type {
   EventInput,
   EventSubject,
   IssueAnchorResult,
+  RejectingPass,
   QualityPassEvent,
   QualityReviewEvent,
   UsageFields,
@@ -361,7 +374,27 @@ import {
 } from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
-import { type VerifierOutcome, combineVerifier, reviewScope } from "./verifier.js";
+import {
+  VERIFIER_MOUNT,
+  type RunnerEnvironment,
+  type ScenarioTally,
+  type WhiteBoxVerdict,
+  combineVerifier,
+  prepass,
+  reviewScope,
+  runnerOutcomes,
+  tallyScenarios,
+  withheldTranscript,
+} from "./verifier.js";
+import {
+  archiveRun,
+  clearRunDir,
+  prepareVerifierWorkspace,
+  restageFindings,
+  runAppHook,
+  runScenarioRunner,
+  settleWithoutRunner,
+} from "./verifier-run.js";
 import { startTimer } from "./timing.js";
 import {
   containerResourcesOf,
@@ -383,6 +416,7 @@ import {
   buildPartitionCheckPrompt,
   buildQualityFixPrompt,
   buildQualityReviewPrompt,
+  buildScenarioRunnerPrompt,
   buildUiCheckPrompt,
   contextChars,
   measureNetDiffChars,
@@ -510,6 +544,7 @@ export type Terminal =
       readonly latestReviewerProse: string;
       readonly cause:
         | "reviewer-wrote"
+        | "verifier-wrote"
         | "quality-reviewer-wrote"
         | "adjudicator-wrote"
         | "ui-checker-wrote"
@@ -736,6 +771,9 @@ export type InnerLoopConfig = {
   readonly scenarioWriter: boolean;
   readonly scenarioWriterAgent: AgentProviderName;
   readonly scenarioWriterModelId: string;
+  // The verifier's scenario runner (#180), beside the white-box review.
+  readonly scenarioRunnerAgent: AgentProviderName;
+  readonly scenarioRunnerModelId: string;
   // Reasoning effort per call (#130), the third per-call knob beside the model
   // id and the CLI. Absent is a value — the CLI's default — and stays absent
   // on the log line.
@@ -746,6 +784,7 @@ export type InnerLoopConfig = {
   readonly uiCheckEffort?: string | undefined;
   readonly condenserEffort?: string | undefined;
   readonly scenarioWriterEffort?: string | undefined;
+  readonly scenarioRunnerEffort?: string | undefined;
   readonly uiPrototypeCheck: boolean;
   readonly partitionCheck: boolean;
   readonly maxContextChars: number;
@@ -1296,6 +1335,12 @@ async function runSandboxCycle(
     // SOURCE and podman reads it at container start, so a missing one is a
     // bringup failure rather than an empty mount.
     if (sbxContainers.length > 0) await prepareSandboxLogDir(sandboxLogDir);
+    // The verifier's evidence workspace (#238), whenever the scenario writer's
+    // task exists: a bind-mount source too, and empty for each sandbox.
+    const verifierWorkspace = scenarioWriter === null
+      ? null
+      : join(dirname(sandboxLogDir), "verifier-workspace");
+    if (verifierWorkspace !== null) await prepareVerifierWorkspace(verifierWorkspace);
     const holder: { stack: SandboxStack | null; egress: OwnerProxy | null } = {
       stack: null,
       egress: null,
@@ -1372,6 +1417,10 @@ async function runSandboxCycle(
             hostPath: sandboxLogDir,
             sandboxPath: SANDBOX_LOG_MOUNT,
             readonly: true,
+          }]),
+          ...(verifierWorkspace === null ? [] : [{
+            hostPath: verifierWorkspace,
+            sandboxPath: VERIFIER_MOUNT,
           }]),
           ...setupStack.attachments.mounts.map((mount) => ({
             hostPath: resolveStackMountHostPath(worktreePath, mount),
@@ -1639,6 +1688,7 @@ async function runSandboxCycle(
         imageName: bringup.imageName,
         scenarioWriter,
         dbCopy,
+        verifierWorkspace,
       });
       // Whatever an action returned after an abort, it ran against a
       // sandbox being torn down.
@@ -1662,8 +1712,12 @@ async function runSandboxCycle(
           round: opened.attempt,
           quality: opened.quality.verdict,
           qualityRounds: opened.quality.rounds,
-          ...round,
-          rejectingPass: round.correctness === "CHANGES-REQUESTED" ? "correctness" : null,
+          head: round.head,
+          gateOk: round.gateOk,
+          correctness: round.correctness,
+          rejectingPass: round.rejectingPasses[0] ?? null,
+          ...(round.rejectingPasses.length > 1 ? { rejectingPasses: round.rejectingPasses } : {}),
+          ...(round.scenarios === null ? {} : { scenarios: round.scenarios }),
           gateFailures: state.gateFailures,
           correctnessFailures: state.correctnessFailures,
           durationMs: opened.timer(),
@@ -1832,9 +1886,12 @@ type ExecuteActionCtx = {
   // The cycle's resolved sandbox image, and the admission's writer when on.
   readonly imageName: string;
   readonly scenarioWriter: ScenarioWriterTask | null;
-  // The database copy this action runs beside (#201); only the implementer's
-  // prompt reads it.
+  // The database copy this action runs beside (#201): the implementer's and
+  // the scenario runner's prompts read it.
   readonly dbCopy: DbCopyStatus;
+  // The verifier's evidence workspace on the host (#238), present whenever
+  // the scenario writer's task is.
+  readonly verifierWorkspace: string | null;
 };
 
 // Runner-owned facts about the quality pass in this sandbox cycle (#185,
@@ -1876,28 +1933,33 @@ async function tipSettledRules(stackSource: StackSource): Promise<ReadonlySet<Se
 
 // The round a gate-1 or verifier result closes, for the `review-round`
 // record; null for every other event, and for a verifier write (which parks).
-// `correctness` is the white-box review's verdict.
+// `correctness` is the white-box review's verdict, and `rejectingPasses` the
+// passes that rejected, the white-box review's first (#238).
 export function closedReviewRound(event: LoopEvent): {
   readonly head: string;
   readonly gateOk: boolean;
-  readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED";
+  readonly correctness: WhiteBoxVerdict | "SKIPPED";
+  readonly rejectingPasses: readonly RejectingPass[];
+  readonly scenarios: ScenarioTally | null;
 } | null {
   if (event.kind === "gate-result") {
     return event.gate.ok
       ? null
-      : { head: event.head, gateOk: false, correctness: "SKIPPED" };
+      : { head: event.head, gateOk: false, correctness: "SKIPPED", rejectingPasses: [], scenarios: null };
   }
   if (event.kind !== "verifier-result") return null;
-  const correctness = WHITE_BOX_VERDICT[event.outcome.kind];
-  return correctness === null ? null : { head: event.head, gateOk: true, correctness };
+  const { outcome, scenarios } = event;
+  const correctness = outcome.kind === "rejected"
+    ? outcome.whiteBox
+    : outcome.kind === "approved"
+      ? "APPROVED"
+      : outcome.kind === "harness-failed"
+        ? "HARNESS-FAILED"
+        : null;
+  if (correctness === null) return null;
+  const rejectingPasses = outcome.kind === "rejected" ? outcome.rejectingPasses : [];
+  return { head: event.head, gateOk: true, correctness, rejectingPasses, scenarios };
 }
-
-const WHITE_BOX_VERDICT = {
-  wrote: null,
-  "harness-failed": "HARNESS-FAILED",
-  approved: "APPROVED",
-  rejected: "CHANGES-REQUESTED",
-} as const satisfies Record<VerifierOutcome["kind"], string | null>;
 
 async function executeAction(
   action: LoopAction,
@@ -3200,7 +3262,8 @@ export async function enforceReadOnlyAgentSnapshot(
     | "Adjudicator"
     | "UI checker"
     | "Partition checker"
-    | "Anchor condenser",
+    | "Anchor condenser"
+    | "Scenario runner",
   transcript: string,
 ): Promise<string | null> {
   if (!readOnlyAgentSnapshotChanged(before, after)) return null;
@@ -3227,7 +3290,10 @@ export async function enforceReadOnlyAgentSnapshot(
 // report the implementer committed nothing for, or a quality report the fixer
 // committed nothing for. A verifier OVERRULED ends the issue as approved,
 // so no history entry needs rewriting afterwards; a quality OVERRULED joins
-// the overrules later listers are shown.
+// the overrules later listers are shown. Before a verifier report is judged,
+// `findings/` is restaged from that round's archive (#238), whatever the
+// implementer did to it; beside a scenario unit, a write's detail names the
+// judge's transcript rather than quoting it, as it may quote the evidence.
 export async function runAdjudicator(
   action: Extract<LoopAction, { kind: "run-adjudicator" }>,
   ctx: ExecuteActionCtx,
@@ -3236,6 +3302,19 @@ export async function runAdjudicator(
 }>> {
   const { issue, sandbox, opts, config } = ctx;
   const { rejection } = action;
+  const scenarioUnits = action.pass === "correctness"
+    ? action.rejection.units.flatMap((unit) => (unit.id === "white-box" ? [] : [unit.id]))
+    : [];
+  if (action.pass === "correctness" && ctx.verifierWorkspace !== null) {
+    await restageFindings(
+      ctx.verifierWorkspace,
+      opts.attemptLogger.verifierRoundDir(ctx.invocationSequence.filename({
+        role: "verifier-round",
+        attempt: rejection.round,
+      })),
+      scenarioUnits,
+    );
+  }
   const prompt = await buildAdjudicatorPrompt({
     ...branchRoleInputs(ctx),
     pass: action.pass,
@@ -3327,7 +3406,9 @@ export async function runAdjudicator(
       before,
       after,
       "Adjudicator",
-      output,
+      scenarioUnits.length === 0
+        ? output
+        : withheldTranscript(transcript),
     );
     if (write !== null) return { kind: "adjudicator-wrote", detail: write };
 
@@ -3407,18 +3488,41 @@ export async function runAdjudicator(
   return { kind: "adjudicator-harness-failed", detail: details.join("\n\n") };
 }
 
-// The verifier (#180): today its white-box review alone, the correctness
-// review (#121, #185), cold and read-only, run only on a green gate-1 at the
-// head the quality pass left. From its second round on it reads the change
-// since the last head an earlier round reviewed. Its picture is measured
-// before it runs, still anchored at the seed; reviewer-run.ts owns what its
-// invocations mean.
+// The verifier (#180, #238): its white-box review, the correctness review
+// (#121, #185), and, when the scenario writer wrote a set, the scenario runner
+// beside it (verifier-run.ts), both cold and read-only, run only on a green
+// gate-1 at the head the quality pass left. Every round runs every written
+// scenario. Before the agents start, the round's `run/` is emptied, the
+// `beforeScenarioRun` hook serves the app from this head and the pre-pass
+// settles what cannot run; the white-box picture is measured, still anchored at
+// the seed, and from its second round on the review reads the change since the
+// last head an earlier round reviewed. Both agents settle before anything is
+// decided: a throw from either is rethrown, the white-box review's first.
+// Then the round's evidence is archived and the failing scenarios' restaged,
+// and `combineVerifier` folds the two results. reviewer-run.ts owns what the
+// white-box invocations mean.
 export async function runVerifier(
   action: Extract<LoopAction, { kind: "run-verifier" }>,
   ctx: ExecuteActionCtx,
 ): Promise<Extract<LoopEvent, { kind: "verifier-result" | "context-over-budget" }>> {
   const { issue, sandbox, opts, config } = ctx;
   const head = await requireIssueTip(ctx, "before the verifier");
+  const selected = action.scenarios?.scenarios ?? [];
+  // The workspace exists whenever the scenario writer's task does, and so
+  // whenever a set was written.
+  const workspace = selected.length === 0 ? null : ctx.verifierWorkspace;
+  if (selected.length > 0 && workspace === null) {
+    throw new Error("scenarios to run without a verifier workspace");
+  }
+  let appHook: RunnerEnvironment["appHook"] = "none";
+  if (workspace !== null) {
+    await clearRunDir(workspace);
+    appHook = await runAppHook(sandbox, opts.hooks.sandbox?.beforeScenarioRun ?? [], workspace);
+  }
+  const plan = prepass(selected, {
+    dbCopies: ctx.dbCopy.kind === "none" ? "off" : ctx.dbCopy.kind,
+    appHook,
+  });
   const contained = new Map(await Promise.all(ctx.priorReviewRounds.map(
     async ({ head: reviewed }) =>
       [reviewed, await isAncestor(sandbox.worktreePath, reviewed, head)] as const,
@@ -3430,6 +3534,7 @@ export async function runVerifier(
       : { promptExtension: config.promptExtensions.reviewer }),
     priorRounds: ctx.priorReviewRounds,
     scope: reviewScope(ctx.priorReviewRounds, (sha) => contained.get(sha) === true),
+    productionData: ctx.dbCopy.kind === "held",
   });
   const measuredContextChars = contextChars(
     prompt,
@@ -3444,43 +3549,93 @@ export async function runVerifier(
       detail: "The completed branch exceeds the configured context budget before review.",
     };
   }
-  const outcome = await runReadOnlyReview(ctx, {
-    role: "Reviewer",
+  const runnerDeps = {
+    issue,
+    subject: ctx.subject.event,
+    sandbox,
+    config,
+    invocationSequence: ctx.invocationSequence,
+    attemptLogger: opts.attemptLogger,
+    onEvent: opts.onEvent,
+    providerState: opts.providerState,
+  };
+  const runnerInput = workspace === null || plan.run.length === 0 ? null : {
     attempt: action.attempt,
-    describe: `reviewer round=${action.attempt}`,
-    agent: config.reviewerAgent,
-    modelId: config.reviewerModelId,
-    effort: config.reviewerEffort,
-    prompt,
-    measuredContextChars,
-    slot: "review-correctness",
-    name: (invocation) =>
-      `reviewer-${issue.id}-round-${action.attempt}` +
-      (invocation > 1 ? `-invocation-${invocation}` : ""),
-    filename: (invocation) => ctx.invocationSequence.filename({
-      role: "reviewer", attempt: action.attempt, invocation,
+    scenarios: plan.run,
+    prepass: plan.unverified,
+    workspace,
+    prompt: await buildScenarioRunnerPrompt({
+      anchor: ctx.anchorOpts,
+      worktreePath: sandbox.worktreePath,
+      ...(config.promptExtensions?.scenarioRunner === undefined
+        ? {}
+        : { promptExtension: config.promptExtensions.scenarioRunner }),
+      sandboxStack: ctx.sandboxStatuses,
+      sandboxHasGateAttachments: hasSandboxGateAttachments(ctx.sandboxGateAttachments),
+      egressEnforced: config.egress?.policy.mode === "enforce",
+      dbCopy: ctx.dbCopy.kind === "held" ? ctx.dbCopy : null,
+      appHook,
+      scenarios: plan.run,
     }),
-    // One line per INVOCATION (#82). `model=` and `provider=` are on the
-    // record because the number is meaningless without knowing which model
-    // spent it, and both are per-call config a stats reader cannot recover.
-    record: (r) => opts.onEvent({
-      kind: "review-pass",
-      ...ctx.subject.event,
+  };
+  const [whiteBoxSettled, runnerSettled] = await Promise.allSettled([
+    runReadOnlyReview(ctx, {
+      role: "Reviewer",
       attempt: action.attempt,
-      round: action.attempt,
-      invocation: r.invocation,
-      provider: config.reviewerAgent,
-      model: config.reviewerModelId,
-      effort: config.reviewerEffort ?? null,
-      result: r.result,
-      durationMs: r.durationMs,
-      ...(r.endedBy === undefined ? {} : { endedBy: r.endedBy }),
-      transcript: r.transcript,
-      ...(r.maxGapMs === undefined ? {} : { maxGapMs: r.maxGapMs }),
-      ...(r.usage === undefined ? {} : { usage: r.usage }),
-      ...r.resources,
+      describe: `reviewer round=${action.attempt}`,
+      agent: config.reviewerAgent,
+      modelId: config.reviewerModelId,
+      effort: config.reviewerEffort,
+      prompt,
+      measuredContextChars,
+      slot: "review-correctness",
+      name: (invocation) =>
+        `reviewer-${issue.id}-round-${action.attempt}` +
+        (invocation > 1 ? `-invocation-${invocation}` : ""),
+      filename: (invocation) => ctx.invocationSequence.filename({
+        role: "reviewer", attempt: action.attempt, invocation,
+      }),
+      // One line per INVOCATION (#82). `model=` and `provider=` are on the
+      // record because the number is meaningless without knowing which model
+      // spent it, and both are per-call config a stats reader cannot recover.
+      record: (r) => opts.onEvent({
+        kind: "review-pass",
+        ...ctx.subject.event,
+        attempt: action.attempt,
+        round: action.attempt,
+        invocation: r.invocation,
+        provider: config.reviewerAgent,
+        model: config.reviewerModelId,
+        effort: config.reviewerEffort ?? null,
+        result: r.result,
+        durationMs: r.durationMs,
+        ...(r.endedBy === undefined ? {} : { endedBy: r.endedBy }),
+        transcript: r.transcript,
+        ...(r.maxGapMs === undefined ? {} : { maxGapMs: r.maxGapMs }),
+        ...(r.usage === undefined ? {} : { usage: r.usage }),
+        ...r.resources,
+      }),
     }),
-  });
+    runnerInput === null
+      ? settleWithoutRunner(runnerDeps, action.attempt, plan.unverified)
+      : runScenarioRunner(runnerDeps, runnerInput),
+  ]);
+  if (whiteBoxSettled.status === "rejected") throw whiteBoxSettled.reason;
+  if (runnerSettled.status === "rejected") throw runnerSettled.reason;
+  const outcome = whiteBoxSettled.value;
+  const runner = runnerSettled.value;
+  const roundDir = opts.attemptLogger.verifierRoundDir(ctx.invocationSequence.filename({
+    role: "verifier-round",
+    attempt: action.attempt,
+  }));
+  if (workspace !== null) {
+    await archiveRun(workspace, roundDir);
+    await restageFindings(
+      workspace,
+      roundDir,
+      runnerOutcomes(runner).flatMap((o) => (o.outcome === "fail" ? [o.id] : [])),
+    );
+  }
   if (outcome.kind === "reviewed") {
     ctx.priorReviewRounds.push({
       round: action.attempt,
@@ -3494,7 +3649,13 @@ export async function runVerifier(
   return {
     kind: "verifier-result",
     head,
-    outcome: combineVerifier(reviewerResult(outcome, "correctness")),
+    outcome: combineVerifier(
+      reviewerResult(outcome, "correctness"),
+      runner,
+      action.scenarios,
+      (id) => `${join(roundDir, id)}/`,
+    ),
+    scenarios: tallyScenarios(runner),
   };
 }
 
