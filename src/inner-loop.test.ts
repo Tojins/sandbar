@@ -3138,6 +3138,37 @@ describe("runInnerLoop context terminals (#158)", () => {
       ]);
     });
 
+    it("drops the copy at teardown when acquiring it throws, and the fresh sandbox copies again", async () => {
+      const { opts, calls } = copiesHarness(
+        async () => ({ ...completeRun, stdout: "<promise>NEEDS-INFO</promise><questions>stop</questions>", commits: [] }),
+      );
+      let acquisitions = 0;
+      innerLoopMocks.createDbCopySlot.mockReset().mockImplementation(() => ({
+        align: vi.fn(async (desired: DbCopyHolder | null) => {
+          calls.push(`align ${desired}`);
+          if (desired === null) return { kind: "none" };
+          if (acquisitions++ === 0) throw new Error("onDbCopyReady exec died");
+          return held;
+        }),
+      }));
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
+      expect(calls).toEqual([
+        "create sandbox",
+        "align null",
+        "align implementer",
+        "align null",
+        "stop siblings",
+        "close sandbox",
+        "create sandbox",
+        "align null",
+        "align implementer",
+        "align null",
+        "stop siblings",
+        "close sandbox",
+      ]);
+    });
+
     it("refuses to set up copies when the sandbox stack that runs the target is not up", async () => {
       const { opts } = copiesHarness(async () => completeRun);
       innerLoopMocks.startSandboxStack.mockReset().mockResolvedValue(null);

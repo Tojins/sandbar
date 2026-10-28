@@ -242,7 +242,7 @@ describe("createDbCopySlot", () => {
 
   const slotWith = (over: {
     readonly up?: boolean | Error;
-    readonly hookOk?: boolean;
+    readonly hookOk?: boolean | Error;
     readonly hooks?: number;
     readonly registry?: DbCopies;
   } = {}) => {
@@ -265,6 +265,7 @@ describe("createDbCopySlot", () => {
       sandbox: {
         runHooks: async (hooks) => {
           ops.push(`hooks ${hooks.map((h) => h.command).join(",")}`);
+          if (over.hookOk instanceof Error) throw over.hookOk;
           return { ok: over.hookOk ?? true, output: "migrated 3\n" };
         },
       },
@@ -346,6 +347,29 @@ describe("createDbCopySlot", () => {
     const registry = copies();
     const { slot } = slotWith({ up: new Error("podman went away"), registry });
     await expect(slot.align("implementer")).rejects.toThrow("podman went away");
+    expect(await readdir(layout.copies)).toEqual([]);
+    expect((await registry.acquire("221", target())).kind).toBe("ok");
+  });
+
+  it("holds the copy while its hook runs, so a hook that throws leaves align(null) a copy to drop", async () => {
+    await publish();
+    const registry = copies();
+    const { slot, ops, events } = slotWith({ hookOk: new Error("exec died"), registry });
+    await expect(slot.align("implementer")).rejects.toThrow("exec died");
+    expect(await slot.align(null)).toEqual({ kind: "none" });
+    expect(ops).toEqual([expect.stringMatching(/^in /), "hooks prepare-0", "out"]);
+    expect(events.map((e) => e.action)).toEqual(["dropped"]);
+    expect(await readdir(layout.copies)).toEqual([]);
+    expect((await registry.acquire("221", target())).kind).toBe("ok");
+  });
+
+  it("leaves align(null) a copy to drop when the hook's log cannot be written", async () => {
+    await publish();
+    const registry = copies();
+    const { slot } = slotWith({ registry });
+    await rm(logDir, { recursive: true });
+    await expect(slot.align("implementer")).rejects.toThrow(/ENOENT/);
+    expect(await slot.align(null)).toEqual({ kind: "none" });
     expect(await readdir(layout.copies)).toEqual([]);
     expect((await registry.acquire("221", target())).kind).toBe("ok");
   });
