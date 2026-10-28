@@ -33,9 +33,15 @@
 // population and `n` the measured part of it, and an aggregate of nothing
 // measured has null statistics, never 0. Quantiles are nearest-rank. A token
 // sum is null where no invocation in it reported that bucket. The rows for
-// scenarios (#180, #203), quality rule groups (#204), DB copies (#201),
+// scenario outcomes (#180), quality rule groups (#204), DB copies (#201),
 // and the janitor (#205) are empty until those issues emit their events; each
 // adds its own reducer arm here.
+//
+// Scenario sets (#203) are one sample per `scenario-writer` event that
+// carries `scenarios`, NONE counting 0: `issues` is how many issues got one,
+// `perIssue` their sizes, and `writerFailed` the writers that ended in a
+// failure. An aborted writer and one that wrote are neither. A writer event
+// is an invocation row of role `scenario-writer` when it ran at all.
 //
 // Anchors (#217) are one sample per `issue-anchor` event — every loop's
 // opening step — sized before the trace drop, after it, and as the roles
@@ -324,6 +330,15 @@ const AGENT_KINDS: ReadonlySet<StatsEvent["kind"]> = new Set([
   "review-pass", "adjudication", "resolve-attempt",
 ]);
 
+// A scenario writer that ran; a size refusal before the run has no duration.
+type WriterEvent = Extract<StatsEvent, { kind: "scenario-writer" }> & {
+  readonly durationMs: number;
+};
+
+const WRITER_FAILED: ReadonlySet<string> = new Set([
+  "failed", "input-too-large", "quota", "credential",
+]);
+
 // An anchor step that called the condenser; the others made no invocation.
 type CondenserEvent = Extract<StatsEvent, { kind: "issue-anchor" }> & {
   readonly provider: string;
@@ -332,10 +347,12 @@ type CondenserEvent = Extract<StatsEvent, { kind: "issue-anchor" }> & {
   readonly durationMs: number;
 };
 
-const isAgentEvent = (event: StatsEvent): event is AgentEvent | CondenserEvent =>
-  event.kind === "issue-anchor" ? event.provider !== undefined : AGENT_KINDS.has(event.kind);
+const isAgentEvent = (event: StatsEvent): event is AgentEvent | CondenserEvent | WriterEvent =>
+  event.kind === "issue-anchor" ? event.provider !== undefined
+    : event.kind === "scenario-writer" ? event.durationMs !== undefined
+    : AGENT_KINDS.has(event.kind);
 
-const roleOf = (event: AgentEvent | CondenserEvent): Role =>
+const roleOf = (event: AgentEvent | CondenserEvent | WriterEvent): Role =>
   event.kind === "issue-anchor" ? "condenser"
     : event.kind === "quality-review" ? (event.mode === "list" ? "quality-list" : "quality-verify")
     : event.kind === "quality-pass" ? "quality-fix"
@@ -346,7 +363,7 @@ const roleOf = (event: AgentEvent | CondenserEvent): Role =>
 
 function invocationRow(
   run: string,
-  event: AgentEvent | CondenserEvent,
+  event: AgentEvent | CondenserEvent | WriterEvent,
   prose: ReadonlyMap<string, string> | null,
 ): Row {
   const transcript = event.kind === "resolve-attempt" ? null : event.transcript ?? null;
@@ -413,6 +430,8 @@ export function computeStats(input: StatsInput): StatsReport {
   };
   const gate2 = { runs: 0, red: 0 };
   const anchors: Extract<StatsEvent, { kind: "issue-anchor" }>[] = [];
+  const scenarioSets: { readonly issue: number; readonly size: number }[] = [];
+  let writerFailed = 0;
   const deploys = new Map<string, DeployOutcome>();
 
   for (const { run, events, prose } of input.runs) {
@@ -508,6 +527,12 @@ export function computeStats(input: StatsInput): StatsReport {
         case "issue-anchor":
           anchors.push(event);
           break;
+        case "scenario-writer":
+          if (event.scenarios !== undefined) {
+            scenarioSets.push({ issue: event.issue, size: event.scenarios });
+          }
+          if (WRITER_FAILED.has(event.result)) writerFailed += 1;
+          break;
         case "adjudication":
           adjudication[event.pass].rulings += 1;
           if (event.ruling === "OVERRULED") adjudication[event.pass].overruled += 1;
@@ -567,7 +592,14 @@ export function computeStats(input: StatsInput): StatsReport {
         ...deployCounts,
       },
     },
-    scenarios: { issues: 0, perIssue: agg([]), pass: 0, fail: 0, unverified: 0, writerFailed: 0 },
+    scenarios: {
+      issues: new Set(scenarioSets.map((set) => set.issue)).size,
+      perIssue: agg(scenarioSets.map((set) => set.size)),
+      pass: 0,
+      fail: 0,
+      unverified: 0,
+      writerFailed,
+    },
     qualityGroups: {},
     dbCopies: {
       copies: 0,

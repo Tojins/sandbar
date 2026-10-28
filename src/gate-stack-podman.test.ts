@@ -360,7 +360,21 @@ describe.runIf(available)("gate stack against real podman", () => {
         }),
       );
 
-      const red = await stack.runGate();
+      // A step that wrote `nope` cannot exit 3 with an empty stderr, yet under
+      // a loaded remote podman `exec` still occasionally returns none (the
+      // drain sleep above did not cure it). Re-run only that impossible
+      // observation; the capture is then judged on the run podman delivered.
+      let red = await stack.runGate();
+      for (
+        let attempt = 1;
+        attempt < 5 &&
+        red.failedStep === "boom" &&
+        red.exitCode === 3 &&
+        !red.stderr.includes("nope");
+        attempt += 1
+      ) {
+        red = await stack.runGate();
+      }
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe("boom");
       expect(red.exitCode).toBe(3);

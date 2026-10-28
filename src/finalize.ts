@@ -677,7 +677,8 @@ type FinalizeKindInput =
         | "adjudicator"
         | "UI checker"
         | "partition checker"
-        | "anchor condenser";
+        | "anchor condenser"
+        | "scenario writer";
     }
   | {
       readonly kind: "hard-error";

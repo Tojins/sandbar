@@ -30,6 +30,10 @@
 // either pass and its immutable head, deliberately without prior-round
 // history or implementer speech so it must re-establish every blocking claim
 // from the code.
+// The scenario writer (#203) gets the issue anchor, its adversarial contract
+// and its own prompt extension, probed in the seed snapshot it explores; no
+// project anchor, diff or branch history, because it works from the seed and
+// discovers the rest itself.
 // The UI and partition checkers (#126/#158) are intentionally smaller: issue
 // anchor plus their own decision contracts, with no project standards, diff or
 // prior-round history. The anchor condenser (#217) is smaller still: its
@@ -107,6 +111,7 @@ const IMPLEMENTER_TPL = loadTemplate("implementer");
 const UI_CHECK_TPL = loadTemplate("ui-check");
 const PARTITION_CHECK_TPL = loadTemplate("partition-check");
 const ANCHOR_CONDENSER_TPL = loadTemplate("anchor-condenser");
+const SCENARIO_WRITER_TPL = loadTemplate("scenario-writer");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
 const IMPLEMENTER_QUALITY_COMMITS_TPL = loadTemplate("implementer-quality-commits");
@@ -418,6 +423,19 @@ export async function buildPartitionCheckPrompt(
     await buildIssueAnchor(issueId, anchor),
     render(PARTITION_CHECK_TPL, { budgetChars: String(budgetChars) }),
   ].join("\n\n---\n\n");
+}
+
+// The scenario writer (#203). `snapshotPath` is the seed tree it reads, where
+// a path extension must resolve.
+export async function buildScenarioWriterPrompt(
+  issueId: string,
+  anchor: IssueAnchorOptions,
+  snapshotPath: string,
+  extension: PromptExtension | undefined,
+): Promise<string> {
+  const slot = promptExtensionSlot(resolvePromptExtension(snapshotPath, extension)).trimEnd();
+  return [await buildIssueAnchor(issueId, anchor), SCENARIO_WRITER_TPL, ...(slot ? [slot] : [])]
+    .join("\n\n---\n\n");
 }
 
 // The thread condenser (#217): its contract, then the issue it classifies, as

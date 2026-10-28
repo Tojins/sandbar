@@ -71,7 +71,11 @@ and the gate stack (`config.gateStack`, #24).
    (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
    patch-scoped from round 2) → adjudicator on dispute of either pass (#167).
    Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`. Read-only
-   roles that write park the issue.
+   roles that write park the issue. Beside attempt 1, the scenario writer
+   (#203, `scenario-writer-run.ts`, grammar in `scenario-parser.ts`) runs once
+   per admission in its own container on the read-only seed snapshot, files
+   `scenarios-<k>.json` in the issue's log directory, and is joined before the
+   verifier; its failure changes nothing.
 3. **Landing** — serialized, in an ephemeral worktree at `origin/<source>`
    (#10): `merger.ts`, `merger-worktree.ts`, `resolve-loop.ts` (#67),
    `version-conflict.ts` (#68), `forge-verify.ts` (`mergeMode`, #22),
@@ -135,7 +139,8 @@ With `config.databaseCopies`, every recompute reads the base import's outcome
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
   configured); quality lister 5.0k, verify 5.3k, fixer 4.8k; verifier
   white-box 4.1k; adjudicator 1.1k + the report; UI check 1.6k and partition
-  check 1.5k + the issue anchor; resolve 1.2k + anchor + paths/trace; reflect
+  check 1.5k + the issue anchor; scenario writer 2.2k + the issue anchor;
+  resolve 1.2k + anchor + paths/trace; reflect
   tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser
   1.3k + the thread (no anchor). The issue anchor (median 5.6k, max 41k
   measured, #197) has sandbar's traces and quoted reviewer prose dropped and,

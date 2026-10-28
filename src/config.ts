@@ -90,6 +90,7 @@ export type PromptRole =
   | "implementer"
   | "reviewer"
   | "reviewerQuality"
+  | "scenarioWriter"
   | "merger";
 export type PromptExtension =
   | { readonly text: string }
@@ -131,6 +132,7 @@ const PROMPT_ROLES: readonly PromptRole[] = [
   "implementer",
   "reviewer",
   "reviewerQuality",
+  "scenarioWriter",
   "merger",
 ];
 
@@ -836,6 +838,15 @@ export type RunConfig = {
   // no driver default.
   readonly condenseAboveChars?: number | null;
   readonly condenserModelId?: string;
+  // The scenario writer (#203): a cold, read-only role that writes hidden
+  // Given/When/Then scenarios once per admission, in its own container on a
+  // read-only snapshot of the seed, while attempt 1 runs. Default on; its
+  // routing defaults to claude and "opus" independently of every other role,
+  // because the adversarial reasoning is the value, and its effort has no
+  // driver default. A path in `promptExtensions.scenarioWriter` is probed in
+  // that snapshot.
+  readonly scenarioWriter?: boolean;
+  readonly scenarioWriterModelId?: string;
   readonly mergerModelId?: string;
   // `npm run reflect`'s two steps (#182, #208), never run by the daemon: the
   // tagger labels findings against a closed vocabulary ("sonnet"), the
@@ -862,6 +873,7 @@ export type RunConfig = {
   readonly reviewerQualityAgent?: AgentProviderName;
   readonly adjudicatorAgent?: AgentProviderName;
   readonly condenserAgent?: AgentProviderName;
+  readonly scenarioWriterAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
   readonly reflectTaggerAgent?: AgentProviderName;
   readonly reflectSynthesizerAgent?: AgentProviderName;
@@ -875,7 +887,8 @@ export type RunConfig = {
   // gets the driver default beside its default model — implementer, UI
   // checker and reviewer `high`, reviewer-quality and merger `medium`, the
   // adjudicator the reviewer's, the reflect tagger `medium` and its
-  // synthesizer `high`; the condenser has none (#217). A role routed elsewhere
+  // synthesizer `high`; the condenser (#217) and the scenario writer (#203)
+  // have none. A role routed elsewhere
   // has no driver default either:
   // UNSET MEANS ABSENT, no flag is emitted and the CLI's own default applies
   // (for codex the per-model default the server ships, `low` for gpt-5.6-sol
@@ -887,6 +900,7 @@ export type RunConfig = {
   readonly reviewerQualityEffort?: string;
   readonly adjudicatorEffort?: string;
   readonly condenserEffort?: string;
+  readonly scenarioWriterEffort?: string;
   readonly mergerEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
@@ -1096,6 +1110,7 @@ export type ResolvedConfig = Required<
     | "reviewerQualityEffort"
     | "adjudicatorEffort"
     | "condenserEffort"
+    | "scenarioWriterEffort"
     | "mergerEffort"
     | "reflectTaggerEffort"
     | "reflectSynthesizerEffort"
@@ -1113,6 +1128,7 @@ export type ResolvedConfig = Required<
   readonly reviewerQualityEffort?: string;
   readonly adjudicatorEffort?: string;
   readonly condenserEffort?: string;
+  readonly scenarioWriterEffort?: string;
   readonly mergerEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
@@ -1142,6 +1158,8 @@ export const DEFAULT_REFLECT_SYNTHESIZER_MODEL_ID = "opus";
 export const DEFAULT_UI_CHECK_MODEL_ID = "sonnet";
 export const DEFAULT_CONDENSER_MODEL_ID = "sonnet";
 export const DEFAULT_CONDENSE_ABOVE_CHARS = 20_000;
+export const DEFAULT_SCENARIO_WRITER = true;
+export const DEFAULT_SCENARIO_WRITER_MODEL_ID = "opus";
 // Reasoning effort for a claude-routed role that names none (#130's field).
 // Unattended work whose output decides something runs at `high`: the
 // implementer, the verdict-holding reviewer (and so the adjudicator), and the
@@ -2778,6 +2796,12 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       `config.partitionCheck must be a boolean, got ${JSON.stringify(config.partitionCheck)}.`,
     );
   }
+  const scenarioWriter = config.scenarioWriter ?? DEFAULT_SCENARIO_WRITER;
+  if (typeof scenarioWriter !== "boolean") {
+    throw new SandbarError(
+      `config.scenarioWriter must be a boolean, got ${JSON.stringify(config.scenarioWriter)}.`,
+    );
+  }
   const keepAwakeWhileIdle =
     config.keepAwakeWhileIdle ?? DEFAULT_KEEP_AWAKE_WHILE_IDLE;
   if (typeof keepAwakeWhileIdle !== "boolean") {
@@ -2838,6 +2862,12 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
         ? config.reviewerQualityModelId
         : undefined
   );
+  // Its own "claude" default, not the reviewer's (#203): a codex reviewer
+  // would hand it the "opus" model id, the half-moved config #72 refuses.
+  const scenarioWriterAgent = parseAgentProviderName(
+    "scenarioWriterAgent",
+    config.scenarioWriterAgent,
+  );
   const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
   assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
   if (uiPrototypeCheck) {
@@ -2879,6 +2909,9 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   if (condenseAboveChars !== null) {
     assertRoleModelIdNamed("condenser", condenserAgent, condenserModelId);
   }
+  if (scenarioWriter) {
+    assertRoleModelIdNamed("scenarioWriter", scenarioWriterAgent, config.scenarioWriterModelId);
+  }
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   const reflectTaggerAgent = parseAgentProviderName(
     "reflectTaggerAgent",
@@ -2903,6 +2936,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "reviewerQualityEffort",
     "adjudicatorEffort",
     "condenserEffort",
+    "scenarioWriterEffort",
     "mergerEffort",
     "reflectTaggerEffort",
     "reflectSynthesizerEffort",
@@ -2942,6 +2976,8 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     condenseAboveChars,
     // Only a disabled step leaves it unnamed off claude; nothing reads it then.
     condenserModelId: condenserModelId ?? DEFAULT_CONDENSER_MODEL_ID,
+    scenarioWriter,
+    scenarioWriterModelId: config.scenarioWriterModelId ?? DEFAULT_SCENARIO_WRITER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     reflectTaggerModelId: config.reflectTaggerModelId ?? DEFAULT_REFLECT_TAGGER_MODEL_ID,
     reflectSynthesizerModelId:
@@ -2952,6 +2988,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     reviewerQualityAgent,
     adjudicatorAgent,
     condenserAgent,
+    scenarioWriterAgent,
     mergerAgent,
     reflectTaggerAgent,
     reflectSynthesizerAgent,

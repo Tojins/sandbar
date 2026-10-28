@@ -45,6 +45,7 @@ describe("agent invocation records (#135)", () => {
     [{ role: "anchor-condense", invocation: 2 }, "anchor-condense-2.log"],
     [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
     [{ role: "partition-check", invocation: 2 }, "partition-check-2.log"],
+    [{ role: "scenario-writer", invocation: 2 }, "scenario-writer-2.log"],
   ] as const)("names %j as %s", (identity, expected) => {
     expect(agentInvocationFilename(identity)).toBe(expected);
   });
@@ -60,6 +61,17 @@ describe("agent invocation records (#135)", () => {
     expect(second.filename({ role: "ui-check", invocation: 1 })).toBe("ui-check-3.log");
     expect(second.filename({ role: "partition-check", invocation: 1 })).toBe("partition-check-1.log");
     expect(second.filename({ role: "implementer", attempt: 1, nudge: false })).toBe("attempt-1.log");
+  });
+
+  // A later admission's writer owns a sequence started after the earlier one
+  // named its files (#203).
+  it("numbers the scenario writer across admissions", () => {
+    const sequencer = createAgentInvocationSequencer();
+    const first = sequencer.startCycle();
+    expect(first.filename({ role: "scenario-writer", invocation: 1 })).toBe("scenario-writer-1.log");
+    expect(first.filename({ role: "scenario-writer", invocation: 2 })).toBe("scenario-writer-2.log");
+    expect(sequencer.startCycle().filename({ role: "scenario-writer", invocation: 1 }))
+      .toBe("scenario-writer-3.log");
   });
 });
 
@@ -167,6 +179,25 @@ describe("raw transcript tree", () => {
       .rejects.toMatchObject({ code: "EEXIST" });
     expect(JSON.parse(await readFile(join(issue.dir, "issue-snapshot-1.json"), "utf8")))
       .toEqual(first);
+  });
+
+  it("files each scenario set create-only, in its own sequence, and answers with its path (#203)", async () => {
+    const tree = await makeRun();
+    const issue = await tree.issue("203");
+    const set = {
+      version: 1,
+      issue: 203,
+      seed: { ref: "origin/main", sha: "abc" },
+      writer: { provider: "claude", model: "opus", effort: null },
+      scenarios: [],
+    } as const;
+    await expect(issue.writeScenarios(set)).resolves.toBe(join(issue.dir, "scenarios-1.json"));
+    await expect(issue.writeScenarios({ ...set, issue: 204 }))
+      .resolves.toBe(join(issue.dir, "scenarios-2.json"));
+    expect(JSON.parse(await readFile(join(issue.dir, "scenarios-1.json"), "utf8"))).toEqual(set);
+
+    const restarted = await (await createTranscriptTree(tree.runDir)).issue("203");
+    await expect(restarted.writeScenarios(set)).rejects.toMatchObject({ code: "EEXIST" });
   });
 
   it("keeps merger and resolve transcripts as raw artefacts", async () => {

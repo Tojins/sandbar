@@ -45,8 +45,10 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // The UI-check invocation (#126) classifies a failed read-only agent write
   // before rethrowing the original invocation error, mirroring the reviewer.
   // The tenth is the quality fixer (#185): an agent exit or timeout is the
-  // named end of its pass, and every other failure is rethrown.
-  "inner-loop.ts": 10,
+  // named end of its pass, and every other failure is rethrown. The eleventh
+  // reports a scenario writer that failed while its admission ended (#203),
+  // after the terminal is already decided.
+  "inner-loop.ts": 11,
   "keepawake.ts": 1,
   "lock.ts": 4,
   "merger.ts": 11,
@@ -66,6 +68,11 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // origin lease — none of which happens if it escapes `run()` instead.
   "run.ts": 11,
   "sandbox-stack.ts": 2,
+  // The scenario writer (#203): a run, and the host steps around it, that
+  // failed with anything but sandbar's own SandbarError are its named
+  // failures, and that is rethrown; a container that would not close is
+  // reported (#83).
+  "scenario-writer-run.ts": 3,
   // The HTTP request boundary maps record/reducer failures to a 500 response
   // for the polling page (#132).
   "ui-server.ts": 1,

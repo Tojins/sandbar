@@ -142,6 +142,17 @@
 // therefore cannot overwrite or manufacture an operator-facing reason (#139).
 // Reusing a dirty/off-branch clone and fast-forwarding a clean one are likewise
 // feed-only notices; D1/#27 remain the later authority that can refuse it.
+// The scenario writer (#203, scenario-writer-run.ts) is the one role that runs
+// beside the loop rather than in it. `runInnerLoop` creates its task once per
+// admission, when `config.scenarioWriter` is on, and hands its status to every
+// cycle's initial state, so a fresh HARD-ERROR cycle never starts a second
+// one. The state machine's `start-scenario-writer` brings it up in its own
+// container on a read-only snapshot at the branch's fork point from its seed
+// ref, with the cycle's resolved sandbox image, and returns at once: attempt 1
+// never waits for it. `await-scenario-writer` is the join before the
+// verifier. A terminal before the join aborts it in `runInnerLoop`'s finally.
+// The action that starts it has no visible phase, so it emits no `phase`
+// event; attempt 1's follows at once.
 // Each duration-bearing agent event carries that invocation's peak-memory/OOM
 // evidence, gate events retain it per step, and both stacks emit each sibling's
 // final teardown record after their resources are removed (#141).
@@ -208,6 +219,7 @@ import {
   type HeadMismatch,
   type IssueBranchBase,
   branchCommitsSinceSeed,
+  forkPoint,
   branchTip,
   describeIssueBranchOriginSync,
   dirtyWorktreePaths,
@@ -246,6 +258,7 @@ import type { AgentInvocationSequence, AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
+import { type ScenarioWriterTask, createScenarioWriterTask } from "./scenario-writer-run.js";
 import {
   parseAdjudicationRuling,
   stripAdjudicationRulingTokens,
@@ -307,7 +320,7 @@ import {
 
 export const FAILURE_TAIL_LINES = 200;
 
-function agentSandboxNotice(
+export function agentSandboxNotice(
   severity: "warning" | "error",
   message: string,
 ): EventInput {
@@ -430,7 +443,8 @@ export type Terminal =
         | "adjudicator-wrote"
         | "ui-checker-wrote"
         | "partition-checker-wrote"
-        | "anchor-condenser-wrote";
+        | "anchor-condenser-wrote"
+        | "scenario-writer-wrote";
       readonly commits: readonly { sha: string }[];
       readonly specGaps: readonly SpecGap[];
     }
@@ -574,7 +588,7 @@ class PartitionRequiredError extends Error {
 }
 
 // What a pre-attempt role's failed invocation records as its result.
-const agentFailureResult = (
+export const agentFailureResult = (
   err: unknown,
 ): "input-too-large" | "quota" | "credential" | "failed" =>
   err instanceof AgentInputTooLargeError
@@ -647,6 +661,10 @@ export type InnerLoopConfig = {
   // `condenseAboveChars`; null turns it off.
   readonly condenserAgent: AgentProviderName;
   readonly condenseAboveChars: number | null;
+  // The scenario writer (#203): once per admission, beside attempt 1.
+  readonly scenarioWriter: boolean;
+  readonly scenarioWriterAgent: AgentProviderName;
+  readonly scenarioWriterModelId: string;
   // Reasoning effort per call (#130), the third per-call knob beside the model
   // id and the CLI. Absent is a value — the CLI's default — and stays absent
   // on the log line.
@@ -656,6 +674,7 @@ export type InnerLoopConfig = {
   readonly adjudicatorEffort?: string | undefined;
   readonly uiCheckEffort?: string | undefined;
   readonly condenserEffort?: string | undefined;
+  readonly scenarioWriterEffort?: string | undefined;
   readonly uiPrototypeCheck: boolean;
   readonly partitionCheck: boolean;
   readonly maxContextChars: number;
@@ -765,6 +784,7 @@ export async function runInnerLoop(
     issue: IssueRef,
     opts: InnerLoopOptions,
     invocationSequence: AgentInvocationSequence,
+    scenarioWriter: ScenarioWriterTask | null,
   ) => Promise<SandboxCycleOutcome> = runSandboxCycle,
 ): Promise<Terminal> {
   let retriesUsed = 0;
@@ -792,30 +812,54 @@ export async function runInnerLoop(
       await opts.onEvent(event);
     },
   };
-  for (;;) {
-    const outcome = await runCycle(
-      issue,
-      {
-        ...cycleOptions,
-        config: { ...cycleOptions.config, partitionCheck: partitionCheckPending },
-      },
-      opts.attemptLogger.startInvocationCycle(),
-    );
-    specGaps.push(...outcome.specGaps);
-    const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
-    if (decision.kind === "surface") {
-      return toTerminal({ ...outcome, specGaps });
+  const scenarioWriter = opts.config.scenarioWriter
+    ? createScenarioWriterTask({
+        issue,
+        config: opts.config,
+        attemptLogger: opts.attemptLogger,
+        onEvent: opts.onEvent,
+        providerState: opts.providerState,
+      })
+    : null;
+  try {
+    for (;;) {
+      const outcome = await runCycle(
+        issue,
+        {
+          ...cycleOptions,
+          config: { ...cycleOptions.config, partitionCheck: partitionCheckPending },
+        },
+        opts.attemptLogger.startInvocationCycle(),
+        scenarioWriter,
+      );
+      specGaps.push(...outcome.specGaps);
+      const decision = decideAfterTerminal(outcome.verdict, retriesUsed);
+      if (decision.kind === "surface") {
+        return toTerminal({ ...outcome, specGaps });
+      }
+      retriesUsed = decision.nextRetriesUsed;
+      const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
+      await opts.onEvent({
+        kind: "hard-error",
+        issue: Number(issue.id),
+        title: issue.title,
+        retry: retriesUsed,
+        max: HARD_ERROR_MAX_RETRIES,
+        reason,
+      });
     }
-    retriesUsed = decision.nextRetriesUsed;
-    const reason = outcome.verdict.type === "HARD-ERROR" ? outcome.verdict.reason : "";
-    await opts.onEvent({
-      kind: "hard-error",
-      issue: Number(issue.id),
-      title: issue.title,
-      retry: retriesUsed,
-      max: HARD_ERROR_MAX_RETRIES,
-      reason,
-    });
+  } finally {
+    // A no-op once the join has heard it; otherwise the admission has ended
+    // without needing it.
+    try {
+      await scenarioWriter?.abort();
+    } catch (err) {
+      await opts.onEvent({
+        kind: "complaint",
+        severity: "error",
+        message: `issue=${issue.id} scenario writer failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   }
 }
 
@@ -913,6 +957,7 @@ async function runSandboxCycle(
   issue: IssueRef,
   opts: InnerLoopOptions,
   invocationSequence: AgentInvocationSequence,
+  scenarioWriter: ScenarioWriterTask | null,
 ): Promise<SandboxCycleOutcome> {
   const { config } = opts;
   const branchImages = opts.branchImages;
@@ -1103,7 +1148,7 @@ async function runSandboxCycle(
             readonly: mount.mode === "ro",
           })),
         ];
-        return agentSandbox.createSandbox({
+        const created = await agentSandbox.createSandbox({
           branch: issue.branch,
           layout: config.layout,
           // Named explicitly rather than left to defaultImageName(repoDir): the
@@ -1158,6 +1203,8 @@ async function runSandboxCycle(
               }
             : {}),
         });
+        // The scenario writer runs this image too.
+        return { sandbox: created, imageName };
       })(), (ms) => {
         sandboxMs = ms;
       }),
@@ -1201,9 +1248,10 @@ async function runSandboxCycle(
     sandboxStack = holder.stack;
     sandboxStatuses = sandboxStack?.statuses ?? [];
 
-    if (sandboxResult.status === "fulfilled") sandbox = sandboxResult.value;
+    const bringup = sandboxResult.status === "fulfilled" ? sandboxResult.value : null;
+    sandbox = bringup?.sandbox ?? null;
     if (stackResult.status === "fulfilled") stack = stackResult.value;
-    if (sandbox === null || stack === null) {
+    if (bringup === null || stack === null) {
       throw sandboxResult.status === "rejected"
         ? sandboxResult.reason
         : (stackResult as PromiseRejectedResult).reason;
@@ -1289,6 +1337,7 @@ async function runSandboxCycle(
       maxReviewRounds: config.maxReviewRounds,
       uiPrototypeCheck: config.uiPrototypeCheck,
       partitionCheck: config.partitionCheck && !branchAhead,
+      scenarioWriter: scenarioWriter?.status() ?? { kind: "off" },
     });
     let action: LoopAction = initialAction(state);
     await opts.onEvent({
@@ -1302,7 +1351,7 @@ async function runSandboxCycle(
     while (action.kind !== "terminate") {
       const event = await executeAction(action, {
         issue,
-        sandbox,
+        sandbox: bringup.sandbox,
         opts,
         config,
         anchorOpts,
@@ -1317,6 +1366,8 @@ async function runSandboxCycle(
         specGaps,
         sandboxStatuses,
         invocationSequence,
+        imageName: bringup.imageName,
+        scenarioWriter,
       });
       const r = step(state, event);
       state = r.state;
@@ -1357,13 +1408,16 @@ async function runSandboxCycle(
           detail: action.extraReprompt,
         });
       }
-      await opts.onEvent({
-        kind: "phase",
-        issue: Number(issue.id),
-        title: issue.title,
-        attempt: state.attempt,
-        phases: visiblePhases(action),
-      });
+      const phases = visiblePhases(action);
+      if (phases.length > 0 || action.kind === "terminate") {
+        await opts.onEvent({
+          kind: "phase",
+          issue: Number(issue.id),
+          title: issue.title,
+          attempt: state.attempt,
+          phases,
+        });
+      }
     }
 
     return { verdict: action.verdict, accumulatedCommits: accumulated, specGaps };
@@ -1516,6 +1570,9 @@ type ExecuteActionCtx = {
   // Empty when the consumer declares no `inSandbox` container.
   readonly sandboxStatuses: readonly SandboxContainerStatus[];
   readonly invocationSequence: AgentInvocationSequence;
+  // The cycle's resolved sandbox image, and the admission's writer when on.
+  readonly imageName: string;
+  readonly scenarioWriter: ScenarioWriterTask | null;
 };
 
 // Runner-owned facts about the quality pass in this sandbox cycle (#185,
@@ -1585,6 +1642,15 @@ async function executeAction(
       return runPartitionCheck(action, ctx);
     case "run-ui-check":
       return runUiCheck(action, ctx);
+    case "start-scenario-writer":
+      requireScenarioWriter(ctx).start({
+        imageName: ctx.imageName,
+        seedRef: ctx.base.ref,
+        seedSha: await forkPoint(ctx.config.layout.repoDir, ctx.base.ref, ctx.issue.branch),
+      });
+      return { kind: "scenario-writer-started" };
+    case "await-scenario-writer":
+      return { kind: "scenario-writer-result", outcome: await requireScenarioWriter(ctx).settled() };
     case "run-implementer":
       return runImplementer(action, ctx);
     case "run-quality-list":
@@ -1601,6 +1667,13 @@ async function executeAction(
     case "terminate":
       throw new Error("executeAction called with terminate; runner should exit instead");
   }
+}
+
+function requireScenarioWriter(ctx: ExecuteActionCtx): ScenarioWriterTask {
+  if (ctx.scenarioWriter === null) {
+    throw new Error("scenario writer action with the scenario writer off");
+  }
+  return ctx.scenarioWriter;
 }
 
 // The thread condenser (#217), once per sandbox cycle ahead of the partition
@@ -1995,7 +2068,9 @@ export async function runUiCheck(
 }
 
 // Where every role's issue anchor is read from, and cached condensed.
-const issueAnchorOptionsOf = (config: InnerLoopConfig): IssueAnchorOptions => ({
+export const issueAnchorOptionsOf = (
+  config: Pick<InnerLoopConfig, "issueSource" | "repo" | "layout">,
+): IssueAnchorOptions => ({
   issueSource: config.issueSource,
   repo: config.repo,
   anchorCacheDir: config.layout.anchorCacheDir,

@@ -296,6 +296,40 @@ describe("computeStats anchors (#217)", () => {
   });
 });
 
+describe("computeStats scenario sets (#203)", () => {
+  const writer = (issue: number, invocation: number, result: string, fields: Record<string, unknown> = {}) =>
+    ev({
+      kind: "scenario-writer", issue, title: `Issue ${issue}`, invocation, provider: "claude",
+      model: "opus", effort: null, result, ...fields,
+    });
+
+  it("counts each recorded set, the writers that failed, and only the writers that ran as invocations", () => {
+    const report = computeStats(input([run("run-1", [
+      admitted(1),
+      writer(1, 1, "completed", { durationMs: 9, transcript: "scenario-writer-1.log" }),
+      writer(1, 2, "completed", { durationMs: 4, transcript: "scenario-writer-2.log", scenarios: 7 }),
+      admitted(2),
+      writer(2, 3, "completed", { durationMs: 5, scenarios: 0 }),
+      admitted(3),
+      writer(3, 4, "quota", { durationMs: 1 }),
+      admitted(4),
+      writer(4, 1, "input-too-large"),
+      admitted(5),
+      writer(5, 5, "aborted", { durationMs: 2 }),
+    ])]));
+    expect(report.scenarios).toEqual({
+      issues: 2, perIssue: agg([7, 0]), pass: 0, fail: 0, unverified: 0, writerFailed: 2,
+    });
+    expect(report.invocations.map((row) => [row.issue, row.role, row.result, row.durationMs])).toEqual([
+      [1, "scenario-writer", "completed", 9],
+      [1, "scenario-writer", "completed", 4],
+      [2, "scenario-writer", "completed", 5],
+      [3, "scenario-writer", "quota", 1],
+      [5, "scenario-writer", "aborted", 2],
+    ]);
+  });
+});
+
 describe("computeStats prose (#182)", () => {
   it("carries speech and the terminal reason only with --with-prose", () => {
     const events = [

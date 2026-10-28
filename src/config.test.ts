@@ -1128,6 +1128,54 @@ describe("resolveConfig", () => {
     expect(off.condenseAboveChars).toBeNull();
   });
 
+  it("turns the scenario writer on, routed to claude and opus with no effort, whatever the reviewer's routing (#203)", () => {
+    const r = resolveConfig(minimal);
+    expect(r.scenarioWriter).toBe(true);
+    expect(r.scenarioWriterAgent).toBe("claude");
+    expect(r.scenarioWriterModelId).toBe("opus");
+    expect(r.scenarioWriterEffort).toBeUndefined();
+    const codexReviewer = resolveConfig({
+      ...minimal,
+      reviewerAgent: "codex",
+      reviewerModelId: "gpt-5.6-sol",
+    });
+    expect(codexReviewer.scenarioWriterAgent).toBe("claude");
+    expect(codexReviewer.scenarioWriterModelId).toBe("opus");
+    expect(resolveConfig({
+      ...minimal,
+      scenarioWriter: false,
+      scenarioWriterAgent: "codex",
+      scenarioWriterModelId: "gpt-5.6-sol",
+      scenarioWriterEffort: "xhigh",
+    })).toMatchObject({
+      scenarioWriter: false,
+      scenarioWriterAgent: "codex",
+      scenarioWriterModelId: "gpt-5.6-sol",
+      scenarioWriterEffort: "xhigh",
+    });
+  });
+
+  it("refuses a scenario writer split from claude with no model, unless it is off (#203)", () => {
+    expect(() => resolveConfig({ ...minimal, scenarioWriterAgent: "codex" }))
+      .toThrow(/config\.scenarioWriterAgent is "codex"[\s\S]*config\.scenarioWriterModelId/);
+    expect(resolveConfig({ ...minimal, scenarioWriter: false, scenarioWriterAgent: "codex" })
+      .scenarioWriter).toBe(false);
+  });
+
+  it("refuses a non-boolean scenarioWriter and a malformed scenarioWriterEffort (#203)", () => {
+    expect(() => resolveConfig({ ...minimal, scenarioWriter: "yes" as never }))
+      .toThrow(/config\.scenarioWriter must be a boolean/);
+    expect(() => resolveConfig({ ...minimal, scenarioWriterEffort: "" }))
+      .toThrow(/config\.scenarioWriterEffort/);
+  });
+
+  it("accepts a scenarioWriter prompt extension (#203)", () => {
+    expect(resolveConfig({
+      ...minimal,
+      promptExtensions: { scenarioWriter: { path: "docs/SCENARIOS.md" } },
+    }).promptExtensions).toEqual({ scenarioWriter: { path: "docs/SCENARIOS.md" } });
+  });
+
   it.each([0, -1, 1.5, Number.NaN])("refuses condenseAboveChars %s", (value) => {
     expect(() => resolveConfig({ ...minimal, condenseAboveChars: value }))
       .toThrow(/config\.condenseAboveChars must be a positive integer/);
