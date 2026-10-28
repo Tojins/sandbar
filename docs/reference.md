@@ -339,6 +339,16 @@ last stack it accepted and logs a warning. At startup there is nothing to fall
 back to, so the run refuses to start. `sandbar gate` reads the file from the
 tree it gates.
 
+A branch never changes its own gate, except for container `env`. When an
+issue branch changes the file, a change to containers' `env` alone applies to
+that branch's gate-1 (and to its sandbox from the next one); landing still
+gates on the source branch's stack. Any other change — mounts, images, flags,
+containers added or removed, steps — is not applied: gate-1 runs once on the
+source branch's stack, and the issue parks under `agent-stuck` with a comment
+listing what differs and how that gate went. Land the stack change on the
+source branch by hand, then re-queue the issue. A missing or invalid file on
+the branch counts as such a change.
+
 ### Containers
 
 | Key | Meaning |
