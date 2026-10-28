@@ -499,6 +499,8 @@ export function computeStats(input: StatsInput): StatsReport {
 
   const issues = rollups(cycles, input.withProse);
   const done = issues.filter((issue) => issue.outcome === "DONE");
+  const deployCounts = { green: 0, red: 0, unverified: 0 };
+  for (const outcome of deploys.values()) deployCounts[outcome] += 1;
   return {
     statsSchema: 1,
     window: input.window,
@@ -543,9 +545,7 @@ export function computeStats(input: StatsInput): StatsReport {
       gate2,
       deploy: {
         watched: deploys.size,
-        green: [...deploys.values()].filter((o) => o === "green").length,
-        red: [...deploys.values()].filter((o) => o === "red").length,
-        unverified: [...deploys.values()].filter((o) => o === "unverified").length,
+        ...deployCounts,
       },
     },
     scenarios: { issues: 0, perIssue: agg([]), pass: 0, fail: 0, unverified: 0, writerFailed: 0 },

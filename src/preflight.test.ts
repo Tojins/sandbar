@@ -741,8 +741,9 @@ describe("deployWatchRefusals (#198)", () => {
     readonly labels?: readonly string[] | null;
   }) => {
     const calls: (readonly string[])[] = [];
-    const exec: ExecFn = async (file, args) => {
+    const exec: ExecFn = async (file, args, options) => {
       expect(file).toBe("gh");
+      expect(options.cwd).toBe("/cache");
       calls.push(args);
       if (args[0] === "workflow") {
         if (opts.workflowError !== undefined) throw exitError(opts.workflowError);
@@ -796,6 +797,14 @@ describe("deployWatchRefusals (#198)", () => {
     expect(await refusals(fakeGh({ labels: null }).exec)).toEqual([
       expect.stringMatching(/could not list Tojins\/outdoor's labels \(HTTP 403\)/),
     ]);
+  });
+
+  it("throws when gh label list answers something that is not a list", async () => {
+    const exec: ExecFn = async (_file, args) => ({
+      stdout: args[0] === "workflow" ? "name: deploy\n" : "{}",
+      stderr: "",
+    });
+    await expect(refusals(exec)).rejects.toThrow(/gh label list answered/);
   });
 
   it("refuses a notifyLogin that is the token's own login, whatever its case", async () => {

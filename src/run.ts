@@ -1883,6 +1883,10 @@ export async function run(
   // Until when tracker reads are held after GitHub refused one for quota
   // (`forge-rate-limit.ts`); null when they are not.
   let trackerHeldUntil: number | null = null;
+  const holdTracker = async (): Promise<number> => {
+    trackerHeldUntil = await fetchRateLimitResumeAt(Date.now());
+    return trackerHeldUntil;
+  };
 
   // The deploy watch (#198), when configured. Cleanup stops it first, so no
   // write follows the lease's release and no event follows run-end.
@@ -1899,11 +1903,11 @@ export async function run(
     settings: deployWatch,
     emit: (event) => runRecord.emit(event),
     onRateLimited: async () => {
-      trackerHeldUntil = await fetchRateLimitResumeAt(Date.now());
+      const heldUntil = await holdTracker();
       await runRecord.emit({
         kind: "notice",
         message: "Deploy watch hit GitHub's rate limit; holding tracker reads until " +
-          `${new Date(trackerHeldUntil).toISOString()}`,
+          `${new Date(heldUntil).toISOString()}`,
       });
     },
   });
@@ -1979,7 +1983,7 @@ export async function run(
       if (!isForgeRateLimit(err)) {
         return { failure: err instanceof Error ? err.message : String(err) };
       }
-      trackerHeldUntil = await fetchRateLimitResumeAt(Date.now());
+      await holdTracker();
       const stderr = (err as { stderr?: unknown }).stderr;
       return {
         failure: typeof stderr === "string" && stderr.trim() !== ""

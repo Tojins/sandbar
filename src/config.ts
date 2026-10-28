@@ -7,7 +7,6 @@ import {
   parseAgentProviderName,
 } from "./agent-providers.js";
 import type { SandboxHooks } from "./agent-sandbox.js";
-import type { DeployWatchSettings } from "./deploy-watch.js";
 import { SandbarError } from "./errors.js";
 import { DEFAULT_LANE, type Lane } from "./lanes.js";
 import { ALL_BRANCH_INFIXES, BRANCH_PREFIX } from "./naming.js";
@@ -591,6 +590,17 @@ export type ResolvedMergeMode =
       readonly noChecksGraceMs: number;
       readonly openPullRequest: boolean;
     };
+
+// The resolved deploy watch (`resolveDeployWatch`): every default applied.
+export type DeployWatchSettings = {
+  // The workflow FILE name, e.g. "deploy.yml".
+  readonly workflow: string;
+  // The GitHub login the bug body @-mentions.
+  readonly notifyLogin: string;
+  // The dedupe label every bug issue carries.
+  readonly label: string;
+  readonly timeoutMs: number;
+};
 
 // The deploy watch (#198, `deploy-watch.ts`): the consumer's own deploy
 // workflow, watched on every poll; a red run that deployed a sandbar merge

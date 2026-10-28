@@ -238,10 +238,11 @@ import {
 } from "./agent-providers.js";
 import type {
   BuiltImage,
+  DeployWatchSettings,
   ResolvedGateStack,
   ResolvedStackContainer,
 } from "./config.js";
-import { type DeployWatchSettings, READY_FOR_HUMAN_LABEL } from "./deploy-watch.js";
+import { READY_FOR_HUMAN_LABEL } from "./deploy-watch.js";
 import { checkWorktreeImageUids, pulledImagesOf } from "./ensure-images.js";
 import type { EnvReader } from "./env.js";
 import { SandbarError, hasExitCode, isErrno, isExitStatus } from "./errors.js";
@@ -1570,35 +1571,47 @@ export async function deployWatchRefusals(args: {
   const { watch } = args;
   const exec = args.exec ?? defaultExec;
   const repoFlag = repoSlug(args.repo);
-  const gh = async (argv: readonly string[]): Promise<{ readonly stdout: string } | { readonly failure: string }> => {
+  // The failure text of a `gh` that exited nonzero; null when it succeeded.
+  const failureOf = async (run: Promise<unknown>): Promise<string | null> => {
     try {
-      return { stdout: (await exec("gh", argv, { cwd: args.cwd })).stdout };
+      await run;
+      return null;
     } catch (err) {
       if (!hasExitCode(err)) throw err;
-      return { failure: commandFailureDetail(err) };
+      return commandFailureDetail(err);
     }
   };
+  const gh = (argv: readonly string[]) => exec("gh", argv, { cwd: args.cwd });
   const refusals: string[] = [];
-  const [workflow, labels] = await Promise.all([
+  let labelsStdout = "";
+  const [workflowFailure, labelsFailure] = await Promise.all([
     // `gh workflow view` has no `--json`; `--yaml` reads the file and fails
     // when the repository has no such workflow.
-    gh(["workflow", "view", watch.workflow, "--repo", repoFlag, "--yaml"]),
-    gh(["label", "list", "--repo", repoFlag, "--limit", "200", "--json", "name"]),
+    failureOf(gh(["workflow", "view", watch.workflow, "--repo", repoFlag, "--yaml"])),
+    failureOf(
+      gh(["label", "list", "--repo", repoFlag, "--limit", "200", "--json", "name"])
+        .then((r) => { labelsStdout = r.stdout; }),
+    ),
   ]);
-  if ("failure" in workflow) {
+  if (workflowFailure !== null) {
     refusals.push(
       `config.deployWatch.workflow: ${repoFlag} has no workflow file ` +
-        `${watch.workflow} (${workflow.failure}).`,
+        `${watch.workflow} (${workflowFailure}).`,
     );
   }
-  if ("failure" in labels) {
-    refusals.push(`config.deployWatch: could not list ${repoFlag}'s labels (${labels.failure}).`);
+  if (labelsFailure !== null) {
+    refusals.push(`config.deployWatch: could not list ${repoFlag}'s labels (${labelsFailure}).`);
   } else {
-    const listed: unknown = JSON.parse(labels.stdout);
+    const listed: unknown = JSON.parse(labelsStdout);
     if (!Array.isArray(listed)) {
-      throw new SandbarError(`gh label list answered ${JSON.stringify(labels.stdout)}`);
+      throw new SandbarError(`gh label list answered ${JSON.stringify(labelsStdout)}`);
     }
-    const names = new Set(listed.map((l) => (l as { readonly name?: unknown }).name));
+    const names = new Set(
+      listed.flatMap((l: unknown) =>
+        typeof l === "object" && l !== null && "name" in l && typeof l.name === "string"
+          ? [l.name]
+          : []),
+    );
     const missing = [READY_FOR_HUMAN_LABEL, watch.label].filter((l) => !names.has(l));
     if (missing.length > 0) {
       refusals.push(
