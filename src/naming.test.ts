@@ -7,10 +7,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  dbCopyDirName,
   dbImportContainerName,
   egressImageTag,
   egressProxyNameFor,
   gateScope,
+  isOwnDbCopyDir,
+  sandboxDbCopyContainerNameFor,
   resolveNetworkNameFor,
   sandboxNetworkNameFor,
   reflectScope,
@@ -338,6 +341,13 @@ describe("gate-stack resource names (#24)", () => {
     expect(dbImportContainerName(root)).toBe(`sandbar-${root}-db-import`);
     expect(dbImportContainerName(root).startsWith(scopedResourcePrefix(S))).toBe(false);
     expect(isScopedResourceName(dbImportContainerName(root))).toBe(true);
+  });
+
+  it("scopes a database copy's dir and container by the run", () => {
+    expect(dbCopyDirName(S, "221", 3)).toBe(`sandbar-${S}-issue-221-3`);
+    expect(isOwnDbCopyDir(S, dbCopyDirName(S, "221", 3))).toBe(true);
+    expect(isOwnDbCopyDir(runScope("/elsewhere"), dbCopyDirName(S, "221", 3))).toBe(false);
+    expect(sandboxDbCopyContainerNameFor(S, "221", "db")).toBe(`sandbar-${S}-sbx-221-db-dbcopy`);
   });
 
   it("keeps the merger's stack disjoint from every issue's", () => {

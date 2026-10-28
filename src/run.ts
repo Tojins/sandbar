@@ -144,7 +144,9 @@
 // With `config.databaseCopies`, every recompute also reads the nightly base
 // import's outcome (#201, `db-base.ts`): each new attempt is a `db-base`
 // event, and a missing or stale dump or a failed import is a complaint once
-// per run. The import itself runs beside the daemon, never in it.
+// per run. The import itself runs beside the daemon, never in it. The
+// run's own copies of that base (`db-copy.ts`) are swept at startup, after
+// the orphan containers, and again at each quiescent sweep.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
 // Every gate-1 and gate-2 call passes through one run-wide FIFO semaphore
@@ -158,7 +160,9 @@
 // A low reading latches admission closed and drains; active-cycle healthy
 // readings cannot reopen it. Reconciliation and the deciding remeasurement
 // happen only once the pool is quiescent, so image removal cannot race a live
-// gate or sandbox build.
+// gate or sandbox build. With `config.databaseCopies` the database volume is
+// measured beside the graphroot, against its own floor, and feeds the same
+// latch; the latch holds every low reading and the exit names each.
 
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
@@ -221,13 +225,18 @@ import { currentEgressImageTag } from "./egress.js";
 import { makeEnvReader } from "./env.js";
 import { startTimer } from "./timing.js";
 import {
+  type DbVolumeSpace,
   type GraphRootSpace,
+  dbVolumeSpace,
+  dbVolumeSpaceIsLow,
+  formatLowDbVolumeSpace,
   formatLowGraphRootSpace,
   graphRootSpace,
   graphRootSpaceIsLow,
   podmanGraphRoot,
 } from "./disk-space.js";
 import { createDbBaseWatch } from "./db-base.js";
+import { sweepDbCopies } from "./db-copy.js";
 import { createDeployWatcher, realDeployWatchAdapter } from "./deploy-watch.js";
 import {
   SandbarError,
@@ -629,7 +638,7 @@ function schedulerExit(
     readonly pool: ContinuousPool<PlannedIssue, Terminal>;
     readonly providerExit: TerminalExit | null;
     readonly restartDetail: string | null;
-    readonly storage: GraphRootSpace | null;
+    readonly storage: LowStorage | null;
   },
 ): TerminalExit {
   switch (reason) {
@@ -655,9 +664,24 @@ function schedulerExit(
   }
 }
 
-function lowStorageExit(space: GraphRootSpace): TerminalExit {
+// Every filesystem below its floor, each named: the graphroot, and with
+// `config.databaseCopies` the database volume (#201). Never empty.
+type LowStorage = readonly string[];
+
+function lowStorageOf(
+  graphRoot: GraphRootSpace,
+  dbVolume: DbVolumeSpace | null,
+): LowStorage | null {
+  const low = [
+    ...(graphRootSpaceIsLow(graphRoot) ? [formatLowGraphRootSpace(graphRoot)] : []),
+    ...(dbVolume !== null && dbVolumeSpaceIsLow(dbVolume) ? [formatLowDbVolumeSpace(dbVolume)] : []),
+  ];
+  return low.length === 0 ? null : low;
+}
+
+function lowStorageExit(low: LowStorage): TerminalExit {
   return storageExit(
-    `${formatLowGraphRootSpace(space)} after image reconciliation; ` +
+    `${low.join("; ")} after image reconciliation; ` +
       "admissions were stopped and the pool drained",
   );
 }
@@ -830,6 +854,7 @@ export async function run(
     images: config.images,
     agentProviders,
     deployWatch: config.deployWatch,
+    databaseCopies: config.databaseCopies,
   };
   const stopBeforeOriginLock = async (
     err: PreflightError | SandbarError,
@@ -1253,7 +1278,19 @@ export async function run(
   // acquireLock has already mkdirSync'd the directory, so this cannot ENOENT.
   const scope = runScope(realpathSync(lockPaths.workDir));
   let graphRoot!: string;
-  let startupSpace!: GraphRootSpace;
+  let startupLow: LowStorage | null = null;
+  // The database volume, measured beside the graphroot (#201).
+  const measureDbVolume = async (): Promise<DbVolumeSpace | null> =>
+    config.databaseCopies === null ? null : await dbVolumeSpace(config.databaseCopies.root);
+  // Every copy this run's scope left on the volume (#201); only when no
+  // sandbox can hold one.
+  const sweepCopies = async (sweepScope: "startup" | "quiescent"): Promise<void> => {
+    if (config.databaseCopies === null) return;
+    const copies = await sweepDbCopies({ cfg: config.databaseCopies, scope });
+    if (copies.removed.length > 0 || copies.failures.length > 0) {
+      await runRecord.emit({ kind: "sweep", scope: sweepScope, ...copies });
+    }
+  };
   // The egress proxy image this driver builds (#202): live whether or not this
   // installation runs proxies, exactly as the tools pins are.
   let egressImageTag!: string;
@@ -1281,6 +1318,7 @@ export async function run(
       await runRecord.emit({ kind: "sweep", scope: "startup", removed: orphans.removed, failures: [] });
     }
     await reportSweepFailures(orphans, (event) => runRecord.emit(event), "startup");
+    await sweepCopies("startup");
 
     egressImageTag = await currentEgressImageTag(scope);
     const staleImages = await reconcileImages({
@@ -1294,7 +1332,7 @@ export async function run(
     if (staleImages.removed.length > 0) {
       await runRecord.emit({ kind: "sweep", scope: "startup", removed: staleImages.removed, failures: [] });
     }
-    startupSpace = await graphRootSpace(graphRoot);
+    startupLow = lowStorageOf(await graphRootSpace(graphRoot), await measureDbVolume());
 
     // Debris no run's scope claims: from a build predating #28, or the
     // sandcastle era. Reported rather than removed, because a bare-prefix match
@@ -1317,11 +1355,11 @@ export async function run(
     return await stopAtStartup("startup-sweep-failed", err);
   }
 
-  if (graphRootSpaceIsLow(startupSpace)) {
+  if (startupLow !== null) {
     return await exitAtStartup(
-      `${formatLowGraphRootSpace(startupSpace)} after startup image reconciliation. ` +
+      `${startupLow.join("; ")} after startup image reconciliation. ` +
         "Sandbar will not begin image preparation or admit work.",
-      lowStorageExit(startupSpace),
+      lowStorageExit(startupLow),
     );
   }
 
@@ -1539,7 +1577,7 @@ export async function run(
     (issue) => issue.id,
   );
   let providerExitPending: TerminalExit | null = null;
-  let storageLow: GraphRootSpace | null = null;
+  let storageLow: LowStorage | null = null;
   // Source movement creates refresh WORK, not an instruction to build at the
   // point it was observed. The next recompute measures storage first; a low
   // reading keeps this latched through the drain so recovery can perform it,
@@ -2170,6 +2208,7 @@ export async function run(
           await runRecord.emit({ kind: "sweep", scope: "quiescent", removed: cycleOrphans.removed, failures: [] });
         }
         await reportSweepFailures(cycleOrphans, (event) => runRecord.emit(event), "quiescent");
+        await sweepCopies("quiescent");
       }
       if (pool.isQuiescent) {
         const cycleImages = await reconcileImages({
@@ -2191,11 +2230,10 @@ export async function run(
         }
       }
 
-      const previousStorageLow: GraphRootSpace | null = storageLow;
+      const previousStorageLow: LowStorage | null = storageLow;
       const measuredSpace = await graphRootSpace(graphRoot);
-      const measuredStorageLow = graphRootSpaceIsLow(measuredSpace)
-        ? measuredSpace
-        : null;
+      const measuredVolume = await measureDbVolume();
+      const measuredStorageLow = lowStorageOf(measuredSpace, measuredVolume);
       // A low reading is a drain latch, not a momentary admission pause. Only
       // the quiescent boundary can reconcile safely, so only its post-reconcile
       // measurement may reopen admission. Measurements continue while work
@@ -2207,7 +2245,7 @@ export async function run(
         await runRecord.emit({
           kind: "complaint",
           severity: "error",
-          message: `${formatLowGraphRootSpace(storageLow)}. Sandbar is stopping ` +
+          message: `${storageLow.join("; ")}. Sandbar is stopping ` +
             "admissions and draining; once quiescent it reconciles owned images " +
             "and measures again before deciding whether to exit.",
         });
@@ -2216,7 +2254,11 @@ export async function run(
           kind: "preflight",
           action: "disk-space-recovered",
           detail: `Podman graphroot '${measuredSpace.graphRoot}' recovered to ` +
-            `${measuredSpace.availableBytes} bytes free after image reconciliation`,
+            `${measuredSpace.availableBytes} bytes free` +
+            (measuredVolume === null
+              ? ""
+              : `, database volume '${measuredVolume.root}' to ${measuredVolume.availableBytes} bytes free`) +
+            " after image reconciliation",
         });
       }
       await dbBaseWatch?.observe();

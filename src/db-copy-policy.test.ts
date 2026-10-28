@@ -1,20 +1,24 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveGateStack } from "./config.js";
+import { resolveDatabaseCopies, resolveGateStack } from "./config.js";
 import {
   type BaseMeta,
+  type DbCopyHolder,
   type DumpIdentity,
   type ImportStatus,
   SUPERSEDED_GRACE_MS,
   baseIdAt,
   BASE_ID_RE,
+  baseCompatible,
   basesToSweep,
   dbBaseComplaints,
   dbBaseEventOf,
   importNeeded,
   importSpaceNeeded,
+  planAlign,
   sanitizeImportError,
   specTokenOf,
+  withDbCopy,
 } from "./db-copy-policy.js";
 import { MIN_DB_VOLUME_FREE_BYTES } from "./disk-space.js";
 
@@ -185,6 +189,68 @@ describe("dbBaseEventOf", () => {
     });
     expect(dbBaseEventOf({ ...status(), outcome: "imported", baseBytes: 7 })).toEqual({
       kind: "db-base", action: "imported", attempt: "b20261028T030000000Z", dump, durationMs: 5, baseBytes: 7,
+    });
+  });
+});
+
+const cfg = resolveDatabaseCopies({
+  dump: "/srv/drops/app/app-latest.sql.gz",
+  root: "/srv/installations/app",
+  container: "db",
+  database: "app",
+  bufferPoolBytes: 64 * 1024 * 1024,
+})!;
+
+describe("planAlign", () => {
+  it.each<[DbCopyHolder | null, DbCopyHolder | null, boolean, DbCopyHolder | null]>([
+    [null, null, false, null],
+    [null, "implementer", false, "implementer"],
+    ["implementer", "implementer", false, null],
+    ["implementer", null, true, null],
+    ["implementer", "scenario-runner", true, "scenario-runner"],
+    ["scenario-runner", "implementer", true, "implementer"],
+    ["scenario-runner", "scenario-runner", true, "scenario-runner"],
+  ])("%s -> %s drops %s and acquires %s", (current, desired, drop, acquire) => {
+    expect(planAlign(current, desired)).toEqual({ drop, acquire });
+  });
+
+  it("re-acquires for an implementer round that follows another action", () => {
+    const steps: (DbCopyHolder | null)[] = ["implementer", null, null, "implementer"];
+    let current: DbCopyHolder | null = null;
+    const acquired: DbCopyHolder[] = [];
+    for (const desired of steps) {
+      const plan = planAlign(current, desired);
+      if (plan.drop) current = null;
+      if (plan.acquire !== null) acquired.push(current = plan.acquire);
+    }
+    expect(acquired).toEqual(["implementer", "implementer"]);
+  });
+});
+
+describe("baseCompatible", () => {
+  const meta = (over: Partial<BaseMeta> = {}): BaseMeta => ({
+    id: "b20261028T030000000Z", dump, specToken: specTokenOf(db()), database: "app",
+    image: "docker.io/library/mariadb:10.11", importedAt: "2026-10-28T04:00:00.000Z",
+    durationMs: 1, baseBytes: 1, ...over,
+  });
+
+  it("accepts a base the target's server built into the configured schema", () => {
+    expect(baseCompatible(meta(), db({ env: { TZ: "Europe/Brussels" } }), cfg)).toBe(true);
+  });
+
+  it("refuses a base built by another server or into another schema", () => {
+    expect(baseCompatible(meta(), db({ image: "docker.io/library/mariadb:11.4" }), cfg)).toBe(false);
+    expect(baseCompatible(meta({ database: "other" }), db(), cfg)).toBe(false);
+  });
+});
+
+describe("withDbCopy", () => {
+  it("adds only the datadir mount and a final buffer-pool arg", () => {
+    const target = db();
+    expect(withDbCopy(target, "/srv/installations/app/copies/c1", cfg)).toEqual({
+      ...target,
+      mounts: [...target.mounts, { hostPath: "/srv/installations/app/copies/c1", containerPath: "/var/lib/mysql", mode: "rw" }],
+      args: ["--ft-min-word-len=2", `--innodb-buffer-pool-size=${64 * 1024 * 1024}`],
     });
   });
 });

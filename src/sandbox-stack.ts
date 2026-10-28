@@ -61,6 +61,19 @@
 // siblings, which write continuously; a compiled-cache race over one directory
 // is the consumer's to resolve with per-environment cache paths.
 //
+// A database copy (#201) runs as a SECOND container beside its target
+// sibling, not in place of it: `swapDbCopyIn` stops the target (its fixture
+// database, already prepared by `onSandboxReady`) and brings up
+// `<target>-dbcopy` from `withDbCopy`'s spec in the same netns, so the agent
+// reaches the copy at the address the fixtures had. The copy is claimed like
+// any sibling, so `stop` removes it joiners-first and records its teardown;
+// its follower appends to the target's log after a `[sandbar] db copy`
+// marker. `swapDbCopyOut` measures and removes it, then starts the target
+// again and follows it from that start, so the file holds nothing twice. A
+// copy that does not come up is removed and the target restarted: the copy
+// is an aid, so its failure is the caller's to report, never a HARD-ERROR.
+// Recreating the target instead would re-run its prepare hook.
+//
 // Secrets (#241): a sibling's `secretEnv` keys are valued from the DAEMON's
 // environment (`daemonEnv`, the installation env) at bringup, laid over its
 // `env` and carried like any env — in `withRuntimeEnv`'s file, never an argv
@@ -91,8 +104,13 @@ import {
   boundedPodman,
   bringUpContainers,
   containerState,
+  pollUntilReady,
 } from "./gate-stack.js";
-import { type RunScope, sandboxContainerNameFor } from "./naming.js";
+import {
+  type RunScope,
+  sandboxContainerNameFor,
+  sandboxDbCopyContainerNameFor,
+} from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 import {
   readContainerResources,
@@ -152,6 +170,15 @@ export type SandboxContainerStatus = {
 
 export type SandboxStack = {
   readonly statuses: readonly SandboxContainerStatus[];
+  // Stops the target sibling `copy.container` names and brings the copy up
+  // in its place; false, with the target running again, when the copy did
+  // not come up. `label` names the copy in the target's log.
+  readonly swapDbCopyIn: (copy: {
+    readonly container: ResolvedStackContainer;
+    readonly label: string;
+  }) => Promise<boolean>;
+  // Removes the copy and starts the target sibling again.
+  readonly swapDbCopyOut: () => Promise<void>;
   readonly stop: () => Promise<void>;
 };
 
@@ -201,8 +228,14 @@ export type SandboxStackDeps = {
   // judgment of "leaked" versus "was never there" lives in the real
   // implementation rather than in `stop`.
   readonly remove: (containerName: string) => Promise<string | null>;
-  readonly follow: (containerName: string, filePath: string) => LogFollower;
+  // `since` (RFC 3339) skips what an earlier follower of the same
+  // container already wrote.
+  readonly follow: (containerName: string, filePath: string, since?: string) => LogFollower;
   readonly measure: (containerName: string) => Promise<ContainerResources>;
+  // Stop a running sibling, and start it again until it is ready. Both throw
+  // when podman does not.
+  readonly pause: (containerName: string) => Promise<void>;
+  readonly resume: (containerName: string, c: ResolvedStackContainer) => Promise<void>;
 };
 
 export const realSandboxStackDeps: SandboxStackDeps = {
@@ -211,7 +244,22 @@ export const realSandboxStackDeps: SandboxStackDeps = {
   follow: startLogFollower,
   measure: (containerName) =>
     readContainerResources(containerName, systemContainerResourceDeps(boundedPodman)),
+  pause: (containerName) => controlSibling(["stop", containerName]),
+  resume: async (containerName, c) => {
+    await controlSibling(["start", containerName]);
+    if (c.readiness !== null) await pollUntilReady(containerName, c, c.readiness, SANDBOX_LABEL);
+  },
 };
+
+async function controlSibling(args: readonly string[]): Promise<void> {
+  const r = await boundedPodman(args, CONTROL_TIMEOUT_MS);
+  if (boundedOk(r)) return;
+  throw new SandbarError(
+    `${SANDBOX_LABEL}: ${RUNTIME} ${args.join(" ")} failed: ${
+      r.timedOut ? `timed out after ${CONTROL_TIMEOUT_MS}ms` : r.errorMessage
+    }`,
+  );
+}
 
 // A sibling with its `secretEnv` valued from `daemonEnv`, or the keys that
 // resolve to nothing. A value podman's env file cannot carry counts as nothing
@@ -282,12 +330,33 @@ export async function startSandboxStack(
   const nameOf = (c: ResolvedStackContainer): string =>
     sandboxContainerNameFor(opts.scope, opts.issueId, c.name);
 
-  const followers: LogFollower[] = [];
+  const logPathOf = (c: ResolvedStackContainer): string => join(opts.logDir, `${c.name}.log`);
+
+  const followers = new Map<string, LogFollower>();
   const created: string[] = [];
-  const lifetimes = new Map<string, () => number>();
+  // What a claimed container's teardown record names it, by podman name.
+  const lives = new Map<string, {
+    readonly name: string;
+    readonly lifecycle: ResolvedStackContainer["lifecycle"];
+    readonly elapsed: () => number;
+  }>();
   const teardowns: ContainerTeardown[] = [];
   const teardownFailures: unknown[] = [];
   let stopped = false;
+
+  // A claimed container's teardown record (#141), taken before its removal.
+  const measureClaimed = async (name: string): Promise<ContainerTeardown> => {
+    const life = lives.get(name);
+    if (life === undefined) throw new Error(`sandbox stack: ${name} was never claimed`);
+    lives.delete(name);
+    return {
+      name: life.name,
+      container: name,
+      lifecycle: life.lifecycle,
+      durationMs: life.elapsed(),
+      ...(await deps.measure(name)),
+    };
+  };
 
   const stop = async (): Promise<void> => {
     if (stopped) return;
@@ -295,7 +364,7 @@ export async function startSandboxStack(
     // Latched, so this can never do anything again — drop it from the registry
     // rather than leave a spent closure there for the rest of the run (#55).
     dispose();
-    for (const f of followers) f.stop();
+    for (const f of followers.values()) f.stop();
     // Reverse creation order, and JOINERS BEFORE THE ANCHOR is the invariant
     // that matters — the anchor is removed by `sandbox.close()`, which the
     // inner loop calls after this, and by the cleanup registry, which pops in
@@ -313,28 +382,10 @@ export async function startSandboxStack(
     const failures: string[] = [];
     const leaked: string[] = [];
     const names = [...created].reverse();
-    const measured = await Promise.allSettled(names.map(async (name) => {
-      const configured = containers.find((c) => nameOf(c) === name);
-      const elapsed = lifetimes.get(name);
-      if (configured !== undefined && elapsed !== undefined) {
-        return {
-          name: configured.name,
-          container: name,
-          lifecycle: configured.lifecycle,
-          durationMs: elapsed(),
-          ...(await deps.measure(name)),
-        } satisfies ContainerTeardown;
-      }
-      return null;
-    }));
-    for (let i = 0; i < names.length; i++) {
-      const result = measured[i];
-      if (result?.status === "fulfilled") {
-        if (result.value !== null) teardowns.push(result.value);
-      } else if (result?.status === "rejected") {
-        teardownFailures.push(result.reason);
-      }
-      lifetimes.delete(names[i]!);
+    const measured = await Promise.allSettled(names.map(measureClaimed));
+    for (const result of measured) {
+      if (result.status === "fulfilled") teardowns.push(result.value);
+      else teardownFailures.push(result.reason);
     }
     for (const name of names) {
       const failure = await deps.remove(name);
@@ -404,12 +455,13 @@ export async function startSandboxStack(
   const secretValues: string[] = [];
   const bringUp = async (
     group: readonly ResolvedStackContainer[],
+    groupCtx: BringUpCtx = ctx,
   ): Promise<void> => {
     const resolved = group.map((c) => {
       const r = resolveSecretEnv(c, daemonEnv);
       if (r.kind === "missing") {
         throw new ContainerBringupError(
-          nameOf(c),
+          groupCtx.nameOf(c),
           `${SANDBOX_LABEL}: container '${c.name}' (${c.image}) was not ` +
             `started: its secretEnv key(s) ${r.keys.join(", ")} resolve to ` +
             "nothing in the daemon's environment (unset, empty, or holding a " +
@@ -421,7 +473,7 @@ export async function startSandboxStack(
       return r.container;
     });
     try {
-      await deps.bringUp(resolved, ctx);
+      await deps.bringUp(resolved, groupCtx);
     } catch (err) {
       throw maskedError(err, secretValues);
     }
@@ -445,7 +497,7 @@ export async function startSandboxStack(
     for (const c of group) {
       const name = nameOf(c);
       if (!created.includes(name)) created.push(name);
-      if (!lifetimes.has(name)) lifetimes.set(name, startTimer());
+      if (!lives.has(name)) lives.set(name, { name: c.name, lifecycle: c.lifecycle, elapsed: startTimer() });
     }
   };
 
@@ -491,7 +543,7 @@ export async function startSandboxStack(
         // record of what the run did before it restarted.
         try {
           await appendFile(
-            join(opts.logDir, `${c.name}.log`),
+            logPathOf(c),
             `[sandbar] container '${c.name}' did not come up.\n\n${failure}\n`,
             "utf8",
           );
@@ -512,7 +564,7 @@ export async function startSandboxStack(
       // For a container that never started, the follower writes podman's own
       // complaint into the same file and notes its exit — which is what the
       // placeholder above says in more words, not a contradiction of it.
-      followers.push(deps.follow(nameOf(c), join(opts.logDir, `${c.name}.log`)));
+      followers.set(nameOf(c), deps.follow(nameOf(c), logPathOf(c)));
     }
   } catch (err) {
     const stoppedResult = await Promise.allSettled([stop()]);
@@ -526,8 +578,89 @@ export async function startSandboxStack(
     throw err;
   }
 
+  // The copy in place of its target, while one is.
+  let dbCopy: { readonly name: string; readonly target: ResolvedStackContainer } | null = null;
+
+  const note = (c: ResolvedStackContainer, line: string) =>
+    appendFile(logPathOf(c), `\n[sandbar] ${line}\n`, "utf8");
+
+  // Starts `target` again, and follows it from that start.
+  const restartTarget = async (target: ResolvedStackContainer): Promise<void> => {
+    const since = new Date().toISOString();
+    await deps.resume(nameOf(target), target);
+    followers.set(nameOf(target), deps.follow(nameOf(target), logPathOf(target), since));
+  };
+
+  // Removes the copy container: measured first, and the record reported.
+  const removeCopy = async (name: string): Promise<void> => {
+    followers.get(name)?.stop();
+    followers.delete(name);
+    const teardown = await measureClaimed(name);
+    const failure = await deps.remove(name);
+    created.splice(created.indexOf(name), 1);
+    if (failure !== null) {
+      throw new SandbarError(
+        `sandbox stack: removing the database copy for issue ${opts.issueId} ` +
+          `failed, leaking it:\n${failure}\nClean up with: ${RUNTIME} rm -f -t 0 ${name}`,
+      );
+    }
+    await opts.onContainerTeardown?.(teardown);
+  };
+
+  const swapDbCopyIn: SandboxStack["swapDbCopyIn"] = async ({ container, label }) => {
+    if (stopped) throw new SandbarError(`sandbox stack for issue ${opts.issueId} is stopped`);
+    if (dbCopy !== null) {
+      throw new SandbarError(`sandbox stack for issue ${opts.issueId} already runs a database copy`);
+    }
+    const target = containers.find((c) => c.name === container.name);
+    if (target === undefined) {
+      throw new SandbarError(`sandbox stack: '${container.name}' is not a sibling of issue ${opts.issueId}`);
+    }
+    const name = sandboxDbCopyContainerNameFor(opts.scope, opts.issueId, target.name);
+    await deps.pause(nameOf(target));
+    followers.get(nameOf(target))?.stop();
+    followers.delete(nameOf(target));
+    await note(target, `'${target.name}' stopped; db copy ${label} started`);
+    dbCopy = { name, target };
+    created.push(name);
+    lives.set(name, { name: `${target.name}-dbcopy`, lifecycle: target.lifecycle, elapsed: startTimer() });
+    try {
+      await bringUp([container], { ...ctx, nameOf: () => name });
+    } catch (err) {
+      if (err instanceof ContainerBringupError) {
+        await note(target, `db copy ${label} did not come up.\n\n${err.message}`);
+        await swapDbCopyOut();
+        return false;
+      }
+      // Any other failure still leaves the target stopped and the copy named:
+      // put both back, report a failed restore, and rethrow the original.
+      const [restored] = await Promise.allSettled([swapDbCopyOut()]);
+      if (restored?.status === "rejected") {
+        await reportCleanupNotice(
+          "cleanup-failure",
+          "Sandbox stack could not restore the target after a database copy failed",
+          restored.reason,
+        );
+      }
+      throw err;
+    }
+    followers.set(name, deps.follow(name, logPathOf(target)));
+    return true;
+  };
+
+  const swapDbCopyOut: SandboxStack["swapDbCopyOut"] = async () => {
+    if (dbCopy === null) throw new SandbarError(`sandbox stack for issue ${opts.issueId} runs no database copy`);
+    const { name, target } = dbCopy;
+    dbCopy = null;
+    await removeCopy(name);
+    await note(target, `db copy removed; '${target.name}' restarted`);
+    await restartTarget(target);
+  };
+
   return {
     statuses: containers.map((c) => record(c, failed.get(c.name) ?? null)),
+    swapDbCopyIn,
+    swapDbCopyOut,
     stop,
   };
 }
@@ -574,8 +707,8 @@ export type LogFollower = { readonly stop: () => void };
 // `log` readiness kind. It is two array elements; sharing them across modules
 // would be the only thing left tying a readiness mechanism that no longer
 // exists to an artefact that does.
-export function logFollowArgs(containerName: string): string[] {
-  return ["logs", "-f", containerName];
+export function logFollowArgs(containerName: string, since?: string): string[] {
+  return ["logs", "-f", ...(since === undefined ? [] : ["--since", since]), containerName];
 }
 
 // One `podman logs -f` per sibling, appended to a file on the host (#44 D4).
@@ -590,7 +723,7 @@ export function logFollowArgs(containerName: string): string[] {
 // Unbounded by design, like the follower it is modelled on, and bounded the
 // same way: by ownership. `stop` kills it and runs on every path out of the
 // stack, including the cleanup registry's.
-function startLogFollower(containerName: string, filePath: string): LogFollower {
+function startLogFollower(containerName: string, filePath: string, since?: string): LogFollower {
   let stopped = false;
   let child: ChildProcess | null = null;
   let stream: WriteStream | null = null;
@@ -598,7 +731,7 @@ function startLogFollower(containerName: string, filePath: string): LogFollower 
   // An 'error' on the stream is otherwise an unhandled event, which takes the
   // whole run down — a log follower must never be able to do that.
   stream.on("error", () => {});
-  const ch = spawn(RUNTIME, logFollowArgs(containerName), {
+  const ch = spawn(RUNTIME, logFollowArgs(containerName, since), {
     stdio: ["ignore", "pipe", "pipe"],
   });
   child = ch;

@@ -215,6 +215,10 @@ vi.mock("./image-lifecycle.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./image-lifecycle.js")>(),
   reconcileImages: vi.fn(async () => ({ removed: [] })),
 }));
+vi.mock("./db-copy.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./db-copy.js")>(),
+  sweepDbCopies: vi.fn(async () => ({ removed: [], failures: [] })),
+}));
 vi.mock("./egress.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./egress.js")>(),
   currentEgressImageTag: vi.fn(async () => "egress"),
@@ -225,6 +229,7 @@ vi.mock("./forge-rate-limit.js", () => ({
 vi.mock("./disk-space.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./disk-space.js")>(),
   podmanGraphRoot: vi.fn(async () => "/podman/store"),
+  dbVolumeSpace: vi.fn(async (root: string) => ({ root, availableBytes: 20n * 1024n * 1024n * 1024n })),
   graphRootSpace: vi.fn(async () => ({
     graphRoot: "/podman/store",
     availableBytes: 20n * 1024n * 1024n * 1024n,
@@ -309,7 +314,8 @@ import { realAdapter as realFinalizeAdapter } from "./finalize.js";
 import { createBranchImages, ensureImages } from "./ensure-images.js";
 import { agentToolsImageTags, createAgentImages } from "./agent-tools.js";
 import { reconcileImages } from "./image-lifecycle.js";
-import { graphRootSpace } from "./disk-space.js";
+import { dbVolumeSpace, graphRootSpace } from "./disk-space.js";
+import { sweepDbCopies } from "./db-copy.js";
 import { fetchRateLimitResumeAt } from "./forge-rate-limit.js";
 import { cleanupOrphanContainers } from "./containers.js";
 import { UiPortInUseError, startUiServer } from "./ui-server.js";
@@ -498,6 +504,93 @@ describe("run quota orchestration (#109)", () => {
       expect.stringContaining("SANDBAR HALTED — internal failure"),
     );
     expect(seams.originRelease).toHaveBeenCalledOnce();
+  });
+
+  // #201: the database volume feeds the same latch, and startup sweeps the
+  // copies a dead run of this workdir left.
+  it("sweeps database copies at startup and exits 3 naming a low database volume", async () => {
+    seams.plan.mockResolvedValue(resolution([issue("221")]));
+    vi.mocked(sweepDbCopies).mockResolvedValueOnce({ removed: ["sandbar-wdead-issue-7-1"], failures: [] });
+    vi.mocked(dbVolumeSpace).mockResolvedValueOnce({ root: "/srv/db/app", availableBytes: 5n * 1024n * 1024n * 1024n });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({
+      ...config,
+      gateStack: {
+        containers: [
+          ...config.gateStack.containers,
+          {
+            name: "db", image: "mariadb", inSandbox: true,
+            readiness: { kind: "healthcheck", command: ["healthcheck.sh"] },
+          },
+        ],
+        steps: [{ name: "test", in: "app", command: ["true"] }],
+      },
+      databaseCopies: { dump: "/srv/drops/app.sql.gz", root: "/srv/db/app", container: "db", database: "app" },
+    })).rejects.toThrow("EXIT:3");
+    expect(seams.innerLoop).not.toHaveBeenCalled();
+    expect(eventsOf("sweep")).toContainEqual({
+      kind: "sweep", scope: "startup", removed: ["sandbar-wdead-issue-7-1"], failures: [],
+    });
+    expect(eventsOf("exit")).toContainEqual(expect.objectContaining({
+      tag: "storage",
+      exitCode: 3,
+      reason: expect.stringContaining("Database volume '/srv/db/app' has 5368709120 bytes (5.0 GiB) free"),
+    }));
+  });
+
+  // #201: the quiescent boundary sweeps the copies too, and a recovery from a
+  // latch that included the database volume names it.
+  it("sweeps database copies at quiescence and names the database volume on recovery", async () => {
+    const running = issue("221");
+    const terminal = deferred<{ type: "NEEDS-INFO"; questions: string; strandedHead: null }>();
+    seams.plan.mockResolvedValue(resolution([running]));
+    vi.mocked(fetchOriginRefs).mockReset();
+    vi.mocked(fetchOriginRefs).mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockImplementation(async () => await terminal.promise);
+    vi.mocked(sweepDbCopies)
+      .mockResolvedValueOnce({ removed: [], failures: [] })
+      .mockResolvedValueOnce({ removed: ["sandbar-wlive-issue-9-2"], failures: [] });
+    // Healthy while admitting, low while the issue runs, healthy again; the
+    // issue ends on the fourth reading, so the next recompute is quiescent.
+    let reading = 0;
+    vi.mocked(dbVolumeSpace).mockImplementation(async (root: string) => {
+      const current = reading++;
+      if (current === 4) terminal.resolve({ type: "NEEDS-INFO", questions: "answer", strandedHead: null });
+      return {
+        root,
+        availableBytes: (current === 2 ? 5n : 20n) * 1024n * 1024n * 1024n,
+      };
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({
+      ...config,
+      pollIntervalMs: 1,
+      gateStack: {
+        containers: [
+          ...config.gateStack.containers,
+          {
+            name: "db", image: "mariadb", inSandbox: true,
+            readiness: { kind: "healthcheck", command: ["healthcheck.sh"] },
+          },
+        ],
+        steps: [{ name: "test", in: "app", command: ["true"] }],
+      },
+      databaseCopies: { dump: "/srv/drops/app.sql.gz", root: "/srv/db/app", container: "db", database: "app" },
+    })).rejects.toThrow(/EXIT:/);
+
+    expect(eventsOf("sweep")).toContainEqual({
+      kind: "sweep", scope: "quiescent", removed: ["sandbar-wlive-issue-9-2"], failures: [],
+    });
+    expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
+      action: "disk-space-recovered",
+      detail: expect.stringContaining("database volume '/srv/db/app' to 21474836480 bytes free"),
+    }));
   });
 
   it("reconciles, reports exact graphroot free space, and exits 3 before admission", async () => {

@@ -103,6 +103,10 @@
 // self-mention and the bug's one @-mention would reach nobody. The token
 // login is the one #136 resolves, read here too when the queue is "anyone".
 //
+// With `config.databaseCopies`, the volume under its root must be mounted and
+// take a reflink copy (`dbVolumeRefusals`, #201): without reflink every copy
+// would fail, and `--reflink=auto` would silently fill the volume instead.
+//
 // The git fetch is an answer too, not a best-effort warmup. Its failure joins
 // the ordinary invariant report and retains git's stderr (#81, absorbed by
 // #118); a wildcard refspec matching nothing still exits zero.
@@ -241,10 +245,12 @@ import {
 } from "./agent-providers.js";
 import type {
   BuiltImage,
+  DatabaseCopiesSettings,
   DeployWatchSettings,
   ResolvedGateStack,
   ResolvedStackContainer,
 } from "./config.js";
+import { dbVolumeRefusals } from "./db-copy.js";
 import { READY_FOR_HUMAN_LABEL } from "./deploy-watch.js";
 import { checkWorktreeImageUids, pulledImagesOf } from "./ensure-images.js";
 import type { EnvReader } from "./env.js";
@@ -326,6 +332,8 @@ export type PreflightConfig = {
   readonly agentProviders: readonly AgentProviderName[];
   // `config.deployWatch`; null when the watch is off.
   readonly deployWatch: DeployWatchSettings | null;
+  // `config.databaseCopies`; null when copies are off.
+  readonly databaseCopies: DatabaseCopiesSettings | null;
   readonly onEvent: (event: EventInput) => Promise<void> | void;
 };
 
@@ -1829,6 +1837,7 @@ export async function runPreflightAfterReachability(
     ...fetchFailures,
     ...synced.refusals,
     ...deployWatchFailures,
+    ...(cfg.databaseCopies === null ? [] : await dbVolumeRefusals(cfg.databaseCopies)),
   ];
   if (failures.length > 0) throw new PreflightError(failures);
 

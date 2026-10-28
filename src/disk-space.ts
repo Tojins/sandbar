@@ -14,7 +14,11 @@
 // capacity management.
 //
 // The database volume (#201) has a floor of the same size and kind, which a
-// base import must leave intact (`importSpaceNeeded`, db-copy-policy.ts).
+// base import must leave intact (`importSpaceNeeded`, db-copy-policy.ts). The
+// daemon measures it beside the graphroot whenever `databaseCopies` is set,
+// and a low reading closes the same drain latch; a copy is refused while the
+// volume is low (`db-copy.ts`), because ENOSPC under InnoDB corrupts the data
+// an agent is reading.
 
 import { execFile } from "node:child_process";
 import { statfs } from "node:fs/promises";
@@ -55,6 +59,8 @@ export type GraphRootSpace = {
 };
 
 type StatFs = (path: string) => Promise<{
+  readonly blocks: bigint;
+  readonly bfree: bigint;
   readonly bavail: bigint;
   readonly bsize: bigint;
 }>;
@@ -68,6 +74,15 @@ export async function freeBytes(
 ): Promise<bigint> {
   const stats = await read(path);
   return stats.bavail * stats.bsize;
+}
+
+// What is in use on the filesystem holding `path`, by everyone.
+export async function usedBytes(
+  path: string,
+  read: StatFs = defaultStatFs,
+): Promise<bigint> {
+  const stats = await read(path);
+  return (stats.blocks - stats.bfree) * stats.bsize;
 }
 
 export async function graphRootSpace(
@@ -90,4 +105,25 @@ export function formatBytes(bytes: bigint): string {
 export function formatLowGraphRootSpace(space: GraphRootSpace): string {
   return `Podman graphroot '${space.graphRoot}' has ${formatBytes(space.availableBytes)} ` +
     `free, below sandbar's ${formatBytes(MIN_GRAPHROOT_FREE_BYTES)} floor`;
+}
+
+export type DbVolumeSpace = {
+  readonly root: string;
+  readonly availableBytes: bigint;
+};
+
+export async function dbVolumeSpace(
+  root: string,
+  read: StatFs = defaultStatFs,
+): Promise<DbVolumeSpace> {
+  return { root, availableBytes: await freeBytes(root, read) };
+}
+
+export function dbVolumeSpaceIsLow(space: DbVolumeSpace): boolean {
+  return space.availableBytes < MIN_DB_VOLUME_FREE_BYTES;
+}
+
+export function formatLowDbVolumeSpace(space: DbVolumeSpace): string {
+  return `Database volume '${space.root}' has ${formatBytes(space.availableBytes)} ` +
+    `free, below sandbar's ${formatBytes(MIN_DB_VOLUME_FREE_BYTES)} floor`;
 }

@@ -28,6 +28,9 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // The nightly base's job error (#201) runs the import's teardown, logs a
   // failure of that teardown with its cause, and rethrows the original.
   "db-base.ts": 2,
+  // A database copy's slot (#201) releases the copy when a swap throws,
+  // reports a release that failed in turn, and rethrows the original.
+  "db-copy.ts": 2,
   // The deploy watcher's tick (#198) classifies a rate limit, an unanswered
   // request, a forge answer and a lease lost to cleanup; anything else is
   // rethrown.
@@ -67,12 +70,14 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // is recorded as a complaint and a halted exit, and cleanup releases the
   // origin lease — none of which happens if it escapes `run()` instead.
   "run.ts": 11,
-  "sandbox-stack.ts": 2,
   // The scenario writer (#203): a run, and the host steps around it, that
   // failed with anything but sandbar's own SandbarError are its named
   // failures, and that is rethrown; a container that would not close is
   // reported (#83).
   "scenario-writer-run.ts": 3,
+  // A database copy's swap-in (#201) classifies a sibling that did not come up
+  // into a false return; any other failure restores the target and rethrows.
+  "sandbox-stack.ts": 3,
   // The HTTP request boundary maps record/reducer failures to a 500 response
   // for the polling page (#132).
   "ui-server.ts": 1,

@@ -17,13 +17,14 @@
 //   bases/<id>/          a datadir, subuid-owned once the entrypoint chowns it
 //   bases/<id>.json      its meta, written only after a clean shutdown
 //   current              symlink to `bases/<id>`, swapped by rename
+//   copies/              the daemon's: one reflink copy per issue (db-copy.ts)
 //
 // THE DAEMON ONLY READS (`createDbBaseWatch`): at every recompute it reads the
 // status and the drop's stat, records each new attempt once as a `db-base`
 // event and raises `dbBaseComplaints` once per key per run, so the run header
 // shows a missing or stale dump and a failed import.
 //
-// The daemon owns `copies/` (#201 part 2) and never deletes a base. A base dir
+// The daemon owns `copies/` (`db-copy.ts`) and never deletes a base. A base dir
 // without meta is an import that never finished; a superseded base is deleted
 // by the first job run at least SUPERSEDED_GRACE_MS later (`basesToSweep`).
 // Nothing is ever moved across directories: the datadir is subuid-owned, so
@@ -103,6 +104,7 @@ export type DbBaseLayout = {
   readonly status: string;
   readonly bases: string;
   readonly current: string;
+  readonly copies: string;
 };
 
 export function dbBaseLayout(root: string): DbBaseLayout {
@@ -111,6 +113,7 @@ export function dbBaseLayout(root: string): DbBaseLayout {
     status: join(root, "import-status.json"),
     bases: join(root, "bases"),
     current: join(root, "current"),
+    copies: join(root, "copies"),
   };
 }
 
@@ -121,14 +124,16 @@ const STDERR_KEPT_CHARS = 16_384;
 const USERNS_TIMEOUT_MS = 30 * 60_000;
 
 // Runs argv inside the rootless user namespace, where a subuid-owned datadir
-// is the invoking user's to remove and measure, and returns its stdout.
-// Throws when it fails.
+// is the invoking user's to remove, copy and measure, and returns its stdout.
+// Throws UsernsCommandError when the command fails or times out.
 export type UsernsRun = (argv: readonly string[]) => Promise<string>;
 
-const podmanUnshare: UsernsRun = async (argv) => {
+export class UsernsCommandError extends SandbarError {}
+
+export const podmanUnshare: UsernsRun = async (argv) => {
   const r = await boundedPodman(["unshare", ...argv], USERNS_TIMEOUT_MS);
   if (!boundedOk(r)) {
-    throw new Error(`${RUNTIME} unshare ${argv.join(" ")} failed: ${r.errorMessage || "timed out"}`);
+    throw new UsernsCommandError(`${RUNTIME} unshare ${argv.join(" ")} failed: ${r.errorMessage || "timed out"}`);
   }
   return r.stdout;
 };
@@ -152,6 +157,9 @@ export const readImportStatus = (layout: DbBaseLayout): Promise<ImportStatus | n
   readJson<ImportStatus>(layout.status);
 
 const metaPath = (layout: DbBaseLayout, id: string) => join(layout.bases, `${id}.json`);
+
+export const readBaseMeta = (layout: DbBaseLayout, id: string): Promise<BaseMeta | null> =>
+  readJson<BaseMeta>(metaPath(layout, id));
 
 // The dump as a rename identifies it, or null when there is none.
 export async function statDump(path: string): Promise<DumpIdentity | null> {
@@ -322,7 +330,7 @@ async function importIfNeeded(
     });
   };
 
-  const previous = currentId === null ? null : await readJson<BaseMeta>(metaPath(layout, currentId));
+  const previous = currentId === null ? null : await readBaseMeta(layout, currentId);
   const free = await (opts.freeBytes ?? freeBytes)(cfg.root);
   if (free < importSpaceNeeded(previous?.baseBytes ?? null, dump.size)) {
     return await fail("insufficient-space");
@@ -411,7 +419,7 @@ export async function sweepBases(
   );
   const bases = await Promise.all([...ids].map(async (id) => ({
     id,
-    meta: await readJson<BaseMeta>(metaPath(layout, id)),
+    meta: await readBaseMeta(layout, id),
   })));
   const { remove, stamp } = basesToSweep(bases, currentId, now.getTime());
   for (const id of remove) {

@@ -15,6 +15,10 @@
 // Gate-step attachments (#166) enter through the same existing env/mount
 // provider boundary: config.env retains its allowlist fallback semantics while
 // the gate's own env stays literal, and the provider sees one final record.
+// `Sandbox.runHooks` (#201) runs in-sandbox hooks on demand after setup —
+// `onDbCopyReady`, after each database copy is swapped in — and answers a
+// failure or timeout with its output instead of throwing: a failed migration
+// on a copy is evidence for the agent, never a reason to rebuild the sandbox.
 //
 // A provider's parser answers in seven registers and the difference between
 // them is load-bearing: `text`/`result` is the agent's SPEECH and is the only
@@ -254,14 +258,20 @@ export type SandboxHooks = {
     onSandboxReady?: ReadonlyArray<{ command: string; timeoutMs?: number }>;
   };
   sandbox?: {
-    onSandboxReady?: ReadonlyArray<{
-      command: string;
-      // Run this hook as container uid 0 (`podman exec --user 0`). The image
-      // need not carry sudo or a sudoers policy.
-      sudo?: boolean;
-      timeoutMs?: number;
-    }>;
+    onSandboxReady?: ReadonlyArray<SandboxHook>;
+    // After each database copy is swapped in (#201), to apply the branch's
+    // migrations to it. Valid only with `config.databaseCopies`; run by
+    // `Sandbox.runHooks`, whose failure is reported and never retried.
+    onDbCopyReady?: ReadonlyArray<SandboxHook>;
   };
+};
+
+export type SandboxHook = {
+  command: string;
+  // Run this hook as container uid 0 (`podman exec --user 0`). The image
+  // need not carry sudo or a sudoers policy.
+  sudo?: boolean;
+  timeoutMs?: number;
 };
 
 export type ParsedStreamEvent =
@@ -616,6 +626,11 @@ export interface Sandbox {
   // Leave reclamation to the run-level lease barrier. Unlike preservation,
   // this is not an operator-actionable fault and produces no notice by itself.
   deferWorktreeReclaim(): void;
+  // Run in-sandbox hooks after setup, in order, each in the worktree and
+  // bounded by its `timeoutMs` (default one minute); the first that fails or
+  // times out stops the rest. A failure is an answer, not a throw: `output`
+  // holds every hook's stdout and stderr and, last, why it stopped.
+  runHooks(hooks: ReadonlyArray<SandboxHook>): Promise<{ ok: boolean; output: string }>;
   close(): Promise<{ preservedWorktreePath?: string }>;
 }
 
@@ -3336,6 +3351,33 @@ export const createSandbox = async (
     },
     deferWorktreeReclaim() {
       reclaimDeferred = true;
+    },
+    async runHooks(hooks) {
+      let output = "";
+      for (const hook of hooks) {
+        const ms = hook.timeoutMs ?? HOOK_TIMEOUT_MS;
+        const timeout = new AbortController();
+        const timer = setTimeout(() => timeout.abort(), ms);
+        let r: ExecResult;
+        try {
+          r = await providerHandle.exec(hook.command, {
+            cwd: sandboxRepoDir,
+            sudo: hook.sudo,
+            signal: timeout.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+        output += r.stdout + r.stderr;
+        // Checked first: a killed client resolves as if it exited 0.
+        if (timeout.signal.aborted) {
+          return { ok: false, output: `${output}\n[sandbar] '${hook.command}' timed out after ${ms}ms\n` };
+        }
+        if (r.exitCode !== 0) {
+          return { ok: false, output: `${output}\n[sandbar] '${hook.command}' exited ${r.exitCode}\n` };
+        }
+      }
+      return { ok: true, output };
     },
     async close() {
       if (closed) return { preservedWorktreePath: undefined };
