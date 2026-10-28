@@ -547,3 +547,15 @@ export function egressImageTag(scope: RunScope, fingerprint: string): string {
     fingerprint.slice(0, IMAGE_FINGERPRINT_CHARS)
   }`;
 }
+
+// ---------------------------------------------------------------------------
+// Seed snapshots (#203)
+//
+// A seed snapshot's directory inside `RepoLayout.snapshotsDir`. Named after
+// the issue, not its branch: the snapshot is detached and holds no ref, so a
+// branch-shaped name would claim something it does not carry.
+// ---------------------------------------------------------------------------
+
+export function seedSnapshotDirName(issueId: string): string {
+  return `issue-${issueId}-seed`;
+}

@@ -144,6 +144,18 @@
 // feed-only notices; preservation errors remain operator-facing complaints
 // through the severity carried by `onNotice` (#172).
 //
+// `createSeedSnapshotSandbox` (#203) is the second shape, for a read-only role
+// that must not see the issue's branch: its own container over a detached,
+// ref-less clone of the seed commit in `snapshotsDir`, mounted `:ro`. It
+// shares `invokeAgent` and `measuredAgentRun` with `createSandbox` (F9, F9b,
+// F11, F12) and nothing else: no hooks, no `copyToWorktree`, no gate
+// attachments, no sandbox stack, no git identity and no commit capture. The
+// snapshot holds nothing the cache lacks, so it is not an issue clone and
+// `reclaimIssueClone` does not apply: close removes the container, then the
+// directory unless the caller preserves it. `changed()` is the host's own
+// HEAD/porcelain comparison against bringup. The mount already forbids a
+// write, and the comparison keeps "a write parks" literal anyway.
+//
 // `copyToWorktree` has two resolved forms (#144 decision 7): legacy strings
 // still join to the operator checkout and mirror the same relative path, while
 // `{ from, to }` carries an already-absolute host source and a validated
@@ -163,14 +175,18 @@
 
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { onCleanup, reportCleanupNotice } from "./cleanup.js";
 import { resolveSandboxEnv } from "./env.js";
 import { isErrno } from "./errors.js";
-import { RESOURCE_PREFIX, strandedHeadRef } from "./naming.js";
+import {
+  RESOURCE_PREFIX,
+  seedSnapshotDirName,
+  strandedHeadRef,
+} from "./naming.js";
 import { RESERVED_WORKTREE_NAMES, type RepoLayout } from "./repo-cache.js";
 import type { ResolvedCopyToWorktreeEntry } from "./config.js";
 import { startGapTimer, startTimer } from "./timing.js";
@@ -1548,13 +1564,14 @@ const gitConfigOrEmpty = (args: string[], cwd: string): Promise<string> =>
 // a worktree holding a forgotten `git add` as clean — so the worktree gets
 // DELETED on close with the agent's uncommitted work in it. Same reasoning as
 // `dirtyWorktreePaths` in git-ops.ts; see the long comment there.
-const hasUncommittedChanges = async (worktreePath: string): Promise<boolean> => {
-  const output = await execGit(
+const porcelainStatus = (worktreePath: string): Promise<string> =>
+  execGit(
     ["-c", "status.showUntrackedFiles=normal", "status", "--porcelain"],
     worktreePath,
   );
-  return output.trim().length > 0;
-};
+
+const hasUncommittedChanges = async (worktreePath: string): Promise<boolean> =>
+  (await porcelainStatus(worktreePath)).trim().length > 0;
 
 const isOnIssueBranch = async (
   worktreePath: string,
@@ -2492,6 +2509,13 @@ const captureCodexRolloutCursor = async (
     : { kind: "unknown" };
 };
 
+type AgentInvocation = {
+  readonly agent: string;
+  readonly model: string | null;
+  readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
+  readonly env?: Readonly<Record<string, string>>;
+};
+
 type InvokeAgentResult = {
   result: string;
   silent: boolean;
@@ -2514,12 +2538,7 @@ const invokeAgent = async (
   idleTimeoutMs: number,
   completionTimeoutMs: number,
   completionSignals: readonly string[],
-  invocation: {
-    readonly agent: string;
-    readonly model: string | null;
-    readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
-    readonly env?: Readonly<Record<string, string>>;
-  },
+  invocation: AgentInvocation,
 ): Promise<InvokeAgentResult> => {
   // A resumed Codex session appends to an existing rollout. Snapshot its byte
   // boundary before starting the process so this invocation cannot inherit an
@@ -2920,6 +2939,74 @@ const invokeAgent = async (
   });
 };
 
+// One `run()` around whatever a sandbox does beside the agent itself: the
+// timeouts' defaults, F12's cgroup edges, the invocation record (F11) and the
+// result's shape, with the partial resources and duration a failure carries
+// out (F9). Both sandbox shapes go through it, so neither can drift from the
+// other on what an invocation reports.
+const measuredAgentRun = async <T extends InvokeAgentResult>(
+  sandbox: SandboxProvider,
+  containerName: string,
+  o: RunOptions,
+  iterate: (
+    idleTimeoutMs: number,
+    completionTimeoutMs: number,
+    invocation: AgentInvocation,
+  ) => Promise<T>,
+): Promise<{ readonly iter: T; readonly result: Omit<SandboxRunResult, "commits"> }> => {
+  const idleTimeoutMs =
+    (o.idleTimeoutSeconds ?? DEFAULT_IDLE_TIMEOUT_SECONDS) * 1000;
+  const completionTimeoutMs =
+    (o.completionTimeoutSeconds ?? DEFAULT_COMPLETION_TIMEOUT_SECONDS) * 1000;
+
+  let resources: ContainerResources = {};
+  let durationMs: number | undefined;
+  const resourceStart = await sandbox.containerResourceSnapshot?.(containerName);
+  let iter: T;
+  try {
+    iter = await iterate(idleTimeoutMs, completionTimeoutMs, {
+      agent: o.name ?? o.agent.name,
+      model: o.model ?? null,
+      ...(o.env === undefined ? {} : { env: o.env }),
+      onEnd: async (record) => {
+        durationMs = record.durationMs;
+        const resourceEnd = await sandbox.containerResourceSnapshot?.(containerName);
+        resources = resourceEnd === undefined
+          ? {}
+          : containerResourcesSince(resourceEnd, resourceStart);
+        await o.onInvocationEnd?.({ ...record, ...resources });
+      },
+    });
+  } catch (err) {
+    const withResources = withPartialContainerResources(err, resources);
+    throw durationMs === undefined
+      ? withResources
+      : withPartialDurationMs(withResources, durationMs);
+  }
+  if (durationMs === undefined) {
+    throw new Error("agent invocation completed without recording its duration");
+  }
+
+  return {
+    iter,
+    result: {
+      stdout: iter.result,
+      durationMs,
+      silent: iter.silent,
+      maxGapMs: iter.maxGapMs,
+      endedBy: iter.endedBy,
+      ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
+      ...(iter.usage === undefined ? {} : { usage: iter.usage }),
+      ...(iter.peakContext === undefined ? {} : { peakContext: iter.peakContext }),
+      ...(iter.firstContext === undefined ? {} : { firstContext: iter.firstContext }),
+      ...(iter.rateLimit === undefined ? {} : { rateLimit: iter.rateLimit }),
+      ...(iter.backgroundTasks === undefined ? {} : { backgroundTasks: iter.backgroundTasks }),
+      toolCalls: iter.toolCalls,
+      ...resources,
+    },
+  };
+};
+
 // ---------------------------------------------------------------------------
 // prepareWorktree / createSandbox — orchestration, lifecycle, commit capture
 // ---------------------------------------------------------------------------
@@ -3102,12 +3189,7 @@ export const createSandbox = async (
     idleTimeoutMs: number,
     completionTimeoutMs: number,
     completionSignals: readonly string[],
-    invocation: {
-      readonly agent: string;
-      readonly model: string | null;
-      readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
-    readonly env?: Readonly<Record<string, string>>;
-    },
+    invocation: AgentInvocation,
   ): Promise<InvokeAgentResult & { commits: { sha: string }[] }> => {
     // Read host git identity, then propagate into the sandbox. safe.directory
     // is set per-run (load-bearing: bind mount is owned by a different UID and
@@ -3231,66 +3313,20 @@ export const createSandbox = async (
     worktreePath,
     containerName: providerHandle.containerName,
     async run(o) {
-      const idleTimeoutMs =
-        (o.idleTimeoutSeconds ?? DEFAULT_IDLE_TIMEOUT_SECONDS) * 1000;
-      const completionTimeoutMs =
-        (o.completionTimeoutSeconds ?? DEFAULT_COMPLETION_TIMEOUT_SECONDS) * 1000;
-
-      let resources: ContainerResources = {};
-      let durationMs: number | undefined;
-      const resourceStart = await options.sandbox.containerResourceSnapshot?.(
+      const { iter, result } = await measuredAgentRun(
+        options.sandbox,
         providerHandle.containerName,
-      );
-      let iter: Awaited<ReturnType<typeof runOneIteration>>;
-      try {
-        iter = await runOneIteration(
+        o,
+        (idleTimeoutMs, completionTimeoutMs, invocation) => runOneIteration(
           o.agent,
           o.prompt,
           idleTimeoutMs,
           completionTimeoutMs,
           o.completionSignal,
-          {
-            agent: o.name ?? o.agent.name,
-            model: o.model ?? null,
-            ...(o.env === undefined ? {} : { env: o.env }),
-            onEnd: async (record) => {
-              durationMs = record.durationMs;
-              const resourceEnd = await options.sandbox.containerResourceSnapshot?.(
-                providerHandle.containerName,
-              );
-              resources = resourceEnd === undefined
-                ? {}
-                : containerResourcesSince(resourceEnd, resourceStart);
-              await o.onInvocationEnd?.({ ...record, ...resources });
-            },
-          },
-        );
-      } catch (err) {
-        const withResources = withPartialContainerResources(err, resources);
-        throw durationMs === undefined
-          ? withResources
-          : withPartialDurationMs(withResources, durationMs);
-      }
-      if (durationMs === undefined) {
-        throw new Error("agent invocation completed without recording its duration");
-      }
-
-      return {
-        stdout: iter.result,
-        commits: iter.commits,
-        durationMs,
-        silent: iter.silent,
-        maxGapMs: iter.maxGapMs,
-        endedBy: iter.endedBy,
-        ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
-        ...(iter.usage === undefined ? {} : { usage: iter.usage }),
-        ...(iter.peakContext === undefined ? {} : { peakContext: iter.peakContext }),
-        ...(iter.firstContext === undefined ? {} : { firstContext: iter.firstContext }),
-        ...(iter.rateLimit === undefined ? {} : { rateLimit: iter.rateLimit }),
-        ...(iter.backgroundTasks === undefined ? {} : { backgroundTasks: iter.backgroundTasks }),
-        toolCalls: iter.toolCalls,
-        ...resources,
-      };
+          invocation,
+        ),
+      );
+      return { ...result, commits: iter.commits };
     },
     async syncBranchToCache() {
       await syncIssueBranchToCache(repoDir, worktreePath, branch);
@@ -3315,6 +3351,170 @@ export const createSandbox = async (
       if (reclaim.kind !== "preserved") return { preservedWorktreePath: undefined };
       await notice("error", `Issue clone preserved at ${worktreePath}: ${reclaim.reason}`);
       return { preservedWorktreePath: worktreePath };
+    },
+  };
+};
+
+// ---------------------------------------------------------------------------
+// createSeedSnapshotSandbox — a read-only seed tree in its own container (#203)
+// ---------------------------------------------------------------------------
+
+export type CreateSeedSnapshotSandboxOptions = {
+  readonly layout: RepoLayout;
+  readonly issueId: string;
+  // The commit the snapshot is checked out at, detached.
+  readonly seedSha: string;
+  readonly sandbox: SandboxProvider;
+  // `config.env`, resolved as createSandbox resolves it.
+  readonly env: Record<string, string>;
+  // Appended after the snapshot: the Codex auth mount (#134) and nothing else.
+  readonly extraMounts: readonly Mount[];
+  readonly onNotice: (
+    severity: "warning" | "error",
+    message: string,
+  ) => void | Promise<void>;
+};
+
+export interface SeedSnapshotSandbox {
+  // The snapshot's host path, under `snapshotsDir`.
+  readonly worktreePath: string;
+  readonly containerName: string;
+  run(o: RunOptions): Promise<Omit<SandboxRunResult, "commits">>;
+  // What moved in the snapshot since bringup, its HEAD or its porcelain
+  // status, described for a human; null when nothing did.
+  changed(): Promise<string | null>;
+  // Removes the container, then the snapshot unless `preserve` names why a
+  // human should see it.
+  close(o?: { readonly preserve?: string }): Promise<void>;
+}
+
+type SnapshotState = { readonly head: string | null; readonly status: string };
+
+const snapshotState = async (path: string): Promise<SnapshotState> => ({
+  head: await headCommit(path),
+  status: await porcelainStatus(path),
+});
+
+// `--local` hardlinks the cache's whole object store, so the seed is present
+// whichever ref reached it. The clone's refs are the cache's branches as
+// `origin/*`, the issue's own among them: they go with the remote, and any ref
+// still listed after that is deleted by name. A leftover at the path is a
+// closed admission's preserved snapshot or a crash's debris, and is replaced.
+const createSeedSnapshot = (
+  repoDir: string,
+  path: string,
+  seedSha: string,
+): Promise<void> =>
+  withTimeout(
+    (async () => {
+      await rm(path, { recursive: true, force: true });
+      await execGit(
+        ["clone", "--local", "--no-checkout", "--no-tags", repoDir, path],
+        repoDir,
+      );
+      await execGit(["checkout", "--detach", seedSha], path);
+      await execGit(["remote", "remove", "origin"], path);
+      const refs = await execGit(["for-each-ref", "--format=%(refname)"], path);
+      for (const ref of refs.split("\n").filter((r) => r !== "")) {
+        await execGit(["update-ref", "-d", ref], path);
+      }
+    })(),
+    WORKTREE_TIMEOUT_MS,
+    () =>
+      new WorktreeError(
+        `Seed snapshot creation timed out after ${WORKTREE_TIMEOUT_MS}ms`,
+      ),
+  );
+
+export const createSeedSnapshotSandbox = async (
+  options: CreateSeedSnapshotSandboxOptions,
+): Promise<SeedSnapshotSandbox> => {
+  const { repoDir, hostCwd, snapshotsDir } = options.layout;
+  const worktreePath = join(snapshotsDir, seedSnapshotDirName(options.issueId));
+  const removeSnapshot = (): Promise<void> =>
+    rm(worktreePath, { recursive: true, force: true });
+
+  let handle: SandboxHandle;
+  let baseline: SnapshotState;
+  try {
+    await createSeedSnapshot(repoDir, worktreePath, options.seedSha);
+    baseline = await snapshotState(worktreePath);
+    handle = await options.sandbox.create({
+      worktreePath,
+      hostRepoPath: hostCwd,
+      mounts: [
+        { hostPath: worktreePath, sandboxPath: SANDBOX_REPO_DIR, readonly: true },
+        ...options.extraMounts,
+      ],
+      env: { ...resolveSandboxEnv(options.env), ...options.sandbox.env },
+    });
+  } catch (e) {
+    // F4, for the snapshot.
+    try {
+      await removeSnapshot();
+    } catch (cleanupError) {
+      await options.onNotice("error", `Failed to remove seed snapshot after bringup failure: ${String(cleanupError)}`);
+    }
+    throw e;
+  }
+  // The provider registered the container's removal first, so a shutdown
+  // drains it before this removes the directory it mounts.
+  const unregisterShutdown = registerAsyncShutdown(
+    removeSnapshot,
+    () => rmSync(worktreePath, { recursive: true, force: true }),
+  );
+  const sandboxRepoDir = handle.worktreePath;
+  let closed = false;
+
+  return {
+    worktreePath,
+    containerName: handle.containerName,
+    async run(o) {
+      const { result } = await measuredAgentRun(
+        options.sandbox,
+        handle.containerName,
+        o,
+        async (idleTimeoutMs, completionTimeoutMs, invocation) => {
+          await sandboxGitSetup(
+            handle,
+            `git config --global --add safe.directory "${sandboxRepoDir}"`,
+          );
+          return invokeAgent(
+            handle,
+            sandboxRepoDir,
+            o.prompt,
+            o.agent,
+            idleTimeoutMs,
+            completionTimeoutMs,
+            o.completionSignal,
+            invocation,
+          );
+        },
+      );
+      return result;
+    },
+    async changed() {
+      const now = await snapshotState(worktreePath);
+      const moves = [
+        ...(now.head === baseline.head
+          ? []
+          : [`HEAD moved from ${baseline.head ?? "(unborn)"} to ${now.head ?? "(unborn)"}`]),
+        ...(now.status === baseline.status
+          ? []
+          : [`git status --porcelain now reads:\n${now.status}`]),
+      ];
+      return moves.length === 0 ? null : moves.join("\n");
+    },
+    async close(o) {
+      if (closed) return;
+      closed = true;
+      unregisterShutdown();
+      await handle.close();
+      if (o?.preserve !== undefined) {
+        await options.onNotice("error", `Seed snapshot preserved at ${worktreePath}: ${o.preserve}`);
+        return;
+      }
+      await removeSnapshot();
     },
   };
 };
