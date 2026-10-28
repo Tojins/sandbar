@@ -183,6 +183,36 @@ describe("renderAttemptSlot — the egress allowlist (#202)", () => {
   });
 });
 
+// #201: a held database copy is named with its dump's day and its hook's
+// outcome; no copy says nothing.
+describe("renderAttemptSlot — the database copy (#201)", () => {
+  const held = {
+    kind: "held", holder: "implementer", container: "db", dumpDate: "2026-10-28", hook: "ok",
+  } as const;
+
+  it("names the sibling, the dump's day and the rules for prod data", () => {
+    const slot = renderAttemptSlot({ ...implementerInputs, dbCopy: held });
+    expect(slot).toContain("## Your production database copy");
+    expect(slot).toContain("The `db` sibling runs on a copy of the production database dump of\n2026-10-28");
+    expect(slot).toContain("The copy hook applied the branch's migrations to it; its output is in " +
+      "`/sandbar/logs/db-copy-hook.log`.");
+    expect(slot).toMatch(/discarded when you hand over/);
+    expect(slot).toMatch(/no test may depend on what\s+the copy holds/);
+    expect(slot).toMatch(/Never copy its rows into commits, tests,\s+fixtures or your final message/);
+  });
+
+  it.each([
+    ["failed", "**The copy hook failed on it**, so the branch's migrations may be missing"],
+    ["none", "No copy hook is configured, so it has the dump's schema without the branch's migrations."],
+  ] as const)("says what a %s hook means", (hook, line) => {
+    expect(renderAttemptSlot({ ...implementerInputs, dbCopy: { ...held, hook } })).toContain(line);
+  });
+
+  it("says nothing without a copy", () => {
+    expect(renderAttemptSlot(implementerInputs)).not.toContain("database copy");
+  });
+});
+
 describe("adjudication prompt contracts (#167)", () => {
   it("tells an unchanged implementer attempt how to dispute a false finding", () => {
     const slot = renderAttemptSlot({

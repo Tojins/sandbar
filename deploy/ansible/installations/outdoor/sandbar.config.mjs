@@ -129,6 +129,12 @@ export default {
       onSandboxReady: [
         { command: "scripts/sandbox-prepare.sh", timeoutMs: 300_000 },
       ],
+      // After each database copy is swapped in: the branch's migrations on
+      // the prod dump, then the agent login (Tojins/outdoor#786). Bounded for
+      // a migration that rewrites one of the ~1.7M-row tables.
+      onDbCopyReady: [
+        { command: "scripts/sandbox-prepare.sh db-copy", timeoutMs: 1_800_000 },
+      ],
     },
   },
 

@@ -736,6 +736,9 @@ async function replayCase(
       sandboxLogBaseDir: issueLogger.dir,
       attemptLogger: issueLogger,
       gateSemaphore: ctx.gateSemaphore,
+      // A replay's implementer works on the fixtures: a copy of tonight's
+      // dump is not the data the original run saw.
+      dbCopies: null,
       onEvent,
       providerState: ctx.providerState,
     });

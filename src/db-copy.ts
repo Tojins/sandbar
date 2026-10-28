@@ -31,7 +31,9 @@
 // releases it and records `dropped` with the volume's used bytes. Acquiring
 // swaps a fresh copy in, then runs `onDbCopyReady` in the agent container,
 // its output appended to `db-copy-hook.log` in the sandbox's log dir; a
-// failing hook keeps the copy up and is recorded, never retried. Events
+// failing hook keeps the copy up and is recorded, never retried. The slot
+// holds the copy from the swap on, so a hook or log write that throws leaves
+// it for the teardown's `align(null)` to drop and release. Events
 // carry reason codes only, never server output (decision 13).
 
 import { readdir, realpath, rm, stat, writeFile, appendFile, mkdir } from "node:fs/promises";
@@ -51,6 +53,7 @@ import {
   readBaseMeta,
 } from "./db-base.js";
 import {
+  DB_COPY_HOOK_LOG,
   type DbCopyEvent,
   type DbCopyHolder,
   type DbCopyUnavailable,
@@ -219,11 +222,18 @@ export async function dbVolumeRefusals(cfg: DatabaseCopiesSettings): Promise<str
   }
 }
 
+// What the holder is told: the sibling the copy runs as, the day its dump was
+// taken, and how the copy hook went.
+export type DbCopyHeld = {
+  readonly kind: "held";
+  readonly holder: DbCopyHolder;
+  readonly container: string;
+  readonly dumpDate: string;
+  readonly hook: "ok" | "failed" | "none";
+};
+
 export type DbCopyStatus =
-  | {
-      readonly kind: "held";
-      readonly holder: DbCopyHolder;
-    }
+  | DbCopyHeld
   | { readonly kind: "none" }
   | { readonly kind: "unavailable"; readonly reason: DbCopyUnavailable };
 
@@ -232,8 +242,6 @@ export type DbCopySlot = {
   // action wants; null drops it.
   readonly align: (desired: DbCopyHolder | null) => Promise<DbCopyStatus>;
 };
-
-export const DB_COPY_HOOK_LOG = "db-copy-hook.log";
 
 export function createDbCopySlot(opts: {
   readonly copies: DbCopies;
@@ -244,13 +252,13 @@ export function createDbCopySlot(opts: {
   readonly issue: { readonly id: string; readonly title: string };
   // The sandbox's log dir, mounted in the agent container.
   readonly logDir: string;
-  readonly emit: (event: DbCopyEvent) => Promise<unknown>;
+  readonly emit: (event: DbCopyEvent) => Promise<void> | void;
 }): DbCopySlot {
   const { copies, issue } = opts;
   const { cfg } = copies;
   type Held = {
     readonly lease: DbCopyLease;
-    readonly status: Extract<DbCopyStatus, { kind: "held" }>;
+    readonly status: DbCopyHeld;
   };
   let held: Held | null = null;
   const record = { issue: Number(issue.id), title: issue.title };
@@ -304,21 +312,26 @@ export function createDbCopySlot(opts: {
       return await fail("bringup-failed");
     }
     const durationMs = elapsed();
-    let hook: "ok" | "failed" | "none" = "none";
+    // Held from here on, so a hook or log write that throws leaves the copy
+    // for the teardown's `align(null)` to drop.
+    held = {
+      lease,
+      status: { kind: "held", holder, container: opts.target.name, dumpDate: lease.dumpDate, hook: "none" },
+    };
     let hookMs: number | undefined;
     if (opts.hooks.length > 0) {
       const hookElapsed = startTimer();
       const ran = await opts.sandbox.runHooks(opts.hooks);
       hookMs = hookElapsed();
-      hook = ran.ok ? "ok" : "failed";
+      held = { lease, status: { ...held.status, hook: ran.ok ? "ok" : "failed" } };
       await appendFile(
         join(opts.logDir, DB_COPY_HOOK_LOG),
         `[sandbar] onDbCopyReady for db copy ${label}\n${ran.output}\n`,
         "utf8",
       );
     }
-    const status = { kind: "held", holder } as const;
-    held = { lease, status };
+    const { status } = held;
+    const { hook } = status;
     await opts.emit({
       kind: "db-copy", ...record, holder, action: "created", durationMs, base: lease.base, hook,
       ...(hookMs === undefined ? {} : { hookMs }),

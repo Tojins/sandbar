@@ -2,8 +2,9 @@
 // project anchor (shared verbatim by both agents), issue anchor
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
 // commit list + diff stat (progressive disclosure, #158), the quality fixer's
-// commits since the last attempt (#185), sandbox-stack report #44, the egress
-// allowlist note when it is enforced (#202), gate trace,
+// commits since the last attempt (#185), sandbox-stack report #44, the
+// database copy it holds (#201), the egress allowlist note when it is
+// enforced (#202), gate trace,
 // the latest verifier rejection — an accepted behavior finding is fixed at
 // every same-defect site behind a failing-first test (#181) — and the same
 // built-in coding standards the quality pass applies plus a live pre-promise
@@ -92,7 +93,9 @@ import {
 } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
-import type { SandboxContainerStatus } from "./sandbox-stack.js";
+import type { DbCopyHeld } from "./db-copy.js";
+import { DB_COPY_HOOK_LOG } from "./db-copy-policy.js";
+import { SANDBOX_LOG_MOUNT, type SandboxContainerStatus } from "./sandbox-stack.js";
 import { type QualityStandards, type RuleGroup, renderStandards } from "./standards-groups.js";
 import { type ParsedVerdict, stripVerdictTokens } from "./verdict-parser.js";
 
@@ -138,6 +141,7 @@ const IMPLEMENTER_SANDBOX_GATE_ACCESS_ATTACHED_TPL = loadTemplate(
 const IMPLEMENTER_CHUNK_BASE_TPL = loadTemplate("implementer-chunk-base");
 const IMPLEMENTER_STACK_FILE_TPL = loadTemplate("implementer-stack-file");
 const IMPLEMENTER_SANDBOX_EGRESS_TPL = loadTemplate("implementer-sandbox-egress");
+const IMPLEMENTER_DB_COPY_TPL = loadTemplate("implementer-db-copy");
 const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
 const ADJUDICATOR_TPL = loadTemplate("adjudicator");
 const QUALITY_TESTS_MISSING_LISTER_TPL = loadTemplate("quality-tests-missing-lister");
@@ -320,6 +324,9 @@ export type PromptInputs = {
   // The rules a step of the gate stack in effect settles (#183): their prose
   // is left out of this attempt's pre-promise review.
   readonly settled: ReadonlySet<SettledRule>;
+  // The database copy this attempt holds (#201). Absent without one: a copy
+  // that is off or unavailable says nothing.
+  readonly dbCopy?: DbCopyHeld;
 };
 
 export type ReviewerPromptInputs = {
@@ -828,6 +835,8 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     inputs.sandboxHasGateAttachments ?? false,
   );
 
+  const dbCopy = inputs.dbCopy === undefined ? "" : renderDbCopySlot(inputs.dbCopy);
+
   const stackFile = inputs.stackFile === undefined
     ? ""
     : render(IMPLEMENTER_STACK_FILE_TPL, { path: inputs.stackFile });
@@ -852,6 +861,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     workDone: section(workDone),
     qualityCommits: section(qualityCommitsSection),
     sandboxStack: section(sandboxStack),
+    dbCopy: section(dbCopy),
     stackFile: section(stackFile),
     egress: section(inputs.egressEnforced === true ? IMPLEMENTER_SANDBOX_EGRESS_TPL : ""),
     gateFailure: section(gateFailure),
@@ -866,6 +876,18 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
       inputs.settled, "commit-ritual", COMMIT_RITUAL_IMPLEMENTER_TPL, "\n",
     ),
   });
+}
+
+// The database-copy slot (#201): which sibling runs on the copy, the dump's
+// day, and whether the copy hook applied the branch's migrations to it.
+export function renderDbCopySlot(copy: DbCopyHeld): string {
+  const log = `\`${SANDBOX_LOG_MOUNT}/${DB_COPY_HOOK_LOG}\``;
+  const hook = {
+    ok: `The copy hook applied the branch's migrations to it; its output is in ${log}.`,
+    failed: `**The copy hook failed on it**, so the branch's migrations may be missing; its output is in ${log}.`,
+    none: "No copy hook is configured, so it has the dump's schema without the branch's migrations.",
+  }[copy.hook];
+  return render(IMPLEMENTER_DB_COPY_TPL, { container: copy.container, dumpDate: copy.dumpDate, hook });
 }
 
 // The sandbox-stack slot (#44 D8) — pure, over the resolved subset plus this

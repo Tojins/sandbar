@@ -96,8 +96,9 @@ and measures the database volume into the same storage latch as the
 graphroot; startup and quiescence sweep the run's copies.
 `db-copy.ts` makes one reflink copy of the base per issue and a slot swaps it
 into the sandbox stack beside its target sibling (`swapDbCopyIn`/`Out`),
-then runs `onDbCopyReady` (`Sandbox.runHooks`); not yet wired into the
-inner loop.
+then runs `onDbCopyReady` (`Sandbox.runHooks`). The inner loop aligns the
+slot before every action (`dbCopyHolderFor`): only the implementer holds a
+copy, a fresh one each round.
 
 ## Invariants — where they live
 
@@ -150,9 +151,10 @@ inner loop.
   (shared by every branch role; incl. 10 commit subjects and
   `background-tasks.md`); implementer attempt slot 6.8k (2.9k of it
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
-  configured, +0.2k an enforced egress allowlist); quality lister 5.6k for the
-  built-in group, 2.8k + its group for a project group; verify 6.0k, fixer
-  5.4k; verifier white-box 4.1k; adjudicator 1.1k + the report; UI check 1.6k and partition
+  configured, +0.2k an enforced egress allowlist, +0.6k a held database
+  copy); quality lister 5.6k for the built-in group, 2.8k + its group for a
+  project group; verify 6.0k, fixer 5.4k; verifier white-box 4.1k;
+  adjudicator 1.1k + the report; UI check 1.6k and partition
   check 1.5k + the issue anchor; scenario writer 2.2k + the issue anchor;
   resolve 1.2k + anchor + paths/trace; reflect
   tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser

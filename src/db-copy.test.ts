@@ -21,13 +21,18 @@ import {
 import { type UsernsRun, UsernsCommandError, dbBaseLayout, publishBase } from "./db-base.js";
 import {
   type DbCopies,
-  DB_COPY_HOOK_LOG,
   createDbCopies,
   createDbCopySlot,
   dbVolumeRefusals,
   sweepDbCopies,
 } from "./db-copy.js";
-import { type BaseMeta, type DbCopyEvent, specTokenOf, withDbCopy } from "./db-copy-policy.js";
+import {
+  type BaseMeta,
+  DB_COPY_HOOK_LOG,
+  type DbCopyEvent,
+  specTokenOf,
+  withDbCopy,
+} from "./db-copy-policy.js";
 import { MIN_DB_VOLUME_FREE_BYTES } from "./disk-space.js";
 import { dbCopyDirName, runScope } from "./naming.js";
 
@@ -237,7 +242,7 @@ describe("createDbCopySlot", () => {
 
   const slotWith = (over: {
     readonly up?: boolean | Error;
-    readonly hookOk?: boolean;
+    readonly hookOk?: boolean | Error;
     readonly hooks?: number;
     readonly registry?: DbCopies;
   } = {}) => {
@@ -260,6 +265,7 @@ describe("createDbCopySlot", () => {
       sandbox: {
         runHooks: async (hooks) => {
           ops.push(`hooks ${hooks.map((h) => h.command).join(",")}`);
+          if (over.hookOk instanceof Error) throw over.hookOk;
           return { ok: over.hookOk ?? true, output: "migrated 3\n" };
         },
       },
@@ -276,7 +282,7 @@ describe("createDbCopySlot", () => {
   it("acquires for the implementer, keeps the copy across implementer actions, and drops it at handover", async () => {
     await publish();
     const { slot, ops, events } = slotWith();
-    const held = { kind: "held", holder: "implementer" };
+    const held = { kind: "held", holder: "implementer", container: "db", dumpDate: "2026-10-28", hook: "ok" };
     expect(await slot.align("implementer")).toEqual(held);
     expect(await slot.align("implementer")).toEqual(held);
     expect(await readdir(layout.copies)).toEqual([dbCopyDirName(SCOPE, "221", 1)]);
@@ -305,7 +311,7 @@ describe("createDbCopySlot", () => {
     const { slot, ops } = slotWith({ hooks: 0 });
     await slot.align("implementer");
     expect(await slot.align("scenario-runner")).toEqual({
-      kind: "held", holder: "scenario-runner",
+      kind: "held", holder: "scenario-runner", container: "db", dumpDate: "2026-10-28", hook: "none",
     });
     expect(ops).toEqual([expect.stringMatching(/^in .*-1 /), "out", expect.stringMatching(/^in .*-2 /)]);
   });
@@ -313,7 +319,7 @@ describe("createDbCopySlot", () => {
   it("keeps a copy whose hook failed, and says so", async () => {
     await publish();
     const { slot, events } = slotWith({ hookOk: false });
-    expect(await slot.align("implementer")).toMatchObject({ kind: "held" });
+    expect(await slot.align("implementer")).toMatchObject({ kind: "held", hook: "failed" });
     expect(events).toEqual([expect.objectContaining({ action: "created", hook: "failed" })]);
   });
 
@@ -341,6 +347,29 @@ describe("createDbCopySlot", () => {
     const registry = copies();
     const { slot } = slotWith({ up: new Error("podman went away"), registry });
     await expect(slot.align("implementer")).rejects.toThrow("podman went away");
+    expect(await readdir(layout.copies)).toEqual([]);
+    expect((await registry.acquire("221", target())).kind).toBe("ok");
+  });
+
+  it("holds the copy while its hook runs, so a hook that throws leaves align(null) a copy to drop", async () => {
+    await publish();
+    const registry = copies();
+    const { slot, ops, events } = slotWith({ hookOk: new Error("exec died"), registry });
+    await expect(slot.align("implementer")).rejects.toThrow("exec died");
+    expect(await slot.align(null)).toEqual({ kind: "none" });
+    expect(ops).toEqual([expect.stringMatching(/^in /), "hooks prepare-0", "out"]);
+    expect(events.map((e) => e.action)).toEqual(["dropped"]);
+    expect(await readdir(layout.copies)).toEqual([]);
+    expect((await registry.acquire("221", target())).kind).toBe("ok");
+  });
+
+  it("leaves align(null) a copy to drop when the hook's log cannot be written", async () => {
+    await publish();
+    const registry = copies();
+    const { slot } = slotWith({ registry });
+    await rm(logDir, { recursive: true });
+    await expect(slot.align("implementer")).rejects.toThrow(/ENOENT/);
+    expect(await slot.align(null)).toEqual({ kind: "none" });
     expect(await readdir(layout.copies)).toEqual([]);
     expect((await registry.acquire("221", target())).kind).toBe("ok");
   });
