@@ -294,3 +294,6 @@ export function withDbCopy(
     args: [...target.args, `--innodb-buffer-pool-size=${cfg.bufferPoolBytes}`],
   };
 }
+
+// The file the copy hook's output is appended to, in the sandbox's log dir.
+export const DB_COPY_HOOK_LOG = "db-copy-hook.log";

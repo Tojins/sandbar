@@ -84,7 +84,8 @@ import {
 } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
-import { DB_COPY_HOOK_LOG, type DbCopyHeld } from "./db-copy.js";
+import type { DbCopyHeld } from "./db-copy.js";
+import { DB_COPY_HOOK_LOG } from "./db-copy-policy.js";
 import { SANDBOX_LOG_MOUNT, type SandboxContainerStatus } from "./sandbox-stack.js";
 import { type QualityStandards, renderStandards } from "./standards-groups.js";
 import { type ParsedVerdict, stripVerdictTokens } from "./verdict-parser.js";

@@ -51,6 +51,7 @@ import {
   readBaseMeta,
 } from "./db-base.js";
 import {
+  DB_COPY_HOOK_LOG,
   type DbCopyEvent,
   type DbCopyHolder,
   type DbCopyUnavailable,
@@ -239,8 +240,6 @@ export type DbCopySlot = {
   // action wants; null drops it.
   readonly align: (desired: DbCopyHolder | null) => Promise<DbCopyStatus>;
 };
-
-export const DB_COPY_HOOK_LOG = "db-copy-hook.log";
 
 export function createDbCopySlot(opts: {
   readonly copies: DbCopies;

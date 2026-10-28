@@ -197,6 +197,7 @@ import {
   resolveGateStack,
 } from "./config.js";
 import type { DbCopies, DbCopyStatus } from "./db-copy.js";
+import { SandbarError } from "./errors.js";
 import type { DbCopyHolder } from "./db-copy-policy.js";
 import {
   containerResourcesOf,
@@ -3135,6 +3136,58 @@ describe("runInnerLoop context terminals (#158)", () => {
         "close sandbox",
         "create sandbox",
       ]);
+    });
+
+    it("refuses to set up copies when the sandbox stack that runs the target is not up", async () => {
+      const { opts } = copiesHarness(async () => completeRun);
+      innerLoopMocks.startSandboxStack.mockReset().mockResolvedValue(null);
+
+      await expect(runInnerLoop(issue, opts)).rejects.toThrow(new SandbarError(
+        "database copies: the sandbox stack that runs the target is not up",
+      ));
+      expect(innerLoopMocks.createDbCopySlot).not.toHaveBeenCalled();
+    });
+
+    it("hands the configured onDbCopyReady hooks to the slot", async () => {
+      const { opts } = copiesHarness(
+        async () => ({ ...completeRun, stdout: "<promise>NEEDS-INFO</promise><questions>stop</questions>", commits: [] }),
+      );
+      const onDbCopyReady = [{ name: "migrate", command: ["true"] }] as never[];
+      const withHooks = {
+        ...opts,
+        hooks: { sandbox: { onDbCopyReady } },
+      } as unknown as Parameters<typeof runInnerLoop>[1];
+
+      await runInnerLoop(issue, withHooks);
+      expect(innerLoopMocks.createDbCopySlot).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ hooks: onDbCopyReady }),
+      );
+      expect(vi.mocked(innerLoopMocks.createDbCopySlot).mock.calls[0]![0].hooks).toBe(onDbCopyReady);
+    });
+
+    it("still stops the siblings and closes the sandbox when dropping the copy fails", async () => {
+      const { opts, calls, events } = copiesHarness(
+        async () => ({ ...completeRun, stdout: "<promise>NEEDS-INFO</promise><questions>stop</questions>", commits: [] }),
+      );
+      innerLoopMocks.createDbCopySlot.mockReset().mockImplementation(() => ({
+        align: vi.fn(async (desired: DbCopyHolder | null) => {
+          if (desired !== null) return held;
+          // Only the teardown's drop is the last align(null); earlier ones succeed.
+          calls.push("align null");
+          if (calls.filter((c) => c === "align null").length > 1) {
+            throw new Error("swap out failed");
+          }
+          return { kind: "none" };
+        }),
+      }));
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
+      expect(events).toContainEqual({
+        kind: "complaint",
+        severity: "error",
+        message: "Failed to drop the database copy: swap out failed",
+      });
+      expect(calls.slice(-2)).toEqual(["stop siblings", "close sandbox"]);
     });
 
     it("renders no copy slot when the copy is unavailable", async () => {
