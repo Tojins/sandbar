@@ -8,7 +8,7 @@
 // production while looking correct in any test that uses a plain clone.
 
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -1247,6 +1247,40 @@ describe("settleIdenticalBump (real same-bump merge in a linked worktree)", () =
 
     expect(await git(wt, "rev-parse", "HEAD")).toBe(head);
     expect(await version("HEAD")).toBe("0.20.34");
+    expect(lines).toEqual([]);
+  });
+
+  it("leaves both files alone and says so when the lockfile cannot be rewritten", async () => {
+    const { adapter, ok } = await sameBump();
+    expect(ok).toBe(true);
+    const head = await git(wt, "rev-parse", "HEAD");
+    const conflicted =
+      "<<<<<<< ours\n" + lock("0.20.34") + "=======\n" + lock("0.20.34") + ">>>>>>> theirs\n";
+    await writeFile(join(wt, "package-lock.json"), conflicted);
+    lines.length = 0;
+
+    expect(await settleIdenticalBump(adapter, emit, "#42")).toBe(false);
+
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(head);
+    expect(await readFile(join(wt, "package.json"), "utf8")).toBe(pkg("0.20.34"));
+    expect(await readFile(join(wt, "package-lock.json"), "utf8")).toBe(conflicted);
+    expect(await git(wt, "diff", "--cached", "--name-only")).toBe("");
+    expect(lines).toEqual([
+      "version-collision #42 both sides bumped to 0.20.34; " +
+        "package-lock.json is still in conflict or has no root version at it; left to the gate",
+    ]);
+  });
+
+  it("changes nothing when HEAD is neither a merge nor in the middle of one", async () => {
+    await git(repo, "checkout", "-q", "main");
+    await git(repo, "worktree", "add", "--detach", wt, "HEAD");
+    const head = await git(wt, "rev-parse", "HEAD");
+    lines.length = 0;
+
+    expect(await settleIdenticalBump(adapterAt(wt), emit, "#42")).toBe(false);
+
+    expect(await git(wt, "rev-parse", "HEAD")).toBe(head);
+    expect(await git(wt, "status", "--porcelain")).toBe("");
     expect(lines).toEqual([]);
   });
 });

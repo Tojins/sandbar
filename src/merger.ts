@@ -403,7 +403,7 @@ import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { EGRESS_AGENT_ENV, type OwnerEgress } from "./egress.js";
 import { SandbarError, hasExitCode, isErrno, isExitCode } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
-import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
+import { dirtyWorktreePaths, fetchOriginChunkBranch, readFileAtRef } from "./git-ops.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
   type Clock,
@@ -3640,9 +3640,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         : null;
     },
     async readFileAt(rev, path) {
-      const { stdout } = await exec("git", ["ls-tree", "--name-only", rev, "--", path], { cwd });
-      if (stdout.trim() === "") return null;
-      return (await exec("git", ["show", `${rev}:${path}`], { cwd })).stdout;
+      return readFileAtRef(cwd, rev, path);
     },
     async mergeBaseOf(a, b) {
       return (await exec("git", ["merge-base", a, b], { cwd })).stdout.trim();
