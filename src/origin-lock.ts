@@ -365,6 +365,17 @@ export class OriginLockHeldError extends SandbarError {
   }
 }
 
+// A named control-flow condition for a remote-write barrier racing terminal
+// cleanup. Cleanup and the heartbeat classify it; adapter callers receive the
+// rejection unchanged, which is what prevents their write after lease release.
+// The deploy watch (#198) classifies it too, abandoning its tick.
+export class OriginLeaseLostDuringCleanupError extends SandbarError {
+  constructor(message: string) {
+    super(message);
+    this.name = "OriginLeaseLostDuringCleanupError";
+  }
+}
+
 export type OriginLockHandle = {
   readonly claim: () => OriginLockClaim;
   renew(): Promise<OriginLockRenewal>;
