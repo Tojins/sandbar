@@ -27,6 +27,7 @@ import {
   DEFAULT_REVIEWER_MODEL_ID,
   DEFAULT_REVIEWER_QUALITY_MODEL_ID,
   DEFAULT_MERGER_MODEL_ID,
+  DEFAULT_UI_CHECK_MODEL_ID,
   DEFAULT_SOURCE_BRANCH,
   DEFAULT_WORK_DIR,
   DEFAULT_LABELS,
@@ -475,7 +476,7 @@ describe("resolveConfig", () => {
     expect(r.uiPrototypeCheck).toBe(DEFAULT_UI_PROTOTYPE_CHECK);
     expect(r.partitionCheck).toBe(DEFAULT_PARTITION_CHECK);
     expect(r.maxContextChars).toBe(DEFAULT_MAX_CONTEXT_CHARS);
-    expect(r.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
+    expect(r.uiCheckModelId).toBe(DEFAULT_UI_CHECK_MODEL_ID);
     expect(r.reviewerModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
     expect(r.reviewerQualityModelId).toBe(DEFAULT_REVIEWER_QUALITY_MODEL_ID);
     expect(r.adjudicatorModelId).toBe(DEFAULT_REVIEWER_MODEL_ID);
@@ -682,11 +683,13 @@ describe("resolveConfig", () => {
     expect(r.copyToWorktree).toEqual([".npmrc"]);
   });
 
-  it("defaults every agent call to the version-agnostic opus alias", () => {
+  it("defaults every agent call to a version-agnostic claude alias", () => {
     const r = resolveConfig(minimal);
     expect(r.implementerModelId).toBe("opus");
+    expect(r.uiCheckModelId).toBe("sonnet");
     expect(r.reviewerModelId).toBe("opus");
-    expect(r.reviewerQualityModelId).toBe("opus");
+    expect(r.reviewerQualityModelId).toBe("sonnet");
+    expect(r.adjudicatorModelId).toBe("opus");
     expect(r.mergerModelId).toBe("opus");
   });
 
@@ -747,7 +750,7 @@ describe("resolveConfig", () => {
       implementerModelId: "gpt-5.6-sol",
       uiCheckAgent: "claude",
     });
-    expect(backToClaude.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
+    expect(backToClaude.uiCheckModelId).toBe(DEFAULT_UI_CHECK_MODEL_ID);
     expect(() =>
       resolveConfig({
         ...minimal,
@@ -784,7 +787,7 @@ describe("resolveConfig", () => {
       implementerModelId: "gpt-5.6-sol",
       uiCheckAgent: "claude",
     });
-    expect(splitProvider.uiCheckModelId).toBe(DEFAULT_IMPLEMENTER_MODEL_ID);
+    expect(splitProvider.uiCheckModelId).toBe(DEFAULT_UI_CHECK_MODEL_ID);
   });
 
   // #72 — the vendor knob beside the tiering one. Defaulting both to "claude"
@@ -824,11 +827,10 @@ describe("resolveConfig", () => {
     expect(r.reviewerAgent).toBe("claude");
   });
 
-  // The third per-call knob (#130). Passed through per role and otherwise
-  // ABSENT — not defaulted, not normalised — because unset means "the CLI's
-  // own default", and a driver default here would be the dotfile-shaped
-  // invisible setting the field exists to replace.
-  it("passes each role's reasoning effort through, and leaves unset ones absent (#130)", () => {
+  // The third per-call knob (#130). Passed through per role; an unset one
+  // gets the driver default for a claude-routed role and stays ABSENT for any
+  // other vendor, whose level set and server default are its own.
+  it("passes each role's reasoning effort through, and defaults unset claude roles (#130)", () => {
     const r = resolveConfig({
       ...minimal,
       implementerEffort: "high",
@@ -842,14 +844,37 @@ describe("resolveConfig", () => {
     expect(r.reviewerQualityEffort).toBe("high");
     expect(r.adjudicatorEffort).toBe("max");
     expect(r.mergerEffort).toBe("xhigh");
-    expect(r.reviewerEffort).toBeUndefined();
+    expect(r.reviewerEffort).toBe("high");
     const none = resolveConfig(minimal);
-    expect(none.implementerEffort).toBeUndefined();
-    expect(none.uiCheckEffort).toBeUndefined();
-    expect(none.reviewerEffort).toBeUndefined();
-    expect(none.reviewerQualityEffort).toBeUndefined();
-    expect(none.adjudicatorEffort).toBeUndefined();
-    expect(none.mergerEffort).toBeUndefined();
+    expect(none.implementerEffort).toBe("high");
+    expect(none.uiCheckEffort).toBe("high");
+    expect(none.reviewerEffort).toBe("high");
+    expect(none.reviewerQualityEffort).toBe("medium");
+    expect(none.adjudicatorEffort).toBe("high");
+    expect(none.mergerEffort).toBe("medium");
+  });
+
+  it("leaves an unset effort absent for a role routed off claude (#130)", () => {
+    const r = resolveConfig({
+      ...minimal,
+      implementerAgent: "codex",
+      implementerModelId: "gpt-5.6-sol",
+      reviewerAgent: "codex",
+      reviewerModelId: "gpt-5.6-sol",
+      reviewerQualityAgent: "claude",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+    });
+    expect(r.implementerEffort).toBeUndefined();
+    expect(r.uiCheckEffort).toBeUndefined();
+    expect(r.reviewerEffort).toBeUndefined();
+    expect(r.adjudicatorEffort).toBeUndefined();
+    expect(r.mergerEffort).toBeUndefined();
+    expect(r.reviewerQualityEffort).toBe("medium");
+    // The adjudicator still follows a reviewer effort the operator named.
+    expect(
+      resolveConfig({ ...minimal, reviewerEffort: "xhigh" }).adjudicatorEffort,
+    ).toBe("xhigh");
   });
 
   // Shape only: the level set is the CLI's to refuse. An empty string would

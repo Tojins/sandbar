@@ -663,14 +663,16 @@ export type RunConfig = {
 
   // Model ids passed to the role's agent provider, one per role. There is no
   // single global model knob: every agent role names its own model so the
-  // tiering is explicit at the call site. Every role defaults to the version-
-  // agnostic "opus" alias, which the claude CLI resolves to the latest Opus —
-  // so the defaults don't pin a version and don't need bumping per release.
+  // tiering is explicit at the call site. Every role defaults to a version-
+  // agnostic claude alias ("opus" or "sonnet"), which the CLI resolves to the
+  // latest of that tier — so the defaults don't pin a version and don't need
+  // bumping per release.
   // A role routed to another provider (below) puts THAT vendor's id in the same
   // field: the fields name the model, not the vendor — and must then name it,
   // since the default is a claude alias (`assertRoleModelIdNamed`).
-  // Defaults: implementer/reviewer/reviewer-quality/adjudicator/merger all "opus"; the UI
-  // checker follows the effective implementer model.
+  // Defaults: implementer/reviewer/merger "opus", reviewer-quality and the UI
+  // checker "sonnet"; the adjudicator follows the reviewer, and the UI checker
+  // follows an implementer model the operator named.
   readonly implementerModelId?: string;
   // The one pre-attempt UI classifier (#126). Its routing follows the
   // implementer unless explicitly split, while the check itself defaults on.
@@ -720,12 +722,14 @@ export type RunConfig = {
   // `codex -c model_reasoning_effort=<level>` — and never checked against a
   // level table here: the set is vendor- and model-dependent (`xhigh` on some
   // codex models, `ultra` on one), and a wrong value is refused by the CLI on
-  // the first invocation, loudly. UNSET MEANS ABSENT: no flag is emitted and
-  // the CLI's own default applies — for codex the per-model default the
-  // server ships (`low` for gpt-5.6-sol when this was written), for claude
-  // `high`. There is no driver default, so a config that says nothing sees no
-  // change, and the level a run used is on its log line (`effort=`) or
-  // provably nowhere.
+  // the first invocation, loudly. A claude-routed role that leaves it unset
+  // gets the driver default beside its default model — implementer, UI
+  // checker and reviewer `high`, reviewer-quality and merger `medium`, the
+  // adjudicator the reviewer's. A role routed elsewhere has no driver default:
+  // UNSET MEANS ABSENT, no flag is emitted and the CLI's own default applies
+  // (for codex the per-model default the server ships, `low` for gpt-5.6-sol
+  // when this was written). The level a run used is on its log line
+  // (`effort=`) or provably nowhere.
   readonly implementerEffort?: string;
   readonly uiCheckEffort?: string;
   readonly reviewerEffort?: string;
@@ -900,7 +904,8 @@ export type RunConfig = {
 };
 
 // After resolution every defaultable field is concrete except values whose
-// absence IS their default: `requiresSandbar`, the per-role effort flags, and
+// absence IS their default: `requiresSandbar`, the per-role effort flags (absent
+// for a role not routed to claude), and
 // `maxConcurrentGates` (unlimited). The other three are re-declared rather than
 // merely `Required<>`d because resolution changes their TYPE, not just their
 // presence: `labels` widens from Partial to the fully-populated vocabulary,
@@ -949,8 +954,20 @@ export const DEFAULT_UI_PROTOTYPE_CHECK = true;
 export const DEFAULT_PARTITION_CHECK = true;
 export const DEFAULT_MAX_CONTEXT_CHARS = 600_000;
 export const DEFAULT_REVIEWER_MODEL_ID = "opus";
-export const DEFAULT_REVIEWER_QUALITY_MODEL_ID = "opus";
+export const DEFAULT_REVIEWER_QUALITY_MODEL_ID = "sonnet";
 export const DEFAULT_MERGER_MODEL_ID = "opus";
+export const DEFAULT_UI_CHECK_MODEL_ID = "sonnet";
+// Reasoning effort for a claude-routed role that names none (#130's field).
+// Unattended work whose output decides something runs at `high`: the
+// implementer, the verdict-holding reviewer (and so the adjudicator), and the
+// one-token UI classifier, which at `medium` often answers without thinking.
+// The quality pass and the merger take scoped, well-specified work at
+// `medium`, where Opus 5.5 already matches Opus 5 at `high`.
+export const DEFAULT_IMPLEMENTER_EFFORT = "high";
+export const DEFAULT_UI_CHECK_EFFORT = "high";
+export const DEFAULT_REVIEWER_EFFORT = "high";
+export const DEFAULT_REVIEWER_QUALITY_EFFORT = "medium";
+export const DEFAULT_MERGER_EFFORT = "medium";
 export const DEFAULT_CLAUDE_MD_PATH = "CLAUDE.md";
 export const DEFAULT_CONTEXT_MD_PATH = "CONTEXT.md";
 export const DEFAULT_ADR_DIR = "docs/adr";
@@ -2195,10 +2212,20 @@ export function resolveCopyToWorktree(
   });
 }
 
+// A driver effort default belongs to the claude default model beside it; another
+// vendor's level set and server defaults are its own, so a role routed there
+// keeps its effort absent unless the operator names one.
+function claudeEffort(
+  agent: AgentProviderName,
+  level: string,
+): string | undefined {
+  return agent === "claude" ? level : undefined;
+}
+
 // #121 renamed the second reviewer pass, and a renamed field is exactly #66's
 // silent failure: the config is IMPORTED, so a host still saying
 // `reviewerFollowupModelId` would have it spread through `...config` and never
-// read, quietly running the pass on the "opus" default. `requiresSandbar` only
+// read, quietly running the pass on the claude default. `requiresSandbar` only
 // catches a config asking for a NEWER driver; this is the opposite direction —
 // an older config on a newer driver — so it is refused here, by name.
 function checkRenamedReviewerField(config: RunConfig): void {
@@ -2360,7 +2387,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   }
   assertRoleModelIdNamed("reviewer", reviewerAgent, config.reviewerModelId);
   // Per PASS, against that pass's own provider (#121): a config that routes
-  // quality away from claude and leaves the model id at the "opus" default is
+  // quality away from claude and leaves the model id at its claude-alias default is
   // #72's half-moved config, and the correctness pass's own id says nothing
   // about it.
   assertRoleModelIdNamed("reviewer", reviewerQualityAgent, config.reviewerQualityModelId, {
@@ -2417,7 +2444,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     uiCheckModelId:
       config.uiCheckModelId ??
       inheritedUiCheckModelId ??
-      DEFAULT_IMPLEMENTER_MODEL_ID,
+      DEFAULT_UI_CHECK_MODEL_ID,
     reviewerModelId: config.reviewerModelId ?? DEFAULT_REVIEWER_MODEL_ID,
     reviewerQualityModelId:
       config.reviewerQualityModelId ?? DEFAULT_REVIEWER_QUALITY_MODEL_ID,
@@ -2432,7 +2459,22 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     reviewerQualityAgent,
     adjudicatorAgent,
     mergerAgent,
-    adjudicatorEffort: config.adjudicatorEffort ?? config.reviewerEffort,
+    implementerEffort:
+      config.implementerEffort ??
+      claudeEffort(implementerAgent, DEFAULT_IMPLEMENTER_EFFORT),
+    uiCheckEffort:
+      config.uiCheckEffort ?? claudeEffort(uiCheckAgent, DEFAULT_UI_CHECK_EFFORT),
+    reviewerEffort:
+      config.reviewerEffort ?? claudeEffort(reviewerAgent, DEFAULT_REVIEWER_EFFORT),
+    reviewerQualityEffort:
+      config.reviewerQualityEffort ??
+      claudeEffort(reviewerQualityAgent, DEFAULT_REVIEWER_QUALITY_EFFORT),
+    adjudicatorEffort:
+      config.adjudicatorEffort ??
+      config.reviewerEffort ??
+      claudeEffort(adjudicatorAgent, DEFAULT_REVIEWER_EFFORT),
+    mergerEffort:
+      config.mergerEffort ?? claudeEffort(mergerAgent, DEFAULT_MERGER_EFFORT),
     coauthorTrailer:
       config.coauthorTrailer ??
       defaultCoauthorTrailer(config.botName, config.botEmail),

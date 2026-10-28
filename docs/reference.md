@@ -123,7 +123,10 @@ export default { /* ... */ env, ...routing };
 - **Routing** keys `SANDBAR_<ROLE>_AGENT`, `_MODEL_ID` and `_EFFORT` choose the
   agent CLI, model and effort per role. Roles: `IMPLEMENTER`, `UI_CHECK`,
   `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, `MERGER`. They never enter a
-  sandbox. Defaults are claude, `opus`, no effort flag.
+  sandbox. Defaults are claude with `opus` at `high` for the implementer and
+  reviewer (and so the adjudicator), `sonnet` at `high` for the UI check,
+  `sonnet` at `medium` for the quality pass and `opus` at `medium` for the
+  merger. A role routed off claude gets no effort flag unless it names one.
 
 [`sandbar.env.example`](../sandbar.env.example) lists every key.
 
