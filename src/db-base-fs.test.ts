@@ -4,7 +4,7 @@
 // is subuid-owned; db-base-podman.test.ts runs the import itself.
 
 import { execFile } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -23,7 +23,7 @@ import {
   runDbBaseJob,
   sweepBases,
 } from "./db-base.js";
-import { type BaseMeta, type ImportStatus, SUPERSEDED_GRACE_MS } from "./db-copy-policy.js";
+import { type BaseMeta, type ImportStatus, SUPERSEDED_GRACE_MS, importSpaceNeeded } from "./db-copy-policy.js";
 import type { EventInput } from "./events.js";
 
 const exec = promisify(execFile);
@@ -108,7 +108,7 @@ describe("publishBase", () => {
     await makeBase(old);
     await publishBase(layout, old, null, new Date());
     // A job killed between linking and renaming left its link behind.
-    await writeFile(`${layout.current}.tmp`, "");
+    await symlink("bases/stale", `${layout.current}.tmp`);
 
     const next = meta("b20261028T030000000Z");
     await makeBase(null, next.id);
@@ -225,9 +225,28 @@ describe("runDbBaseJob before any container", () => {
     expect((await readImportStatus(layout))!.attempt).not.toBe(status!.attempt);
   });
 
+  it("sizes the room needed from the current base, not from the dump", async () => {
+    await dropDump();
+    const current = meta("b20261027T030000000Z", { baseBytes: 1_000_000_000 });
+    await makeBase(current);
+    await publishBase(layout, current, null, new Date());
+    const needed = importSpaceNeeded(current.baseBytes, 13);
+    // Room for a base grown from the dump alone, but not one the size of the last.
+    expect(needed).toBeGreaterThan(importSpaceNeeded(null, 13));
+    await expect(job({ freeBytes: async () => needed - 1n }).result).resolves.toBe("import-failed");
+    expect(await readImportStatus(layout)).toMatchObject({ detail: "insufficient-space" });
+  });
+
   it("does nothing while the drop is empty", async () => {
     await expect(job().result).resolves.toBe("no-dump");
     expect(await readImportStatus(layout)).toBeNull();
+  });
+});
+
+describe("readImportStatus", () => {
+  it("rejects a status file that is not JSON rather than reading it as absent", async () => {
+    await writeFile(layout.status, "{not json");
+    await expect(readImportStatus(layout)).rejects.toThrow(SyntaxError);
   });
 });
 

@@ -92,6 +92,61 @@ async function rowsIn(root: string, base: string): Promise<string> {
 }
 
 describe.runIf(available)("sandbar db-base against real podman", () => {
+  const fresh = async (over: Record<string, unknown> = {}) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "sandbar-db-base-podman-")));
+    roots.push(root);
+    await mkdir(join(root, "drop"));
+    const dump = join(root, "drop/app-latest.sql.gz");
+    const cfg = resolveDatabaseCopies({
+      dump, root, container: "db", database: "app",
+      importBufferPoolBytes: 64 * 1024 * 1024, importTimeoutMs: 180_000, ...over,
+    })!;
+    const layout = dbBaseLayout(root);
+    const run = (t = target) => runDbBaseJob({
+      cfg, target: t, force: false, log: () => undefined, userns: inUserns(root),
+      freeBytes: async () => 1n << 50n,
+    });
+    return { root, dump, layout, run };
+  };
+
+  it("removes a killed job's leftover container before importing", async ({ expect }) => {
+    const { root, dump, run } = await fresh();
+    await writeFile(dump, gzipSync(ROWS));
+    await exec(RUNTIME, ["create", "--name", dbImportContainerName(runScope(root)), IMAGE, "true"]);
+    await expect(run()).resolves.toBe("imported");
+  }, 600_000);
+
+  it("keeps current unchanged for a truncated gzip and for an import past its timeout", async ({ expect }) => {
+    const truncated = await fresh();
+    // Without its trailer: every row arrives, then zlib reports the end.
+    const whole = gzipSync(ROWS);
+    await writeFile(truncated.dump, whole.subarray(0, whole.length - 8));
+    await expect(truncated.run()).resolves.toBe("import-failed");
+    expect(await readImportStatus(truncated.layout)).toMatchObject({ detail: "dump-unreadable" });
+    expect(await readdir(truncated.root)).not.toContain("current");
+
+    // The server is up inside the timeout; the stream is not done by it.
+    const slow = await fresh({ importTimeoutMs: 90_000 });
+    await writeFile(slow.dump, gzipSync(`${ROWS}SELECT SLEEP(3600);\n`));
+    const status = await slow.run().then(() => readImportStatus(slow.layout));
+    expect(status).toMatchObject({ outcome: "import-failed", detail: "timeout" });
+    expect(await readdir(slow.root)).not.toContain("current");
+  }, 600_000);
+
+  it("names a server that will not start not-ready, and an image that will not run container-failed", async ({ expect }) => {
+    // The server runs, but its healthcheck never passes inside the timeout.
+    const broken = await fresh({ importTimeoutMs: 5_000 });
+    await writeFile(broken.dump, gzipSync(ROWS));
+    await expect(broken.run({ ...target, readiness: { kind: "healthcheck", command: ["false"] } }))
+      .resolves.toBe("import-failed");
+    expect(await readImportStatus(broken.layout)).toMatchObject({ detail: "not-ready" });
+
+    const missing = await fresh();
+    await writeFile(missing.dump, gzipSync(ROWS));
+    await expect(missing.run({ ...target, image: "localhost/sandbar-no-such-image:0" })).resolves.toBe("import-failed");
+    expect(await readImportStatus(missing.layout)).toMatchObject({ detail: "container-failed" });
+  }, 600_000);
+
   it("imports a dump as current, and keeps it current through a failing one", async ({ expect }) => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "sandbar-db-base-podman-")));
     roots.push(root);

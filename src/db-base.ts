@@ -330,20 +330,20 @@ async function importIfNeeded(
 
   // Registered before the container exists, so a signal at any point after
   // this tears down whatever got created.
-  let tornDown = false;
-  const teardown = async (): Promise<void> => {
-    if (tornDown) return;
-    tornDown = true;
+  const withdraw = registerDisposable(() => abort("interrupted").then(() => undefined));
+  let aborted = false;
+  // Records why the import failed, then removes whatever it created; once.
+  // The status goes first, so a stuck removal cannot leave it unrecorded.
+  async function abort(reason: string): Promise<ImportStatus["outcome"]> {
+    if (aborted) return "import-failed";
+    aborted = true;
     withdraw();
+    const outcome = await fail(reason);
     const removed = await boundedPodman(CONTAINER_RM_ARGS(containerName), CONTROL_TIMEOUT_MS);
     if (!boundedOk(removed)) log(`db-base: could not remove ${containerName}: ${removed.errorMessage}`);
     await userns(["rm", "-rf", baseDir]);
-  };
-  const withdraw = registerDisposable(async () => {
-    if (tornDown) return;
-    await teardown();
-    await fail("interrupted");
-  });
+    return outcome;
+  }
 
   await mkdir(baseDir);
   log(`db-base: importing ${dump.name} (${dump.size} bytes) as ${id}`);
@@ -352,17 +352,13 @@ async function importIfNeeded(
     detail = await buildBase(opts, containerName, baseDir);
   } catch (err) {
     try {
-      await teardown();
-      await fail("job-error");
+      await abort("job-error");
     } catch (cleanupErr) {
       log(`db-base: cleaning up ${id} after a job error also failed: ${String(cleanupErr)}`);
     }
     throw err;
   }
-  if (detail !== null) {
-    await teardown();
-    return await fail(detail);
-  }
+  if (detail !== null) return await abort(detail);
   withdraw();
 
   const du = await userns(["du", "-sb", baseDir]);
