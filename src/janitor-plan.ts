@@ -130,10 +130,21 @@ export function decideRollingBase(args: {
   return { kind: retired ? "fresh" : "continue", lease };
 }
 
+// What a run ended as: `committed` has nothing to say, every other outcome
+// may name a cause.
+export type JanitorEnding =
+  | { readonly outcome: "committed" }
+  | { readonly outcome: Exclude<JanitorOutcome, "committed">; readonly cause?: string };
+
+// A provider's quota or credential error ends a run as the terminal of that name does.
+export const providerFailure = (
+  cause: "QUOTA" | "CREDENTIAL",
+): { readonly outcome: "failed"; readonly cause: string } => ({ outcome: "failed", cause });
+
 export function janitorOutcome(
   terminal: Terminal,
   commitsBeyondBase: number,
-): { readonly outcome: JanitorOutcome; readonly cause?: string } {
+): JanitorEnding {
   switch (terminal.type) {
     case "DONE":
       return { outcome: "committed" };
@@ -143,6 +154,7 @@ export function janitorOutcome(
         : { outcome: "rejected", cause: terminal.type };
     case "QUOTA":
     case "CREDENTIAL":
+      return providerFailure(terminal.type);
     case "HARD-ERROR":
       return { outcome: "failed", cause: terminal.type };
     case "NEEDS-STACK-CHANGE":
@@ -159,11 +171,15 @@ export function janitorOutcome(
 export const visitCounts = (outcome: JanitorOutcome): boolean =>
   outcome === "committed" || outcome === "no-change" || outcome === "rejected";
 
-// The repository file a task's prompt is read from at the source tip, or
-// null for the standards.
-export function janitorPromptPath(prompt: JanitorTaskPrompt): string | null {
-  if (prompt === "standards") return null;
-  return "file" in prompt ? prompt.file : `.claude/skills/${prompt.skill}/SKILL.md`;
+// Where a task's prompt comes from: the repository file read at the source
+// tip (null for the standards), and how a pull request body names it.
+export function describePrompt(prompt: JanitorTaskPrompt): {
+  readonly path: string | null;
+  readonly label: string;
+} {
+  if (prompt === "standards") return { path: null, label: "the project standards flagged `{janitor}`" };
+  if ("file" in prompt) return { path: prompt.file, label: `\`${prompt.file}\`` };
+  return { path: `.claude/skills/${prompt.skill}/SKILL.md`, label: `the skill \`${prompt.skill}\`` };
 }
 
 // The `What to apply` section: the flagged standards groups, or the prompt
@@ -173,7 +189,7 @@ export function janitorSourceText(
   text: string,
   sourceBranch: string,
 ): string {
-  const path = janitorPromptPath(prompt);
+  const { path } = describePrompt(prompt);
   return path === null
     ? `Find code in scope that breaks these project rules and fix it.\n\n${text}`
     : `From \`${path}\` on \`${sourceBranch}\`:\n\n${text}`;
@@ -197,10 +213,7 @@ export function janitorPrContent(
   task: string,
   prompt: JanitorTaskPrompt,
 ): { readonly title: string; readonly body: string } {
-  const source = prompt === "standards"
-    ? "the project standards flagged `{janitor}`"
-    : "file" in prompt ? `\`${prompt.file}\`` : `the skill \`${prompt.skill}\``;
-  return { title: `Idle task: ${task}`, body: `Idle task \`${task}\`, applying ${source}.` };
+  return { title: `Idle task: ${task}`, body: `Idle task \`${task}\`, applying ${describePrompt(prompt).label}.` };
 }
 
 export const JANITOR_CONFLICT_PR_COMMENT = (args: {

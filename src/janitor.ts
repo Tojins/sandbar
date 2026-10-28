@@ -35,7 +35,7 @@
 // Exactly two failures are caught, around the loop: `InnerLoopAbortedError`,
 // the pre-emption, is `pre-empted`; a provider's quota or credential error is
 // `failed` (the run's provider state has already heard it). Anything else
-// propagates to run.ts, which records the run as `failed`.
+// propagates to `settleJanitorRun`, which records the run as `failed`.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -44,7 +44,7 @@ import type { JanitorTask, PromptExtension } from "./config.js";
 import type { EventInput } from "./events.js";
 import { AgentCredentialError, AgentQuotaError, reclaimIssueClone } from "./agent-sandbox.js";
 import { chunkForgeWrites, LAND_LABEL } from "./chunk-land.js";
-import { isExitCode } from "./errors.js";
+import { faultDetail, isExitCode } from "./errors.js";
 import { ensurePullRequest, type PullRequestRef } from "./forge-pr.js";
 import { gitStdout, isAncestor, readFileAtRef, revParse, revParseOrNull } from "./git-ops.js";
 import {
@@ -70,7 +70,9 @@ import {
   janitorHoldKey,
   janitorOutcome,
   janitorPrContent,
-  janitorPromptPath,
+  describePrompt,
+  type JanitorEnding,
+  providerFailure,
   janitorSourceText,
   pickJanitorTask,
   pickScope,
@@ -82,7 +84,7 @@ import {
 } from "./janitor-plan.js";
 import type { IssueLogger } from "./logs.js";
 import { janitorBranchName, janitorStackId } from "./naming.js";
-import type { OriginWriteBarrier } from "./origin-lock.js";
+import { OriginLeaseLostDuringCleanupError, type OriginWriteBarrier } from "./origin-lock.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 import { janitorStandards, readQualityStandards } from "./standards-groups.js";
@@ -229,11 +231,14 @@ export async function pushRollingBranch(
 ): Promise<boolean> {
   const ref = `refs/heads/${branch}`;
   try {
-    await exec("git", ["push", "--quiet", `--force-with-lease=${ref}:${lease}`, "origin", `${ref}:${ref}`], { cwd: repoDir });
+    await exec("git", ["push", "--quiet", `--force-with-lease=${ref}:${lease}`, "origin", `${ref}:${ref}`], {
+      cwd: repoDir,
+      env: { ...process.env, LC_ALL: "C" },
+    });
     return true;
   } catch (err) {
-    const { stdout } = await exec("git", ["ls-remote", "origin", ref], { cwd: repoDir });
-    if ((stdout.split("\t")[0] ?? "").trim() !== lease) return false;
+    // `--force-with-lease` names its refusal in the push's own stderr.
+    if (String((err as { stderr?: unknown }).stderr ?? "").includes("(stale info)")) return false;
     throw err;
   }
 }
@@ -296,6 +301,44 @@ export type JanitorRunDeps = {
   readonly runLoop?: typeof runInnerLoop;
 };
 
+// A run as the daemon holds it: one that throws is recorded as a complaint and
+// a `failed` run, then rethrown to the unhandled-rejection trap. A lease lost
+// to cleanup is cleanup's to record. `onEnd` runs either way.
+export async function settleJanitorRun(args: {
+  readonly task: string;
+  readonly run: () => Promise<unknown>;
+  readonly emit: (event: EventInput) => Promise<void>;
+  readonly durationMs: () => number;
+  readonly onEnd: () => void;
+}): Promise<void> {
+  try {
+    await args.run();
+  } catch (err) {
+    if (err instanceof OriginLeaseLostDuringCleanupError) return;
+    await args.emit({
+      kind: "complaint",
+      severity: "error",
+      message: `Janitor task '${args.task}' failed: ${faultDetail(err)}`,
+    });
+    await args.emit({
+      kind: "janitor-run",
+      task: args.task,
+      branch: janitorBranchName(args.task),
+      outcome: "failed",
+      scope: [],
+      durationMs: args.durationMs(),
+    });
+    throw err;
+  } finally {
+    args.onEnd();
+  }
+}
+
+// A committed run adds what it carried and, once published, its pull request.
+type RunEnding =
+  | { readonly outcome: "committed"; readonly commits: number; readonly pullRequest?: number }
+  | Exclude<JanitorEnding, { readonly outcome: "committed" }>;
+
 export async function runJanitor(deps: JanitorRunDeps): Promise<JanitorOutcome | "held"> {
   const timer = startTimer();
   const { task, layout, sourceBranch } = deps;
@@ -332,7 +375,7 @@ export async function runJanitor(deps: JanitorRunDeps): Promise<JanitorOutcome |
   if (sourceText === null) {
     return await hold("source-missing", task.prompt === "standards"
       ? "no project standards group is flagged {janitor}"
-      : `${janitorPromptPath(task.prompt)} is missing at origin/${sourceBranch}`);
+      : `${describePrompt(task.prompt).path} is missing at origin/${sourceBranch}`);
   }
 
   let base = sourceTip;
@@ -396,17 +439,10 @@ export async function runJanitor(deps: JanitorRunDeps): Promise<JanitorOutcome |
   return await report(result, scope);
 }
 
-type RunEnding = {
-  readonly outcome: JanitorOutcome;
-  readonly cause?: string;
-  readonly commits?: number;
-  readonly pullRequest?: number;
-};
-
 // The prompt source's text at the source tip, or null when it has none.
 async function readTaskSource(deps: JanitorRunDeps): Promise<string | null> {
   const { prompt } = deps.task;
-  const path = janitorPromptPath(prompt);
+  const { path } = describePrompt(prompt);
   if (path !== null) {
     return await readFileAtRef(deps.layout.repoDir, `refs/remotes/origin/${deps.sourceBranch}`, path);
   }
@@ -445,9 +481,8 @@ async function runLoop(
     return ending.outcome === "committed" ? { ...ending, commits } : ending;
   } catch (err) {
     if (err instanceof InnerLoopAbortedError) return { outcome: "pre-empted" };
-    if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
-      return { outcome: "failed", cause: err instanceof AgentQuotaError ? "QUOTA" : "CREDENTIAL" };
-    }
+    if (err instanceof AgentQuotaError) return providerFailure("QUOTA");
+    if (err instanceof AgentCredentialError) return providerFailure("CREDENTIAL");
     throw err;
   }
 }
@@ -457,7 +492,7 @@ async function publish(
   deps: JanitorRunDeps,
   branch: string,
   lease: string,
-  committed: RunEnding,
+  committed: Extract<RunEnding, { readonly outcome: "committed" }>,
 ): Promise<RunEnding> {
   if (deps.signal.aborted) return { outcome: "pre-empted" };
   const latest = await deps.forge.latestPullRequest(branch);

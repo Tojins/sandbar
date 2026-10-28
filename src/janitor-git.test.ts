@@ -8,8 +8,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { JanitorTask } from "./config.js";
+import type { JanitorTask, PromptExtension } from "./config.js";
 import type { EventInput } from "./events.js";
+import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
 import { InnerLoopAbortedError, type Terminal, type runInnerLoop } from "./inner-loop.js";
 import {
   type JanitorForge,
@@ -173,7 +174,7 @@ describe("the janitor's git (#205)", () => {
       },
       ensureDraftPullRequest: async (args) => {
         ensured.push(args);
-        return { number: 12, url: "https://example.com/pull/12" };
+        return { number: ensureNumber, url: "https://example.com/pull/12" };
       },
     };
     // The inner loop, faked: one commit on the run's branch, then `terminal`.
@@ -188,13 +189,18 @@ describe("the janitor's git (#205)", () => {
         return terminal;
       }) as typeof runInnerLoop;
     const DONE: Terminal = { type: "DONE", commits: [], specGaps: [] };
-    const run = (runLoop: typeof runInnerLoop, runTask = task) => runJanitor({
+    let ensureNumber = 12;
+    const run = (
+      runLoop: typeof runInnerLoop,
+      runTask = task,
+      standards: PromptExtension | undefined = undefined,
+    ) => runJanitor({
       task: runTask,
       layout,
       sourceBranch: "main",
       ...BOT,
       maxContextChars: 600_000,
-      standards: undefined,
+      standards,
       forge,
       beforeOriginWrite: async () => undefined,
       loop: {} as never,
@@ -217,6 +223,7 @@ describe("the janitor's git (#205)", () => {
       prs = [];
       comments = [];
       ensured = [];
+      ensureNumber = 12;
       await commit("main", { "JANITOR.md": "Tidy the tests.\n" });
       await fetchCache();
     });
@@ -375,6 +382,90 @@ describe("the janitor's git (#205)", () => {
       expect(outcome).toBe("failed");
       expect(ended()).toMatchObject({ outcome: "failed", cause: "lease" });
       expect(await originTip()).toBe(human);
+    });
+
+    it("leaves out the pull request number a forge answers with 0", async () => {
+      ensureNumber = 0;
+      expect(await run(loopEnding(DONE))).toBe("committed");
+      const event = ended();
+      expect(event).toMatchObject({ outcome: "committed", commits: 1 });
+      expect(event).not.toHaveProperty("pullRequest");
+    });
+
+    it.each([
+      ["a quota error", new AgentQuotaError("claude", { window: "5h" } as never), "QUOTA"],
+      ["a credential error", new AgentCredentialError("expired"), "CREDENTIAL"],
+    ])("reports %s as a failed run, pushes nothing and does not count the visit", async (_, error, cause) => {
+      expect(await run(loopEnding(error))).toBe("failed");
+      expect(ended()).toMatchObject({ outcome: "failed", cause });
+      expect(await originTip()).toBeNull();
+      expect(ensured).toEqual([]);
+      const ledger = JSON.parse(await readFile(janitorLedgerPath(layout.stateDir, "tidy"), "utf8"));
+      expect(ledger.visits).toEqual({});
+    });
+
+    it("reports a thrown abort as a pre-empted run", async () => {
+      expect(await run((async () => {
+        throw new InnerLoopAbortedError();
+      }) as typeof runInnerLoop)).toBe("pre-empted");
+      expect(ended()).toMatchObject({ outcome: "pre-empted" });
+      expect(await originTip()).toBeNull();
+    });
+
+    it("holds a task whose previous clone must be preserved, without a start or an end", async () => {
+      const clone = join(layout.worktreesDir, "sandbar-janitor-tidy");
+      await mkdir(clone, { recursive: true });
+      await exec("git", ["init", "-q", clone]);
+      await git(clone, "config", "sandbar.issueBranch", branch);
+      await git(clone, "checkout", "-q", "-b", branch);
+      await writeFile(join(clone, "scratch.txt"), "uncommitted\n");
+      let ran = false;
+      expect(await run((async () => {
+        ran = true;
+        return DONE;
+      }) as typeof runInnerLoop)).toBe("held");
+      expect(ran).toBe(false);
+      expect(events).toContainEqual({
+        kind: "complaint",
+        severity: "error",
+        message: expect.stringContaining("Janitor clone preserved at"),
+      });
+      expect(events.some((e) => e.kind === "janitor-start" || e.kind === "janitor-run")).toBe(false);
+      const ledger = JSON.parse(await readFile(janitorLedgerPath(layout.stateDir, "tidy"), "utf8"));
+      expect(ledger.hold.kind).toBe("clone-preserved");
+    });
+
+    describe("a standards task", () => {
+      const standardsTask: JanitorTask = { ...task, prompt: "standards" };
+
+      it("runs with the flagged group's text in the anchor", async () => {
+        let anchor = "";
+        await run((async (_issue, opts) => {
+          anchor = opts.janitor!.anchor;
+          return { type: "NEEDS-INFO", questions: "nothing", strandedHead: null, specGaps: [] };
+        }) as typeof runInnerLoop, standardsTask, { text: "## Tests {janitor}\n- keep tests tidy\n" });
+        expect(anchor).toContain("Find code in scope that breaks these project rules and fix it.");
+        expect(anchor).toContain("keep tests tidy");
+      });
+
+      it("holds with the standards message when no group is flagged", async () => {
+        expect(await run(loopEnding(DONE), standardsTask, { text: "## Tests\n- keep tests tidy\n" })).toBe("held");
+        expect(events).toContainEqual({
+          kind: "notice",
+          message: expect.stringContaining("no project standards group is flagged {janitor}"),
+        });
+        const ledger = JSON.parse(await readFile(janitorLedgerPath(layout.stateDir, "tidy"), "utf8"));
+        expect(ledger.hold.kind).toBe("source-missing");
+      });
+    });
+
+    it("lists a directory task's scope as the directory", async () => {
+      let anchor = "";
+      await run((async (_issue, opts) => {
+        anchor = opts.janitor!.anchor;
+        return { type: "NEEDS-INFO", questions: "nothing", strandedHead: null, specGaps: [] };
+      }) as typeof runInnerLoop, { ...task, unit: "directory" });
+      expect(anchor).toContain("- `src/`, the files directly in it");
     });
   });
 });

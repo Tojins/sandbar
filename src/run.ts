@@ -323,8 +323,8 @@ import {
   type OriginLockHandle,
   type OriginLockRenewal,
 } from "./origin-lock.js";
-import { type RunScope, janitorBranchName, janitorTaskFromBranch, runScope } from "./naming.js";
-import { type JanitorRunDeps, dueJanitorTask, realJanitorForge, runJanitor } from "./janitor.js";
+import { type RunScope, janitorTaskFromBranch, runScope } from "./naming.js";
+import { type JanitorRunDeps, dueJanitorTask, realJanitorForge, runJanitor, settleJanitorRun } from "./janitor.js";
 import {
   MergerError,
   type MergerOutcome,
@@ -1665,45 +1665,31 @@ export async function run(
   const startJanitor = (task: JanitorTask, loop: JanitorRunDeps["loop"]): void => {
     const controller = new AbortController();
     const timer = startTimer();
-    const settled = (async () => {
-      try {
-        await runJanitor({
-          task,
-          layout,
-          sourceBranch: config.sourceBranch,
-          botName: config.botName,
-          botEmail: config.botEmail,
-          maxContextChars: config.maxContextChars,
-          standards: config.promptExtensions.reviewerQuality,
-          forge: janitorForge,
-          beforeOriginWrite: renewOriginLease,
-          loop,
-          attemptLogger: await runRecord.janitor(task.name),
-          onEvent: (event) => runRecord.emit(event).then(() => undefined),
-          signal: controller.signal,
-          now: () => new Date(),
-        });
-      } catch (err) {
-        // Cleanup owns the run's end once the lease is gone (see the loop's catch).
-        if (err instanceof OriginLeaseLostDuringCleanupError) return;
-        await runRecord.emit({
-          kind: "complaint",
-          severity: "error",
-          message: `Janitor task '${task.name}' failed: ${faultDetail(err)}`,
-        });
-        await runRecord.emit({
-          kind: "janitor-run",
-          task: task.name,
-          branch: janitorBranchName(task.name),
-          outcome: "failed",
-          scope: [],
-          durationMs: timer(),
-        });
-      } finally {
+    const settled = settleJanitorRun({
+      task: task.name,
+      run: async () => runJanitor({
+        task,
+        layout,
+        sourceBranch: config.sourceBranch,
+        botName: config.botName,
+        botEmail: config.botEmail,
+        maxContextChars: config.maxContextChars,
+        standards: config.promptExtensions.reviewerQuality,
+        forge: janitorForge,
+        beforeOriginWrite: renewOriginLease,
+        loop,
+        attemptLogger: await runRecord.janitor(task.name),
+        onEvent: (event) => runRecord.emit(event).then(() => undefined),
+        signal: controller.signal,
+        now: () => new Date(),
+      }),
+      emit: (event) => runRecord.emit(event).then(() => undefined),
+      durationMs: timer,
+      onEnd: () => {
         janitor.run = null;
         pool.wakeExternal();
-      }
-    })();
+      },
+    });
     janitor.run = { task: task.name, controller, settled };
   };
   let providerExitPending: TerminalExit | null = null;

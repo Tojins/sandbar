@@ -437,6 +437,22 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     ]);
   });
 
+  it("deletes a local janitor branch through preflight and announces it (#205)", async () => {
+    await installPassingPreflightShims();
+    await giveTargetBareOrigin();
+    await git(target, "update-ref", "refs/heads/sandbar/janitor-tidy", "HEAD");
+    const events: EventInput[] = [];
+
+    await runPreflight({ ...passingCfg(), onEvent: (event) => events.push(event) }, localReachability);
+
+    expect(events).toContainEqual({
+      kind: "preflight",
+      action: "cleaned",
+      detail: "Cleaned up local janitor branches: sandbar/janitor-tidy",
+    });
+    await expect(git(target, "show-ref", "--verify", "refs/heads/sandbar/janitor-tidy")).rejects.toBeDefined();
+  });
+
   it("abandons an origin-deleted closed branch through preflight and announces it", async () => {
     await installPassingPreflightShims();
     const origin = await giveTargetBareOrigin();
