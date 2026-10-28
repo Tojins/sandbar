@@ -61,9 +61,8 @@ import { SandbarError, isErrno, isExitCode } from "./errors.js";
 import type { PromptExtension } from "./config.js";
 import type { IssueBranchBase } from "./git-ops.js";
 import type { ReviewScope, ReviewPass } from "./inner-loop-machine.js";
-import { fetchIssueText } from "./issue-anchor.js";
+import { type IssueSource, renderIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
-import type { RepoRef } from "./repo-ref.js";
 import type { SandboxContainerStatus } from "./sandbox-stack.js";
 import { type ParsedVerdict, stripVerdictTokens } from "./verdict-parser.js";
 
@@ -193,10 +192,8 @@ export type ProjectAnchorOptions = {
   // has no way to sanity check — it reads as this repo's history and is wrong
   // in a way that looks exactly like a stale checkout.
   //
-  // Three sources, because they answer three different questions.
-  //
-  // `repo` is the tracker (#34). It names the repository outright rather than
-  // letting `gh` infer it from a directory's remotes — see issue-anchor.ts.
+  // Two sources here, and the issue anchor's third (`PromptAnchorOptions`),
+  // because they answer three different questions.
   //
   // `repoDir` is the bare cache, where the `git log` runs (#38).
   //
@@ -204,12 +201,19 @@ export type ProjectAnchorOptions = {
   // a field here — it is `buildProjectAnchor`'s second argument, so that the
   // two prompt builders can DERIVE it from the worktree they are already
   // given rather than a caller having to remember to supply it. See there.
-  readonly repo: RepoRef;
   readonly repoDir: string;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
   readonly sourceBranch: string;
+};
+
+// The implementer's two anchors. `issueSource` is the tracker (#34):
+// `ghIssueSource` names the repository outright rather than letting `gh` infer
+// it from a directory's remotes — see issue-anchor.ts. A replay hands its case
+// file's issue instead (#195).
+export type PromptAnchorOptions = ProjectAnchorOptions & {
+  readonly issueSource: IssueSource;
 };
 
 export type PromptInputs = {
@@ -254,7 +258,7 @@ export type PromptInputs = {
 
 export type ReviewerPromptInputs = {
   readonly issue: { readonly id: string; readonly title: string; readonly branch: string };
-  // The anchor layers' sources (#34, #38). `repo` names the tracker; `repoDir`
+  // The anchor layers' sources (#34, #38). `issueSource` is the tracker; `repoDir`
   // is where the `git log` runs, and it stays the bare cache rather than
   // `worktreePath` — that worktree is the reviewer's SUBJECT, and sourcing the
   // project HISTORY from it would make the anchor a function of the branch
@@ -265,7 +269,7 @@ export type ReviewerPromptInputs = {
   // resolve inside its sandbox, against exactly that worktree. Being a function
   // of the branch is the POINT there — a branch that adds
   // `CODING_STANDARDS.md` must be reviewed against it.
-  readonly repo: RepoRef;
+  readonly issueSource: IssueSource;
   readonly repoDir: string;
   readonly worktreePath: string;
   // The project history the anchor quotes, and the branch the review prose
@@ -339,7 +343,7 @@ export type PriorReviewRound = {
 
 export async function buildPrompt(
   inputs: PromptInputs,
-  anchor: ProjectAnchorOptions,
+  anchor: PromptAnchorOptions,
 ): Promise<string> {
   const layers = [
     // The probe tree is DERIVED from the worktree this prompt is about, not
@@ -350,7 +354,7 @@ export async function buildPrompt(
     // this module directly, and silently drops the `@ref` for any doc the
     // branch itself adds.
     await buildProjectAnchor(anchor, inputs.worktreePath),
-    await buildIssueAnchor(inputs.issue.id, anchor.repo),
+    await buildIssueAnchor(inputs.issue.id, anchor.issueSource),
     await buildAttemptSlot(inputs, anchor),
   ];
   return layers.join("\n\n---\n\n");
@@ -362,9 +366,9 @@ export async function buildPrompt(
 // are deliberately absent rather than optional slots callers could fill.
 export async function buildUiCheckPrompt(
   issueId: string,
-  repo: RepoRef,
+  issueSource: IssueSource,
 ): Promise<string> {
-  return [await buildIssueAnchor(issueId, repo), UI_CHECK_TPL].join("\n\n---\n\n");
+  return [await buildIssueAnchor(issueId, issueSource), UI_CHECK_TPL].join("\n\n---\n\n");
 }
 
 // The independent fan-out classifier (#158). Like the UI check, it receives
@@ -372,11 +376,11 @@ export async function buildUiCheckPrompt(
 // hint; the role never guesses a numeric diff size.
 export async function buildPartitionCheckPrompt(
   issueId: string,
-  repo: RepoRef,
+  issueSource: IssueSource,
   budgetChars: number,
 ): Promise<string> {
   return [
-    await buildIssueAnchor(issueId, repo),
+    await buildIssueAnchor(issueId, issueSource),
     render(PARTITION_CHECK_TPL, { budgetChars: String(budgetChars) }),
   ].join("\n\n---\n\n");
 }
@@ -419,7 +423,6 @@ async function buildBranchRoleAnchors(
   return await Promise.all([
     buildProjectAnchor(
       {
-        repo: inputs.repo,
         repoDir: inputs.repoDir,
         claudeMdPath: inputs.claudeMdPath,
         contextMdPath: inputs.contextMdPath,
@@ -427,7 +430,7 @@ async function buildBranchRoleAnchors(
       },
       inputs.worktreePath,
     ),
-    buildIssueAnchor(inputs.issue.id, inputs.repo),
+    buildIssueAnchor(inputs.issue.id, inputs.issueSource),
   ]);
 }
 
@@ -616,9 +619,9 @@ export async function buildProjectAnchor(
 
 async function buildIssueAnchor(
   issueId: string,
-  repo: RepoRef,
+  issueSource: IssueSource,
 ): Promise<string> {
-  return `# Issue anchor\n\n${await fetchIssueText(issueId, repo)}`;
+  return `# Issue anchor\n\n${renderIssueText(issueId, await issueSource(issueId))}`;
 }
 
 async function buildAttemptSlot(
@@ -866,7 +869,7 @@ async function readBranchPicture(
 // explicit prompt data (#88), which preserves fresh investigation without
 // reviewer amnesia, and a quality lister only the overruled quality reports
 // (#187).
-type BranchSlotRender = Omit<ReviewerPromptInputs, "repo" | "repoDir" | "worktreePath"> & {
+type BranchSlotRender = Omit<ReviewerPromptInputs, "issueSource" | "repoDir" | "worktreePath"> & {
   readonly commits: string;
   readonly stat: string;
 };

@@ -37,11 +37,6 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   revParse: vi.fn(async () => "seed-sha"),
 }));
 
-vi.mock("./issue-anchor.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./issue-anchor.js")>(),
-  fetchIssueSnapshot: vi.fn(async () => ({ title: "Issue", body: "", comments: [] })),
-}));
-
 vi.mock("./agent-sandbox.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./agent-sandbox.js")>();
   return {
@@ -148,7 +143,7 @@ const config = (
     issueClonesDir: "/tmp/.sandbar/issues",
     logsDir: "/tmp/.sandbar/logs",
   },
-  repo: { owner: "o", name: "r" },
+  issueSource: async () => ({ title: "Issue", body: "", comments: [] }),
   sourceBranch: "main",
   env: {},
   implementerModelId: "model",

@@ -99,6 +99,10 @@
 // Container-backed events retain cgroup peak-memory and OOMKilled evidence;
 // merger-stack lifecycle records are emitted after teardown (#141).
 //
+// Each admission's inner-loop config and each issue's `terminal` event are
+// built by `innerLoopConfigOf` and `terminalEventOf`, which replay (#195)
+// shares, so a replayed record has the shape of a run's.
+//
 // The gate stack is a `StackSource` that preflight opens after its fetch
 // (#186): with `gateStack: { path }`, every inner-loop gate-1 and every
 // landing reads the stack from `origin/<sourceBranch>` as last fetched, so a
@@ -259,7 +263,13 @@ import {
   verifiedLandingOptionsFrom,
 } from "./forge-verify.js";
 import { startKeepawake } from "./keepawake.js";
-import { runInnerLoop, type Terminal } from "./inner-loop.js";
+import {
+  type InnerLoopConfig,
+  type IssueRef,
+  type Terminal,
+  runInnerLoop,
+} from "./inner-loop.js";
+import { type IssueSource, ghIssueSource } from "./issue-anchor.js";
 import { requiredAgentProviders } from "./agent-providers.js";
 import { LockHeldError, acquireLock, lockPathsFor } from "./lock.js";
 import {
@@ -271,7 +281,7 @@ import {
   type OriginLockHandle,
   type OriginLockRenewal,
 } from "./origin-lock.js";
-import { runScope } from "./naming.js";
+import { type RunScope, runScope } from "./naming.js";
 import {
   MergerError,
   type MergerOutcome,
@@ -333,6 +343,7 @@ import {
 import { buildProjectAnchor } from "./prompt.js";
 import { repoSlug } from "./repo-ref.js";
 import {
+  type RepoLayout,
   ensureRepoCache,
   ensureSourceWorktree,
   repoLayout,
@@ -454,19 +465,80 @@ export function terminalReason(terminal: Terminal): string | null {
   }
 }
 
-// What a terminal event records of the issue's outcome: its prose reason, and
-// the machine's typed cause and spec-gap count beside it (#194).
-export function terminalEventFields(
-  terminal: Terminal,
-): Pick<
-  Extract<EventInput, { kind: "terminal" }>,
-  "terminal" | "reason" | "cause" | "specGaps"
-> {
+// How one issue's inner loop ended: its terminal, or the loop rejected.
+export type IssueEnding =
+  | Terminal
+  | { readonly type: "REJECTED"; readonly reason: string };
+
+// The `terminal` event of one issue: its prose reason, and the machine's typed
+// cause and spec-gap count beside it (#194). `run()` and replay (#195) both
+// record it through here, so the two record shapes cannot drift.
+export function terminalEventOf(
+  issue: Pick<IssueRef, "id" | "title">,
+  ending: IssueEnding,
+  durationMs: number,
+): Extract<EventInput, { kind: "terminal" }> {
+  const subject = { kind: "terminal", issue: Number(issue.id), title: issue.title } as const;
+  if (ending.type === "REJECTED") {
+    return { ...subject, terminal: "REJECTED", reason: ending.reason, durationMs };
+  }
   return {
-    terminal: terminal.type,
-    reason: terminalReason(terminal),
-    ...("cause" in terminal ? { cause: terminal.cause } : {}),
-    specGaps: terminal.specGaps.length,
+    ...subject,
+    terminal: ending.type,
+    reason: terminalReason(ending),
+    ...("cause" in ending ? { cause: ending.cause } : {}),
+    specGaps: ending.specGaps.length,
+    durationMs,
+  };
+}
+
+// The inner loop's configuration for one admission (#195): `run()` and replay
+// build it from the same resolved config, and differ only in what they pass
+// here — replay's layout is a case cache and its issue source the case file.
+export function innerLoopConfigOf(
+  config: ResolvedConfig,
+  parts: {
+    readonly layout: RepoLayout;
+    readonly issueSource: IssueSource;
+    readonly scope: RunScope;
+    readonly env: Record<string, string>;
+    readonly codexAuthMount: CodexAuthMount | undefined;
+    readonly agentImages: AgentImages;
+  },
+): InnerLoopConfig {
+  const { codexAuthMount, ...rest } = parts;
+  return {
+    ...rest,
+    sourceBranch: config.sourceBranch,
+    implementerModelId: config.implementerModelId,
+    uiPrototypeCheck: config.uiPrototypeCheck,
+    partitionCheck: config.partitionCheck,
+    maxContextChars: config.maxContextChars,
+    uiCheckModelId: config.uiCheckModelId,
+    reviewerModelId: config.reviewerModelId,
+    reviewerQualityModelId: config.reviewerQualityModelId,
+    adjudicatorModelId: config.adjudicatorModelId,
+    implementerAgent: config.implementerAgent,
+    uiCheckAgent: config.uiCheckAgent,
+    reviewerAgent: config.reviewerAgent,
+    reviewerQualityAgent: config.reviewerQualityAgent,
+    adjudicatorAgent: config.adjudicatorAgent,
+    implementerEffort: config.implementerEffort,
+    uiCheckEffort: config.uiCheckEffort,
+    reviewerEffort: config.reviewerEffort,
+    reviewerQualityEffort: config.reviewerQualityEffort,
+    adjudicatorEffort: config.adjudicatorEffort,
+    maxQualityRounds: config.maxQualityRounds,
+    maxGateRounds: config.maxGateRounds,
+    maxReviewRounds: config.maxReviewRounds,
+    sandboxImage: config.sandboxImage,
+    ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
+    claudeMdPath: config.claudeMdPath,
+    contextMdPath: config.contextMdPath,
+    adrDir: config.adrDir,
+    promptExtensions: config.promptExtensions,
+    botName: config.botName,
+    botEmail: config.botEmail,
   };
 }
 
@@ -1423,42 +1495,6 @@ export async function run(
   // issue execution slots and shared with the serialized landing path below.
   const gateSemaphore = createGateSemaphore(config.maxConcurrentGates);
 
-  const innerLoopCfg = {
-    layout,
-    repo,
-    sourceBranch: config.sourceBranch,
-    env: sandboxEnv,
-    implementerModelId: config.implementerModelId,
-    uiPrototypeCheck: config.uiPrototypeCheck,
-    partitionCheck: config.partitionCheck,
-    maxContextChars: config.maxContextChars,
-    uiCheckModelId: config.uiCheckModelId,
-    reviewerModelId: config.reviewerModelId,
-    reviewerQualityModelId: config.reviewerQualityModelId,
-    adjudicatorModelId: config.adjudicatorModelId,
-    implementerAgent: config.implementerAgent,
-    uiCheckAgent: config.uiCheckAgent,
-    reviewerAgent: config.reviewerAgent,
-    reviewerQualityAgent: config.reviewerQualityAgent,
-    adjudicatorAgent: config.adjudicatorAgent,
-    implementerEffort: config.implementerEffort,
-    uiCheckEffort: config.uiCheckEffort,
-    reviewerEffort: config.reviewerEffort,
-    reviewerQualityEffort: config.reviewerQualityEffort,
-    adjudicatorEffort: config.adjudicatorEffort,
-    maxQualityRounds: config.maxQualityRounds,
-    maxGateRounds: config.maxGateRounds,
-    maxReviewRounds: config.maxReviewRounds,
-    sandboxImage: config.sandboxImage,
-    ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
-    scope,
-    claudeMdPath: config.claudeMdPath,
-    contextMdPath: config.contextMdPath,
-    adrDir: config.adrDir,
-    promptExtensions: config.promptExtensions,
-    botName: config.botName,
-    botEmail: config.botEmail,
-  };
   type IssueOutcome = { issue: PlannedIssue; terminal: Terminal };
   type ExecutionEvent = SettledIssue<PlannedIssue, Terminal>;
   const pool = new ContinuousPool<PlannedIssue, Terminal>(
@@ -2460,10 +2496,14 @@ export async function run(
       // committed on a branch. The catch rethrows so the pool still observes
       // and finalizes a rejected task.
       const admissionImages = currentImages;
-      const admissionConfig = {
-        ...innerLoopCfg,
+      const admissionConfig = innerLoopConfigOf(config, {
+        layout,
+        issueSource: ghIssueSource(repo),
+        scope,
+        env: sandboxEnv,
+        codexAuthMount,
         agentImages: admissionImages.agentImages,
-      };
+      });
       for (const issue of executionIssues) {
         const issueLogger = await runRecord.issue(issue.id);
         const task: Promise<Terminal> = (async () => {
@@ -2485,25 +2525,13 @@ export async function run(
               onEvent: (event) => runRecord.emit(event).then(() => undefined),
               providerState,
             });
-            const durationMs = issueTimer();
-            await runRecord.emit({
-              kind: "terminal",
-              issue: Number(issue.id),
-              title: issue.title,
-              ...terminalEventFields(terminal),
-              durationMs,
-            });
+            await runRecord.emit(terminalEventOf(issue, terminal, issueTimer()));
             return terminal;
           } catch (err) {
             const reason = err instanceof Error ? err.message : String(err);
-            await runRecord.emit({
-              kind: "terminal",
-              issue: Number(issue.id),
-              title: issue.title,
-              terminal: "REJECTED",
-              reason,
-              durationMs: issueTimer(),
-            });
+            await runRecord.emit(
+              terminalEventOf(issue, { type: "REJECTED", reason }, issueTimer()),
+            );
             throw err;
           }
         })();
@@ -2675,7 +2703,6 @@ export async function run(
           // closing it would mean rebuilding the anchor per resolve attempt.
           const projectAnchor = await buildProjectAnchor(
             {
-              repo,
               repoDir: layout.repoDir,
               claudeMdPath: config.claudeMdPath,
               contextMdPath: config.contextMdPath,

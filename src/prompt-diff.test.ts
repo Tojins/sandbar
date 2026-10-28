@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SandbarError } from "./errors.js";
 import { ensureIssueBranch, sourceBranchBase } from "./git-ops.js";
 import type { ReviewScope } from "./inner-loop-machine.js";
+import { ghIssueSource } from "./issue-anchor.js";
 import {
   branchIsAheadOfSeed,
   buildPrompt,
@@ -118,7 +119,7 @@ async function commitLongPath(subject: string): Promise<void> {
 }
 
 const anchorOpts = (sourceBranch = "main") => ({
-  repo: REPO,
+  issueSource: ghIssueSource(REPO),
   repoDir,
   claudeMdPath: "CLAUDE.md",
   sourceBranch,
@@ -137,7 +138,7 @@ const implementerInputs = (base = sourceBranchBase("main")) => ({
 
 const reviewerInputs = (base = sourceBranchBase("main"), sourceBranch = "main") => ({
   issue: ISSUE,
-  repo: REPO,
+  issueSource: ghIssueSource(REPO),
   repoDir,
   worktreePath: worktree,
   sourceBranch,

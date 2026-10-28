@@ -21,7 +21,9 @@
 // Human comments and the body are never touched.
 //
 // That boundary is exported as `fetchIssueSnapshot` so the inner loop can file
-// the issue as it stood at admission beside the run's logs (#195).
+// the issue as it stood at admission beside the run's logs (#195). The inner
+// loop reads the issue only through an `IssueSource`: `ghIssueSource` for a
+// run, the case file's frozen JSON for a replay, so a replay asks `gh` nothing.
 //
 // Fetch/parse failures THROW (SandbarError): a missing anchor must halt loudly
 // rather than degrade into a placeholder string the agent ignores.
@@ -177,6 +179,13 @@ export async function fetchIssueSnapshot(
   }
   return parsed;
 }
+
+// Where the inner loop reads its issue from (#195): every prompt's issue anchor
+// and the admission snapshot go through the one source the loop is given.
+export type IssueSource = (issueId: string) => Promise<IssueJson>;
+
+export const ghIssueSource = (repo: RepoRef): IssueSource =>
+  (issueId) => fetchIssueSnapshot(issueId, repo);
 
 // Structured issue fields for decisions that must not depend on the prompt
 // renderer's prose shape. Comments are deliberately absent: dependency edges

@@ -36,6 +36,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { sourceBranchBase } from "./git-ops.js";
+import { ghIssueSource } from "./issue-anchor.js";
 import {
   buildAdjudicatorPrompt,
   buildPrompt,
@@ -148,7 +149,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("quotes the named repo's recent history", async () => {
     const anchor = await buildProjectAnchor(
       {
-        repo: CONFIGURED,
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
         sourceBranch: "main",
@@ -164,7 +164,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("tells the role to stop its background tasks before its final answer", async () => {
     const anchor = await buildProjectAnchor(
       {
-        repo: CONFIGURED,
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
         sourceBranch: "main",
@@ -183,7 +182,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("marks history unavailable when the named source ref is absent", async () => {
     const anchor = await buildProjectAnchor(
       {
-        repo: CONFIGURED,
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
         sourceBranch: "missing",
@@ -204,7 +202,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         base: sourceBranchBase("main"),
       },
       {
-        repo: CONFIGURED,
+        issueSource: ghIssueSource(CONFIGURED),
         repoDir: target,
         probeWorktree: target,
         claudeMdPath: "CLAUDE.md",
@@ -218,7 +216,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   });
 
   it("builds the UI check from only the configured issue anchor and role contract", async () => {
-    const prompt = await buildUiCheckPrompt("1", CONFIGURED);
+    const prompt = await buildUiCheckPrompt("1", ghIssueSource(CONFIGURED));
     expect(prompt).toContain("Issue #1: acme/app");
     expect(prompt).toContain("# UI prototype check");
     expect(prompt).not.toContain("Last 10 commits");
@@ -228,7 +226,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("assembles adjudication from both anchors and only the rejected report", async () => {
     const prompt = await buildAdjudicatorPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
-      repo: CONFIGURED,
+      issueSource: ghIssueSource(CONFIGURED),
       repoDir: target,
       worktreePath: launchedFrom,
       sourceBranch: "main",
@@ -258,7 +256,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
     const anchor = await buildProjectAnchor(
       {
-        repo: CONFIGURED,
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
         contextMdPath: "CONTEXT.md",
@@ -275,7 +272,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
     const anchor = await buildProjectAnchor(
       {
-        repo: CONFIGURED,
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
         contextMdPath: "CONTEXT.md",
@@ -295,7 +291,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
     const anchor = await buildProjectAnchor(
       {
-        repo: CONFIGURED,
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
         adrDir: "docs/adr",
@@ -319,7 +314,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
     const prompt = await buildQualityReviewPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
-      repo: CONFIGURED,
+      issueSource: ghIssueSource(CONFIGURED),
       repoDir: target,
       worktreePath: launchedFrom,
       sourceBranch: "main",
@@ -339,7 +334,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
     const prompt = await buildQualityReviewPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
-      repo: CONFIGURED,
+      issueSource: ghIssueSource(CONFIGURED),
       repoDir: target,
       worktreePath: launchedFrom,
       sourceBranch: "main",
@@ -365,7 +360,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         promptExtension: { path: "CODING_STANDARDS.md" },
       },
       {
-        repo: CONFIGURED,
+        issueSource: ghIssueSource(CONFIGURED),
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
         contextMdPath: "CONTEXT.md",
@@ -390,7 +385,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
         promptExtension: { path: "CODING_STANDARDS.md" },
       },
       {
-        repo: CONFIGURED,
+        issueSource: ghIssueSource(CONFIGURED),
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
         sourceBranch: "main",
@@ -404,7 +399,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   it("builds the reviewer's history from the repo, not from the worktree under review", async () => {
     const prompt = await buildCorrectnessPrompt({
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
-      repo: CONFIGURED,
+      issueSource: ghIssueSource(CONFIGURED),
       repoDir: target,
       worktreePath: launchedFrom,
       sourceBranch: "main",
@@ -427,7 +422,6 @@ describe("prompt anchors name their sources (#34, #38)", () => {
 
     const anchor = await buildProjectAnchor(
       {
-        repo: CONFIGURED,
         repoDir: target,
         claudeMdPath: "CLAUDE.md",
         contextMdPath: "CONTEXT.md",
