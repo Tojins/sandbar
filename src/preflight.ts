@@ -1571,40 +1571,36 @@ export async function deployWatchRefusals(args: {
   const { watch } = args;
   const exec = args.exec ?? defaultExec;
   const repoFlag = repoSlug(args.repo);
-  // The failure text of a `gh` that exited nonzero; null when it succeeded.
-  const failureOf = async (run: Promise<unknown>): Promise<string | null> => {
+  // A `gh` that exited nonzero becomes its failure text; anything else throws.
+  const ghOrFailure = async (
+    argv: readonly string[],
+  ): Promise<{ readonly stdout: string } | { readonly failure: string }> => {
     try {
-      await run;
-      return null;
+      return await exec("gh", argv, { cwd: args.cwd });
     } catch (err) {
       if (!hasExitCode(err)) throw err;
-      return commandFailureDetail(err);
+      return { failure: commandFailureDetail(err) };
     }
   };
-  const gh = (argv: readonly string[]) => exec("gh", argv, { cwd: args.cwd });
   const refusals: string[] = [];
-  let labelsStdout = "";
-  const [workflowFailure, labelsFailure] = await Promise.all([
+  const [workflow, labels] = await Promise.all([
     // `gh workflow view` has no `--json`; `--yaml` reads the file and fails
     // when the repository has no such workflow.
-    failureOf(gh(["workflow", "view", watch.workflow, "--repo", repoFlag, "--yaml"])),
-    failureOf(
-      gh(["label", "list", "--repo", repoFlag, "--limit", "200", "--json", "name"])
-        .then((r) => { labelsStdout = r.stdout; }),
-    ),
+    ghOrFailure(["workflow", "view", watch.workflow, "--repo", repoFlag, "--yaml"]),
+    ghOrFailure(["label", "list", "--repo", repoFlag, "--limit", "200", "--json", "name"]),
   ]);
-  if (workflowFailure !== null) {
+  if ("failure" in workflow) {
     refusals.push(
       `config.deployWatch.workflow: ${repoFlag} has no workflow file ` +
-        `${watch.workflow} (${workflowFailure}).`,
+        `${watch.workflow} (${workflow.failure}).`,
     );
   }
-  if (labelsFailure !== null) {
-    refusals.push(`config.deployWatch: could not list ${repoFlag}'s labels (${labelsFailure}).`);
+  if ("failure" in labels) {
+    refusals.push(`config.deployWatch: could not list ${repoFlag}'s labels (${labels.failure}).`);
   } else {
-    const listed: unknown = JSON.parse(labelsStdout);
+    const listed: unknown = JSON.parse(labels.stdout);
     if (!Array.isArray(listed)) {
-      throw new SandbarError(`gh label list answered ${JSON.stringify(labelsStdout)}`);
+      throw new SandbarError(`gh label list answered ${JSON.stringify(labels.stdout)}`);
     }
     const names = new Set(
       listed.flatMap((l: unknown) =>
