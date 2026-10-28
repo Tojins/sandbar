@@ -146,6 +146,13 @@ export const DEFAULT_LABELS: LabelConfig = {
 // sandbox, resolution refuses conflicting destinations/keys and collisions
 // with config.env; `sandboxGateAttachmentsOf` owns that contract.
 //
+// One stack still describes two places a container can run (#44, #241):
+// `inSandbox` adds a sibling beside the agent, and `inGate: false` takes the
+// container out of the gate, leaving it sandbox-only. Only such a container
+// may name `secretEnv` — env keys valued from the daemon's environment at
+// sibling bringup — and it may not mount the worktree, so a credential reaches
+// neither a verdict, the implementer sandbox, nor code the agent can edit.
+//
 // Two forms (#186). The inline stack is validated here, at load. A stack file
 // (`{ path }`) is only a path at load: the run reads it from the source tip
 // whenever a stack is resolved (stack-source.ts), and validates the text with
@@ -326,6 +333,24 @@ export type StackContainer = {
   // that property comes from being a different network namespace rather than
   // from the absence of a runtime. See sandbox-stack.ts.
   readonly inSandbox?: boolean;
+  // Run this container in the GATE too. Default true; `false` makes it a
+  // sandbox sibling only (#241), and is refused unless `inSandbox` is set and
+  // no step runs in it. The motivating case is a recording proxy that holds
+  // live credentials beside the agent while the gate keeps its mocks: a
+  // verdict must never touch a live integration. An `inGate: false` container
+  // counts for none of the gate's own rules (the worktree-reachability checks
+  // below ask about what the gate runs), and every gate-side reader sees the
+  // stack through `gateStackOf`, never this field.
+  readonly inGate?: boolean;
+  // Env KEYS whose values come from the daemon's own environment (the
+  // installation env) when the sandbox sibling is brought up (#241). Names
+  // only, so a stack file in the consumer repo stays secret-free (#186). Only
+  // on an `inGate: false` container — which no step enters, so
+  // `sandboxGateAttachmentsOf` never flattens it into the implementer sandbox
+  // — that mounts nothing from the worktree, so the agent cannot change the
+  // code holding the credential. Resolution, and what a missing key does, is
+  // sandbox-stack.ts's.
+  readonly secretEnv?: readonly string[];
   // The image has no long-running process of its own: hold it open with
   // `sleep infinity` so steps can `podman exec` into it. This is what makes a
   // one-shot task runner an ordinary container rather than a special case.
@@ -454,6 +479,8 @@ export type ResolvedStackContainer = {
   readonly mountWorktree: string | null;
   readonly servesWorktree: boolean;
   readonly inSandbox: boolean;
+  readonly inGate: boolean;
+  readonly secretEnv: readonly string[];
   readonly hold: boolean;
   readonly readiness: Readiness | null;
   readonly readinessTimeoutMs: number;
@@ -1278,6 +1305,8 @@ const CONTAINER_OPTIONAL: FieldShapes<StackContainer, false> = {
   mountWorktree: [isString, "a string"],
   servesWorktree: [isBoolean, "a boolean"],
   inSandbox: [isBoolean, "a boolean"],
+  inGate: [isBoolean, "a boolean"],
+  secretEnv: [isStrings, "a list of strings"],
   hold: [isBoolean, "a boolean"],
   readiness: [
     (v) => isRecord(v) && (v.command === undefined || isStrings(v.command)),
@@ -1384,11 +1413,13 @@ export function resolveGateStack(
   const containers = stack.containers.map((c) =>
     resolveStackContainer(c, seen, label),
   );
+  // The worktree rules below are about what the GATE runs (#241).
+  const inGate = containers.filter((c) => c.inGate);
 
   // A stack where nothing mounts the worktree gates the same bytes on every
   // attempt: it can go green while the branch under test is broken, which is
   // the one failure mode the whole gate exists to prevent.
-  if (!containers.some((c) => c.mountWorktree !== null)) {
+  if (!inGate.some((c) => c.mountWorktree !== null)) {
     throw new SandbarError(
       `${label}: no container declares \`mountWorktree\`, so no step can ` +
         "see the code under test. The gate would return the same verdict for " +
@@ -1404,6 +1435,9 @@ export function resolveGateStack(
   // own container, so the rule has nothing left to be about.
 
   const byName = new Set(containers.map((c) => c.name));
+  const sandboxOnly = new Set(
+    containers.filter((c) => !c.inGate).map((c) => c.name),
+  );
   const stepNames = new Set<string>();
   const steps: ResolvedGateStep[] = [];
   for (const step of stack.steps) {
@@ -1425,6 +1459,12 @@ export function resolveGateStack(
       throw new SandbarError(
         `${label}: step '${step.name}' runs in '${step.in}', which is ` +
           `not a declared container (have: ${[...byName].join(", ")}).`,
+      );
+    }
+    if (sandboxOnly.has(step.in)) {
+      throw new SandbarError(
+        `${label}: step '${step.name}' runs in '${step.in}', which sets ` +
+          "'inGate: false' and so does not run in the gate.",
       );
     }
     if (step.command.length === 0) {
@@ -1474,7 +1514,7 @@ export function resolveGateStack(
   // GREEN: a warning scrolls past at startup and the gate merges broken code
   // for as long as nobody re-reads it.
   const steppedInto = new Set(stack.steps.map((step) => step.in));
-  const mounting = containers.filter((c) => c.mountWorktree !== null);
+  const mounting = inGate.filter((c) => c.mountWorktree !== null);
   if (!mounting.some((c) => steppedInto.has(c.name) || c.servesWorktree)) {
     const names = mounting.map((c) => `'${c.name}'`).join(", ");
     throw new SandbarError(
@@ -1679,6 +1719,63 @@ function checkReadiness(
   }
 }
 
+// A credential's container (#241). Each rule keeps the value out of a reach it
+// would otherwise have: the gate (a verdict must never touch a live
+// integration, and only a gate container's env is flattened into the
+// implementer sandbox, #166), and the worktree (the agent edits it, so a
+// container that mounts it runs code the agent wrote, holding the secret).
+// `mounts` with an absolute `hostPath` stay allowed — a host path is the
+// installation's, not the branch's.
+function checkSecretEnv(
+  c: StackContainer,
+  inGate: boolean,
+  secretEnv: readonly string[],
+  label: string,
+): void {
+  if (inGate) {
+    throw new SandbarError(
+      `${label}: container '${c.name}' sets 'secretEnv' but runs in the ` +
+        "gate. A secret is allowed only on an 'inGate: false' container: a " +
+        "verdict must never touch a live integration.",
+    );
+  }
+  const worktreeMounts = (c.mounts ?? []).filter((m) => !isAbsolute(m.hostPath));
+  if (c.mountWorktree !== undefined || worktreeMounts.length > 0) {
+    const what = c.mountWorktree !== undefined
+      ? "'mountWorktree'"
+      : `worktree-relative mounts (${worktreeMounts.map((m) => m.hostPath).join(", ")})`;
+    throw new SandbarError(
+      `${label}: container '${c.name}' sets 'secretEnv' and ${what}. The ` +
+        "agent edits the worktree, so this container would run code the agent " +
+        "can change while it holds the secret.",
+    );
+  }
+  const seen = new Set<string>();
+  for (const key of secretEnv) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new SandbarError(
+        `${label}: container '${c.name}' has secretEnv key ` +
+          `${JSON.stringify(key)}, which is not an env name (letters, digits ` +
+          "and underscores, not starting with a digit).",
+      );
+    }
+    if (seen.has(key)) {
+      throw new SandbarError(
+        `${label}: container '${c.name}' lists secretEnv key '${key}' twice.`,
+      );
+    }
+    seen.add(key);
+    // Two sources for one key would leave which value wins to spread order.
+    if (Object.hasOwn(c.env ?? {}, key) || key === "CI") {
+      throw new SandbarError(
+        `${label}: container '${c.name}' has secretEnv key '${key}', which ` +
+          `${key === "CI" ? "is reserved" : "it also sets in 'env'"}. A key ` +
+          "has one source.",
+      );
+    }
+  }
+}
+
 function resolveStackContainer(
   c: StackContainer,
   seen: Set<string>,
@@ -1794,6 +1891,26 @@ function resolveStackContainer(
         "entry.",
     );
   }
+  // A container the gate does not run has to run somewhere, and the sandbox is
+  // the only other place.
+  const inGate = c.inGate ?? true;
+  if (!inGate && c.inSandbox !== true) {
+    throw new SandbarError(
+      `${label}: container '${c.name}' sets 'inGate: false' without ` +
+        "'inSandbox: true', so it would run nowhere.",
+    );
+  }
+  // Nothing to serve: `servesWorktree` answers a question about the gate's
+  // steps, and this container is not in the gate.
+  if (!inGate && c.servesWorktree === true) {
+    throw new SandbarError(
+      `${label}: container '${c.name}' sets 'servesWorktree' with ` +
+        "'inGate: false'. It does not run in the gate, so it serves nothing " +
+        "to the gate's steps.",
+    );
+  }
+  const secretEnv = c.secretEnv ?? [];
+  if (secretEnv.length > 0) checkSecretEnv(c, inGate, secretEnv, label);
   for (const m of c.mounts ?? []) {
     // podman's `-v` spec is colon-delimited with no escape mechanism, so a
     // colon anywhere would re-split the spec into different paths + options.
@@ -1885,6 +2002,8 @@ function resolveStackContainer(
     mountWorktree: c.mountWorktree ?? null,
     servesWorktree: c.servesWorktree ?? false,
     inSandbox: c.inSandbox ?? false,
+    inGate,
+    secretEnv,
     hold,
     readiness,
     readinessTimeoutMs,

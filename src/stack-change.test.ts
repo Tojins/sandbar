@@ -51,6 +51,29 @@ const tip = resolve(config());
 const classify = (branch: BranchStackRead) => classifyStackChange(PATH, tip, branch);
 
 describe("classifyStackChange", () => {
+  // #241: the branch's env would be laid over a container holding a live
+  // credential, and an env value can redirect it.
+  it("is `non-env` for an env change on a container that holds secretEnv", () => {
+    const proxy = (env: Record<string, string>): StackContainer => ({
+      name: "proxy",
+      image: "localhost/proxy",
+      inSandbox: true,
+      inGate: false,
+      secretEnv: ["TOKEN"],
+      env,
+    });
+    const withProxy = (env: Record<string, string>) =>
+      resolve(config({ containers: [db(), app(), proxy(env)] }));
+    expect(classifyStackChange(PATH, withProxy({ UPSTREAM: "https://a" }), {
+      kind: "ok",
+      stack: withProxy({ UPSTREAM: "https://evil" }),
+    })).toEqual({
+      kind: "non-env",
+      path: PATH,
+      differences: [{ where: "container 'proxy'", what: "env (holds secretEnv)" }],
+    });
+  });
+
   it("is `same` for an identical stack and for spelled-out defaults", () => {
     expect(classify(ok(config()))).toEqual({ kind: "same" });
     expect(classify(ok(config({

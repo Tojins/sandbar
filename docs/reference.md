@@ -365,6 +365,8 @@ the branch counts as such a change.
 | `postReadyCommands` | One-shot setup run after readiness. |
 | `servesWorktree` | See rules below. |
 | `inSandbox` | Also run a copy beside the agent. See below. |
+| `inGate` | Default `true`. `false` runs the container only beside the agent. See below. |
+| `secretEnv` | Env keys valued from sandbar's own environment. See below. |
 
 ### Steps
 
@@ -418,6 +420,31 @@ the agent can run the app while it works:
 - An `attempt` container that fails to start is reported to the agent; an
   `issue` container that fails retries the issue.
 - Cost: one extra container per `inSandbox` entry per active issue.
+
+### `inGate: false` and `secretEnv`
+
+`inGate: false` keeps a container out of the gate, so it runs only beside the
+agent — for example a recording proxy that talks to a live service while the
+gate keeps its mocks. It needs `inSandbox: true`, and no step may run in it.
+
+`secretEnv` lists env keys whose values come from sandbar's own environment
+(the installation env) when the container starts. The stack file holds only
+the names:
+
+```js
+{ name: "proxy", image: "localhost/proxy", inSandbox: true, inGate: false,
+  env: { MODE: "record" }, secretEnv: ["ADFINITY_TOKEN"] }
+```
+
+- Only on an `inGate: false` container, which must not use `mountWorktree` or
+  worktree-relative `mounts` (absolute host paths are fine).
+- A key that is unset or empty fails that container's start, like a failed
+  readiness check.
+- The values are masked in the start-up errors sandbar reports. What the
+  container itself logs is in `/sandbar/logs/<name>.log`, which the agent can
+  read, so it must not print the secret.
+- A branch's own `env` change to such a container is treated as a stack change,
+  not an env-only one.
 
 ## `sandbar gate`
 

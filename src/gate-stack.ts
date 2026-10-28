@@ -5,7 +5,9 @@
 // The boundary of what a branch controls (#186): the stack DEFINITION —
 // containers, env, mounts, steps — comes from the source branch, while images
 // built from the branch's Containerfiles are part of the work under test. This
-// module runs whatever spec it is handed; stack-source.ts decides which.
+// module runs whatever spec it is handed; stack-source.ts decides which. It
+// runs that spec without its `inGate: false` containers (`gateStackOf`, #241):
+// those are sandbox siblings only, and may hold live credentials.
 //
 // Topology: every container joins one podman POD sharing a netns (addresses
 // itself as `127.0.0.1`, publishes nothing, so parallel gates and the
@@ -845,7 +847,16 @@ function indent(text: string): string {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+// The stack as the GATE runs it: without the sandbox-only containers (#241).
+// Every gate-side reader goes through this, so `inGate: false` is decided in
+// one place — the container's secret, if any, never reaches a pod.
+export function gateStackOf(spec: ResolvedGateStack): ResolvedGateStack {
+  if (spec.containers.every((c) => c.inGate)) return spec;
+  return { ...spec, containers: spec.containers.filter((c) => c.inGate) };
+}
+
 export async function startStack(opts: StackOptions): Promise<Stack> {
+  const spec = gateStackOf(opts.spec);
   const networkName = networkNameFor(opts.scope, opts.stackId);
   const podName = podNameFor(opts.scope, opts.stackId);
   const nameOf = (c: ResolvedStackContainer): string =>
@@ -1011,7 +1022,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       await finishTeardown();
       return;
     }
-    await Promise.all(opts.spec.containers.map(recordTeardown));
+    await Promise.all(spec.containers.map(recordTeardown));
     // `pod rm -f` takes the member containers AND the infra container with it.
     // The infra container is named `<pod-id-prefix>-infra`, which matches no
     // sandbar prefix — removing containers by name would leave it, and the pod,
@@ -1107,7 +1118,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
 
     const attach: ContainerAttachment = { kind: "pod", podName };
 
-    const issueContainers = opts.spec.containers.filter(
+    const issueContainers = spec.containers.filter(
       (c) => c.lifecycle === "issue",
     );
     // Split only under reuse; otherwise the pod was just created and nothing
@@ -1171,7 +1182,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       await waitForReady(nameOf(c), c, GATE_LABEL);
     }
 
-    const attemptContainers = opts.spec.containers.filter(
+    const attemptContainers = spec.containers.filter(
       (c) => c.lifecycle === "attempt",
     );
 
@@ -1191,7 +1202,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     const imageResolver = opts.images;
     // Computed here, from this stack's own spec, so no caller can hand the
     // shared resolver a superset (#46).
-    const imagesThisStackRuns = new Set(opts.spec.containers.map((c) => c.image));
+    const imagesThisStackRuns = new Set(spec.containers.map((c) => c.image));
 
     return {
       podName,
@@ -1200,7 +1211,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       stop,
       runGate: () =>
         runStackGate({
-          spec: opts.spec,
+          spec,
           attemptContainers,
           issueContainers,
           attach,

@@ -205,6 +205,92 @@ describe("startSandboxStack (#44 D3)", () => {
       "PHP Fatal error: syntax error, unexpected ';'",
     );
 
+  // #241. A sandbox-only proxy beside an app, holding a credential from the
+  // daemon's environment.
+  const withSecret = (lifecycle: "issue" | "attempt") =>
+    resolveGateStack({
+      containers: [
+        { name: "app", image: "app", mountWorktree: "/app" },
+        {
+          name: "proxy",
+          image: "proxy",
+          lifecycle,
+          inSandbox: true,
+          inGate: false,
+          env: { MODE: "record" },
+          secretEnv: ["ADFINITY_TOKEN"],
+        },
+      ],
+      steps: [{ name: "test", in: "app", command: ["npm", "test"] }],
+    });
+  const startWith = (
+    deps: SandboxStackDeps,
+    lifecycle: "issue" | "attempt",
+    daemonEnv: Record<string, string | undefined>,
+  ) =>
+    startSandboxStack(
+      {
+        issueId: "44",
+        scope: SCOPE,
+        spec: withSecret(lifecycle),
+        worktreePath: "/wt",
+        anchorContainerName: ANCHOR,
+        logDir,
+        daemonEnv,
+      },
+      deps,
+    );
+
+  it("values secretEnv from the daemon's environment at bringup", async () => {
+    const envs: Record<string, string>[] = [];
+    const r = recorder();
+    await startWith(
+      {
+        ...r.deps,
+        bringUp: async (containers, ctx) => {
+          envs.push(...containers.map((c) => c.env));
+          await r.deps.bringUp(containers, ctx);
+        },
+      },
+      "attempt",
+      { ADFINITY_TOKEN: "s3cret" },
+    );
+    expect(envs).toEqual([{ MODE: "record", ADFINITY_TOKEN: "s3cret" }]);
+  });
+
+  it.each([["unset", {}], ["empty", { ADFINITY_TOKEN: "" }]])(
+    "brings an attempt sibling up degraded, unstarted, when its secret is %s",
+    async (_, daemonEnv) => {
+      const r = recorder();
+      const stack = await startWith(r.deps, "attempt", daemonEnv);
+      expect(r.broughtUp).toEqual([]);
+      expect(stack.statuses[0]).toMatchObject({ name: "proxy", up: false });
+      expect(stack.statuses[0]?.failure).toMatch(
+        /secretEnv key\(s\) ADFINITY_TOKEN resolve to nothing/,
+      );
+    },
+  );
+
+  it("throws for an issue sibling whose secret is unset", async () => {
+    const r = recorder();
+    await expect(startWith(r.deps, "issue", {}))
+      .rejects.toThrow(/ADFINITY_TOKEN resolve to nothing/);
+    expect(r.broughtUp).toEqual([]);
+  });
+
+  it("masks secret values in the bringup error the prompt carries", async () => {
+    const r = recorder((n) => n === "proxy"
+      ? new ContainerBringupError(
+        "sandbar-x-sbx-44-proxy",
+        "sandbox stack: container 'proxy' did not become ready",
+        "auth failed for token s3cret",
+      )
+      : null);
+    const stack = await startWith(r.deps, "attempt", { ADFINITY_TOKEN: "s3cret" });
+    expect(stack.statuses[0]?.failure).toMatch(/auth failed for token <secret>/);
+    expect(stack.statuses[0]?.failure).not.toMatch(/s3cret/);
+  });
+
   // The bringup code is the GATE's, and its messages are the one string D3
   // hands a degraded sibling — rendered into the implementer's prompt right
   // under a paragraph saying the gate's stack is a namespace it cannot reach.

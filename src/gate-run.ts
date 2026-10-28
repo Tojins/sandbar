@@ -76,6 +76,7 @@ import {
   type Stack,
   boundedOk,
   boundedPodman,
+  gateStackOf,
   startStack,
 } from "./gate-stack.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
@@ -172,7 +173,7 @@ export function gateReuseToken(
   worktreePath: string,
   version: string,
 ): string {
-  const issueContainers = spec.containers.filter(
+  const issueContainers = gateStackOf(spec).containers.filter(
     (c: ResolvedStackContainer) => c.lifecycle === "issue",
   );
   return createHash("sha256")
@@ -188,7 +189,7 @@ export function gateReuseToken(
 }
 
 // The `config.images` entries this command may build: exactly those a
-// `gateStack` container runs.
+// `gateStack` container runs in the gate (`gateStackOf`, #241).
 //
 // `run.ts` passes `config.images` whole and is right to — a run creates an
 // agent sandbox, so the sandbox image is one of the images it runs. This
@@ -217,7 +218,7 @@ export function gateStackImagesOf(
   images: readonly BuiltImage[],
   gateStack: ResolvedGateStack,
 ): readonly BuiltImage[] {
-  const run = new Set(gateStack.containers.map((c) => c.image));
+  const run = new Set(gateStackOf(gateStack).containers.map((c) => c.image));
   return images.filter((i) => run.has(i.tag));
 }
 
