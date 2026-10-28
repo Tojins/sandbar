@@ -194,6 +194,7 @@ describe("runUiCheck (#126)", () => {
         issue: { id: "126", title: "ui check", branch: "sandbar/issue-126" },
         sandbox,
         opts: {
+          stackSource: { path: null },
           attemptLogger: {
             writeInvocation: vi.fn(async (filename) => writes.push(filename)),
           },
@@ -439,6 +440,7 @@ describe("runPartitionCheck (#158)", () => {
       sandbox,
       base: { ref: "origin/main", sha: "base" },
       opts: {
+        stackSource: { path: null },
         attemptLogger: { writeInvocation: vi.fn() },
         onEvent: (event: EventInput) => events.push(event),
       },
@@ -672,6 +674,7 @@ describe("silent implementer attempt policy (#116)", () => {
       issue: { id: "116", title: "silent", branch: "sandbar/issue-116-silent" },
       sandbox,
       opts: {
+        stackSource: { path: null },
         attemptLogger: {
           writeInvocation: vi.fn(async (_filename, record) => writes.push(record.speech)),
         },
@@ -1052,7 +1055,7 @@ describe("role prompt-extension wiring (#91)", () => {
     issue: { id: "91", title: "extensions", branch: "sandbar/issue-91" },
     sandbox: { worktreePath: "/worktree" },
     worktreePath: "/worktree",
-    opts: {},
+    opts: { stackSource: { path: null } },
     config: {
       repo: "owner/repo",
       layout: { repoDir: "/repo" },
@@ -1172,6 +1175,7 @@ describe("runVerifier (#121, #180, #185)", () => {
       sandbox,
       worktreePath: "/worktree",
       opts: {
+        stackSource: { path: null },
         attemptLogger: {
           writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
         },
@@ -1393,6 +1397,7 @@ describe("runQualityReview (#187)", () => {
       sandbox,
       worktreePath: "/worktree",
       opts: {
+        stackSource: { path: null },
         attemptLogger: {
           writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
         },
@@ -1609,6 +1614,7 @@ describe("runQualityFix (#185, #187)", () => {
       sandbox,
       worktreePath: "/worktree",
       opts: {
+        stackSource: { path: null },
         attemptLogger: {
           writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
         },
@@ -1827,6 +1833,7 @@ describe("closedReviewRound (#132, #185)", () => {
     kind: "gate-result" as const,
     head: "h",
     gate: { ok, failureTrace: ok ? "" : "x", failedStep: ok ? null : "test" },
+    stackChange: null,
   });
   const correctness = (reviewer: ReviewerResult) =>
     ({ kind: "verifier-result" as const, head: "h", outcome: combineVerifier(reviewer) });
@@ -1889,6 +1896,7 @@ describe("runAdjudicator (#167)", () => {
     issue: { id: "167", title: "adjudicate", branch: "sandbar/issue-167" },
     sandbox,
     opts: {
+      stackSource: { path: null },
       attemptLogger: { writeInvocation: vi.fn() },
       onEvent: async (event: EventInput) => { events.push(event); },
     },
@@ -2265,9 +2273,12 @@ describe("runGate admission (#142)", () => {
         gateSemaphore,
         attemptLogger: { writeGate: vi.fn() },
         onEvent: (event: EventInput) => events.push(event),
-        stackSource: { current: async () => ({ stack: { containers: [], steps: [] } }) },
+        stackSource: {
+          forHead: async () => ({ stack: { containers: [], steps: [] }, classification: { kind: "same" } }),
+        },
       },
       gateStack: { ensure: async () => ({ runGate }) },
+      reportGateStack: async () => undefined,
       quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 1, timer: () => 0, quality: null } },
       invocationSequence: createAgentInvocationSequencer().startCycle(),
     }) as unknown as Parameters<typeof runGate>[1];
@@ -2293,6 +2304,7 @@ describe("runGate admission (#142)", () => {
     const green = {
       kind: "gate-result",
       head: "tip-a",
+      stackChange: null,
       gate: { ok: true, failureTrace: "", failedStep: null },
     };
     await expect(first).resolves.toEqual(green);
@@ -2335,9 +2347,12 @@ describe("runGate admission (#142)", () => {
         gateSemaphore: createGateSemaphore(undefined),
         attemptLogger: { writeGate },
         onEvent: () => undefined,
-        stackSource: { current: async () => ({ stack: { containers: [], steps: [] } }) },
+        stackSource: {
+          forHead: async () => ({ stack: { containers: [], steps: [] }, classification: { kind: "same" } }),
+        },
       },
       gateStack: { ensure: async () => ({ runGate: async () => gate }) },
+      reportGateStack: async () => undefined,
       quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 2, timer: () => 0, quality: null } },
       invocationSequence: sequencer.startCycle(),
     } as unknown as Parameters<typeof runGate>[1];
@@ -2362,52 +2377,81 @@ describe("runGate admission (#142)", () => {
     });
   });
 
-  // #186: a stack change that landed mid-issue reaches the next gate-1.
-  it("re-reads the stack source and runs gate-1 on the stack bound to it", async () => {
-    const tipStack = { containers: [], steps: [] };
-    const gate: GateResult = {
+  // #186: the stack in effect is resolved for the head being gated, so a tip
+  // that moved mid-issue, or the branch's own env edit, reaches the next gate-1.
+  describe("the stack in effect", () => {
+    const green: GateResult = {
       ok: true, stdout: "", stderr: "", exitCode: 0, failedStep: null,
       durationMs: 1, steps: [], containerLogs: "",
     };
-    const runGateOnBound = vi.fn(async () => gate);
-    const ensure = vi.fn(async () => ({ runGate: runGateOnBound }));
+    const tipStack = { containers: [], steps: [] };
     const laterStack = { containers: [], steps: [{ name: "later", in: "x", command: ["true"] }] };
-    const current = vi.fn()
-      .mockResolvedValueOnce({ stack: tipStack })
-      .mockResolvedValueOnce({ stack: laterStack });
-    innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
-    const ctx = {
-      issue: { id: "186", title: "stack", branch: "sandbar/issue-186" },
-      worktreePath: "/worktree",
-      opts: {
-        gateSemaphore: createGateSemaphore(undefined),
-        attemptLogger: { writeGate: vi.fn() },
-        onEvent: () => undefined,
-        stackSource: { current },
-      },
-      gateStack: { ensure },
-      quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 1, timer: () => 0, quality: null } },
-      invocationSequence: createAgentInvocationSequencer().startCycle(),
-    } as unknown as Parameters<typeof runGate>[1];
+    const context = (forHead: ReturnType<typeof vi.fn>) => {
+      const runGateOnBound = vi.fn(async () => green);
+      const ensure = vi.fn(async () => ({ runGate: runGateOnBound }));
+      const reportGateStack = vi.fn(async () => undefined);
+      const ctx = {
+        issue: { id: "186", title: "stack", branch: "sandbar/issue-186" },
+        worktreePath: "/worktree",
+        opts: {
+          gateSemaphore: createGateSemaphore(undefined),
+          attemptLogger: { writeGate: vi.fn() },
+          onEvent: () => undefined,
+          stackSource: { forHead },
+        },
+        gateStack: { ensure },
+        reportGateStack,
+        quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 1, timer: () => 0, quality: null } },
+        invocationSequence: createAgentInvocationSequencer().startCycle(),
+      } as unknown as Parameters<typeof runGate>[1];
+      return { ctx, ensure, runGateOnBound, reportGateStack };
+    };
+    const action = (attempt: number) => ({
+      kind: "run-gate" as const,
+      attempt,
+      quality: { verdict: "APPROVED" as const, rounds: 0 },
+    });
 
-    const result = await runGate({
-      kind: "run-gate",
-      attempt: 1,
-      quality: { verdict: "APPROVED", rounds: 0 },
-    }, ctx);
+    it("resolves it for the gated head before every gate-1 and runs the stack bound to it", async () => {
+      const first = { stack: tipStack, classification: { kind: "same" } };
+      const later = { stack: laterStack, classification: { kind: "env-only", containers: ["x"] } };
+      const forHead = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(later);
+      innerLoopMocks.branchTip.mockReset().mockResolvedValueOnce("tip-a").mockResolvedValueOnce("tip-b");
+      const { ctx, ensure, runGateOnBound, reportGateStack } = context(forHead);
 
-    expect(current).toHaveBeenCalledOnce();
-    expect(ensure).toHaveBeenCalledExactlyOnceWith(tipStack);
-    expect(runGateOnBound).toHaveBeenCalledOnce();
-    expect(result.gate.ok).toBe(true);
+      const result = await runGate(action(1), ctx);
 
-    // The next gate-1 asks again and hands the bound stack the new spec.
-    await runGate({
-      kind: "run-gate",
-      attempt: 2,
-      quality: { verdict: "APPROVED", rounds: 0 },
-    }, ctx);
-    expect(ensure).toHaveBeenLastCalledWith(laterStack);
+      expect(forHead).toHaveBeenCalledExactlyOnceWith("/worktree", "tip-a");
+      expect(reportGateStack).toHaveBeenCalledExactlyOnceWith(first);
+      expect(ensure).toHaveBeenCalledExactlyOnceWith(tipStack);
+      expect(runGateOnBound).toHaveBeenCalledOnce();
+      expect(result.gate.ok).toBe(true);
+      expect(result.stackChange).toBeNull();
+
+      await runGate(action(2), ctx);
+      expect(forHead).toHaveBeenLastCalledWith("/worktree", "tip-b");
+      expect(reportGateStack).toHaveBeenLastCalledWith(later);
+      expect(ensure).toHaveBeenLastCalledWith(laterStack);
+    });
+
+    it("still runs gate-1 on the tip's stack for a non-env change, and reports the change", async () => {
+      const differences = [{ where: "container 'db'", what: "mounts" }];
+      const forHead = vi.fn(async () => ({
+        stack: tipStack,
+        classification: { kind: "non-env", path: "gate/stack.json", differences },
+      }));
+      innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
+      const { ctx, ensure, runGateOnBound } = context(forHead);
+
+      const result = await runGate(action(1), ctx);
+
+      expect(ensure).toHaveBeenCalledExactlyOnceWith(tipStack);
+      expect(runGateOnBound).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({
+        gate: { ok: true },
+        stackChange: { path: "gate/stack.json", differences },
+      });
+    });
   });
 });
 
@@ -2502,9 +2546,12 @@ describe("runInnerLoop context terminals (#158)", () => {
         ...overrides,
       },
       stackSource: {
-        current: async () => ({
+        path: null,
+        forHead: async () => ({
           stack: { containers: [], steps: [] },
           attachments: sandboxGateAttachments,
+          classification: { kind: "same" },
+          tipBlob: null,
         }),
       },
       hooks: {},
@@ -2572,6 +2619,55 @@ describe("runInnerLoop context terminals (#158)", () => {
       kind: "complaint",
       message: expect.stringContaining("Reusing worktree"),
     }));
+  });
+
+  // #186: a stack file's env edit applies from setup, and an edit beyond env
+  // parks the issue after gate-1 has run once on the tip's stack.
+  it("records the stack in effect and parks a stack change beyond env", async () => {
+    const { opts, events } = harness(async (options) =>
+      /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : completeRun
+    );
+    const stack = { containers: [], steps: [] };
+    const differences = [{ where: "container 'db'", what: "mounts" }];
+    const forHead = vi.fn()
+      .mockResolvedValueOnce({
+        stack: { ...stack, steps: [{ name: "env", in: "db", command: ["true"] }] },
+        attachments: { env: {}, mounts: [] },
+        classification: { kind: "env-only", containers: ["db"] },
+        tipBlob: "blob-1",
+      })
+      .mockResolvedValueOnce({
+        stack,
+        attachments: { env: {}, mounts: [] },
+        classification: { kind: "non-env", path: "gate/stack.json", differences },
+        tipBlob: "blob-1",
+      });
+    const withFile = {
+      ...opts,
+      stackSource: { path: "gate/stack.json", forHead },
+    } as unknown as Parameters<typeof runInnerLoop>[1];
+
+    await expect(runInnerLoop(issue, withFile)).resolves.toMatchObject({
+      type: "NEEDS-STACK-CHANGE",
+      stackChange: { path: "gate/stack.json", differences },
+      gate: { ok: true },
+    });
+    expect(forHead).toHaveBeenNthCalledWith(1, "/worktree", `refs/heads/${issue.branch}`);
+    expect(forHead).toHaveBeenNthCalledWith(2, "/worktree", "head123");
+    expect(events.filter((e) => e.kind === "gate-stack")).toEqual([
+      {
+        kind: "gate-stack", issue: Number(issue.id), title: issue.title, gate: "gate-1",
+        tipBlob: "blob-1", classification: "env-only", containers: ["db"],
+      },
+      {
+        kind: "gate-stack", issue: Number(issue.id), title: issue.title, gate: "gate-1",
+        tipBlob: "blob-1", classification: "non-env",
+      },
+    ]);
+    expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ stackFile: "gate/stack.json" }),
+      expect.anything(),
+    );
   });
 
   it("keeps sandbox teardown failures as full error complaints", async () => {

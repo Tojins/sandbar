@@ -23,10 +23,17 @@
 // validated them; this layer only roots relative sources in the issue worktree
 // and preserves gate env as literal container values.
 //
-// The stack comes from `opts.stackSource` (#186): read once at setup for the
-// sandbox, its siblings and its attachments (like the sandbox image, #46), and
-// again before EVERY gate-1, where the `BoundStack` restarts the gate stack if
-// the source tip's stack has changed since it started.
+// The stack comes from `opts.stackSource.forHead` (#186): the source tip's,
+// with the branch's container env laid over it when that is all the branch
+// changed in its stack file. Read once at setup for the sandbox, its siblings
+// and its attachments (like the sandbox image, #46), and again before EVERY
+// gate-1 for the head being gated, where the `BoundStack` restarts the gate
+// stack if the spec in effect has changed since it started — a tip that moved,
+// or the implementer's own env edit. A `gate-stack` event records the spec in
+// effect at setup and each time it changes; it is a report, never a decision
+// input. Any other stack edit is a `stackChange` on the gate-1 result: the gate
+// still runs once, on the tip's stack alone, and the state machine parks the
+// issue with NEEDS-STACK-CHANGE.
 //
 // The partition and UI-prototype decisions (#158/#126) are cold agent calls in
 // the existing issue sandbox and spend no convergence budget. Partition runs
@@ -200,6 +207,7 @@ import {
 import {
   HARD_ERROR_MAX_RETRIES,
   type ContextSlot,
+  type Gate1Result,
   type LoopAction,
   type LoopEvent,
   type LoopState,
@@ -229,7 +237,14 @@ import {
   sandboxContainers,
   startSandboxStack,
 } from "./sandbox-stack.js";
-import { type BoundStack, type StackSource, bindStack } from "./stack-source.js";
+import { stackChangeOf, type StackChange } from "./stack-change.js";
+import {
+  type BoundStack,
+  type HeadStack,
+  type StackSource,
+  bindStack,
+  stackSpecToken,
+} from "./stack-source.js";
 import {
   REVIEWER_MAX_INVOCATIONS,
   type ReviewerInvocation,
@@ -401,6 +416,14 @@ export type Terminal =
       readonly budget: number;
       readonly detail: string;
       readonly commits: readonly { sha: string }[];
+      readonly specGaps: readonly SpecGap[];
+    }
+  | {
+      // #186: the branch changes its gate stack beyond container env. Gate-1
+      // ran once on the source tip's stack; `gate` is that verdict.
+      readonly type: "NEEDS-STACK-CHANGE";
+      readonly stackChange: StackChange;
+      readonly gate: Gate1Result;
       readonly specGaps: readonly SpecGap[];
     }
   | {
@@ -638,6 +661,37 @@ export type InnerLoopOptions = {
   readonly gateSemaphore: GateSemaphore;
 };
 
+// The `gate-stack` record for one sandbox cycle (#186): the spec in effect at
+// setup, and again each time a gate-1 finds a different one.
+function gateStackReporter(
+  issue: IssueRef,
+  onEvent: InnerLoopOptions["onEvent"],
+): (head: HeadStack) => Promise<void> {
+  let token: string | null = null;
+  return async ({ stack, tipBlob, classification }) => {
+    const next = stackSpecToken(stack);
+    if (next === token) return;
+    token = next;
+    await onEvent({
+      kind: "gate-stack",
+      issue: Number(issue.id),
+      title: issue.title,
+      gate: "gate-1",
+      tipBlob,
+      classification: classification.kind,
+      ...(classification.kind === "env-only"
+        ? { containers: classification.containers }
+        : {}),
+    });
+  };
+}
+
+// The stack file the implementer is told only env edits of reach its gate.
+const stackFileInput = (
+  source: StackSource,
+): { readonly stackFile?: string } =>
+  source.path === null ? {} : { stackFile: source.path };
+
 const hasSandboxGateAttachments = (
   attachments: SandboxGateAttachments,
 ): boolean =>
@@ -775,6 +829,13 @@ function toTerminal(outcome: SandboxCycleOutcome): Terminal {
             commits: accumulatedCommits,
             specGaps,
           };
+    case "NEEDS-STACK-CHANGE":
+      return {
+        type: "NEEDS-STACK-CHANGE",
+        stackChange: verdict.stackChange,
+        gate: verdict.gate,
+        specGaps,
+      };
     case "HARD-ERROR":
       return {
         type: "HARD-ERROR",
@@ -912,7 +973,12 @@ async function runSandboxCycle(
     // slot renders to nothing.
     // Once per sandbox, like the sandbox image (#46): the agent's siblings
     // and its gate attachments come from the stack in effect at setup.
-    const setupStack = await opts.stackSource.current();
+    const setupStack = await opts.stackSource.forHead(
+      worktreePath,
+      `refs/heads/${issue.branch}`,
+    );
+    const reportGateStack = gateStackReporter(issue, opts.onEvent);
+    await reportGateStack(setupStack);
     const sbxContainers = sandboxContainers(setupStack.stack);
     const sandboxLogDir = join(
       opts.sandboxLogBaseDir ?? config.layout.logsDir,
@@ -1145,6 +1211,7 @@ async function runSandboxCycle(
         sandboxHasGateAttachments: hasSandboxGateAttachments(
           setupStack.attachments,
         ),
+        ...stackFileInput(opts.stackSource),
       }, anchorOpts);
       const size = contextChars(
         admissionPrompt,
@@ -1192,6 +1259,7 @@ async function runSandboxCycle(
         anchorOpts,
         base,
         gateStack,
+        reportGateStack,
         sandboxGateAttachments: setupStack.attachments,
         worktreePath,
         accumulated,
@@ -1378,8 +1446,9 @@ type ExecuteActionCtx = {
   // same range (#61).
   readonly base: IssueBranchBase;
   // Bound to the stack in effect at the last gate-1, and restarted when the
-  // next one finds the source tip's stack changed (#186).
+  // next one finds a different spec in effect (#186).
   readonly gateStack: BoundStack;
+  readonly reportGateStack: (head: HeadStack) => Promise<void>;
   // What this sandbox inherited from the stack at setup (#166).
   readonly sandboxGateAttachments: SandboxGateAttachments;
   // The issue worktree. Same tree the sandbox edits, the stack mounts and the
@@ -2071,6 +2140,7 @@ export async function runImplementer(
       sandboxHasGateAttachments: hasSandboxGateAttachments(
         ctx.sandboxGateAttachments,
       ),
+      ...stackFileInput(opts.stackSource),
     },
     anchorOpts,
   );
@@ -2431,7 +2501,9 @@ export async function runGate(
   if (round === null) throw new Error("gate-1 dispatched without a quality pass opening its round");
   round.quality = action.quality;
   const head = await requireIssueTip(ctx, "before gate-1");
-  const stack = await gateStack.ensure((await opts.stackSource.current()).stack);
+  const inEffect = await opts.stackSource.forHead(ctx.worktreePath, head);
+  await ctx.reportGateStack(inEffect);
+  const stack = await gateStack.ensure(inEffect.stack);
   const admitted = await opts.gateSemaphore.run(() => stack.runGate());
   const gate1 = admitted.value;
   // Before the verdict is classified, for #135's reason: the re-prompt is the
@@ -2459,9 +2531,11 @@ export async function runGate(
     ...(admitted.queuedMs === undefined ? {} : { queuedMs: admitted.queuedMs }),
     steps: Object.fromEntries(gate1.steps.map(({ name, ...step }) => [name, step])),
   });
+  const { classification } = inEffect;
   return {
     kind: "gate-result",
     head,
+    stackChange: stackChangeOf(classification),
     gate: {
       ok: gate1.ok,
       failedStep: gate1.failedStep,

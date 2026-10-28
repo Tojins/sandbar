@@ -181,7 +181,12 @@ const emptyStack = {
   stack: { containers: [], steps: [] },
   attachments: { env: {}, mounts: [] },
 };
-const stackSource = { current: async () => emptyStack, accepted: () => emptyStack };
+const stackSource = {
+  current: async () => emptyStack,
+  accepted: () => emptyStack,
+  path: null,
+  forHead: async () => ({ ...emptyStack, classification: { kind: "same" }, tipBlob: null }),
+};
 
 // A quality lister that approves the branch outright (#187).
 const listerRun = {

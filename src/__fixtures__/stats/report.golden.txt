@@ -19,6 +19,7 @@ NEEDS-UI-PROTOTYPE  0     0       -        -        -           -       -
 NEEDS-PARTITION     0     1       12       30000    9000        800     -
 NEEDS-HUMAN         0     0       -        -        -           -       -
 NEEDS-HUMAN-REVIEW  0     0       -        -        -           -       -
+NEEDS-STACK-CHANGE  0     0       -        -        -           -       -
 HARD-ERROR          0     0       -        -        -           -       -
 QUOTA               0     0       -        -        -           -       -
 CREDENTIAL          0     0       -        -        -           -       -

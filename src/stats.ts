@@ -73,8 +73,8 @@ type TerminalKind = Extract<StatsEvent, { kind: "terminal" }>["terminal"];
 export type Outcome = TerminalKind | "interrupted";
 const OUTCOME_KEYS = {
   DONE: true, "NEEDS-INFO": true, "NEEDS-UI-PROTOTYPE": true, "NEEDS-PARTITION": true,
-  "NEEDS-HUMAN": true, "NEEDS-HUMAN-REVIEW": true, "HARD-ERROR": true, QUOTA: true,
-  CREDENTIAL: true, REJECTED: true, interrupted: true,
+  "NEEDS-HUMAN": true, "NEEDS-HUMAN-REVIEW": true, "NEEDS-STACK-CHANGE": true, "HARD-ERROR": true,
+  QUOTA: true, CREDENTIAL: true, REJECTED: true, interrupted: true,
 } as const satisfies Record<Outcome, true>;
 const OUTCOMES = Object.keys(OUTCOME_KEYS) as readonly Outcome[];
 

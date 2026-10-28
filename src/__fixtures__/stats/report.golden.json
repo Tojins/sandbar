@@ -26,6 +26,7 @@
         "NEEDS-PARTITION": 0,
         "NEEDS-HUMAN": 0,
         "NEEDS-HUMAN-REVIEW": 0,
+        "NEEDS-STACK-CHANGE": 0,
         "HARD-ERROR": 0,
         "QUOTA": 0,
         "CREDENTIAL": 0,
@@ -39,6 +40,7 @@
         "NEEDS-PARTITION": 1,
         "NEEDS-HUMAN": 0,
         "NEEDS-HUMAN-REVIEW": 0,
+        "NEEDS-STACK-CHANGE": 0,
         "HARD-ERROR": 0,
         "QUOTA": 0,
         "CREDENTIAL": 0,
@@ -88,6 +90,13 @@
         "reasoning": null
       },
       "NEEDS-HUMAN-REVIEW": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "NEEDS-STACK-CHANGE": {
         "input": null,
         "cached": null,
         "cacheWrite": null,

@@ -18,6 +18,7 @@ import {
   READY_FOR_AGENT_LABEL as READY_FOR_AGENT,
   REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE,
   SPEC_GAPS_COMMENT,
+  STACK_CHANGE_COMMENT_TEMPLATE,
   finalizeAll,
   finalizationIntendsNotReady,
   finalizeOne as finalizeOneImpl,
@@ -303,6 +304,40 @@ describe("comment templates", () => {
     );
     expect(body.endsWith("re-apply `ready-for-agent`.")).toBe(true);
   });
+  // #186: stop line, the differences and the tip-stack verdict, action line.
+  it("STACK_CHANGE body names the file, each difference and the tip-stack verdict", () => {
+    const stackChange = {
+      path: "gate/stack.json",
+      differences: [
+        { where: "container 'db'", what: "mounts" },
+        { where: "containers", what: "'mailhog' added" },
+      ],
+    };
+    expect(STACK_CHANGE_COMMENT_TEMPLATE(
+      "sandbar/issue-576-tz",
+      stackChange,
+      { ok: false, failedStep: "test", failureTrace: "TimezoneAgreementTest failed" },
+      AGENT_STUCK,
+      READY_FOR_AGENT,
+    )).toBe(
+      `${BOT_COMMENT_PREFIX} stopped: this branch changes \`gate/stack.json\` beyond ` +
+        "container `env`, and a branch never changes its own gate.\n\n" +
+        "- container 'db': mounts\n- containers: 'mailhog' added\n\n" +
+        "Gate-1 is red on the source branch's stack at step `test`.\n\n" +
+        "<details><summary>Gate trace</summary>\n\n" +
+        "```\nTimezoneAgreementTest failed\n```\n\n</details>\n\n" +
+        "Action: use `sandbar/issue-576-tz`; land the stack change on the source " +
+        `branch by hand, then drop \`${AGENT_STUCK}\` and re-apply \`ready-for-agent\`.`,
+    );
+    expect(STACK_CHANGE_COMMENT_TEMPLATE(
+      "sandbar/issue-576-tz",
+      stackChange,
+      { ok: true, failedStep: null, failureTrace: "" },
+      AGENT_STUCK,
+      READY_FOR_AGENT,
+    )).toContain("Gate-1 is green on the source branch's stack.\n\nAction:");
+  });
+
   it("REVIEW_BUDGET_EXHAUSTED body includes bot prefix, the branch, the latest reviewer prose verbatim, and the configured labels", () => {
     const body = REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE(
       "sandbar/issue-45-t-45",
@@ -1007,6 +1042,34 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+    ]);
+  });
+
+  it("stack-change: reclaims, pushes, comments with the differences, swaps labels (#186)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(576);
+    const action = await finalizeOne(
+      {
+        kind: "stack-change",
+        issue: i,
+        stackChange: {
+          path: "gate/stack.json",
+          differences: [{ where: "container 'db'", what: "mounts" }],
+        },
+        gate: { ok: true, failedStep: null, failureTrace: "" },
+      },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(calls.reclaims).toEqual([{ branch: i.branch }]);
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.comments).toHaveLength(1);
+    expect(calls.comments[0]!.body).toContain("- container 'db': mounts");
+    expect(calls.comments[0]!.body).toContain(i.branch);
+    expect(calls.labelEdits).toEqual([
+      { n: 576, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);
   });
 

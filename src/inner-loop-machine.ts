@@ -77,6 +77,14 @@
 // — unreviewed work must not read as DONE — with an orchestrator note,
 // not a finding.
 //
+// A gate-1 result that carries a stack change — the branch edits its gate
+// stack file beyond container `env` (#186, stack-change.ts) — ends the loop
+// with NEEDS-STACK-CHANGE, green or red, and charges no budget: a green on the
+// source tip's stack never exercised the branch's stack, and landing would
+// have to refuse the ungated grader change anyway. The gate verdict rides
+// along as evidence for the human: green means the edit is not needed, red
+// means it has to land first.
+//
 // HARD-ERROR is not a verdict the SM ever emits — it's how the runner wraps
 // unhandled exceptions; decideAfterTerminal answers "retry with a fresh
 // sandbox or surface?" for the runner's outer loop.
@@ -86,6 +94,7 @@ import type { ParseSignal } from "./promise-parser.js";
 import type { UiCheckResult } from "./ui-check-parser.js";
 import type { PartitionCheckResult } from "./partition-check-parser.js";
 import { loadTemplate } from "./prompts.js";
+import type { StackChange } from "./stack-change.js";
 import {
   type VerifierOutcome,
   type VerifierUnit,
@@ -314,6 +323,13 @@ export type Verdict =
         | "ui-checker-wrote"
         | "partition-checker-wrote";
     }
+  | {
+      // The branch changes its gate stack beyond container env (#186). `gate`
+      // is gate-1's verdict on the source tip's stack.
+      readonly type: "NEEDS-STACK-CHANGE";
+      readonly stackChange: StackChange;
+      readonly gate: Gate1Result;
+    }
   | { readonly type: "HARD-ERROR"; readonly reason: string }
   | {
       readonly type: "QUOTA";
@@ -468,6 +484,9 @@ export type LoopEvent =
   | {
       readonly kind: "gate-result";
       readonly gate: Gate1Result;
+      // What the branch changed in its gate stack beyond env, when it did; the
+      // gate then ran on the source tip's stack alone (#186).
+      readonly stackChange: StackChange | null;
       // The head gated — the one the quality pass left. Record material for
       // the runner's `review-round` event; no transition reads it.
       readonly head: string;
@@ -694,7 +713,13 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
       return onQualityFixResult(state, event);
 
     case "gate-result":
-      return onGateResult(state, event.gate);
+      return event.stackChange === null
+        ? onGateResult(state, event.gate)
+        : terminate(state, {
+            type: "NEEDS-STACK-CHANGE",
+            stackChange: event.stackChange,
+            gate: event.gate,
+          });
 
     case "verifier-result":
       return onVerifierResult(state, event.head, event.outcome);

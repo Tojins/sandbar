@@ -89,6 +89,14 @@ describe("terminalFinalizeInputs", () => {
         issue: issue("8"),
         terminal: { type: "CREDENTIAL", provider: "codex", detail: "refresh refused" },
       },
+      {
+        issue: issue("9"),
+        terminal: {
+          type: "NEEDS-STACK-CHANGE",
+          stackChange: { path: "gate/stack.json", differences: [] },
+          gate: { ok: true, failureTrace: "", failedStep: null },
+        },
+      },
     ];
     expect(terminalFinalizeInputs(outcomes).map((i) => i.kind)).toEqual([
       "needs-info",
@@ -99,7 +107,20 @@ describe("terminalFinalizeInputs", () => {
       "read-only-agent-wrote",
       "quota",
       "credential",
+      "stack-change",
     ]);
+  });
+
+  it("carries a stack change and the tip-stack gate verdict onto its handoff (#186)", () => {
+    const stackChange = {
+      path: "gate/stack.json",
+      differences: [{ where: "container 'db'", what: "mounts" }],
+    };
+    const gate = { ok: false, failureTrace: "boom", failedStep: "test" };
+    expect(terminalFinalizeInputs([{
+      issue: issue("1"),
+      terminal: { type: "NEEDS-STACK-CHANGE", stackChange, gate, specGaps: [] },
+    }])).toEqual([{ kind: "stack-change", issue: issue("1"), stackChange, gate, specGaps: [] }]);
   });
 
   it("carries the terminal's payload onto the input", () => {

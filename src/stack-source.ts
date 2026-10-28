@@ -26,6 +26,18 @@
 // next resolution. Halting instead would wait on a consumer landing that a
 // halted daemon never picks up.
 //
+// A BRANCH'S OWN FILE (`forHead`). Each issue's stack in effect is the
+// accepted tip stack, with the branch's container `env` laid over it when the
+// branch's file differs only in env; any other difference, and a missing or
+// invalid file, is a `non-env` change the inner loop parks on
+// (stack-change.ts owns that rule). The branch's file is compared only when the
+// branch CHANGED it — when it differs from the file at the branch's fork from
+// `refs/remotes/origin/<sourceBranch>`. Otherwise a stack change landed on the
+// source after the branch was cut would read as the branch's own edit: every
+// in-flight issue would park on a change it never made, and an env-only one
+// would be reverted by the branch's stale env. The fork is asked of the tree
+// `forHead` is handed, whose remote-tracking ref only has to reach the fork.
+//
 // `sandbar gate` and `pulled-images` read the file from a tree on disk
 // (`readStackFrom`): they have no cache and are run by a human, and a CI job
 // grading its own PR is the one place a branch is meant to see its own stack.
@@ -54,6 +66,11 @@ import {
 import { SandbarError, isErrno, isExitCode } from "./errors.js";
 import type { EventInput } from "./events.js";
 import { type Stack, type StackOptions, startStack } from "./gate-stack.js";
+import {
+  type BranchStackRead,
+  type StackInEffect,
+  stackInEffect,
+} from "./stack-change.js";
 
 const exec = promisify(execFile);
 
@@ -63,7 +80,17 @@ export type StackSource = {
   readonly current: () => Promise<ResolvedStack>;
   // The last accepted stack, without reading the tip.
   readonly accepted: () => ResolvedStack;
+  // The file a branch may edit, or null for an inline stack, which lives in
+  // the installation where no branch reaches it.
+  readonly path: string | null;
+  // The stack in effect for commit `head` of the tree at `worktree`: what
+  // `current` returns, with the branch's env laid over it where that is all
+  // the branch changed.
+  readonly forHead: (worktree: string, head: string) => Promise<HeadStack>;
 };
+
+// `tipBlob` is the accepted tip stack's blob, null for an inline stack.
+export type HeadStack = StackInEffect & { readonly tipBlob: string | null };
 
 export type StackSourceOptions = {
   readonly source: ResolvedStackSource;
@@ -82,15 +109,19 @@ export type StackSourceOptions = {
   readonly onEvent: (event: EventInput) => Promise<void> | void;
 };
 
-// The blob at `<ref>:<path>`, or null when the ref or the path is absent.
-async function tipBlob(
-  repoDir: string,
-  ref: string,
+// Which repository a git call runs in: `--git-dir` for the bare cache, `-C`
+// for a worktree.
+type Repo = readonly string[];
+
+// The blob at `<rev>:<path>`, or null when the rev or the path is absent.
+async function blobAt(
+  repo: Repo,
+  rev: string,
   path: string,
 ): Promise<string | null> {
   try {
     const { stdout } = await exec("git", [
-      "--git-dir", repoDir, "rev-parse", "--verify", "--quiet", `${ref}:${path}`,
+      ...repo, "rev-parse", "--verify", "--quiet", `${rev}:${path}`,
     ]);
     return stdout.trim();
   } catch (err) {
@@ -100,15 +131,28 @@ async function tipBlob(
   }
 }
 
+// The commit `head` forked from `ref` at, or null when they share none.
+async function forkPoint(
+  repo: Repo,
+  head: string,
+  ref: string,
+): Promise<string | null> {
+  try {
+    return (await exec("git", [...repo, "merge-base", head, ref])).stdout.trim();
+  } catch (err) {
+    if (isExitCode(err, 1)) return null;
+    throw err;
+  }
+}
+
 async function readStackBlob(
-  repoDir: string,
+  repo: Repo,
   blob: string | null,
   label: string,
   configEnv: Readonly<Record<string, string>>,
 ): Promise<ResolvedStack> {
   if (blob === null) throw new SandbarError(`${label}: no such file.`);
-  const git = (...args: string[]) =>
-    exec("git", ["--git-dir", repoDir, "cat-file", ...args]);
+  const git = (...args: string[]) => exec("git", [...repo, "cat-file", ...args]);
   // The type is asked apart from the read so a directory at the path is named
   // as one rather than failing as a bad object.
   const type = (await git("-t", blob)).stdout.trim();
@@ -128,52 +172,99 @@ export async function openStackSource(
     checkRebuildOnIsUsed(opts.images, resolved.stack, opts.sandboxImage);
   if (source.kind === "inline") {
     checkImages(source);
-    return { current: async () => source, accepted: () => source };
+    return {
+      current: async () => source,
+      accepted: () => source,
+      path: null,
+      forHead: async () => ({
+        stack: source.stack,
+        attachments: source.attachments,
+        classification: { kind: "same" },
+        tipBlob: null,
+      }),
+    };
   }
+  const { path } = source;
+  const cache: Repo = ["--git-dir", opts.repoDir];
   const ref = `refs/remotes/origin/${opts.sourceBranch}`;
-  const label = `${source.path} at origin/${opts.sourceBranch}`;
+  const label = `${path} at origin/${opts.sourceBranch}`;
   const read = async (blob: string | null) => {
-    const resolved = await readStackBlob(opts.repoDir, blob, label, opts.configEnv);
+    const resolved = await readStackBlob(cache, blob, label, opts.configEnv);
     checkImages(resolved);
     return resolved;
   };
 
-  const startBlob = await tipBlob(opts.repoDir, ref, source.path);
+  const startBlob = await blobAt(cache, ref, path);
   let accepted = { blob: startBlob, resolved: await read(startBlob) };
   // Keyed by blob, so a tip that is fixed and broken again is reported again.
   const complained = new Set<string | null>();
 
+  // The accepted tip stack after reading the tip again, and its blob.
+  const refresh = async (): Promise<typeof accepted> => {
+    const blob = await blobAt(cache, ref, path);
+    if (blob === accepted.blob) return accepted;
+    let resolved: ResolvedStack;
+    try {
+      resolved = await read(blob);
+      await opts.hostChecks(resolved.stack);
+    } catch (err) {
+      if (!(err instanceof SandbarError)) throw err;
+      if (!complained.has(blob)) {
+        complained.add(blob);
+        await opts.onEvent({
+          kind: "complaint",
+          severity: "warning",
+          message:
+            `Gate stack: ${label} was not accepted` +
+            (blob === null ? "" : ` (blob ${blob})`) +
+            ", so gates keep running the last accepted stack " +
+            `(blob ${accepted.blob}):\n${err.message}`,
+        });
+      }
+      return accepted;
+    }
+    accepted = { blob, resolved };
+    await opts.onEvent({
+      kind: "notice",
+      message: `Gate stack: accepted ${label} (blob ${blob}); the next gate runs it.`,
+    });
+    return accepted;
+  };
+
+  // What the branch made of its file: null when it did not change it since
+  // its fork from the source, which leaves the tip's stack in effect.
+  const branchRead = async (
+    worktree: Repo,
+    head: string,
+    tipBlob: string | null,
+  ): Promise<BranchStackRead | null> => {
+    const blob = await blobAt(worktree, head, path);
+    if (blob === tipBlob) return null;
+    const fork = await forkPoint(worktree, head, ref);
+    if (fork !== null && blob === (await blobAt(worktree, fork, path))) return null;
+    if (blob === null) return { kind: "missing" };
+    try {
+      const { stack } = await readStackBlob(worktree, blob, `${path} at ${head}`, opts.configEnv);
+      return { kind: "ok", stack };
+    } catch (err) {
+      if (!(err instanceof SandbarError)) throw err;
+      return { kind: "invalid", message: err.message };
+    }
+  };
+
   return {
     accepted: () => accepted.resolved,
-    current: async () => {
-      const blob = await tipBlob(opts.repoDir, ref, source.path);
-      if (blob === accepted.blob) return accepted.resolved;
-      let resolved: ResolvedStack;
-      try {
-        resolved = await read(blob);
-        await opts.hostChecks(resolved.stack);
-      } catch (err) {
-        if (!(err instanceof SandbarError)) throw err;
-        if (!complained.has(blob)) {
-          complained.add(blob);
-          await opts.onEvent({
-            kind: "complaint",
-            severity: "warning",
-            message:
-              `Gate stack: ${label} was not accepted` +
-              (blob === null ? "" : ` (blob ${blob})`) +
-              ", so gates keep running the last accepted stack " +
-              `(blob ${accepted.blob}):\n${err.message}`,
-          });
-        }
-        return accepted.resolved;
-      }
-      accepted = { blob, resolved };
-      await opts.onEvent({
-        kind: "notice",
-        message: `Gate stack: accepted ${label} (blob ${blob}); the next gate runs it.`,
-      });
-      return resolved;
+    current: async () => (await refresh()).resolved,
+    path,
+    forHead: async (worktree, head) => {
+      const tip = await refresh();
+      const branch = await branchRead(["-C", worktree], head, tip.blob);
+      return {
+        ...(branch === null
+          ? { ...tip.resolved, classification: { kind: "same" } as const }
+          : stackInEffect(path, tip.resolved, branch, opts.configEnv)),
+        tipBlob: tip.blob,
+      };
     },
   };
 }

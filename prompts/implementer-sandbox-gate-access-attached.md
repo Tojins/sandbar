@@ -7,9 +7,9 @@
   change them — only the gate's own result is a verdict. Nothing here is rebuilt
   mid-issue, so a suite that passes here can still red the gate after a lockfile,
   dependency or image-recipe change. Trust the gate's trace when they disagree.
-- **The stack definition is fixed for this issue.** A missing or wrong sibling
-  is a change to the project's `gateStack`, but the stack this issue runs against
-  was resolved once when the run started. Commit that change if it belongs to
-  this issue — it takes effect for later issues, not this one — and say in your
-  report that this issue ran without it. Do not work around a bad sibling by
-  installing a database into this container or shaping the branch around it.
+- **These siblings are fixed for this sandbox.** A missing or wrong sibling is
+  a change to the project's gate stack, but the siblings beside you were
+  resolved once, when this sandbox started. Commit that change if it belongs to
+  this issue — this sandbox does not pick it up — and say in your report that
+  you worked without it. Do not work around a bad sibling by installing a
+  database into this container or shaping the branch around it.
