@@ -34,6 +34,27 @@ export type StatsWindow = { readonly last: number } | { readonly since: string }
 
 export const DEFAULT_STATS_WINDOW: StatsWindow = { last: 10 };
 
+// The window that `--last N` or `--since YYYY-MM-DD` names, the last 10 runs
+// when neither is given, or why the flags name none.
+export function parseStatsWindow(flags: {
+  readonly last?: string | undefined;
+  readonly since?: string | undefined;
+}): StatsWindow | { readonly error: string } {
+  const { last, since } = flags;
+  if (last !== undefined && since !== undefined) return { error: "--last and --since are exclusive" };
+  if (last !== undefined) {
+    return /^[1-9][0-9]*$/.test(last)
+      ? { last: Number(last) }
+      : { error: `--last wants a positive count, not ${last}` };
+  }
+  if (since !== undefined) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(since)
+      ? { since }
+      : { error: `--since wants YYYY-MM-DD, not ${since}` };
+  }
+  return DEFAULT_STATS_WINDOW;
+}
+
 type ReviewRound = Extract<RunEvent, { kind: "review-round" }>;
 
 // The events the reducer reads: today's union, with each field that a

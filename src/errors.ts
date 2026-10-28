@@ -40,6 +40,11 @@ export function isExitStatus(err: unknown, status: number): boolean {
   return propertyEquals(err, "status", status);
 }
 
+// How `util.parseArgs` names an unknown or malformed flag.
+export const isParseArgsError = (err: unknown): err is TypeError =>
+  err instanceof TypeError && "code" in err &&
+  String(err.code).startsWith("ERR_PARSE_ARGS_");
+
 // What `gh` writes to stderr when its request never got an answer from the
 // forge: its own "error connecting to <host>" for DNS/TCP/TLS failures, the Go
 // transport errors it passes through when a connection dies mid-request, and

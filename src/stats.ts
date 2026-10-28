@@ -36,6 +36,10 @@
 // scenarios (#180, #203), quality rule groups (#204), DB copies (#201),
 // deploys (#198), anchors (#197) and the janitor (#205) are empty until those
 // issues emit their events; each adds its own reducer arm here.
+//
+// `gates` and `terminals` list every gate run and every terminal in the
+// window, in record order, for a reader that keys on their typed fields
+// rather than on the rollups (reflect, #182).
 
 import type { StatsEvent, StatsInput, StatsWindow } from "./stats-record.js";
 import { proseKey } from "./stats-record.js";
@@ -91,6 +95,8 @@ export type InvocationRow = {
   readonly result: string;
   // The role's verdict token, where the record carries one.
   readonly verdict: string | null;
+  // The commits the invocation made, where the record carries them.
+  readonly commits: number | null;
   readonly durationMs: number;
   readonly tokens: TokenSum;
   readonly firstContext: number | null;
@@ -102,6 +108,24 @@ export type InvocationRow = {
   readonly transcript: string | null;
   // Only with --with-prose: the speech of the log `transcript` names.
   readonly prose?: string | null;
+};
+
+export type GateRow = {
+  readonly run: string;
+  readonly issue: number;
+  readonly gate: "gate-1" | "gate-2";
+  // gate-1's attempt; gate-2 runs at landing, outside any attempt.
+  readonly attempt: number | null;
+  readonly ok: boolean;
+  // Empty when the record names no red step.
+  readonly redSteps: readonly string[];
+};
+
+export type TerminalRow = {
+  readonly run: string;
+  readonly issue: number;
+  readonly terminal: TerminalKind;
+  readonly cause: string | null;
 };
 
 export type IssueRollup = {
@@ -206,6 +230,8 @@ export type StatsReport = {
     }>>;
   };
   readonly invocations: readonly InvocationRow[];
+  readonly gates: readonly GateRow[];
+  readonly terminals: readonly TerminalRow[];
 };
 
 export function agg(values: readonly (number | null | undefined)[]): Agg {
@@ -319,6 +345,9 @@ function invocationRow(
     verdict: event.kind === "quality-review" ? event.verdict
       : event.kind === "adjudication" ? event.ruling
       : null,
+    commits: event.kind === "quality-pass" ? ("commits" in event ? event.commits.length : null)
+      : event.kind === "implementer" ? event.commits ?? null
+      : null,
     durationMs: event.durationMs,
     tokens: tokensOf(event.usage),
     firstContext: event.usage?.firstContext ?? null,
@@ -344,6 +373,8 @@ const count = (tally: Mutable<PassCount>, rejected: boolean): void => {
 export function computeStats(input: StatsInput): StatsReport {
   const cycles: Cycle[] = [];
   const invocations: Row[] = [];
+  const gates: GateRow[] = [];
+  const terminals: TerminalRow[] = [];
   const passes: Record<PassName, Mutable<PassCount>> = {
     "gate-1": { runs: 0, rejected: 0 },
     "quality-list": { runs: 0, rejected: 0 },
@@ -391,12 +422,28 @@ export function computeStats(input: StatsInput): StatsReport {
       }
       switch (event.kind) {
         case "terminal":
+          terminals.push({
+            run,
+            issue: event.issue,
+            terminal: event.terminal,
+            cause: event.cause ?? null,
+          });
           if (cycle !== undefined && cycle.ended === null) cycle.ended = event;
           break;
         case "implementer":
           if (cycle !== undefined) cycle.attempts += 1;
           break;
         case "gate":
+          gates.push({
+            run,
+            issue: event.issue,
+            gate: event.gate,
+            attempt: "attempt" in event ? event.attempt : null,
+            ok: event.ok,
+            redSteps: Object.entries(event.steps ?? {})
+              .filter(([, step]) => !step.ok)
+              .map(([name]) => name),
+          });
           if (event.gate === "gate-1") {
             count(passes["gate-1"], !event.ok);
             if (cycle !== undefined) cycle.gateRounds += 1;
@@ -492,6 +539,8 @@ export function computeStats(input: StatsInput): StatsReport {
     anchors: { issues: 0, raw: agg([]), afterTraceDrop: agg([]), condensed: agg([]), condenser: {} },
     janitor: { runs: 0, byTask: {} },
     invocations,
+    gates,
+    terminals,
   };
 }
 
@@ -556,10 +605,11 @@ const rate = (part: number, whole: number): string | null =>
 const tokenCells = (sum: TokenSum): readonly Cell[] =>
   [sum.input, sum.cached, sum.cacheWrite, sum.output, sum.reasoning];
 
+export const describeWindow = (window: StatsWindow): string =>
+  "last" in window ? `last ${window.last} runs` : `runs since ${window.since}`;
+
 export function renderStatsTables(report: StatsReport): string {
-  const window = "last" in report.window
-    ? `last ${report.window.last} runs`
-    : `runs since ${report.window.since}`;
+  const window = describeWindow(report.window);
   const issueTotal = (issue: IssueRollup): number | null =>
     agg(Object.values(issue.tokensByRole).map(totalTokens)).sum;
   return [

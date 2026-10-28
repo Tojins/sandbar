@@ -32,6 +32,9 @@ dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132), `pulled-images` and
 `npm run stats` (`src/stats-cli.ts`, #194) is a repo script, not a verb: the
 factory scorecard over run records (`stats-record.ts` reads, `stats.ts`
 reduces); nothing in the daemon imports it.
+`npm run reflect -- --no-agents` (`src/reflect-cli.ts`, #182/#207) is another:
+it mines that report (`reflect-mine.ts`) into typed clusters and outlier
+issues and writes the tables (`reflect-report.ts`) under `<stateDir>/reflect/`.
 The config is a **program**, imported not parsed; `src/config.ts` is the one
 validation boundary and owns all defaults. Sandbar drives a GitHub-Issues coding
 agent loop against a consumer repo, which supplies Containerfiles, anchor docs
