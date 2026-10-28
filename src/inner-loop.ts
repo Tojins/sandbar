@@ -146,10 +146,10 @@
 // host cache on success (#98), as does each settled fixer invocation. After an
 // implementer invocation failure the same publish is recovery-only: its
 // failure is logged and may not replace the provider error.
-// Anchor-condenser, partition-check, UI-check, reviewer, quality lister and
-// verify, and adjudicator invocations snapshot tip and status; any mutation
-// parks the issue and preserves the clone rather than trusting that call. The
-// quality fixer is the one cold role exempt (#185).
+// Anchor-condenser, partition-check, UI-check, reviewer, scenario-runner,
+// quality lister and verify, and adjudicator invocations snapshot tip and
+// status; any mutation parks the issue and preserves the clone rather than
+// trusting that call. The quality fixer is the one cold role exempt (#185).
 // Invocation filenames use one run-owned, per-issue sequence across fresh
 // HARD-ERROR cycles and later admissions: the state machine's attempt and
 // UI-check counters restart at both boundaries, but an earlier invocation

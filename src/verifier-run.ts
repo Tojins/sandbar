@@ -205,6 +205,7 @@ export async function runScenarioRunner(
       const usage = usageFields(
         partial,
         partial.rateLimit ?? (err instanceof AgentQuotaError ? err.measurement : undefined),
+        input.prompt.length,
       );
       const fields: Fields = {
         ...routing,
@@ -215,11 +216,14 @@ export async function runScenarioRunner(
       };
       const write = await wrote(fields);
       if (write !== null) return write;
-      if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) {
+      if (
+        err instanceof AgentQuotaError ||
+        err instanceof AgentCredentialError ||
+        err instanceof EgressProxyDiedError
+      ) {
         await record(deps, attempt, invocation, agentFailureResult(err), fields);
         throw err;
       }
-      if (err instanceof EgressProxyDiedError) throw err;
       return err instanceof AgentInputTooLargeError
         ? await failed(invocation, "input-too-large", "input-too-large", fields)
         : await failed(invocation, "failed", "runner-failed", fields);
