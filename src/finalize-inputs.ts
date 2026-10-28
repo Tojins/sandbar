@@ -30,6 +30,7 @@ import { SILENT_NOOP_RETRY_LIMIT } from "./exit-conditions.js";
 // The read-only role a `read-only-agent-wrote` park names, by terminal cause.
 const READ_ONLY_WRITER = {
   "reviewer-wrote": "reviewer",
+  "verifier-wrote": "verifier",
   "quality-reviewer-wrote": "quality reviewer",
   "adjudicator-wrote": "adjudicator",
   "ui-checker-wrote": "UI checker",

@@ -23,7 +23,7 @@ import type { StackChange } from "./stack-change.js";
 import { DEFAULT_MAX_GATE_ROUNDS } from "./config.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
-import { combineVerifier } from "./verifier.js";
+import { type VerifierOutcome, WHITE_BOX_NO_REVIEW, combineVerifier } from "./verifier.js";
 
 const defaultOpts = {
   issueBranch: "sandbar/issue-1-x",
@@ -176,11 +176,12 @@ const gated = (
   head,
   stackChange,
 });
-// The verifier is its white-box review alone until #180's runner joins it.
+// The verifier's white-box review alone: no scenarios were written.
 const reviewed = (reviewer: ReviewerResult, head = "head"): LoopEvent => ({
   kind: "verifier-result",
   head,
-  outcome: combineVerifier(reviewer),
+  outcome: combineVerifier(reviewer, { kind: "not-run", prepass: [] }, null, () => ""),
+  scenarios: null,
 });
 
 // One serial round after a COMPLETE (#185): the fixer, gate-1 on the head it
@@ -239,7 +240,7 @@ describe("inner-loop-machine — the serial round (#185)", () => {
       { kind: "run-implementer", attempt: 2, failureTrace: "red", extraReprompt: null, latestReviewerFeedback: null },
       { kind: "run-quality-list", attempt: 2, scope: { kind: "since", sha: "head" } },
       { kind: "run-gate", attempt: 2, quality: qualityApproved },
-      { kind: "run-verifier", attempt: 2 },
+      { kind: "run-verifier", attempt: 2, scenarios: null },
     ]);
   });
 
@@ -259,7 +260,7 @@ describe("inner-loop-machine — the serial round (#185)", () => {
     expect(visiblePhases({ kind: "run-quality-verify", attempt: 1, fixRound: 1, anchor: "a", report: "r" }))
       .toEqual(["quality"]);
     expect(visiblePhases({ kind: "run-gate", attempt: 1, quality: qualityApproved })).toEqual(["gate-1"]);
-    expect(visiblePhases({ kind: "run-verifier", attempt: 1 })).toEqual(["review"]);
+    expect(visiblePhases({ kind: "run-verifier", attempt: 1, scenarios: null })).toEqual(["review"]);
   });
 
   it.each([
@@ -580,6 +581,7 @@ describe("inner-loop-machine — unchanged rejection adjudication (#167)", () =>
         head: "abc",
         report: whiteBox("finding"),
         units: [whiteBoxUnit("finding")],
+        whiteBox: "CHANGES-REQUESTED",
       },
     });
   });
@@ -903,7 +905,7 @@ describe("inner-loop-machine — the scenario writer (#203)", () => {
     expect(gated1.action).toEqual({ kind: "await-scenario-writer" });
     expect(visiblePhases(gated1.action)).toEqual(["scenarios"]);
     const joined = step(gated1.state, writerResult(written));
-    expect(joined.action).toEqual({ kind: "run-verifier", attempt: 1 });
+    expect(joined.action).toEqual({ kind: "run-verifier", attempt: 1, scenarios: written.set });
     expect(joined.state.scenarioWriter).toEqual({ kind: "settled", outcome: written });
   });
 
@@ -913,14 +915,14 @@ describe("inner-loop-machine — the scenario writer (#203)", () => {
     const red = stepAll(running, [impl(complete), ...round(gate1Red("boom"))]);
     expect(red.action).toMatchObject({ kind: "run-implementer", attempt: 2 });
     const joined = stepAll(red.state, [impl(complete), ...round(gate1Ok), writerResult(failed)]);
-    expect(joined.action).toEqual({ kind: "run-verifier", attempt: 2 });
+    expect(joined.action).toEqual({ kind: "run-verifier", attempt: 2, scenarios: null });
     const rejected = stepAll(joined.state, [reviewed(changes("fix it"))]);
     const second = stepAll(rejected.state, [impl(complete), ...round(gate1Ok)]);
-    expect(second.action).toEqual({ kind: "run-verifier", attempt: 3 });
+    expect(second.action).toEqual({ kind: "run-verifier", attempt: 3, scenarios: null });
     expect(stepAll(started({
       ...defaultOpts,
       scenarioWriter: { kind: "settled", outcome: { kind: "none", reason: "docs" } },
-    }), [impl(complete), ...round(gate1Ok)]).action).toEqual({ kind: "run-verifier", attempt: 1 });
+    }), [impl(complete), ...round(gate1Ok)]).action).toEqual({ kind: "run-verifier", attempt: 1, scenarios: null });
   });
 
   it("parks a writer that wrote, at the join", () => {
@@ -1091,6 +1093,7 @@ describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
       head: "head",
       report: whiteBox("handle null"),
       units: [whiteBoxUnit("handle null")],
+      whiteBox: "CHANGES-REQUESTED",
     });
   });
 
@@ -1157,7 +1160,9 @@ describe("inner-loop-machine — the verifier's two renderings (#180)", () => {
     outcome: {
       kind: "rejected",
       units: [{ id: "white-box", text: "private", publicText: "public" }],
+      whiteBox: "CHANGES-REQUESTED",
     },
+    scenarios: null,
   };
   const rejected = () => stepAll(started(defaultOpts), [impl(complete), ...round(gate1Ok), split]);
 
@@ -1214,6 +1219,76 @@ describe("inner-loop-machine — the verifier's two renderings (#180)", () => {
       .toBe("Independent adjudicator: UPHELD\nstill true\n\nprivate");
     expect(upheld.state.latestReviewerPublic)
       .toBe("Independent adjudicator: UPHELD\nstill true\n\npublic");
+  });
+});
+
+describe("inner-loop-machine — the scenario runner's units (#238)", () => {
+  const scenarioUnit = { id: "S2", text: "[scenario S2] private", publicText: "[scenario S2] public" } as const;
+  const verified = (outcome: VerifierOutcome): LoopEvent => ({
+    kind: "verifier-result",
+    head: "head",
+    outcome,
+    scenarios: { selected: 2, pass: 1, fail: 1, unverified: 0 },
+  });
+  const both = verified({
+    kind: "rejected",
+    units: [whiteBoxUnit("finding"), scenarioUnit],
+    whiteBox: "CHANGES-REQUESTED",
+  });
+
+  it("charges a rejection from both sources once", () => {
+    const r = stepAll(started(defaultOpts), [impl(complete), ...round(gate1Ok), both]);
+    expect(r.state.correctnessFailures).toBe(1);
+    expect(asImpl(r.action).latestReviewerFeedback)
+      .toBe(`${whiteBox("finding")}\n\n[scenario S2] private`);
+    expect(r.state.latestReviewerPublic).toBe(`${whiteBox("finding")}\n\n[scenario S2] public`);
+  });
+
+  it("says the white-box review produced nothing beside a failing scenario, in both renderings", () => {
+    const r = stepAll(started(defaultOpts), [
+      impl(complete),
+      ...round(gate1Ok),
+      verified({ kind: "rejected", units: [scenarioUnit], whiteBox: "HARNESS-FAILED" }),
+    ]);
+    expect(r.state.correctnessFailures).toBe(1);
+    expect(r.state.reviewerHarnessFailures).toBe(0);
+    expect(r.state.pendingRejection).toEqual({
+      round: 1,
+      head: "head",
+      report: `[scenario S2] private\n\n${WHITE_BOX_NO_REVIEW}`,
+      units: [scenarioUnit],
+      whiteBox: "HARNESS-FAILED",
+    });
+    expect(r.state.latestReviewerPublic).toBe(`[scenario S2] public\n\n${WHITE_BOX_NO_REVIEW}`);
+  });
+
+  it("parks a write with both agents in the sandbox as the verifier's", () => {
+    const r = stepAll(started(defaultOpts), [
+      impl(complete),
+      ...round(gate1Ok),
+      verified({ kind: "wrote", cause: "verifier-wrote", detail: "HEAD moved" }),
+    ]);
+    expect(r.action).toEqual({
+      kind: "terminate",
+      verdict: { type: "NEEDS-HUMAN-REVIEW", cause: "verifier-wrote", latestReviewerProse: "HEAD moved" },
+    });
+  });
+
+  it("withholds an upheld ruling's reasoning from the public rendering beside a scenario unit", () => {
+    const rejected = stepAll(started(defaultOpts), [impl(complete), ...round(gate1Ok), both]);
+    const disputed = step(rejected.state, impl(complete, [], null, null, 0, "head"));
+    const upheld = step(disputed.state, {
+      kind: "adjudicator-result",
+      head: "head",
+      ruling: "UPHELD",
+      reasoning: "the copy shows 0 rows",
+    });
+    expect(asImpl(upheld.action).latestReviewerFeedback)
+      .toBe(`Independent adjudicator: UPHELD\nthe copy shows 0 rows\n\n${whiteBox("finding")}\n\n[scenario S2] private`);
+    expect(upheld.state.latestReviewerPublic).toBe(
+      "Independent adjudicator: UPHELD\n(reasoning withheld beside scenario findings)\n\n" +
+        `${whiteBox("finding")}\n\n[scenario S2] public`,
+    );
   });
 });
 

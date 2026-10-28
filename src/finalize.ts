@@ -671,6 +671,7 @@ type FinalizeKindInput =
       readonly latestReviewerProse: string;
       readonly actor:
         | "reviewer"
+        | "verifier"
         | "quality reviewer"
         | "adjudicator"
         | "UI checker"

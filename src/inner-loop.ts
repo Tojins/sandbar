@@ -489,6 +489,7 @@ export type Terminal =
       readonly latestReviewerProse: string;
       readonly cause:
         | "reviewer-wrote"
+        | "verifier-wrote"
         | "quality-reviewer-wrote"
         | "adjudicator-wrote"
         | "ui-checker-wrote"
@@ -3381,7 +3382,13 @@ export async function runVerifier(
   return {
     kind: "verifier-result",
     head,
-    outcome: combineVerifier(reviewerResult(outcome, "correctness")),
+    outcome: combineVerifier(
+      reviewerResult(outcome, "correctness"),
+      { kind: "not-run", prepass: [] },
+      null,
+      () => "",
+    ),
+    scenarios: null,
   };
 }
 

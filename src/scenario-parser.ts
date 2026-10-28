@@ -306,12 +306,19 @@ function parseClause(
 // The block grammar for one scenario, which `parseScenarioWriter` reads back
 // unchanged inside a `<scenarios>` block.
 export function renderScenario(s: Scenario): string {
-  const clause = (keyword: string, texts: readonly string[]): string[] =>
-    texts.map((text, i) => `${i === 0 ? keyword : "And"} ${text}`);
   return [
     `### ${s.id}: ${s.title}`,
     `needs: ${s.needs.join(", ")}`,
     `area: ${s.area.join(", ")}`,
+    renderClauses(s),
+  ].join("\n");
+}
+
+// The scenario's Given/When/Then lines alone.
+export function renderClauses(s: Scenario): string {
+  const clause = (keyword: string, texts: readonly string[]): string[] =>
+    texts.map((text, i) => `${i === 0 ? keyword : "And"} ${text}`);
+  return [
     ...clause("Given", s.given),
     ...clause("When", s.when),
     ...clause("Then", s.then),

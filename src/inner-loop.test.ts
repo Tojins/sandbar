@@ -1548,6 +1548,7 @@ describe("runVerifier (#121, #180, #185)", () => {
       kind: "verifier-result",
       head: "head123",
       outcome: { kind: "approved" },
+      scenarios: null,
     });
     expect(filenames).toEqual([
       "attempt-2-reviewer-1.log",
@@ -2315,7 +2316,12 @@ describe("closedReviewRound (#132, #185)", () => {
     stackChange: null,
   });
   const correctness = (reviewer: ReviewerResult) =>
-    ({ kind: "verifier-result" as const, head: "h", outcome: combineVerifier(reviewer) });
+    ({
+      kind: "verifier-result" as const,
+      head: "h",
+      outcome: combineVerifier(reviewer, { kind: "not-run", prepass: [] }, null, () => ""),
+      scenarios: null,
+    });
 
   it.each([
     ["a green gate, which leaves the round open", gate(true), null],
