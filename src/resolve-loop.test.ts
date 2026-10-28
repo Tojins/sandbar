@@ -51,13 +51,17 @@ describe("buildResolvePromptBody — lists instead of embedding", () => {
     expect(prompt).not.toContain("```diff");
   });
 
+  // The hint is the agent's only way to read a related issue: piped, `gh issue
+  // view --comments` prints only the raw thread (no title, no body, sandbar's
+  // traces left in), so the hint asks for title and body as JSON.
   it("names each related issue on one line with the command to read it", () => {
     const prompt = buildResolvePromptBody({
       ...promptInputs,
       relatedIssues: [issue(40), issue(44)],
     });
     expect(prompt).toContain("- #40: t-40 (branch `sandbar/issue-40`)\n- #44: t-44 (branch `sandbar/issue-44`)");
-    expect(prompt).toContain("`gh issue view N --repo acme/app --comments`");
+    expect(prompt).toContain("`gh issue view N --repo acme/app --json title,body`");
+    expect(prompt).not.toContain("--comments");
   });
 });
 

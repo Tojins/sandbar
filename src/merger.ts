@@ -41,9 +41,9 @@
 //                            resolved → merged.push (loop already gated)
 //
 // The resolve loop lists *all* other issues in this cycle (number, title,
-// branch; the agent reads them with `gh issue view`) so it can reason about
-// "branch B's intent collides with branch A — abandon B" instead of being
-// stuck inside a single-issue context.
+// branch; the agent reads title and body with `gh issue view --json
+// title,body`) so it can reason about "branch B's intent collides with
+// branch A — abandon B" instead of being stuck inside a single-issue context.
 //
 // ---------------------------------------------------------------------------
 // Two landing targets (#60, §2–3 of the design in #54)
@@ -1206,7 +1206,8 @@ export type RunMergerOptions = {
   // context when reasoning about an integration failure.
   readonly ongoingIssues?: readonly IssueRef[];
   readonly projectAnchor?: string;
-  // `owner/repo`, for the resolve prompt's `gh issue view` hint.
+  // `owner/repo`, for the resolve prompt's `gh issue view --json title,body`
+  // hint.
   readonly repoSlug: string;
   readonly promptExtension?: PromptExtension;
   // Test seam for the duration fields this module logs (#82). Absent ⇒

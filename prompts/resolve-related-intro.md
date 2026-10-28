@@ -7,4 +7,4 @@ where two intents genuinely contradict and one should lose.
 
 {{issues}}
 
-Read any of them with `gh issue view N --repo {{repoSlug}} --comments`.
+Read any of them with `gh issue view N --repo {{repoSlug}} --json title,body`.

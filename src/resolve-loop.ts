@@ -62,7 +62,10 @@
 // The prompt embeds no diff and no related thread (#197): a conflict is shown
 // as its unmerged paths, and each related issue as one line naming its number,
 // title and branch. The agent runs `git diff` and `gh issue view` itself, like
-// every other role, and reads only what the conflict needs.
+// every other role, and reads only what the conflict needs. The hint asks for
+// `--json title,body`, not `--comments`: piped (and the agent's stdout always
+// is), `--comments` prints only the raw thread — no title or body, and
+// sandbar's traces left in (see `issue-anchor.ts`).
 
 import { SandbarError } from "./errors.js";
 import {
@@ -304,8 +307,8 @@ export type ResolveLoopDeps = {
   // Pre-built project anchor — fetched once by the caller and reused across
   // all attempts (large, static).
   readonly projectAnchor: string;
-  // `owner/repo` the prompt names in its `gh issue view` hint for related
-  // issues.
+  // `owner/repo` the prompt names in its `gh issue view --json title,body`
+  // hint for related issues.
   readonly repoSlug: string;
   readonly promptExtension?: PromptExtension;
   // Sha of HEAD captured before `git merge --no-ff` started. The loop refuses
