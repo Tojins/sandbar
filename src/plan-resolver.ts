@@ -964,12 +964,8 @@ function latestReadyLabelApplication(
   );
 }
 
-// Resolve the run token's forge identity once. In `anyone` mode no identity is
-// needed and no call is made, preserving the old queue path exactly.
-export async function resolveReadyLabelPolicy(
-  developers: readonly string[] | "anyone",
-): Promise<ReadyLabelPolicy> {
-  if (developers === "anyone") return "anyone";
+// The login of the token running sandbar.
+export async function fetchTokenLogin(): Promise<string> {
   const { stdout } = await exec("gh", [
     "api",
     "graphql",
@@ -984,7 +980,16 @@ export async function resolveReadyLabelPolicy(
       "GitHub's viewer query did not return the login for the token running sandbar.",
     );
   }
-  return { developers, viewerLogin: login };
+  return login;
+}
+
+// Resolve the run token's forge identity once. In `anyone` mode no identity is
+// needed and no call is made, preserving the old queue path exactly.
+export async function resolveReadyLabelPolicy(
+  developers: readonly string[] | "anyone",
+): Promise<ReadyLabelPolicy> {
+  if (developers === "anyone") return "anyone";
+  return { developers, viewerLogin: await fetchTokenLogin() };
 }
 
 // Two read shapes, and the split between them is GitHub's two limits. One

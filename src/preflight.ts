@@ -92,6 +92,14 @@
 // probes: `viewer { login }` is resolved once here, used for preflight's own
 // branch classification, and returned to every planner recompute in the run.
 //
+// The deploy watch (#198) is asked about only when `config.deployWatch` is
+// set and `gh` is authenticated (`deployWatchRefusals`): its workflow must
+// exist in the repository, its dedupe label and `ready-for-human` must exist
+// (#8: sandbar never creates a label), and `notifyLogin` must not be the
+// token's own login, because GitHub sends no notification for a
+// self-mention and the bug's one @-mention would reach nobody. The token
+// login is the one #136 resolves, read here too when the queue is "anyone".
+//
 // The git fetch is an answer too, not a best-effort warmup. Its failure joins
 // the ordinary invariant report and retains git's stderr (#81, absorbed by
 // #118); a wildcard refspec matching nothing still exits zero.
@@ -233,9 +241,11 @@ import type {
   ResolvedGateStack,
   ResolvedStackContainer,
 } from "./config.js";
+import { type DeployWatchSettings, READY_FOR_HUMAN_LABEL } from "./deploy-watch.js";
 import { checkWorktreeImageUids, pulledImagesOf } from "./ensure-images.js";
 import type { EnvReader } from "./env.js";
 import { SandbarError, hasExitCode, isErrno, isExitStatus } from "./errors.js";
+import { type ExecFn, defaultExec } from "./forge-verify.js";
 import { LOG_READ_TIMEOUT_MS, boundedOk, boundedPodman } from "./gate-stack.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
@@ -261,6 +271,7 @@ import {
   type ReadyLabelPolicy,
   fetchCandidates,
   fetchIssueStates,
+  fetchTokenLogin,
   readChunkMembers,
   readyQueueVerdict,
   resolveReadyLabelPolicy,
@@ -309,6 +320,8 @@ export type PreflightConfig = {
   // attempt dying in-container a cycle later. A disabled UI check contributes
   // no provider because it contributes no invocation.
   readonly agentProviders: readonly AgentProviderName[];
+  // `config.deployWatch`; null when the watch is off.
+  readonly deployWatch: DeployWatchSettings | null;
   readonly onEvent: (event: EventInput) => Promise<void> | void;
 };
 
@@ -1545,6 +1558,63 @@ export async function checkForgeReachabilityForPreflight(
   }
 }
 
+// Why the deploy watch cannot run against `repo`; empty when it can. A `gh`
+// that answers nonzero is the refusal, carrying its stderr.
+export async function deployWatchRefusals(args: {
+  readonly repo: RepoRef;
+  readonly watch: DeployWatchSettings;
+  readonly tokenLogin: string;
+  readonly cwd: string;
+  readonly exec?: ExecFn;
+}): Promise<readonly string[]> {
+  const { watch } = args;
+  const exec = args.exec ?? defaultExec;
+  const repoFlag = repoSlug(args.repo);
+  const gh = async (argv: readonly string[]): Promise<{ readonly stdout: string } | { readonly failure: string }> => {
+    try {
+      return { stdout: (await exec("gh", argv, { cwd: args.cwd })).stdout };
+    } catch (err) {
+      if (!hasExitCode(err)) throw err;
+      return { failure: commandFailureDetail(err) };
+    }
+  };
+  const refusals: string[] = [];
+  // `gh workflow view` has no `--json`; `--yaml` reads the file and fails
+  // when the repository has no such workflow.
+  const workflow = await gh(["workflow", "view", watch.workflow, "--repo", repoFlag, "--yaml"]);
+  if ("failure" in workflow) {
+    refusals.push(
+      `config.deployWatch.workflow: ${repoFlag} has no workflow file ` +
+        `${watch.workflow} (${workflow.failure}).`,
+    );
+  }
+  const labels = await gh(["label", "list", "--repo", repoFlag, "--limit", "200", "--json", "name"]);
+  if ("failure" in labels) {
+    refusals.push(`config.deployWatch: could not list ${repoFlag}'s labels (${labels.failure}).`);
+  } else {
+    const listed: unknown = JSON.parse(labels.stdout);
+    if (!Array.isArray(listed)) {
+      throw new SandbarError(`gh label list answered ${JSON.stringify(labels.stdout)}`);
+    }
+    const names = new Set(listed.map((l) => (l as { readonly name?: unknown }).name));
+    const missing = [READY_FOR_HUMAN_LABEL, watch.label].filter((l) => !names.has(l));
+    if (missing.length > 0) {
+      refusals.push(
+        `config.deployWatch: ${repoFlag} has no label ${missing.map((l) => `\`${l}\``).join(" or ")}; ` +
+          "sandbar never creates labels, so create it before turning the deploy watch on.",
+      );
+    }
+  }
+  if (watch.notifyLogin.toLowerCase() === args.tokenLogin.toLowerCase()) {
+    refusals.push(
+      `config.deployWatch.notifyLogin is ${watch.notifyLogin}, the login of the token ` +
+        "running sandbar; GitHub sends no notification for a self-mention, so name " +
+        "the human who should hear about a red deploy.",
+    );
+  }
+  return refusals;
+}
+
 // What a passing preflight hands the run: the queue policy every planner
 // recompute uses, and the gate stack the run starts on.
 export type PreflightResult = {
@@ -1728,10 +1798,21 @@ export async function runPreflightAfterReachability(
     ...state,
     ...(await stackHostState(stackSource.accepted().stack, cfg.images, state.hasContainerRuntime)),
   });
+  const deployWatchFailures = cfg.deployWatch !== null && readyLabelPolicy !== null
+    ? await deployWatchRefusals({
+        repo: cfg.repo,
+        watch: cfg.deployWatch,
+        tokenLogin: readyLabelPolicy === "anyone"
+          ? await fetchTokenLogin()
+          : readyLabelPolicy.viewerLogin,
+        cwd: cfg.layout.repoDir,
+      })
+    : [];
   const failures = [
     ...results.flatMap((r) => (r.ok ? [] : [r.message])),
     ...fetchFailures,
     ...synced.refusals,
+    ...deployWatchFailures,
   ];
   if (failures.length > 0) throw new PreflightError(failures);
 

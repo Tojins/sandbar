@@ -723,6 +723,7 @@ export async function run(
     developers: config.developers,
     images: config.images,
     agentProviders,
+    deployWatch: config.deployWatch,
   };
   const stopBeforeOriginLock = async (
     err: PreflightError | SandbarError,
