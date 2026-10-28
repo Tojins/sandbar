@@ -54,6 +54,9 @@ describe("selectRuns (#194)", () => {
       "run-2026-09-02T09-00-00-000Z", "run-2026-09-03T08-00-00-000Z",
     ]],
     ["since a date after every run", { since: "2026-10-01" }, []],
+    ["the named runs, oldest first, skipping a name with no directory", {
+      runs: ["run-2026-09-03T08-00-00-000Z", "run-2026-09-09T00-00-00-000Z", "run-2026-09-01T10-00-00-000Z"],
+    }, ["run-2026-09-01T10-00-00-000Z", "run-2026-09-03T08-00-00-000Z"]],
   ] as const)("selects %s", (_name, window, expected) => {
     expect(selectRuns(dirs, window)).toEqual(expected);
   });

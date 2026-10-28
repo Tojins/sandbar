@@ -652,7 +652,9 @@ const tokenCells = (sum: TokenSum): readonly Cell[] =>
   [sum.input, sum.cached, sum.cacheWrite, sum.output, sum.reasoning];
 
 export const describeWindow = (window: StatsWindow): string =>
-  "last" in window ? `last ${window.last} runs` : `runs since ${window.since}`;
+  "runs" in window ? `runs ${window.runs.join(", ")}`
+    : "last" in window ? `last ${window.last} runs`
+    : `runs since ${window.since}`;
 
 export function renderStatsTables(report: StatsReport): string {
   const window = describeWindow(report.window);
