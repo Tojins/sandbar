@@ -164,6 +164,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     // pre-#72 config produces.
     agentProviders: ["claude"] as readonly AgentProviderName[],
     deployWatch: null,
+    databaseCopies: null,
     onEvent: () => undefined,
   });
   // What `runPreflight` hands `gatherState` once its own `gh` checks pass.
