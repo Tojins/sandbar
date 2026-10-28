@@ -153,9 +153,6 @@ function threadOf(issue: IssueJson): readonly ThreadComment[] {
   });
 }
 
-const heading = (c: ThreadComment): string =>
-  c.createdAt === null ? c.author : `${c.author} — ${c.createdAt}`;
-
 // Bump whenever the condenser prompt or `parseCondenseAnswer` changes: it is
 // part of `condenseKey`, so every cached answer is then re-asked.
 export const CONDENSE_CONTRACT_VERSION = 1;
@@ -173,9 +170,13 @@ export type CondenseParse =
   | { readonly kind: "valid"; readonly answer: CondenseAnswer }
   | { readonly kind: "invalid"; readonly reason: string };
 
+export const droppedComments = (answer: CondenseAnswer): number =>
+  answer.filter((d) => d.kind === "drop").length;
+
 export type CondensedThread = {
   readonly answer: CondenseAnswer;
-  readonly repoSlug: string;
+  // The tracker the full thread's pointer names.
+  readonly repo: RepoRef;
 };
 
 // Pure renderer: title line, body, then the comment thread (when present) with
@@ -197,7 +198,7 @@ export function renderIssueText(
   const thread = threadOf(issue);
   if (thread.length === 0) return lines.join("\n");
   const decisions = condensed?.answer ?? [];
-  const dropped = decisions.filter((d) => d.kind === "drop").length;
+  const dropped = droppedComments(decisions);
   if (condensed === undefined || dropped === 0) {
     lines.push("", "## Comments");
   } else {
@@ -212,13 +213,14 @@ export function renderIssueText(
       "",
       `${dropped} of ${thread.length} comments were dropped as superseded by later ` +
         `ones; every other comment is verbatim. Full thread: ` +
-        `\`gh issue view ${issueId} --repo ${condensed.repoSlug} --comments\`.`,
+        `\`gh issue view ${issueId} --repo ${repoSlug(condensed.repo)} --comments\`.`,
     );
   }
   thread.forEach((c, k) => {
     const decision = decisions[k];
     if (decision?.kind !== "drop") {
-      lines.push("", `### ${heading(c)}`, "", c.body);
+      const when = c.createdAt === null ? "" : ` — ${c.createdAt}`;
+      lines.push("", `### ${c.author}${when}`, "", c.body);
       return;
     }
     const by = thread[decision.by - 1]!;
@@ -493,7 +495,7 @@ export async function fetchIssueAnchor(
   }, 0);
   return {
     text: cache.kind === "hit"
-      ? renderIssueText(issueId, json, { answer: cache.answer, repoSlug: repoSlug(repo) })
+      ? renderIssueText(issueId, json, { answer: cache.answer, repo })
       : traced,
     json,
     key,

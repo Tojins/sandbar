@@ -84,6 +84,11 @@ export default {
   // Disable only when issues are partitioned before entering this queue.
   // partitionCheck: true,
 
+  // Condense issue threads longer than this (after sandbar's own traces are
+  // dropped): superseded comments become one-line stubs, cached until the
+  // thread changes. null turns it off.
+  // condenseAboveChars: 20000,
+
   // Useful-context budget: rendered prompt plus the seed-anchored net diff a
   // role is told to inspect on demand. Oversize work parks for partitioning.
   // maxContextChars: 600000,

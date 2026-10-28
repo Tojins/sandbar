@@ -1,9 +1,17 @@
 // Pure inner-loop state machine — no I/O. The runner calls step(state, event)
 // and executes the returned action; `terminate` ends the loop. Every decision
-// (the pre-attempt partition and UI classifications, promise routing, the
+// (the pre-attempt anchor, partition and UI steps, promise routing, the
 // serial quality → gate-1 → verifier order, the quality pass's own
 // list → fix → verify loop, per-budget exhaustion, and context-budget parking)
 // lives here and is table-driven tested in inner-loop-machine.test.ts.
+//
+// Every loop opens on `needs-anchor` (#217): the runner condenses the issue
+// thread when it is long enough and not already cached, ahead of the
+// partition check that measures the anchor. Whether it condensed is the
+// runner's business — the machine knows no threshold. `anchor-ready` moves on
+// to the partition check, the UI check or the implementer, whichever is the
+// first enabled; a condenser that wrote parks the issue like any read-only
+// role.
 //
 // After a clean, on-branch COMPLETE the round is SERIAL (#185, #187): the
 // quality pass, then gate-1 ONCE on the head it left, then the verifier only
@@ -154,6 +162,7 @@ export const HARD_ERROR_MAX_RETRIES = 2;
 export const REVIEWER_HARNESS_FAILURE_LIMIT = 2;
 
 export type LoopPhase =
+  | "needs-anchor"
   | "needs-partition-check"
   | "needs-ui-check"
   | "needs-implementer"
@@ -220,6 +229,7 @@ export type LoopState = {
     | { readonly pass: "correctness"; readonly rejection: VerifierRejection }
     | null;
   readonly uiPrototypeCheck: boolean;
+  readonly partitionCheck: boolean;
   readonly phase: LoopPhase;
 };
 
@@ -321,7 +331,8 @@ export type Verdict =
         | "quality-reviewer-wrote"
         | "adjudicator-wrote"
         | "ui-checker-wrote"
-        | "partition-checker-wrote";
+        | "partition-checker-wrote"
+        | "anchor-condenser-wrote";
     }
   | {
       // The branch changes its gate stack beyond container env (#186). `gate`
@@ -344,6 +355,7 @@ export type Verdict =
     };
 
 export type LoopAction =
+  | { readonly kind: "run-anchor-condense" }
   | { readonly kind: "run-partition-check" }
   | { readonly kind: "run-ui-check" }
   | {
@@ -401,6 +413,7 @@ export type LoopAction =
 export function visiblePhases(
   action: LoopAction,
 ): readonly (
+  | "anchor"
   | "partition-check"
   | "ui-check"
   | "implementer"
@@ -410,6 +423,7 @@ export function visiblePhases(
   | "adjudication"
 )[] {
   switch (action.kind) {
+    case "run-anchor-condense": return ["anchor"];
     case "run-partition-check": return ["partition-check"];
     case "run-ui-check": return ["ui-check"];
     case "run-implementer": return ["implementer"];
@@ -425,6 +439,8 @@ export function visiblePhases(
 }
 
 export type LoopEvent =
+  | { readonly kind: "anchor-ready" }
+  | { readonly kind: "anchor-condenser-wrote"; readonly detail: string }
   | {
       readonly kind: "partition-check-result";
       readonly result: PartitionCheckResult;
@@ -576,15 +592,21 @@ export function initialState(opts: InitialStateOptions): LoopState {
     qualityAdjudicatedHeads: [],
     adjudicating: null,
     uiPrototypeCheck: opts.uiPrototypeCheck,
-    phase: opts.partitionCheck
-      ? "needs-partition-check"
-      : opts.uiPrototypeCheck
-        ? "needs-ui-check"
-        : "needs-implementer",
+    partitionCheck: opts.partitionCheck,
+    phase: "needs-anchor",
   };
 }
 
+// The first enabled pre-attempt check after the anchor, else the implementer.
+const afterAnchor = (state: LoopState): LoopPhase =>
+  state.partitionCheck
+    ? "needs-partition-check"
+    : state.uiPrototypeCheck
+      ? "needs-ui-check"
+      : "needs-implementer";
+
 export function initialAction(state: LoopState): LoopAction {
+  if (state.phase === "needs-anchor") return { kind: "run-anchor-condense" };
   if (state.phase === "needs-partition-check") return { kind: "run-partition-check" };
   if (state.phase === "needs-ui-check") return { kind: "run-ui-check" };
   return {
@@ -600,6 +622,8 @@ const EVENT_PHASE: Readonly<Record<
   Exclude<LoopEvent["kind"], "context-over-budget" | "quality-review-result">,
   LoopPhase
 >> = {
+  "anchor-ready": "needs-anchor",
+  "anchor-condenser-wrote": "needs-anchor",
   "partition-check-result": "needs-partition-check",
   "partition-checker-wrote": "needs-partition-check",
   "ui-check-result": "needs-ui-check",
@@ -659,6 +683,18 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
   }
 
   switch (event.kind) {
+    case "anchor-condenser-wrote":
+      return terminate(state, {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "anchor-condenser-wrote",
+        latestReviewerProse: event.detail,
+      });
+
+    case "anchor-ready": {
+      const afterAnchorState: LoopState = { ...state, phase: afterAnchor(state) };
+      return { state: afterAnchorState, action: initialAction(afterAnchorState) };
+    }
+
     case "partition-checker-wrote":
       return terminate(state, {
         type: "NEEDS-HUMAN-REVIEW",

@@ -6,6 +6,7 @@ import {
   type LoopEvent,
   type LoopState,
   type Gate1Result,
+  type InitialStateOptions,
   type ReviewerResult,
   type Verdict,
   decideAfterTerminal,
@@ -31,6 +32,10 @@ const defaultOpts = {
   partitionCheck: false,
 } as const;
 
+// Every loop opens on the anchor step (#217); most cases start past it.
+const started = (opts: InitialStateOptions): LoopState =>
+  step(initialState(opts), { kind: "anchor-ready" }).state;
+
 // Tiny driver: runs the machine to completion given a script of events.
 // Returns the verdict and the full action trace so each case can assert both.
 function drive(
@@ -41,7 +46,7 @@ function drive(
   },
   script: readonly LoopEvent[],
 ): { readonly actions: readonly LoopAction[]; readonly verdict: Verdict } {
-  let state: LoopState = initialState({ ...defaultOpts, ...opts });
+  let state: LoopState = started({ ...defaultOpts, ...opts });
   const actions: LoopAction[] = [initialAction(state)];
   for (const event of script) {
     const r = step(state, event);
@@ -238,7 +243,7 @@ describe("inner-loop-machine — the serial round (#185)", () => {
   // Correctness reads a green head and nothing else; a red gate returns to
   // the implementer with no review spent on it.
   it("never dispatches correctness on a red gate", () => {
-    const red = stepAll(initialState(defaultOpts), [impl(complete), quality, gated(gate1Red("FAIL x"))]);
+    const red = stepAll(started(defaultOpts), [impl(complete), quality, gated(gate1Red("FAIL x"))]);
     expect(red.action).toMatchObject({ kind: "run-implementer", attempt: 2, failureTrace: "FAIL x" });
     expect(red.state.correctnessFailures).toBe(0);
   });
@@ -260,7 +265,7 @@ describe("inner-loop-machine — the serial round (#185)", () => {
     ["the quality verify", [impl(complete), listed(changes("### Tests\nx")), fixed()]],
     ["the correctness pass", [impl(complete), quality, gated(gate1Ok)]],
   ] as const)("parks a context overage measured before %s", (_name, events) => {
-    const state = stepAll(initialState(defaultOpts), events).state;
+    const state = stepAll(started(defaultOpts), events).state;
     const measured = step(state, {
       kind: "context-over-budget",
       slot: "review-correctness",
@@ -275,7 +280,7 @@ describe("inner-loop-machine — the serial round (#185)", () => {
   });
 
   it("refuses a context overage reported by gate-1, which measures nothing", () => {
-    const state = stepAll(initialState(defaultOpts), [impl(complete), quality]).state;
+    const state = stepAll(started(defaultOpts), [impl(complete), quality]).state;
     expect(() =>
       step(state, {
         kind: "context-over-budget",
@@ -292,7 +297,7 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
   const report = "### Tests\nsrc/a.ts:3 is uncovered";
   // A COMPLETE whose lister rejects: the pass is in front of the fixer.
   const listedRejection = () =>
-    stepAll(initialState(defaultOpts), [impl(complete), listed(changes(report))]);
+    stepAll(started(defaultOpts), [impl(complete), listed(changes(report))]);
   const asGate = (a: LoopAction) => {
     if (a.kind !== "run-gate") throw new Error(`expected run-gate, got ${a.kind}`);
     return a;
@@ -373,7 +378,7 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
   });
 
   it("never hands a quality report to the implementer", () => {
-    const r = stepAll(initialState({ ...defaultOpts, maxQualityRounds: 1 }), [
+    const r = stepAll(started({ ...defaultOpts, maxQualityRounds: 1 }), [
       impl(complete),
       listed(changes(report)),
       fixed(),
@@ -384,7 +389,7 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
   });
 
   it("opens every pass with a fresh budget and lists the whole branch until one approves", () => {
-    const exhausted = stepAll(initialState({ ...defaultOpts, maxQualityRounds: 1 }), [
+    const exhausted = stepAll(started({ ...defaultOpts, maxQualityRounds: 1 }), [
       impl(complete),
       listed(changes(report)),
       fixed(),
@@ -401,7 +406,7 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
     ["lister", [] as readonly LoopEvent[], listed(harnessFailed()), 0],
     ["verify", [listed(changes(report)), fixed()], verified(harnessFailed()), 0],
   ] as const)("goes on to gate-1 when the %s produced no review", (_role, before, failed, rounds) => {
-    const r = stepAll(initialState(defaultOpts), [impl(complete), ...before, failed]);
+    const r = stepAll(started(defaultOpts), [impl(complete), ...before, failed]);
     expect(asGate(r.action).quality).toEqual({ verdict: "REVIEW-FAILED", rounds });
     // Not a correctness harness failure: the #41 bound is untouched.
     expect(r.state.reviewerHarnessFailures).toBe(0);
@@ -411,7 +416,7 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
     ["lister", [] as readonly LoopEvent[], listed({ kind: "reviewer-wrote", detail: "it wrote" })],
     ["verify", [listed(changes(report)), fixed()], verified({ kind: "reviewer-wrote", detail: "it wrote" })],
   ] as const)("parks a %s that writes", (_role, before, wrote) => {
-    const r = stepAll(initialState(defaultOpts), [impl(complete), ...before, wrote]);
+    const r = stepAll(started(defaultOpts), [impl(complete), ...before, wrote]);
     expect(r.action).toEqual({
       kind: "terminate",
       verdict: {
@@ -506,7 +511,7 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
   });
 
   it("does not run the fixer again when an upheld ruling spends the last round", () => {
-    const r = stepAll(initialState({ ...defaultOpts, maxQualityRounds: 1 }), [
+    const r = stepAll(started({ ...defaultOpts, maxQualityRounds: 1 }), [
       impl(complete),
       listed(changes(report)),
       fixed(0),
@@ -556,7 +561,7 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
 
 describe("inner-loop-machine — unchanged rejection adjudication (#167)", () => {
   const reachRejection = (head = "abc") =>
-    stepAll(initialState(defaultOpts), [
+    stepAll(started(defaultOpts), [
       impl(complete, [], null, null, 1, head),
       ...round(gate1Ok, changes("finding"), head),
     ]);
@@ -674,9 +679,49 @@ describe("inner-loop-machine — unchanged rejection adjudication (#167)", () =>
   });
 });
 
+describe("inner-loop-machine — the anchor step opens every loop (#217)", () => {
+  it.each([
+    [{ partitionCheck: true, uiPrototypeCheck: true }, { kind: "run-partition-check" }],
+    [{ partitionCheck: false, uiPrototypeCheck: true }, { kind: "run-ui-check" }],
+    [{ partitionCheck: false, uiPrototypeCheck: false }, { kind: "run-implementer", attempt: 1 }],
+  ] as const)("runs first with %o, then hands on to %o", (checks, next) => {
+    const state = initialState({ ...defaultOpts, ...checks });
+    expect(state.phase).toBe("needs-anchor");
+    const action = initialAction(state);
+    expect(action).toEqual({ kind: "run-anchor-condense" });
+    expect(visiblePhases(action)).toEqual(["anchor"]);
+    const ready = step(state, { kind: "anchor-ready" });
+    expect(ready.action).toMatchObject(next);
+    expect(ready.state.attempt).toBe(1);
+    expect(ready.state.gateFailures).toBe(0);
+  });
+
+  it("parks a condenser that writes", () => {
+    const result = step(initialState(defaultOpts), {
+      kind: "anchor-condenser-wrote",
+      detail: "Anchor condenser changed git state",
+    });
+    expect(result.action).toEqual({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "anchor-condenser-wrote",
+        latestReviewerProse: "Anchor condenser changed git state",
+      },
+    });
+  });
+
+  it("refuses an anchor event after the anchor step, and any other event before it", () => {
+    expect(() => step(started(defaultOpts), { kind: "anchor-ready" }))
+      .toThrow(/anchor-ready event in phase needs-implementer; expected needs-anchor/);
+    expect(() => step(initialState(defaultOpts), impl(complete)))
+      .toThrow(/implementer-result event in phase needs-anchor/);
+  });
+});
+
 describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
   it("runs before attempt 1 without spending an attempt, then proceeds on CLEAR", () => {
-    const state = initialState({ ...defaultOpts, uiPrototypeCheck: true });
+    const state = started({ ...defaultOpts, uiPrototypeCheck: true });
     expect(initialAction(state)).toEqual({ kind: "run-ui-check" });
     const result = step(state, { kind: "ui-check-result", result: { kind: "CLEAR" } });
     expect(result.action).toMatchObject({ kind: "run-implementer", attempt: 1 });
@@ -686,7 +731,7 @@ describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
   });
 
   it("terminates before attempt 1 when a prototype is needed", () => {
-    const state = initialState({ ...defaultOpts, uiPrototypeCheck: true });
+    const state = started({ ...defaultOpts, uiPrototypeCheck: true });
     const result = step(state, {
       kind: "ui-check-result",
       result: { kind: "PROTOTYPE-NEEDED", uiImpact: "new navigation flow" },
@@ -703,14 +748,14 @@ describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
   });
 
   it("starts directly with the implementer when disabled", () => {
-    expect(initialAction(initialState(defaultOpts))).toMatchObject({
+    expect(initialAction(started(defaultOpts))).toMatchObject({
       kind: "run-implementer",
       attempt: 1,
     });
   });
 
   it("parks a checker that writes before trusting its classification", () => {
-    const state = initialState({ ...defaultOpts, uiPrototypeCheck: true });
+    const state = started({ ...defaultOpts, uiPrototypeCheck: true });
     const result = step(state, { kind: "ui-checker-wrote", detail: "UI checker changed git state" });
     expect(result.action).toEqual({
       kind: "terminate",
@@ -725,7 +770,7 @@ describe("inner-loop-machine — one pre-attempt UI check (#126)", () => {
 
 describe("inner-loop-machine — issue partition check (#158)", () => {
   it("runs before UI and attempt 1, then proceeds on CLEAR", () => {
-    const state = initialState({ ...defaultOpts, partitionCheck: true, uiPrototypeCheck: true });
+    const state = started({ ...defaultOpts, partitionCheck: true, uiPrototypeCheck: true });
     expect(initialAction(state)).toEqual({ kind: "run-partition-check" });
     const checked = step(state, {
       kind: "partition-check-result",
@@ -738,7 +783,7 @@ describe("inner-loop-machine — issue partition check (#158)", () => {
   });
 
   it("terminates with structured classifier evidence", () => {
-    const state = initialState({ ...defaultOpts, partitionCheck: true });
+    const state = started({ ...defaultOpts, partitionCheck: true });
     const checked = step(state, {
       kind: "partition-check-result",
       result: { kind: "PARTITION", reason: "API and UI can land alone." },
@@ -759,7 +804,7 @@ describe("inner-loop-machine — issue partition check (#158)", () => {
   });
 
   it("parks a checker that writes", () => {
-    const state = initialState({ ...defaultOpts, partitionCheck: true });
+    const state = started({ ...defaultOpts, partitionCheck: true });
     const result = step(state, { kind: "partition-checker-wrote", detail: "wrote" });
     expect(result.action).toMatchObject({
       kind: "terminate",
@@ -807,7 +852,7 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
   });
 
   it("red-red-green resets the gate streak", () => {
-    const state = stepAll(initialState(defaultOpts), [
+    const state = stepAll(started(defaultOpts), [
       impl(complete), ...round(gate1Red("r1")),
       impl(complete), ...round(gate1Red("r2")),
       impl(complete), quality, gated(gate1Ok),
@@ -817,7 +862,7 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
   });
 
   it("keeps an earlier correctness rejection beside a later gate failure", () => {
-    const r = stepAll(initialState(defaultOpts), [
+    const r = stepAll(started(defaultOpts), [
       impl(complete), ...round(gate1Ok, changes("handle null")),
       impl(complete), ...round(gate1Red("the quality pass's new test fails")),
     ]);
@@ -862,7 +907,7 @@ describe("inner-loop-machine — a stack change beyond env", () => {
     ["green", gate1Ok],
     ["red", gate1Red("boom")],
   ])("terminates NEEDS-STACK-CHANGE on a %s gate without charging a budget", (_, gate) => {
-    const r = stepAll(initialState(defaultOpts), [
+    const r = stepAll(started(defaultOpts), [
       impl(complete),
       quality,
       gated(gate, "head", stackChange),
@@ -888,7 +933,7 @@ describe("inner-loop-machine — a stack change beyond env", () => {
 
 describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
   it("one impl + CHANGES-REQUESTED → next impl carries the prose and clears the trace", () => {
-    const r = stepAll(initialState(defaultOpts), [
+    const r = stepAll(started(defaultOpts), [
       impl(complete),
       ...round(gate1Ok, changes("handle null")),
     ]);
@@ -908,7 +953,7 @@ describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
   });
 
   it("latest reviewer prose replaces an older one on a subsequent CHANGES-REQUESTED", () => {
-    const r = stepAll(initialState(defaultOpts), [
+    const r = stepAll(started(defaultOpts), [
       impl(complete), ...round(gate1Ok, changes("first")),
       impl(complete), ...round(gate1Ok, changes("second")),
     ]);
@@ -930,7 +975,7 @@ describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
   });
 
   it("correctness rejections do not spend the gate budget", () => {
-    const state = stepAll(initialState({ ...defaultOpts, maxGateRounds: 1 }), [
+    const state = stepAll(started({ ...defaultOpts, maxGateRounds: 1 }), [
       impl(complete), ...round(gate1Ok, changes("one")),
       impl(complete), ...round(gate1Ok, changes("two")),
     ]).state;
@@ -939,7 +984,7 @@ describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
   });
 
   it("gate failures and pre-gate re-prompts do not spend the review budget", () => {
-    const state = stepAll(initialState({ ...defaultOpts, maxReviewRounds: 1 }), [
+    const state = stepAll(started({ ...defaultOpts, maxReviewRounds: 1 }), [
       impl(complete), ...round(gate1Red("red")),
       impl(noSignal()),
       impl(complete), quality, gated(gate1Ok),
@@ -972,7 +1017,7 @@ describe("inner-loop-machine — the verifier's two renderings (#180)", () => {
       units: [{ id: "white-box", text: "private", publicText: "public" }],
     },
   };
-  const rejected = () => stepAll(initialState(defaultOpts), [impl(complete), ...round(gate1Ok), split]);
+  const rejected = () => stepAll(started(defaultOpts), [impl(complete), ...round(gate1Ok), split]);
 
   it("hands the implementer the private rendering and keeps the public one", () => {
     const r = rejected();
@@ -1001,7 +1046,7 @@ describe("inner-loop-machine — the verifier's two renderings (#180)", () => {
   });
 
   it("carries only the public rendering when the review budget runs out", () => {
-    const r = stepAll(initialState({ ...defaultOpts, maxReviewRounds: 1 }), [
+    const r = stepAll(started({ ...defaultOpts, maxReviewRounds: 1 }), [
       impl(complete), ...round(gate1Ok), split,
     ]);
     expect(r.action).toEqual({
@@ -1032,7 +1077,7 @@ describe("inner-loop-machine — the verifier's two renderings (#180)", () => {
 
 describe("inner-loop-machine — reviewer harness failure (#41)", () => {
   it("spends neither budget and re-prompts with an orchestrator note", () => {
-    const r = stepAll(initialState(defaultOpts), [impl(complete), ...round(gate1Ok, harnessFailed("idle 600s"))]);
+    const r = stepAll(started(defaultOpts), [impl(complete), ...round(gate1Ok, harnessFailed("idle 600s"))]);
     const next = asImpl(r.action);
     expect(r.state.gateFailures).toBe(0);
     expect(r.state.correctnessFailures).toBe(0);
@@ -1044,14 +1089,14 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
   });
 
   it("cannot exhaust the review budget — a maxReviewRounds of 1 survives it", () => {
-    const r = stepAll(initialState({ ...defaultOpts, maxReviewRounds: 1 }), [
+    const r = stepAll(started({ ...defaultOpts, maxReviewRounds: 1 }), [
       impl(complete), ...round(gate1Ok, harnessFailed()),
     ]);
     expect(r.action.kind).toBe("run-implementer");
   });
 
   it("leaves an earlier round's real prose exactly as it was", () => {
-    const r = stepAll(initialState(defaultOpts), [
+    const r = stepAll(started(defaultOpts), [
       impl(complete), ...round(gate1Ok, changes("real finding")),
       impl(complete), ...round(gate1Ok, harnessFailed()),
     ]);
@@ -1082,13 +1127,13 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
 // the gate budget, and a green gate resets that streak.
 describe("inner-loop-machine — pre-gate re-prompts spend the gate budget", () => {
   it("charges NO-SIGNAL to the gate streak", () => {
-    const r = step(initialState(defaultOpts), impl(noSignal("Emit a token.")));
+    const r = step(started(defaultOpts), impl(noSignal("Emit a token.")));
     expect(r.state.gateFailures).toBe(1);
     expect(asImpl(r.action).extraReprompt).toBe("Emit a token.");
   });
 
   it("a green gate resets a streak of pre-gate failures", () => {
-    const state = stepAll(initialState(defaultOpts), [
+    const state = stepAll(started(defaultOpts), [
       impl(noSignal()),
       impl(complete, ["?? a.ts"]),
       impl(complete), quality, gated(gate1Ok),
@@ -1123,7 +1168,7 @@ describe("inner-loop-machine — pre-gate re-prompts spend the gate budget", () 
   });
 
   it("clears the NO-SIGNAL reprompt after one use", () => {
-    const r = stepAll(initialState(defaultOpts), [
+    const r = stepAll(started(defaultOpts), [
       impl(noSignal("correction")),
       impl(complete), ...round(gate1Red("red")),
     ]);
@@ -1131,13 +1176,13 @@ describe("inner-loop-machine — pre-gate re-prompts spend the gate budget", () 
   });
 
   it("defaults the shared budget to four", () => {
-    expect(initialState({ ...defaultOpts, maxGateRounds: DEFAULT_MAX_GATE_ROUNDS }).maxGateRounds).toBe(4);
+    expect(started({ ...defaultOpts, maxGateRounds: DEFAULT_MAX_GATE_ROUNDS }).maxGateRounds).toBe(4);
   });
 });
 
 describe("inner-loop-machine — phase invariants", () => {
   it("stepping after terminate throws", () => {
-    const r = step(initialState(defaultOpts), impl(needsInfo("q")));
+    const r = step(started(defaultOpts), impl(needsInfo("q")));
     expect(() => step(r.state, impl(complete))).toThrow(/after termination/);
   });
 
@@ -1147,11 +1192,11 @@ describe("inner-loop-machine — phase invariants", () => {
     ["a gate result before COMPLETE", gated(gate1Ok), /gate-result event in phase needs-implementer/],
     ["a correctness result before COMPLETE", reviewed(approved()), /verifier-result event in phase needs-implementer/],
   ] as const)("%s throws", (_name, event, message) => {
-    expect(() => step(initialState(defaultOpts), event)).toThrow(message);
+    expect(() => step(started(defaultOpts), event)).toThrow(message);
   });
 
   it("a correctness result before the gate throws", () => {
-    const state = stepAll(initialState(defaultOpts), [impl(complete), quality]).state;
+    const state = stepAll(started(defaultOpts), [impl(complete), quality]).state;
     expect(() => step(state, reviewed(approved()))).toThrow(/expected needs-verifier/);
   });
 
@@ -1160,7 +1205,7 @@ describe("inner-loop-machine — phase invariants", () => {
     ["maxGateRounds", 0],
     ["maxReviewRounds", 1.5],
   ] as const)("initialState rejects non-positive %s", (field, value) => {
-    expect(() => initialState({ ...defaultOpts, [field]: value })).toThrow(
+    expect(() => started({ ...defaultOpts, [field]: value })).toThrow(
       new RegExp(`${field} must be a positive integer`),
     );
   });
@@ -1224,14 +1269,14 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
   const dirty = ["?? src/new-file.ts", " M src/existing.ts"];
 
   it("routes back to the implementer instead of the round", () => {
-    const r = step(initialState(defaultOpts), impl(complete, dirty));
+    const r = step(started(defaultOpts), impl(complete, dirty));
     expect(r.action.kind).toBe("run-implementer");
     expect(r.state.phase).toBe("needs-implementer");
     expect(r.state.attempt).toBe(2);
   });
 
   it("names the dirty paths in the re-prompt", () => {
-    const next = asImpl(step(initialState(defaultOpts), impl(complete, dirty)).action);
+    const next = asImpl(step(started(defaultOpts), impl(complete, dirty)).action);
     expect(next.extraReprompt).toContain("?? src/new-file.ts");
     expect(next.extraReprompt).toContain(" M src/existing.ts");
     expect(next.extraReprompt).toContain("uncommitted");
@@ -1239,19 +1284,19 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
 
   it("elides a long dirty list rather than filling the prompt with it", () => {
     const many = Array.from({ length: 25 }, (_, i) => `?? f${i}.ts`);
-    const next = asImpl(step(initialState(defaultOpts), impl(complete, many)).action);
+    const next = asImpl(step(started(defaultOpts), impl(complete, many)).action);
     expect(next.extraReprompt).toContain("?? f19.ts");
     expect(next.extraReprompt).not.toContain("?? f20.ts");
     expect(next.extraReprompt).toContain("… and 5 more");
   });
 
   it("tells the agent its gate artifacts must be gitignored", () => {
-    const next = asImpl(step(initialState(defaultOpts), impl(complete, dirty)).action);
+    const next = asImpl(step(started(defaultOpts), impl(complete, dirty)).action);
     expect(next.extraReprompt).toContain("gitignored");
   });
 
   it("starts the round normally once the tree is clean", () => {
-    const r = stepAll(initialState(defaultOpts), [impl(complete, dirty), impl(complete)]);
+    const r = stepAll(started(defaultOpts), [impl(complete, dirty), impl(complete)]);
     expect(r.action.kind).toBe("run-quality-list");
   });
 
@@ -1300,7 +1345,7 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
   });
 
   it("keeps going when the agent commits SOME of the dirt", () => {
-    const r = stepAll(initialState(defaultOpts), [
+    const r = stepAll(started(defaultOpts), [
       impl(complete, ["?? a.ts", "?? b.ts"]),
       impl(complete, ["?? b.ts"]),
     ]);
@@ -1308,7 +1353,7 @@ describe("inner-loop-machine — COMPLETE over a dirty worktree (#24 D1)", () =>
   });
 
   it("clears the dirty memory once the tree comes back clean", () => {
-    const state = stepAll(initialState(defaultOpts), [impl(complete, dirty), impl(complete)]).state;
+    const state = stepAll(started(defaultOpts), [impl(complete, dirty), impl(complete)]).state;
     expect(state.lastDirtyPaths).toBeNull();
   });
 
@@ -1332,21 +1377,21 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
   };
 
   it("does NOT start the round for COMPLETE over a clean tree off the branch", () => {
-    const r = step(initialState(defaultOpts), impl(complete, [], detached()));
+    const r = step(started(defaultOpts), impl(complete, [], detached()));
     expect(r.action.kind).toBe("run-implementer");
     expect(r.state.attempt).toBe(2);
     expect(r.state.gateFailures).toBe(1);
   });
 
   it("names where HEAD actually is, and where the branch still is", () => {
-    const next = asImpl(step(initialState(defaultOpts), impl(complete, [], detached("dead1", "base0"))).action);
+    const next = asImpl(step(started(defaultOpts), impl(complete, [], detached("dead1", "base0"))).action);
     expect(next.extraReprompt).toContain("DETACHED at dead1");
     expect(next.extraReprompt).toContain("sandbar/issue-1-x");
     expect(next.extraReprompt).toContain("base0");
   });
 
   it("names the scratch branch when HEAD is on one", () => {
-    const next = asImpl(step(initialState(defaultOpts), impl(complete, [], onBranchScratch)).action);
+    const next = asImpl(step(started(defaultOpts), impl(complete, [], onBranchScratch)).action);
     expect(next.extraReprompt).toContain("refs/heads/scratch");
   });
 
@@ -1358,18 +1403,18 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
 
   const repaired = { fromSha: "base0", toSha: "head1" } as const;
   const roundAfterRepair = (events: readonly LoopEvent[]) =>
-    stepAll(initialState(defaultOpts), [impl(complete, [], null, repaired), ...events]);
+    stepAll(started(defaultOpts), [impl(complete, [], null, repaired), ...events]);
 
   it.each([
     {
       route: "dirty tree",
-      next: () => step(initialState(defaultOpts), impl(complete, ["?? pending.ts"], null, repaired)),
+      next: () => step(started(defaultOpts), impl(complete, ["?? pending.ts"], null, repaired)),
       routeContext: "?? pending.ts",
     },
     {
       route: "NO-SIGNAL",
       next: () =>
-        step(initialState(defaultOpts), impl(noSignal("Emit a valid promise token."), [], null, repaired)),
+        step(started(defaultOpts), impl(noSignal("Emit a valid promise token."), [], null, repaired)),
       routeContext: "Emit a valid promise token.",
     },
     {
@@ -1398,7 +1443,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
   });
 
   it("does not spend the off-branch correction when a repair precedes another route", () => {
-    const state = step(initialState(defaultOpts), impl(noSignal(), [], null, repaired)).state;
+    const state = step(started(defaultOpts), impl(noSignal(), [], null, repaired)).state;
     expect(state.lastOffBranch).toBe(false);
     expect(step(state, impl(complete, [], detached("head2"))).action.kind).toBe("run-implementer");
   });
@@ -1413,7 +1458,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
 
   it("also fires on NO-SIGNAL, replacing the generic hint", () => {
     const next = asImpl(step(
-      initialState(defaultOpts),
+      started(defaultOpts),
       impl({ kind: "NO-SIGNAL", reprompt: "Still working.", missingTag: true }, [], detached()),
     ).action);
     expect(next.extraReprompt).toContain("not on the issue branch");
@@ -1421,7 +1466,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
   });
 
   it("starts the round normally once HEAD is back on the branch", () => {
-    const r = stepAll(initialState(defaultOpts), [impl(complete, [], detached()), impl(complete)]);
+    const r = stepAll(started(defaultOpts), [impl(complete, [], detached()), impl(complete)]);
     expect(r.action.kind).toBe("run-quality-list");
   });
 
@@ -1454,7 +1499,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
   });
 
   it("counts CONSECUTIVE attempts, so a later relapse gets its own correction", () => {
-    const relapse = stepAll(initialState(defaultOpts), [
+    const relapse = stepAll(started(defaultOpts), [
       impl(complete, [], detached()),
       impl(noSignal()),
       impl(complete, [], detached()),
@@ -1469,7 +1514,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
   });
 
   it("is checked BEFORE the dirty tree — the branch is the deeper problem", () => {
-    const next = asImpl(step(initialState(defaultOpts), impl(complete, ["?? src/new.ts"], detached())).action);
+    const next = asImpl(step(started(defaultOpts), impl(complete, ["?? src/new.ts"], detached())).action);
     expect(next.extraReprompt).toContain("not on the issue branch");
   });
 

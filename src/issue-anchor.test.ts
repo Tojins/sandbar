@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -21,6 +21,7 @@ import {
   type CondenseAnswer,
   condenseKey,
   dropSandbarTraces,
+  fetchIssueAnchor,
   parseCondenseAnswer,
   readCondenseCache,
   renderCondenserInput,
@@ -365,7 +366,7 @@ describe("parseCondenseAnswer", () => {
 });
 
 describe("renderIssueText — condensed", () => {
-  const condensed = renderIssueText("9", thread, { answer: condensedAnswer, repoSlug: "o/r" });
+  const condensed = renderIssueText("9", thread, { answer: condensedAnswer, repo: { owner: "o", name: "r" } });
 
   it("keeps every kept comment byte-equal and stubs each drop", () => {
     const plain = renderIssueText("9", thread);
@@ -389,14 +390,14 @@ describe("renderIssueText — condensed", () => {
   });
 
   it("renders an answer that drops nothing as the plain thread", () => {
-    expect(renderIssueText("9", thread, { answer: [KEEP, KEEP, KEEP, KEEP], repoSlug: "o/r" }))
+    expect(renderIssueText("9", thread, { answer: [KEEP, KEEP, KEEP, KEEP], repo: { owner: "o", name: "r" } }))
       .toBe(renderIssueText("9", thread));
   });
 
   it("separates drops that a kept comment splits", () => {
     const text = renderIssueText("9", thread, {
       answer: [{ kind: "drop", by: 2, reason: null }, KEEP, { kind: "drop", by: 4, reason: null }, KEEP],
-      repoSlug: "o/r",
+      repo: { owner: "o", name: "r" },
     });
     expect(text).toContain("Which directory?\n\n_Dropped: alice, 2026-01-03T00:00:00Z");
     expect(text).toContain("superseded by bob, 2026-01-02T00:00:00Z_\n\n### bob");
@@ -405,7 +406,7 @@ describe("renderIssueText — condensed", () => {
   it("refuses an answer about another thread", () => {
     expect(() => renderIssueText("9", thread, {
       answer: [{ kind: "drop", by: 2, reason: null }, KEEP],
-      repoSlug: "o/r",
+      repo: { owner: "o", name: "r" },
     })).toThrow("a condenser answer for 2 comments rendered over 4");
   });
 });
@@ -519,5 +520,61 @@ describe("the condense cache", () => {
     const read = await readCondenseCache(dir, "9", key, 4);
     expect(read.kind).toBe("miss");
     expect(read.kind === "miss" && read.problem).toMatch(/9\.json is unreadable: EISDIR/);
+  });
+});
+
+describe("fetchIssueAnchor", () => {
+  let dir: string;
+  let originalPath: string | undefined;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "issue-anchor-"));
+    await mkdir(join(dir, "bin"));
+    await writeFile(join(dir, "issue.json"), JSON.stringify(thread));
+    // Prints the fixture whatever it is asked: which repository the fetch
+    // names is prompt-cwd.test.ts's subject.
+    await writeFile(join(dir, "bin", "gh"), `#!/bin/sh\ncat "${join(dir, "issue.json")}"\n`);
+    await chmod(join(dir, "bin", "gh"), 0o755);
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = `${join(dir, "bin")}:${originalPath ?? ""}`;
+  });
+  afterEach(async () => {
+    if (originalPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = originalPath;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const repo = { owner: "o", name: "r" };
+
+  it("renders the uncondensed thread until the cache answers it, then the condensed one", async () => {
+    const cacheDir = join(dir, "anchor-cache");
+    const plain = renderIssueText("9", thread);
+    const before = await fetchIssueAnchor("9", repo, cacheDir);
+    expect(before).toEqual({
+      text: plain,
+      json: thread,
+      key: condenseKey(thread),
+      cache: { kind: "miss", problem: null },
+      rawChars: plain.length,
+      tracedChars: plain.length,
+    });
+
+    await writeCondenseCache(cacheDir, "9", {
+      key: before.key, answer: condensedAnswer, provider: "claude", model: "sonnet",
+    });
+    const after = await fetchIssueAnchor("9", repo, cacheDir);
+    expect(after.cache).toEqual({ kind: "hit", answer: condensedAnswer });
+    expect(after.text).toBe(renderIssueText("9", thread, { answer: condensedAnswer, repo }));
+    expect(after.tracedChars).toBe(plain.length);
+  });
+
+  it("measures the anchor before and after sandbar's traces are dropped", async () => {
+    const bot = "**Sandbar:** stopped.\n\n<details><summary>Gate trace</summary>\n\n" +
+      "x".repeat(500) + "\n</details>";
+    const traced: IssueJson = { ...thread, comments: [{ body: bot }] };
+    await writeFile(join(dir, "issue.json"), JSON.stringify(traced));
+    const anchor = await fetchIssueAnchor("9", repo, join(dir, "anchor-cache"));
+    expect(anchor.tracedChars).toBe(renderIssueText("9", traced).length);
+    expect(anchor.rawChars).toBe(anchor.tracedChars + bot.length - dropSandbarTraces(bot).length);
+    expect(anchor.rawChars - anchor.tracedChars).toBeGreaterThan(450);
   });
 });

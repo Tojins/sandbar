@@ -99,7 +99,7 @@ const V6_KINDS = {
   preflight: true, sweep: true, image: true, "landing-batch": true,
   "land-request": true, recompute: true, "follow-up": true, reconcile: true,
   notice: true, complaint: true, exit: true, "run-end": true, admitted: true,
-  "origin-sync": true, phase: true, setup: true, "ui-check": true,
+  "origin-sync": true, phase: true, setup: true, "issue-anchor": true, "ui-check": true,
   "partition-check": true, implementer: true, "gate-stack": true, gate: true,
   "quality-review": true, "quality-pass": true, "review-pass": true, adjudication: true,
   "resolve-attempt": true, container: true, "review-round": true, repair: true,
