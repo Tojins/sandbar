@@ -21,6 +21,9 @@
 // a preserved clone. The reviewer-write handoff is the one caller that asks for
 // the clone to be kept when the rule would reclaim it: the human is told to
 // inspect it, and uncommitted evidence cannot travel through a push.
+// Every `latestReviewerProse` input is the verifier's PUBLIC rendering
+// (#180): the state machine hands terminals nothing else, so no comment here
+// can publish what only the implementer may read.
 // Human-facing parking comments use the same three-part contract throughout:
 // one stop line, the variable payload (with diagnostics collapsed), and one
 // final action line naming the branch and label transition (#170).
@@ -280,7 +283,7 @@ const needsHumanGateExplanation = (
 ): string =>
   (latestReviewerProse === null
     ? ""
-    : `Latest correctness review (an earlier round):\n\n${latestReviewerProse}\n\n`) +
+    : `Latest verifier report (an earlier round):\n\n${latestReviewerProse}\n\n`) +
   `<details><summary>Gate trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
@@ -468,7 +471,7 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   handoffAction(branch, stuckLabel, readyLabel, "review the branch or repair the harness");
 
 const reviewBudgetExhaustedExplanation = (latestReviewerProse: string): string =>
-  `Latest correctness reviewer report:\n\n${latestReviewerProse}`;
+  `Latest verifier report:\n\n${latestReviewerProse}`;
 
 export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   branch: string,
@@ -477,7 +480,7 @@ export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   stuckLabel: string,
   readyLabel: string,
 ): string =>
-  `${BOT_COMMENT_PREFIX} the correctness review pass stopped after ${roundsUsed} ` +
+  `${BOT_COMMENT_PREFIX} the verifier stopped after ${roundsUsed} ` +
   `consecutive rejection${roundsUsed === 1 ? "" : "s"}.\n\n` +
   `${reviewBudgetExhaustedExplanation(latestReviewerProse)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "push a fix or correct the governing instructions");
@@ -647,14 +650,14 @@ type FinalizeKindInput =
     };
 
 export type FinalizeInput = FinalizeKindInput & {
-  // Correctness-review decisions caused by missing specification, in the order
+  // Verifier decisions caused by missing specification, in the order
   // the rounds declared them. Evidence only: this field affects no terminal,
   // label, branch lifecycle, or state-machine decision (#108).
   readonly specGaps: readonly SpecGap[];
 };
 
 export const SPEC_GAPS_COMMENT = (gaps: readonly SpecGap[]): string =>
-  `${BOT_COMMENT_PREFIX} the correctness reviewer recorded the following ` +
+  `${BOT_COMMENT_PREFIX} the verifier recorded the following ` +
   `specification gap${gaps.length === 1 ? "" : "s"} and the decision it applied:` +
   gaps.map((gap) => `\n\n### Review round ${gap.round}\n\n${gap.text}`).join("");
 

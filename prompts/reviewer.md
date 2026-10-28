@@ -8,7 +8,7 @@ copies only `origin/*` for the source repository, so the bare local name
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diffStat}}{{priorRounds}}{{projectStandards}}## Review process
+{{chunkBase}}{{commits}}{{diffStat}}{{changedSince}}{{priorRounds}}{{projectStandards}}## Review process
 
 Gate-1 is green at this head, which includes any standards fixes and tests the
 quality pass committed on top of the implementer's work. Review these two
@@ -16,9 +16,7 @@ dimensions, using the project conventions in
 {{conventionsRef}} to understand the implementation's invariants and settled
 choices:
 
-Read the entire branch diff before deciding: run `git diff {{baseRef}}...HEAD`
-and inspect every changed file named by the stat above. The stat is navigation,
-not the review surface.
+{{reviewSurface}}
 
 1. Correctness of logic: does the implementation actually work? Look for
    correctness gaps the tests miss: edge cases, off-by-one errors, broken error
@@ -36,8 +34,7 @@ concrete defect on either dimension, APPROVE.
 
 For each finding in the prior-round history from your correctness and spec
 dimensions, state whether it is addressed at this head; an unaddressed one
-blocks. Then review this branch as you would with no history at all. The history
-does not narrow what you may find or make new defects non-blocking.
+blocks. {{historyScope}}
 
 A change requested in an earlier round may not be reversed without naming that
 round and explaining why its request was wrong.

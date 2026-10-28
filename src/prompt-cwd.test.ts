@@ -411,6 +411,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       base: sourceBranchBase("main"),
       claudeMdPath: "CLAUDE.md",
       priorRounds: [],
+      scope: { kind: "full" },
     });
 
     expect(prompt).toContain("commit-from-target-repo");

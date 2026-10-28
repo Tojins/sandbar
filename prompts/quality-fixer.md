@@ -11,7 +11,7 @@ The implementer has reported this issue COMPLETE, and a read-only quality
 review of its branch reported the tests and standards findings below. You fix
 them by changing the code and committing, never by reporting. A cold reviewer
 then checks your commit against this report; gate-1 runs on the head you leave,
-and a correctness reviewer reads the branch after a green gate there.
+and the verifier reads the branch after a green gate there.
 
 {{chunkBase}}{{commits}}{{diffStat}}{{codingStandards}}
 

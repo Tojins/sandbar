@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { SandbarError } from "./errors.js";
 import { ensureIssueBranch, sourceBranchBase } from "./git-ops.js";
+import type { ReviewScope } from "./inner-loop-machine.js";
 import {
   branchIsAheadOfSeed,
   buildPrompt,
@@ -143,9 +144,14 @@ const reviewerInputs = (base = sourceBranchBase("main"), sourceBranch = "main") 
   base,
   claudeMdPath: "CLAUDE.md",
 });
-const correctnessInputs = (base = sourceBranchBase("main"), sourceBranch = "main") => ({
+const correctnessInputs = (
+  base = sourceBranchBase("main"),
+  sourceBranch = "main",
+  scope: ReviewScope = { kind: "full" },
+) => ({
   ...reviewerInputs(base, sourceBranch),
   priorRounds: [],
+  scope,
 });
 const listerInputs = (approvedHead: string | null = null) => ({
   ...reviewerInputs(),
@@ -229,6 +235,17 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     );
     expect(changedSince).toContain(laterPath);
     expect(changedSince).not.toContain(".../visit-version-diff");
+
+    // The verifier's white-box review from its second round on (#180).
+    const review = await buildCorrectnessPrompt(
+      correctnessInputs(undefined, undefined, { kind: "since", sha: listingHead }),
+    );
+    const reviewSince = review.slice(
+      review.indexOf("## Changed since"),
+      review.indexOf("## Review process"),
+    );
+    expect(reviewSince).toContain(`## Changed since \`${listingHead}\``);
+    expect(reviewSince).toContain(laterPath);
   });
 
   it("measures the on-demand net diff separately from the rendered prompt", async () => {
@@ -305,7 +322,7 @@ describe("a failed read is never rendered as an empty slot (#40)", () => {
   // say cannot happen by the time a reviewer runs.
   it("refuses a reviewer or fixer over an empty changeset", async () => {
     await expect(buildCorrectnessPrompt(correctnessInputs())).rejects.toThrow(
-      /refusing to launch a correctness reviewer/,
+      /refusing to launch the verifier's white-box review/,
     );
     await expect(buildQualityReviewPrompt(listerInputs())).rejects.toThrow(
       /refusing to launch a quality lister/,

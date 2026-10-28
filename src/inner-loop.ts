@@ -32,7 +32,7 @@
 // the existing issue sandbox and spend no convergence budget. Partition runs
 // once per admission and only at the seed; UI runs once per sandbox cycle, so
 // a fresh HARD-ERROR asks it again. Before each quality role and before the
-// correctness pass, that role's complete picture (rendered prompt plus
+// verifier, that role's complete picture (rendered prompt plus
 // seed-anchored net diff) is measured against the configured useful-context
 // budget; a resumed branch gets the same enforcement at admission. A provider
 // size refusal maps to the same partition terminal instead of entering
@@ -48,10 +48,12 @@
 //
 // After a clean, on-branch COMPLETE the round is serial (#185, #187): the
 // quality pass, then gate-1 once on the head it left, then — only on a green
-// gate — the cold correctness reviewer on its own separately configured
-// provider and model (#121). The quality pass's three roles all route through
+// gate — the verifier (#180). Today that is its white-box review alone: the
+// cold correctness review on its own separately configured provider and model
+// (#121), whose result `combineVerifier` (verifier.ts) turns into the
+// machine's outcome. The quality pass's three roles all route through
 // `reviewerQuality*` and `promptExtensions.reviewerQuality`. Its lister and
-// verify are read-only reviews run like the correctness pass (reviewer-run.ts
+// verify are read-only reviews run like the white-box review (reviewer-run.ts
 // owns their one cold retry), each invocation recorded as a `quality-review`
 // event. Its fixer runs in this same writable sandbox, committing under a
 // `<botName> (quality)` author the host sets for that invocation only; its
@@ -64,7 +66,7 @@
 // made. The fixer's commits since the implementer's last attempt are handed to
 // the next implementer prompt. Every quality report an adjudicator overrules
 // is kept here, beside the commits, for later listers' prompts.
-// A rejection the next role leaves unchanged — a correctness rejection whose
+// A rejection the next role leaves unchanged — a verifier rejection whose
 // next implementer attempt creates no commit at that head, or a quality
 // report the fixer commits nothing for — is routed once per head to a cold
 // adjudicator (#167, #187). The judge sees that report without implementer
@@ -89,10 +91,12 @@
 // receives only its configured prompt
 // extension; prompt.ts probes path extensions in the issue worktree so a
 // branch can introduce the instructions it is expected to follow (#78, #91).
-// Successful correctness rounds accumulate here beside the commits they judged
-// and are handed to the next correctness prompt (#88). Harness failures add no
+// Successful white-box rounds accumulate here beside the commits they judged
+// and are handed to the next white-box prompt (#88), which from then on reads
+// only the change since the last of those heads that HEAD still contains
+// (`reviewScope`). Harness failures add no
 // entry, and a fresh HARD-ERROR cycle resets the history and the quality
-// ledger. An optional `<spec-gap>` declared by the correctness pass is
+// ledger. An optional `<spec-gap>` declared by the white-box review is
 // accumulated beside that history but around the state machine, preserved
 // across fresh cycles, and carried on every terminal for finalise to record
 // (#108).
@@ -188,6 +192,7 @@ import {
   ensureIssueBranch,
   fastForwardOffBranchHead,
   headMismatch,
+  isAncestor,
   settleQualityResidue,
   revParse,
   symbolicHeadRef,
@@ -233,6 +238,7 @@ import {
   runReviewerInvocations,
 } from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
+import { type VerifierOutcome, combineVerifier, reviewScope } from "./verifier.js";
 import type { RepoRef } from "./repo-ref.js";
 import { startTimer } from "./timing.js";
 import {
@@ -1224,8 +1230,8 @@ async function runSandboxCycle(
       state = r.state;
       action = r.action;
       // Emitted after the step so the record carries the post-round budgets
-      // (#132/#143). A round is quality + gate-1 + correctness; it closes at a
-      // red gate or at the correctness outcome.
+      // (#132/#143). A round is quality + gate-1 + verifier; it closes at a
+      // red gate or at the verifier outcome.
       const round = closedReviewRound(event);
       if (round !== null) {
         const opened = quality.openRound;
@@ -1431,7 +1437,7 @@ export type QualityLedger = {
   // quality history a later lister is shown, so the items do not come back.
   overrules: QualityOverrule[];
   // The round the latest lister opened: its attempt number, a timer spanning
-  // the quality pass, gate-1 and, when it runs, correctness, and how the
+  // the quality pass, gate-1 and, when it runs, the verifier, and how the
   // quality pass ended once gate-1 is dispatched.
   openRound: {
     readonly attempt: number;
@@ -1440,8 +1446,9 @@ export type QualityLedger = {
   } | null;
 };
 
-// The round a gate-1 or correctness result closes, for the `review-round`
-// record; null for every other event, and for a reviewer write (which parks).
+// The round a gate-1 or verifier result closes, for the `review-round`
+// record; null for every other event, and for a verifier write (which parks).
+// `correctness` is the white-box review's verdict.
 export function closedReviewRound(event: LoopEvent): {
   readonly head: string;
   readonly gateOk: boolean;
@@ -1452,17 +1459,17 @@ export function closedReviewRound(event: LoopEvent): {
       ? null
       : { head: event.head, gateOk: false, correctness: "SKIPPED" };
   }
-  if (event.kind !== "correctness-result") return null;
-  const { reviewer } = event;
-  if (reviewer.kind === "reviewer-wrote") return null;
-  return {
-    head: event.head,
-    gateOk: true,
-    correctness: reviewer.kind === "reviewer-harness-failed"
-      ? "HARNESS-FAILED"
-      : reviewer.verdict,
-  };
+  if (event.kind !== "verifier-result") return null;
+  const correctness = WHITE_BOX_VERDICT[event.outcome.kind];
+  return correctness === null ? null : { head: event.head, gateOk: true, correctness };
 }
+
+const WHITE_BOX_VERDICT = {
+  wrote: null,
+  "harness-failed": "HARNESS-FAILED",
+  approved: "APPROVED",
+  rejected: "CHANGES-REQUESTED",
+} as const satisfies Record<VerifierOutcome["kind"], string | null>;
 
 async function executeAction(
   action: LoopAction,
@@ -1482,8 +1489,8 @@ async function executeAction(
       return runQualityFix(action, ctx);
     case "run-gate":
       return runGate(action, ctx);
-    case "run-correctness":
-      return runCorrectness(action, ctx);
+    case "run-verifier":
+      return runVerifier(action, ctx);
     case "run-adjudicator":
       return runAdjudicator(action, ctx);
     case "terminate":
@@ -2061,7 +2068,7 @@ export async function runQualityFix(
     const settled = await settleQualityResidue(ctx.worktreePath, issue.branch, before);
     const shas = settled.commits.map(({ sha }) => sha);
     await record({ result: exited, commits: shas, discarded: settled.residue }, measurements);
-    // Verify, gate-1 and the correctness pass read this clone; the merger
+    // Verify, gate-1 and the verifier read this clone; the merger
     // reads the cache. A publish that fails is infrastructure, exactly as for
     // the implementer (#98).
     await sandbox.syncBranchToCache();
@@ -2558,9 +2565,9 @@ export async function enforceReadOnlyAgentSnapshot(
   );
 }
 
-// The cold judge of one unchanged rejection (#167, #187): a correctness
+// The cold judge of one unchanged rejection (#167, #187): a verifier
 // report the implementer committed nothing for, or a quality report the fixer
-// committed nothing for. A correctness OVERRULED ends the issue as approved,
+// committed nothing for. A verifier OVERRULED ends the issue as approved,
 // so no history entry needs rewriting afterwards; a quality OVERRULED joins
 // the overrules later listers are shown.
 export async function runAdjudicator(
@@ -2743,18 +2750,26 @@ export async function runAdjudicator(
   return { kind: "adjudicator-harness-failed", detail: details.join("\n\n") };
 }
 
-// The correctness pass (#121, #185): cold and read-only, run only on a green
-// gate-1 at the head the quality pass left. Its picture is measured before it
-// runs; reviewer-run.ts owns what its invocations mean.
-export async function runCorrectness(
-  action: Extract<LoopAction, { kind: "run-correctness" }>,
+// The verifier (#180): today its white-box review alone, the correctness
+// review (#121, #185), cold and read-only, run only on a green gate-1 at the
+// head the quality pass left. From its second round on it reads the change
+// since the last head an earlier round reviewed. Its picture is measured
+// before it runs, still anchored at the seed; reviewer-run.ts owns what its
+// invocations mean.
+export async function runVerifier(
+  action: Extract<LoopAction, { kind: "run-verifier" }>,
   ctx: ExecuteActionCtx,
-): Promise<Extract<LoopEvent, { kind: "correctness-result" | "context-over-budget" }>> {
+): Promise<Extract<LoopEvent, { kind: "verifier-result" | "context-over-budget" }>> {
   const { issue, sandbox, opts, config } = ctx;
-  const head = await requireIssueTip(ctx, "before the correctness pass");
+  const head = await requireIssueTip(ctx, "before the verifier");
+  const contained = new Map(await Promise.all(ctx.priorReviewRounds.map(
+    async ({ head: reviewed }) =>
+      [reviewed, await isAncestor(sandbox.worktreePath, reviewed, head)] as const,
+  )));
   const prompt = await buildCorrectnessPrompt({
     ...branchRoleInputs(ctx, config.promptExtensions?.reviewer),
     priorRounds: ctx.priorReviewRounds,
+    scope: reviewScope(ctx.priorReviewRounds, (sha) => contained.get(sha) === true),
   });
   const measuredContextChars = contextChars(
     prompt,
@@ -2817,9 +2832,9 @@ export async function runCorrectness(
     }
   }
   return {
-    kind: "correctness-result",
+    kind: "verifier-result",
     head,
-    reviewer: reviewerResult(outcome, "correctness"),
+    outcome: combineVerifier(reviewerResult(outcome, "correctness")),
   };
 }
 
@@ -2852,7 +2867,7 @@ type ReadOnlyReviewSpec = {
   readonly record: (record: ReviewInvocationRecord) => Promise<void> | void;
 };
 
-// The invocations of one cold, read-only review — the correctness pass or a
+// The invocations of one cold, read-only review — the white-box review or a
 // quality lister or verify (#41, #121, #187). Each invocation is snapshotted
 // and a write aborts the review; a provider closure or size refusal
 // propagates with the same meaning as for every other role; any other failure

@@ -13,8 +13,8 @@ Issue #{{issueId}}: {{issueTitle}}
 {{projectStandards}}## Review process
 
 You are the read-only half of the quality pass. A fixer receives your report
-and commits the changes; gate-1 and a correctness reviewer follow. Review these
-two dimensions:
+and commits the changes; gate-1 and the verifier follow. Review these two
+dimensions:
 
 1. Test quality and coverage. A test finding must name a line whose deletion
    leaves the suite green: either a production line no test covers, or a test
@@ -22,7 +22,7 @@ two dimensions:
 2. Project standards: the coding standards above plus the conventions in
    {{conventionsRef}}.
 
-Do not search for correctness or spec defects: the correctness reviewer owns
+Do not search for correctness or spec defects: the verifier owns
 whether the implementation works and whether it delivers what the issue asks.
 If you notice a concrete correctness defect anyway, raise it under `### Tests`
 as the test that would fail on it: the fixer writes that test, and its failure

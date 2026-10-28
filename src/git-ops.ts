@@ -289,7 +289,7 @@ const errorMessage = (err: unknown): string =>
 export const revParse = async (cwd: string, ref: string): Promise<string> =>
   (await exec("git", ["rev-parse", "--verify", "--quiet", ref], { cwd })).stdout.trim();
 
-const isAncestor = async (
+export const isAncestor = async (
   cwd: string,
   ancestor: string,
   descendant: string,

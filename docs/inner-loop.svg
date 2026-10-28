@@ -31,7 +31,7 @@
     .m-mut { fill: var(--muted); } .m-bad { fill: var(--bad); } .m-ok { fill: var(--ok); }
   </style>
   <rect class="bg" x="0.5" y="0.5" width="1179" height="473" rx="10"/>
-  <title>Pre-checks (context size and UI), implementer, quality review, automatic tests, correctness review, adjudicator, then merge with a resolve agent</title>
+  <title>Pre-checks (context size and UI), implementer, quality review, automatic tests, verifier, adjudicator, then merge with a resolve agent</title>
         <defs>
           <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="m-mut"/></marker>
           <marker id="arr-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="m-bad"/></marker>
@@ -71,13 +71,13 @@
         <path class="e-bad" d="M740 246H758V100H742"/>
         <text class="lbl-bad" x="682" y="170">not fixed</text>
 
-        <!-- automatic tests / correctness -->
+        <!-- automatic tests / verifier -->
         <path class="e" d="M775 86H818"/>
         <rect class="gate" x="820" y="60" width="150" height="52" rx="6"/>
         <text class="t" x="834" y="82">Automatic tests</text>
         <text class="s" x="834" y="100">non AI</text>
         <rect class="agent" x="820" y="180" width="150" height="52" rx="6"/>
-        <text class="t" x="834" y="202">Correctness review</text>
+        <text class="t" x="834" y="202">Verifier</text>
         <text class="s" x="834" y="220">fresh model</text>
         <path class="e-ok" d="M895 112V178"/>
         <text class="lbl-ok" x="901" y="150">green</text>

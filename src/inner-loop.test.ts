@@ -31,6 +31,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   symbolicHeadRef: vi.fn(async () => "refs/heads/sandbar/issue-126" as string | null),
   settleQualityResidue: vi.fn(),
   revParse: vi.fn(async () => "seed-sha"),
+  isAncestor: vi.fn(async (_cwd: string, _ancestor: string, _descendant: string) => true),
   fetchIssueSnapshot: vi.fn(async (): Promise<IssueJson> => ({ title: "Issue", body: "", comments: [] })),
 }));
 
@@ -74,6 +75,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   branchCommitsSinceSeed: innerLoopMocks.branchCommitsSinceSeed,
   ensureIssueBranch: innerLoopMocks.ensureIssueBranch,
   revParse: innerLoopMocks.revParse,
+  isAncestor: innerLoopMocks.isAncestor,
 }));
 
 vi.mock("./issue-anchor.js", async (importOriginal) => ({
@@ -102,7 +104,7 @@ import {
   enforceReadOnlyAgentSnapshot,
   qualityAuthorEnv,
   readOnlyAgentSnapshotChanged,
-  runCorrectness,
+  runVerifier,
   runGate,
   runImplementer,
   runInnerLoop,
@@ -124,7 +126,8 @@ import type { HeadMismatch } from "./git-ops.js";
 import type { IssueJson } from "./issue-anchor.js";
 import type { EventInput } from "./events.js";
 import type { GateResult } from "./gate.js";
-import { initialState } from "./inner-loop-machine.js";
+import { type ReviewerResult, initialState } from "./inner-loop-machine.js";
+import { combineVerifier } from "./verifier.js";
 import { parsePromise } from "./promise-parser.js";
 import { loadTemplate } from "./prompts.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
@@ -1042,24 +1045,25 @@ describe("role prompt-extension wiring (#91)", () => {
     );
   });
 
-  it("hands the correctness reviewer only its own extension", async () => {
+  it("hands the verifier's white-box review only the reviewer extension", async () => {
     const stop = new Error("stop after prompt construction");
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("abc123");
     innerLoopMocks.buildCorrectnessPrompt.mockRejectedValueOnce(stop);
-    await expect(runCorrectness(
-      { kind: "run-correctness", attempt: 1 },
-      ctxWith() as unknown as Parameters<typeof runCorrectness>[1],
+    await expect(runVerifier(
+      { kind: "run-verifier", attempt: 1 },
+      ctxWith() as unknown as Parameters<typeof runVerifier>[1],
     )).rejects.toBe(stop);
     expect(innerLoopMocks.buildCorrectnessPrompt).toHaveBeenCalledWith(
       expect.objectContaining({
         promptExtension: { text: "correctness only" },
         priorRounds: [],
+        scope: { kind: "full" },
       }),
     );
   });
 });
 
-describe("runCorrectness (#121, #185)", () => {
+describe("runVerifier (#121, #180, #185)", () => {
   const scripted = (
     outputs: {
       output: string;
@@ -1144,9 +1148,9 @@ describe("runCorrectness (#121, #185)", () => {
       ctx,
       sandbox,
       filenames,
-      run: () => runCorrectness(
-        { kind: "run-correctness", attempt: 2 },
-        ctx as unknown as Parameters<typeof runCorrectness>[1],
+      run: () => runVerifier(
+        { kind: "run-verifier", attempt: 2 },
+        ctx as unknown as Parameters<typeof runVerifier>[1],
       ),
     };
   };
@@ -1165,13 +1169,9 @@ describe("runCorrectness (#121, #185)", () => {
       },
     ]);
     await expect(run()).resolves.toEqual({
-      kind: "correctness-result",
+      kind: "verifier-result",
       head: "head123",
-      reviewer: {
-        kind: "reviewer-result",
-        verdict: "APPROVED",
-        prose: "<verdict>APPROVED</verdict>",
-      },
+      outcome: { kind: "approved" },
     });
     expect(filenames).toEqual([
       "attempt-2-reviewer-1.log",
@@ -1223,8 +1223,8 @@ describe("runCorrectness (#121, #185)", () => {
     ]);
     const result = await run();
     expect(result).toMatchObject({
-      kind: "correctness-result",
-      reviewer: { kind: "reviewer-harness-failed", detail: expect.stringMatching(/^correctness: /) },
+      kind: "verifier-result",
+      outcome: { kind: "harness-failed", detail: expect.stringMatching(/^correctness: /) },
     });
     expect(ctx.priorReviewRounds).toEqual([]);
   });
@@ -1242,6 +1242,28 @@ describe("runCorrectness (#121, #185)", () => {
     expect(sandbox.run).not.toHaveBeenCalled();
   });
 
+  // From round 2 the white-box reads the change since the last reviewed head
+  // HEAD still contains (#180).
+  it("anchors a later round at the last reviewed head that HEAD contains", async () => {
+    const { ctx, run } = scripted([{
+      output: "<verdict>APPROVED</verdict>", error: null, durationMs: 1, resources: {},
+    }]);
+    const reviewed = (round: number, head: string) => ({
+      round,
+      head,
+      correctness: { verdict: "CHANGES-REQUESTED", prose: "x", specGap: null },
+    });
+    ctx.priorReviewRounds.push(reviewed(1, "first"), reviewed(2, "second"), reviewed(3, "rewritten"));
+    innerLoopMocks.isAncestor.mockReset().mockImplementation(
+      async (_cwd, ancestor) => ancestor !== "rewritten",
+    );
+    await run();
+    expect(innerLoopMocks.isAncestor).toHaveBeenCalledWith("/worktree", "second", "head123");
+    expect(innerLoopMocks.buildCorrectnessPrompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ scope: { kind: "since", sha: "second" } }),
+    );
+  });
+
   it("returns a detected reviewer write as the round's result", async () => {
     const { sandbox, run } = scripted([{
       output: "<verdict>APPROVED</verdict>", error: null, durationMs: 1, resources: {},
@@ -1252,8 +1274,8 @@ describe("runCorrectness (#121, #185)", () => {
       .mockResolvedValueOnce("moved");
     const result = await run();
     expect(result).toMatchObject({
-      kind: "correctness-result",
-      reviewer: { kind: "reviewer-wrote" },
+      kind: "verifier-result",
+      outcome: { kind: "wrote", cause: "reviewer-wrote" },
     });
     expect(sandbox.preserveWorktree).toHaveBeenCalled();
   });
@@ -1711,9 +1733,8 @@ describe("closedReviewRound (#132, #185)", () => {
     head: "h",
     gate: { ok, failureTrace: ok ? "" : "x", failedStep: ok ? null : "test" },
   });
-  const correctness = (
-    reviewer: Extract<Parameters<typeof closedReviewRound>[0], { kind: "correctness-result" }>["reviewer"],
-  ) => ({ kind: "correctness-result" as const, head: "h", reviewer });
+  const correctness = (reviewer: ReviewerResult) =>
+    ({ kind: "verifier-result" as const, head: "h", outcome: combineVerifier(reviewer) });
 
   it.each([
     ["a green gate, which leaves the round open", gate(true), null],

@@ -229,15 +229,18 @@ Each round after the implementer reports done:
    standards. If it finds violations, a fixer commits fixes and a read-only
    verify checks them. The fixer can dispute the list; an adjudicator rules.
 2. **Automatic tests** (gate-1): the gate stack, run once on the result.
-3. **Correctness review**, only if the tests are green. The implementer can
+3. **Verifier**, only if the tests are green: a read-only code review of the
+   branch's logic and its conformance to the issue. From its second round on it
+   reviews only the change since the last head it reviewed. The implementer can
    dispute a rejection; an adjudicator rules.
 
 Red tests and rejections go back to the implementer. Quality findings never
 do. The implementer doesn't see the coding standards; the quality roles do.
 
 Role routing: the quality roles use `reviewerQuality*` and
-`promptExtensions.reviewerQuality`; the adjudicator defaults to the
-correctness reviewer's routing.
+`promptExtensions.reviewerQuality`; the verifier's code review uses
+`reviewer*` and `promptExtensions.reviewer`, and the adjudicator defaults to
+that routing.
 
 ### Budgets
 
@@ -245,7 +248,7 @@ correctness reviewer's routing.
 | --- | --- | --- | --- |
 | `maxQualityRounds` | verify rejections, upheld quality disputes | each quality review | goes on to the tests; open items are logged |
 | `maxGateRounds` | red tests, and attempts with no usable commit (no signal, dirty tree, off-branch HEAD) | on green tests | issue parks as stuck |
-| `maxReviewRounds` | correctness rejections | — | issue parks as stuck |
+| `maxReviewRounds` | verifier rejections | — | issue parks as stuck |
 
 A reviewer that crashes spends no budget. A second crash in one issue stops it.
 

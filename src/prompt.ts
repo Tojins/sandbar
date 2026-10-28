@@ -3,7 +3,7 @@
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
 // commit list + diff stat (progressive disclosure, #158), the quality fixer's
 // commits since the last attempt (#185), sandbox-stack report #44, gate trace,
-// the latest correctness rejection — an accepted behavior finding is fixed at
+// the latest verifier rejection — an accepted behavior finding is fixed at
 // every same-defect site behind a failing-first test (#181) — and the same
 // built-in coding standards the quality pass applies plus a live pre-promise
 // diff checklist (#78).
@@ -13,10 +13,13 @@
 // surface, plus every quality report an adjudicator overruled with its
 // ruling; its fixer gets the latest CHANGES-REQUESTED report (and an upheld
 // ruling); its verify gets that report and a stat of what the fixer changed.
-// Correctness reviewer: diff stat + commits plus every earlier correctness
-// round (#88), a defect a round raised counting as addressed only once it is
-// gone from every site (#181); the lister's overrule history shares that
-// section but not that rule. Every prompt is self-sufficient because no role resumes
+// The verifier's white-box review (#180): diff stat + commits plus every
+// earlier white-box round (#88), a defect a round raised counting as addressed
+// only once it is gone from every site (#181); the lister's overrule history
+// shares that section but not that rule. Its first round reads the whole
+// branch; later rounds are anchored at the last reviewed head HEAD still
+// contains and read only the change since, with a stat of it, while earlier
+// conclusions about unchanged code stand. Every prompt is self-sufficient because no role resumes
 // another's session — which is what lets each role sit on its own vendor
 // (#121).
 // The adjudicator (#167) gets the shared anchors plus one rejected report of
@@ -57,7 +60,7 @@ import { promisify } from "node:util";
 import { SandbarError, isErrno, isExitCode } from "./errors.js";
 import type { PromptExtension } from "./config.js";
 import type { IssueBranchBase } from "./git-ops.js";
-import type { QualityScope, ReviewPass } from "./inner-loop-machine.js";
+import type { ReviewScope, ReviewPass } from "./inner-loop-machine.js";
 import { fetchIssueText } from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
@@ -71,6 +74,10 @@ const exec = promisify(execFile);
 const CODING_STANDARDS = loadTemplate("coding-standards");
 const BACKGROUND_TASKS = loadTemplate("background-tasks");
 const REVIEWER_TPL = loadTemplate("reviewer");
+const REVIEWER_FULL_TPL = loadTemplate("reviewer-full");
+const REVIEWER_FULL_HISTORY_TPL = loadTemplate("reviewer-full-history");
+const REVIEWER_SINCE_TPL = loadTemplate("reviewer-since");
+const REVIEWER_SINCE_HISTORY_TPL = loadTemplate("reviewer-since-history");
 const REVIEWER_QUALITY_TPL = loadTemplate("reviewer-quality");
 const REVIEWER_QUALITY_LISTING_TPL = loadTemplate("reviewer-quality-listing");
 const REVIEWER_QUALITY_LISTING_SINCE_TPL = loadTemplate("reviewer-quality-listing-since");
@@ -216,7 +223,7 @@ export type PromptInputs = {
   // Project history still comes from `ProjectAnchorOptions.sourceBranch`.
   readonly base: IssueBranchBase;
   readonly extraReprompt?: string;
-  // The latest correctness rejection, as the state machine retains it.
+  // The latest verifier rejection, as the state machine retains it.
   readonly latestReviewerFeedback?: string;
   // Commits the quality fixer made since this implementer's previous attempt,
   // oldest first, from the host's own collected range (#185) — never parsed
@@ -264,7 +271,7 @@ export type ReviewerPromptInputs = {
   // What the branch was seeded from, and what the commit list and diff below
   // are measured against (#61). Same value the implementer was given.
   readonly base: IssueBranchBase;
-  // This role's host addition (`promptExtensions.reviewer` for correctness,
+  // This role's host addition (`promptExtensions.reviewer` for the verifier,
   // `promptExtensions.reviewerQuality` for the three quality roles).
   readonly promptExtension?: PromptExtension;
   readonly claudeMdPath: string;
@@ -272,11 +279,14 @@ export type ReviewerPromptInputs = {
 };
 
 export type CorrectnessPromptInputs = ReviewerPromptInputs & {
-  // Earlier correctness verdicts in this sandbox cycle (#88). A harness
+  // Earlier white-box verdicts in this sandbox cycle (#88). A harness
   // failure adds no entry and consumes no round, so a retry reuses its number
   // and the history remains contiguous. The runner owns this history: it is
   // prompt material, not state-machine input.
   readonly priorRounds: readonly PriorReviewRound[];
+  // What this round reads (verifier.ts `reviewScope`): the whole branch, or
+  // the change since the last reviewed head (#180).
+  readonly scope: ReviewScope;
 };
 
 // A quality report an adjudicator overruled, with its ruling (#187). The one
@@ -295,7 +305,7 @@ export type QualityOverrule = {
 export type QualityReviewMode =
   | {
       readonly kind: "list";
-      readonly scope: QualityScope;
+      readonly scope: ReviewScope;
       readonly overrules: readonly QualityOverrule[];
     }
   | {
@@ -417,14 +427,16 @@ async function buildBranchRoleAnchors(
   ]);
 }
 
-// The correctness pass reviews one immutable, gate-green branch snapshot: the
-// head the quality fixer left (#185).
+// The verifier's white-box review reads one immutable, gate-green branch
+// snapshot: the head the quality fixer left (#185). From its second round on
+// it is anchored at the last head an earlier round reviewed (#180).
 export async function buildCorrectnessPrompt(
   inputs: CorrectnessPromptInputs,
 ): Promise<string> {
-  const [[projectAnchor, issueAnchor], picture] = await Promise.all([
+  const [[projectAnchor, issueAnchor], picture, changedSinceStat] = await Promise.all([
     buildBranchRoleAnchors(inputs),
-    readBranchPicture(inputs, "a correctness reviewer"),
+    readBranchPicture(inputs, "the verifier's white-box review"),
+    readChangedSinceStat(inputs, scopeAnchor(inputs.scope)),
   ]);
   return [
     projectAnchor,
@@ -432,6 +444,7 @@ export async function buildCorrectnessPrompt(
     renderReviewerSlot({
       ...inputs,
       ...picture,
+      changedSinceStat,
       promptExtension: resolvePromptExtension(inputs.worktreePath, inputs.promptExtension),
     }),
   ].join("\n\n---\n\n");
@@ -441,8 +454,24 @@ export async function buildCorrectnessPrompt(
 // lister's last approved quality head, a verify's head before the fixer.
 // Null for a whole-branch lister.
 export function qualityReviewAnchor(mode: QualityReviewMode): string | null {
-  if (mode.kind === "verify") return mode.anchor;
-  return mode.scope.kind === "since" ? mode.scope.sha : null;
+  return mode.kind === "verify" ? mode.anchor : scopeAnchor(mode.scope);
+}
+
+const scopeAnchor = (scope: ReviewScope): string | null =>
+  scope.kind === "since" ? scope.sha : null;
+
+// `git diff --stat <anchor>..HEAD` for an anchored review; null for a
+// whole-branch one.
+async function readChangedSinceStat(
+  inputs: ReviewerPromptInputs,
+  anchor: string | null,
+): Promise<string | null> {
+  if (anchor === null) return null;
+  return (await readGit(
+    ["diff", FULL_PATH_DIFF_STAT, `${anchor}..HEAD`],
+    inputs.worktreePath,
+    `the diff stat since ${anchor} for ${inputs.issue.branch}`,
+  )).trim();
 }
 
 // A quality lister or verify (#187): the whole-branch picture always, plus
@@ -450,17 +479,10 @@ export function qualityReviewAnchor(mode: QualityReviewMode): string | null {
 export async function buildQualityReviewPrompt(
   inputs: QualityReviewPromptInputs,
 ): Promise<string> {
-  const anchor = qualityReviewAnchor(inputs.mode);
   const [[projectAnchor, issueAnchor], picture, changedSinceStat] = await Promise.all([
     buildBranchRoleAnchors(inputs),
     readBranchPicture(inputs, `a quality ${inputs.mode.kind === "list" ? "lister" : "verify"}`),
-    anchor === null
-      ? Promise.resolve(null)
-      : readGit(
-          ["diff", FULL_PATH_DIFF_STAT, `${anchor}..HEAD`],
-          inputs.worktreePath,
-          `the diff stat since ${anchor} for ${inputs.issue.branch}`,
-        ).then((stat) => stat.trim()),
+    readChangedSinceStat(inputs, qualityReviewAnchor(inputs.mode)),
   ]);
   return [
     projectAnchor,
@@ -831,7 +853,7 @@ async function readBranchPicture(
 
 // Pure renderers for the branch-reading slots. Extracted so tests can pin
 // each prompt's shape without mocking git. Each invocation stays cold across
-// rounds; the correctness reviewer is handed its earlier rounds' decisions as
+// rounds; the white-box reviewer is handed its earlier rounds' decisions as
 // explicit prompt data (#88), which preserves fresh investigation without
 // reviewer amnesia, and a quality lister only the overruled quality reports
 // (#187).
@@ -842,6 +864,9 @@ type BranchSlotRender = Omit<ReviewerPromptInputs, "repo" | "repoDir" | "worktre
 
 export type ReviewerSlotRender = BranchSlotRender & {
   readonly priorRounds: readonly PriorReviewRound[];
+  readonly scope: ReviewScope;
+  // As for a quality review, anchored at the scope's head.
+  readonly changedSinceStat: string | null;
 };
 
 export type QualityReviewSlotRender = BranchSlotRender & {
@@ -851,6 +876,19 @@ export type QualityReviewSlotRender = BranchSlotRender & {
   // that nothing was read (#40).
   readonly changedSinceStat: string | null;
 };
+
+// The "changed since" section of an anchored review; "" for a whole-branch one.
+function renderChangedSince(anchor: string | null, stat: string | null): string {
+  if ((anchor === null) !== (stat === null)) {
+    throw new Error(
+      "review prompt: the changed-since stat must be supplied exactly " +
+        "when the review is anchored at a head",
+    );
+  }
+  if (anchor === null) return "";
+  return `## Changed since \`${anchor}\`\n\n` +
+    (stat ? `\`\`\`\n${stat}\n\`\`\`` : `(empty — no changes since \`${anchor}\`)`);
+}
 
 export type QualityFixSlotRender = BranchSlotRender & {
   readonly report: string;
@@ -864,9 +902,17 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
         addressed: section(REVIEWER_PRIOR_ROUNDS_ADDRESSED_TPL),
         rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
       });
+  const anchor = scopeAnchor(inputs.scope);
   return render(REVIEWER_TPL, {
     ...branchSlotVars(inputs),
+    changedSince: section(renderChangedSince(anchor, inputs.changedSinceStat)),
     priorRounds: section(priorRounds),
+    reviewSurface: anchor === null
+      ? render(REVIEWER_FULL_TPL, { baseRef: inputs.base.ref })
+      : render(REVIEWER_SINCE_TPL, { anchor }),
+    historyScope: anchor === null
+      ? REVIEWER_FULL_HISTORY_TPL
+      : render(REVIEWER_SINCE_HISTORY_TPL, { anchor }),
   });
 }
 
@@ -876,18 +922,7 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
 export function renderQualityReviewSlot(inputs: QualityReviewSlotRender): string {
   const { mode } = inputs;
   const anchor = qualityReviewAnchor(mode);
-  if ((anchor === null) !== (inputs.changedSinceStat === null)) {
-    throw new Error(
-      "quality review prompt: the changed-since stat must be supplied exactly " +
-        "when the review is anchored at a head",
-    );
-  }
-  const changedSince = anchor === null
-    ? ""
-    : `## Changed since \`${anchor}\`\n\n` +
-      (inputs.changedSinceStat
-        ? `\`\`\`\n${inputs.changedSinceStat}\n\`\`\``
-        : `(empty — no changes since \`${anchor}\`)`);
+  const changedSince = renderChangedSince(anchor, inputs.changedSinceStat);
   const qualityMode = mode.kind === "verify"
     ? render(REVIEWER_QUALITY_VERIFY_TPL, {
         anchor: mode.anchor,

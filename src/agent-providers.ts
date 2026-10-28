@@ -17,7 +17,7 @@
 // so `reviewerQualityAgent` is a routing knob — defaulting to
 // `reviewerAgent`, so a config that says nothing still has one reviewer vendor.
 // The dispute adjudicator (#167) defaults all three routing knobs to that
-// correctness reviewer and may likewise be split explicitly.
+// reviewer (the verifier's code review) and may likewise be split explicitly.
 // The earlier, single-call UI classifier (#126) similarly names
 // `uiCheckAgent`, defaulting to `implementerAgent`; when its gate is disabled,
 // that provider is absent from `requiredAgentProviders` because no call uses it.
