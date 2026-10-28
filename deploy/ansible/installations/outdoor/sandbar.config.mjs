@@ -93,7 +93,7 @@ export default {
 
   // Project rules on top of sandbar's built-in coding standards, for the
   // implementer and the quality pass; resolved inside the worktree. The
-  // correctness reviewer leaves standards to the quality pass.
+  // verifier leaves standards to the quality pass.
   promptExtensions: {
     implementer: { path: "CODING_STANDARDS.md" },
     reviewerQuality: { path: "CODING_STANDARDS.md" },

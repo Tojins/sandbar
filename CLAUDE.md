@@ -43,10 +43,11 @@ and the gate stack (`config.gateStack`, #24).
 2. **Inner loop** — `inner-loop-machine.ts` (pure state machine) +
    `inner-loop.ts` (I/O). One sandbox per issue: partition check (#158), UI
    check (#126), then implementer attempts → quality pass (read-only lister →
-   fixer that writes commits → read-only verify, #187) → gate-1 → correctness
-   reviewer (`reviewer-run.ts`, #41) → adjudicator on dispute of either pass
-   (#167). Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`.
-   Read-only roles that write park the issue.
+   fixer that writes commits → read-only verify, #187) → gate-1 → verifier
+   (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
+   patch-scoped from round 2) → adjudicator on dispute of either pass (#167).
+   Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`. Read-only
+   roles that write park the issue.
 3. **Landing** — serialized, in an ephemeral worktree at `origin/<source>`
    (#10): `merger.ts`, `merger-worktree.ts`, `resolve-loop.ts` (#67),
    `version-conflict.ts` (#68), `forge-verify.ts` (`mergeMode`, #22),

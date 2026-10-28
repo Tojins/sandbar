@@ -682,18 +682,18 @@ export type RunConfig = {
   // routing, runs only while the branch is still at its seed, and may be
   // disabled for hosts that partition work before queueing it.
   readonly partitionCheck?: boolean;
-  // The correctness pass — the one that ends an issue (#121). `reviewerAgent`
-  // is its CLI.
+  // The verifier's code review — the pass that ends an issue (#121, #180).
+  // `reviewerAgent` is its CLI.
   readonly reviewerModelId?: string;
   // The quality pass (#121, #187): a read-only lister, a fixer that commits
   // standards fixes and tests, and a read-only verify, ahead of gate-1 and
-  // the correctness pass. All three share this routing and run cold in the
+  // the verifier. All three share this routing and run cold in the
   // implementer's sandbox, so they may name another vendor's model, paired
   // with `reviewerQualityAgent`.
   // Renamed from `reviewerFollowupModelId`, which is now refused by name.
   readonly reviewerQualityModelId?: string;
   // Independent judge for an unchanged rejected head (#167). Defaults to the
-  // correctness reviewer's routing, not the quality pass's routing.
+  // verifier's code-review (`reviewer*`) routing, not the quality pass's.
   readonly adjudicatorModelId?: string;
   readonly mergerModelId?: string;
 

@@ -1,15 +1,23 @@
 // Pure inner-loop state machine — no I/O. The runner calls step(state, event)
 // and executes the returned action; `terminate` ends the loop. Every decision
 // (the pre-attempt partition and UI classifications, promise routing, the
-// serial quality → gate-1 → correctness order, the quality pass's own
+// serial quality → gate-1 → verifier order, the quality pass's own
 // list → fix → verify loop, per-budget exhaustion, and context-budget parking)
 // lives here and is table-driven tested in inner-loop-machine.test.ts.
 //
 // After a clean, on-branch COMPLETE the round is SERIAL (#185, #187): the
-// quality pass, then gate-1 ONCE on the head it left, then the correctness
-// reviewer only on a green gate there. A red gate goes back to the
-// implementer; a failing test the quality fixer committed is how a
-// correctness defect reaches it.
+// quality pass, then gate-1 ONCE on the head it left, then the verifier only
+// on a green gate there. A red gate goes back to the implementer; a failing
+// test the quality fixer committed is how a correctness defect reaches it.
+//
+// The verifier (#180, verifier.ts) holds the slot the correctness pass held,
+// with its budget (`correctnessFailures` against `maxReviewRounds`), its
+// harness rule and its adjudicator path. Its outcome arrives already combined:
+// a write parks, a harness failure takes #41's path, an approval is DONE, and a
+// rejection is a list of tagged units charged once. A rejection is kept in two
+// renderings: `latestReviewerFeedback`, which the implementer reads, and
+// `latestReviewerPublic`, which is the only one any terminal carries, so
+// whatever finalise publishes is the public rendering by construction.
 //
 // The quality pass (#187) is three cold roles. A read-only LISTER walks the
 // branch — the whole branch until a quality pass has approved a head, then
@@ -37,13 +45,13 @@
 // `gateFailures` counts red gate-1 results AND every attempt that failed to
 // produce a commit the gate could judge — NO-SIGNAL, COMPLETE over a dirty
 // tree, an unrepaired off-branch HEAD — and every green gate-1 resets it.
-// `correctnessFailures` counts correctness rejections only. `qualityFailures`
+// `correctnessFailures` counts verifier rejections only. `qualityFailures`
 // is per quality pass and never stops the loop. No counter spends or resets
 // another. There is no implementer-attempt budget: `attempt` remains only a
 // sequence number.
 //
-// Reviewer harness failure keeps #41's separate rule for the correctness pass
-// and its adjudicator: it charges no budget. `reviewerHarnessFailures` is a
+// Reviewer harness failure keeps #41's separate rule for the verifier and its
+// adjudicator: it charges no budget. `reviewerHarnessFailures` is a
 // per-inner-loop total that never resets; its second failure terminates.
 //
 // A COMPLETE claim is routed on THREE inputs, not one: the promise token, a
@@ -57,7 +65,7 @@
 // hand-to-human terminals NEEDS-INFO and NEEDS-UI-PROTOTYPE (#21, stops
 // before the round) are exempt — they land nothing by construction.
 //
-// A zero-commit COMPLETE at the head of a pending correctness rejection enters
+// A zero-commit COMPLETE at the head of a pending verifier rejection enters
 // one adjudication per head (#167). UPHELD keeps the original charge and makes
 // another zero-commit attempt take the ordinary round; OVERRULED finishes the
 // issue as approved.
@@ -78,6 +86,11 @@ import type { ParseSignal } from "./promise-parser.js";
 import type { UiCheckResult } from "./ui-check-parser.js";
 import type { PartitionCheckResult } from "./partition-check-parser.js";
 import { loadTemplate } from "./prompts.js";
+import {
+  type VerifierOutcome,
+  type VerifierUnit,
+  renderUnits,
+} from "./verifier.js";
 
 const ADJUDICATOR_HARNESS_FAILED_REPROMPT = loadTemplate(
   "implementer-adjudicator-harness-failed",
@@ -94,18 +107,23 @@ export type ContextSlot =
 // The two reviewing passes an adjudicator can rule on (#167, #187).
 export type ReviewPass = "quality" | "correctness";
 
-// A rejected report at the head it judged: the correctness rejection the next
-// zero-commit attempt may dispute (#167), or the quality report a zero-commit
-// fixer disputed (#187).
+// A rejected report at the head it judged: the quality report a zero-commit
+// fixer disputed (#187), or a verifier rejection.
 export type PendingRejection = {
   readonly round: number;
   readonly head: string;
   readonly report: string;
 };
 
-// What a quality lister reads (#187): the whole branch until a quality pass
-// has approved a head, then only what changed since that head.
-export type QualityScope =
+// The verifier rejection the next zero-commit attempt may dispute (#167): its
+// `report` is the units' private rendering, and the units keep the public one.
+export type VerifierRejection = PendingRejection & {
+  readonly units: readonly VerifierUnit[];
+};
+
+// What a quality lister or the verifier's white-box review reads (#187, #180):
+// the whole branch, or only what changed since an earlier head.
+export type ReviewScope =
   | { readonly kind: "full" }
   | { readonly kind: "since"; readonly sha: string };
 
@@ -134,7 +152,7 @@ export type LoopPhase =
   | "needs-quality-fix"
   | "needs-quality-verify"
   | "needs-gate"
-  | "needs-correctness"
+  | "needs-verifier"
   | "needs-adjudicator"
   | "terminated";
 
@@ -151,9 +169,11 @@ export type LoopState = {
   readonly lastFailureTrace: string;
   readonly lastFailedStep: string | null;
   readonly extraReprompt: string | null;
-  // The latest correctness rejection's prose, with any upheld adjudication
+  // The latest verifier rejection's prose, with any upheld adjudication
   // prepended. The quality pass never hands the implementer feedback.
   readonly latestReviewerFeedback: string | null;
+  // The same rejection in its public rendering: what every terminal carries.
+  readonly latestReviewerPublic: string | null;
   // The dirty set that sent the PREVIOUS attempt back to commit its work, or
   // null if the last attempt didn't end that way. Only used to detect that an
   // attempt changed nothing — see onImplementerResult.
@@ -162,12 +182,12 @@ export type LoopState = {
   // branch (#27). One re-prompt is offered; a second consecutive off-branch
   // attempt terminates — see onImplementerResult.
   readonly lastOffBranch: boolean;
-  // Total correctness or adjudicator runs in this inner loop that yielded no
+  // Total verifier or adjudicator runs in this inner loop that yielded no
   // review at all (#41, #143). Never reset: infrastructure faults are bounded
   // independently of convergence streaks.
   readonly reviewerHarnessFailures: number;
-  readonly pendingRejection: PendingRejection | null;
-  // Heads whose correctness rejection has already been adjudicated once.
+  readonly pendingRejection: VerifierRejection | null;
+  // Heads whose verifier rejection has already been adjudicated once.
   readonly adjudicatedHeads: readonly string[];
   readonly upheldAdjudication: {
     readonly head: string;
@@ -186,10 +206,10 @@ export type LoopState = {
   // Heads whose quality report has already been adjudicated once.
   readonly qualityAdjudicatedHeads: readonly string[];
   // What the adjudicator now running was asked to judge.
-  readonly adjudicating: {
-    readonly pass: ReviewPass;
-    readonly rejection: PendingRejection;
-  } | null;
+  readonly adjudicating:
+    | { readonly pass: "quality"; readonly rejection: PendingRejection }
+    | { readonly pass: "correctness"; readonly rejection: VerifierRejection }
+    | null;
   readonly uiPrototypeCheck: boolean;
   readonly phase: LoopPhase;
 };
@@ -250,11 +270,13 @@ export type Verdict =
       //     second consecutive attempt was still off it (#27). `failureTrace`
       //     carries where HEAD actually is, which is the only handle anyone has
       //     on the stranded commits once the worktree is removed.
-      //   reviewer-harness-failed — the correctness reviewer or adjudicator
+      //   reviewer-harness-failed — the verifier or adjudicator
       //     produced nothing twice in this inner loop (#41/#143). `failureTrace`
       //     carries why every invocation in the latest failed run yielded
       //     nothing. `latestReviewerProse` is whatever an EARLIER round said,
       //     if any — never the harness error.
+      // Like every terminal's `latestReviewerProse`, it is the public
+      // rendering (`latestReviewerPublic`).
       readonly type: "NEEDS-HUMAN";
       readonly cause:
         | "gate-red"
@@ -318,7 +340,7 @@ export type LoopAction =
   | {
       readonly kind: "run-quality-list";
       readonly attempt: number;
-      readonly scope: QualityScope;
+      readonly scope: ReviewScope;
     }
   | {
       readonly kind: "run-quality-fix";
@@ -342,12 +364,12 @@ export type LoopAction =
       // whatever the pass ended with.
       readonly quality: QualityOutcome;
     }
-  | { readonly kind: "run-correctness"; readonly attempt: number }
+  | { readonly kind: "run-verifier"; readonly attempt: number }
   | {
       readonly kind: "run-adjudicator";
       readonly attempt: number;
       readonly pass: "correctness";
-      readonly rejection: PendingRejection;
+      readonly rejection: VerifierRejection;
     }
   | {
       readonly kind: "run-adjudicator";
@@ -380,7 +402,7 @@ export function visiblePhases(
     case "run-quality-verify":
       return ["quality"];
     case "run-gate": return ["gate-1"];
-    case "run-correctness": return ["review"];
+    case "run-verifier": return ["review"];
     case "run-adjudicator": return ["adjudication"];
     case "terminate": return [];
   }
@@ -426,8 +448,8 @@ export type LoopEvent =
       readonly head: string;
     }
   | {
-      // A quality lister or verify outcome at `head` (#187). Same shape as a
-      // correctness outcome: a verdict, no review, or a write.
+      // A quality lister or verify outcome at `head` (#187). Same shape as the
+      // verifier's white-box review: a verdict, no review, or a write.
       readonly kind: "quality-review-result";
       readonly mode: "list" | "verify";
       readonly head: string;
@@ -451,9 +473,9 @@ export type LoopEvent =
       readonly head: string;
     }
   | {
-      readonly kind: "correctness-result";
+      readonly kind: "verifier-result";
       readonly head: string;
-      readonly reviewer: ReviewerResult;
+      readonly outcome: VerifierOutcome;
     }
   | {
       readonly kind: "adjudicator-result";
@@ -470,8 +492,8 @@ export type Gate1Result = {
   readonly failedStep: string | null;
 };
 
-// What one read-only review yielded: the correctness pass, or a quality lister
-// or verify (#41, #98, #187).
+// What one read-only review yielded: the verifier's white-box review, or a
+// quality lister or verify (#41, #98, #187).
 export type ReviewerResult =
   | {
       readonly kind: "reviewer-result";
@@ -521,6 +543,7 @@ export function initialState(opts: InitialStateOptions): LoopState {
     lastFailedStep: null,
     extraReprompt: null,
     latestReviewerFeedback: null,
+    latestReviewerPublic: null,
     lastDirtyPaths: null,
     lastOffBranch: false,
     reviewerHarnessFailures: 0,
@@ -565,7 +588,7 @@ const EVENT_PHASE: Readonly<Record<
   "implementer-result": "needs-implementer",
   "quality-fix-result": "needs-quality-fix",
   "gate-result": "needs-gate",
-  "correctness-result": "needs-correctness",
+  "verifier-result": "needs-verifier",
   "adjudicator-result": "needs-adjudicator",
   "adjudicator-wrote": "needs-adjudicator",
   "adjudicator-harness-failed": "needs-adjudicator",
@@ -579,7 +602,7 @@ const expectedPhase = (
     : EVENT_PHASE[event.kind];
 
 // A role measures its own context before it runs (#158): the partition check
-// its anchor, and the quality roles and the correctness reviewer the branch
+// its anchor, and the quality roles and the verifier the branch
 // picture they are about to read. Gate-1 reads no prompt and measures nothing.
 const CONTEXT_MEASURING_PHASES: readonly LoopPhase[] = [
   "needs-partition-check",
@@ -587,7 +610,7 @@ const CONTEXT_MEASURING_PHASES: readonly LoopPhase[] = [
   "needs-quality-list",
   "needs-quality-fix",
   "needs-quality-verify",
-  "needs-correctness",
+  "needs-verifier",
 ];
 
 export function step(state: LoopState, event: LoopEvent): StepResult {
@@ -673,8 +696,8 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
     case "gate-result":
       return onGateResult(state, event.gate);
 
-    case "correctness-result":
-      return onCorrectnessResult(state, event.head, event.reviewer);
+    case "verifier-result":
+      return onVerifierResult(state, event.head, event.outcome);
 
     case "adjudicator-result":
       return onAdjudicatorResult(state, event);
@@ -787,8 +810,8 @@ function joinOrchestratorNotes(
   return present.length === 0 ? null : present.join("\n\n");
 }
 
-// The orchestrator note for an attempt whose correctness pass produced no
-// review (#41). Exported so the wording is asserted where the routing is.
+// The orchestrator note for an attempt whose verifier's code review produced
+// no review (#41). Exported so the wording is asserted where the routing is.
 //
 // It goes in the ORCHESTRATOR NOTE slot, not the reviewer-feedback slot, and
 // that is the whole point of the terminal: the previous behaviour handed the
@@ -813,7 +836,7 @@ export function reviewerHarnessFailedReprompt(
   hasPriorRejection: boolean,
 ): string {
   return [
-    "The correctness reviewer could not be run this round: every invocation",
+    "The verifier's code review could not be run this round: every invocation",
     "returned no review at all. That is a fault in the orchestrator's harness,",
     "not a finding about your work — nothing was said about your code this",
     "round, and the review budget was not charged for it.",
@@ -906,7 +929,7 @@ function onImplementerResult(
         type: "NEEDS-HUMAN",
         cause: "off-branch-head",
         failureTrace: trace,
-        latestReviewerProse: state.latestReviewerFeedback,
+        latestReviewerProse: state.latestReviewerPublic,
         budgetExhausted: null,
         strandedHead: offBranch,
       },
@@ -946,7 +969,7 @@ function onImplementerResult(
           type: "NEEDS-HUMAN",
           cause: "uncommittable-worktree",
           failureTrace: trace,
-          latestReviewerProse: repeated ? state.latestReviewerFeedback : null,
+          latestReviewerProse: repeated ? state.latestReviewerPublic : null,
           budgetExhausted: null,
           strandedHead: null,
         },
@@ -1160,9 +1183,9 @@ function onGateResult(state: LoopState, gate: Gate1Result): StepResult {
         gateFailures: 0,
         lastFailureTrace: "",
         lastFailedStep: null,
-        phase: "needs-correctness",
+        phase: "needs-verifier",
       },
-      action: { kind: "run-correctness", attempt: state.attempt },
+      action: { kind: "run-verifier", attempt: state.attempt },
     };
   }
   const redState: LoopState = {
@@ -1179,7 +1202,7 @@ function onGateResult(state: LoopState, gate: Gate1Result): StepResult {
       type: "NEEDS-HUMAN",
       cause: "gate-red",
       failureTrace: gate.failureTrace,
-      latestReviewerProse: state.latestReviewerFeedback,
+      latestReviewerProse: state.latestReviewerPublic,
       budgetExhausted: {
         budget: "gate",
         roundsUsed: redState.gateFailures,
@@ -1195,39 +1218,49 @@ function onGateResult(state: LoopState, gate: Gate1Result): StepResult {
   });
 }
 
-function onCorrectnessResult(
+function onVerifierResult(
   state: LoopState,
   head: string,
-  reviewer: ReviewerResult,
+  outcome: VerifierOutcome,
 ): StepResult {
-  if (reviewer.kind === "reviewer-wrote") {
-    return terminate(state, {
-      type: "NEEDS-HUMAN-REVIEW",
-      cause: "reviewer-wrote",
-      latestReviewerProse: reviewer.detail,
-    });
+  switch (outcome.kind) {
+    case "wrote":
+      return terminate(state, {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: outcome.cause,
+        latestReviewerProse: outcome.detail,
+      });
+    case "harness-failed":
+      return onReviewerHarnessFailed(
+        state,
+        outcome.detail,
+        reviewerHarnessFailedReprompt(state.latestReviewerFeedback !== null),
+      );
+    case "approved":
+      return terminate({ ...state, pendingRejection: null }, { type: "DONE" });
+    case "rejected":
+      return onVerifierRejected(state, head, outcome.units);
   }
-  if (reviewer.kind === "reviewer-harness-failed") {
-    return onReviewerHarnessFailed(
-      state,
-      reviewer.detail,
-      reviewerHarnessFailedReprompt(state.latestReviewerFeedback !== null),
-    );
-  }
-  if (reviewer.verdict === "APPROVED") {
-    return terminate({ ...state, pendingRejection: null }, { type: "DONE" });
-  }
+}
+
+// One charge per rejected round, whichever units it holds.
+function onVerifierRejected(
+  state: LoopState,
+  head: string,
+  units: readonly VerifierUnit[],
+): StepResult {
   const correctnessFailures = state.correctnessFailures + 1;
-  const pendingRejection: PendingRejection = {
+  const pendingRejection: VerifierRejection = {
     round: state.attempt,
     head,
-    report: reviewer.prose,
+    report: renderUnits(units, "text"),
+    units,
   };
-  const prose = adjudicationNotice(state, pendingRejection);
+  const feedback = rejectionFeedback(state, pendingRejection);
   const reviewedState: LoopState = {
     ...state,
+    ...feedback,
     correctnessFailures,
-    latestReviewerFeedback: prose,
     pendingRejection,
   };
   if (correctnessFailures >= state.maxReviewRounds) {
@@ -1235,42 +1268,42 @@ function onCorrectnessResult(
       type: "NEEDS-HUMAN-REVIEW",
       cause: "correctness-budget-exhausted",
       roundsUsed: correctnessFailures,
-      latestReviewerProse: prose,
+      latestReviewerProse: feedback.latestReviewerPublic,
     });
   }
   return advanceAttempt(reviewedState, {
     failureTrace: "",
     extraReprompt: state.extraReprompt,
-    latestReviewerFeedback: prose,
+    latestReviewerFeedback: feedback.latestReviewerFeedback,
   });
 }
 
-// A rejection repeated at a head an adjudicator already UPHELD carries that
-// ruling's reasoning, so the implementer is not handed the report as if it
-// were still disputable.
-function adjudicationNotice(
+// A verifier rejection in both renderings. One repeated at a head an
+// adjudicator already UPHELD carries that ruling's reasoning, so the
+// implementer is not handed the report as if it were still disputable.
+function rejectionFeedback(
   state: LoopState,
-  rejection: PendingRejection,
-): string {
-  if (state.upheldAdjudication?.head !== rejection.head) return rejection.report;
-  return [
-    "Independent adjudicator: UPHELD",
-    state.upheldAdjudication.reasoning,
-    "",
-    rejection.report,
-  ].join("\n");
+  rejection: VerifierRejection,
+): { readonly latestReviewerFeedback: string; readonly latestReviewerPublic: string } {
+  const upheld = state.upheldAdjudication?.head === rejection.head
+    ? ["Independent adjudicator: UPHELD", state.upheldAdjudication.reasoning, ""]
+    : [];
+  return {
+    latestReviewerFeedback: [...upheld, rejection.report].join("\n"),
+    latestReviewerPublic: [...upheld, renderUnits(rejection.units, "publicText")].join("\n"),
+  };
 }
 
 function onAdjudicatorResult(
   state: LoopState,
   event: Extract<LoopEvent, { kind: "adjudicator-result" }>,
 ): StepResult {
-  const { pass, rejection } = requireAdjudicating(state);
-  if (rejection.head !== event.head) {
+  const adjudicating = requireAdjudicating(state);
+  if (adjudicating.rejection.head !== event.head) {
     throw new Error("adjudicator ruled on a rejection other than the pending head");
   }
   const ruled: LoopState = { ...state, adjudicating: null };
-  if (pass === "quality") {
+  if (adjudicating.pass === "quality") {
     if (event.ruling === "OVERRULED") {
       return toGate({ ...ruled, qualityApprovedHead: event.head }, "OVERRULED");
     }
@@ -1282,23 +1315,24 @@ function onAdjudicatorResult(
   }
   // Every finding in the only rejection the head carries is false: approved.
   if (event.ruling === "OVERRULED") return terminate(ruled, { type: "DONE" });
+  const { rejection } = adjudicating;
   const upheldState: LoopState = {
     ...ruled,
     adjudicatedHeads: [...state.adjudicatedHeads, rejection.head],
     upheldAdjudication: { head: rejection.head, reasoning: event.reasoning.trim() },
   };
-  const feedback = adjudicationNotice(upheldState, rejection);
+  const feedback = rejectionFeedback(upheldState, rejection);
   return advanceAttempt(
-    { ...upheldState, latestReviewerFeedback: feedback },
+    { ...upheldState, ...feedback },
     {
       failureTrace: state.lastFailureTrace,
       extraReprompt: state.extraReprompt,
-      latestReviewerFeedback: feedback,
+      latestReviewerFeedback: feedback.latestReviewerFeedback,
     },
   );
 }
 
-// The correctness reviewer or adjudicator produced nothing at all (#41/#143).
+// The verifier or adjudicator produced nothing at all (#41/#143).
 // No convergence budget is charged by that fault, and `latestReviewerFeedback`
 // keeps whatever an earlier round actually said.
 //
@@ -1321,7 +1355,7 @@ function onReviewerHarnessFailed(
       failureTrace: detail,
       // An earlier round's real report, if there was one. Never `detail` — the
       // handoff renders this as the reviewer speaking.
-      latestReviewerProse: state.latestReviewerFeedback,
+      latestReviewerProse: state.latestReviewerPublic,
       budgetExhausted: null,
       strandedHead: null,
     });

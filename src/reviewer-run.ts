@@ -14,15 +14,15 @@
 // Repository mutation aborts the invocation loop as a typed value, so no
 // second reviewer runs against state the first reviewer altered (#98).
 //
-// Three read-only reviews share this policy: the correctness pass, and the
-// quality pass's lister and verify (#187). Each is COLD — nothing resumes a
+// Three read-only reviews share this policy: the verifier's white-box review
+// (verifier.ts, #180), and the quality pass's lister and verify (#187). Each is COLD — nothing resumes a
 // session — which is what lets each sit on its own vendor (#121 §2). One
 // outcome maps directly to the state machine's event for its pass; the
 // machine decides what a review that produced nothing means for that pass.
 // The quality fixer is not a reviewer: it emits no verdict and its retry is
 // the runner's (inner-loop.ts).
 //
-// The correctness pass may also declare one `<spec-gap>` block (#108).
+// The white-box review may also declare one `<spec-gap>` block (#108).
 // `parseVerdict` keeps it on the parsed verdict; the mapping does not place it
 // on the state-machine event because it is evidence, not a decision input. The
 // I/O runner reads it directly from the completed outcome and accumulates it

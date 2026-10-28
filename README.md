@@ -13,7 +13,7 @@ consumer repo.
 
 ## Inside sandbar: one issue, one sandbox
 
-![Pre-checks, implementer, quality review (violations lister, fixer, verify), automatic tests, correctness review, adjudicator, then merge with a resolve agent](docs/inner-loop.svg)
+![Pre-checks, implementer, quality review (violations lister, fixer, verify), automatic tests, verifier, adjudicator, then merge with a resolve agent](docs/inner-loop.svg)
 
 ## Running it
 

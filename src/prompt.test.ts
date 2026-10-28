@@ -5,7 +5,7 @@ import {
   NO_PROTOTYPE_NEEDED_PHRASE,
 } from "./finalize.js";
 import { sourceBranchBase } from "./git-ops.js";
-import { type QualityScope, reviewerHarnessFailedReprompt } from "./inner-loop-machine.js";
+import { type ReviewScope, reviewerHarnessFailedReprompt } from "./inner-loop-machine.js";
 import {
   type PriorReviewRound,
   type QualityOverrule,
@@ -28,6 +28,8 @@ const baseInputs = {
   base: sourceBranchBase("main"),
   claudeMdPath: "CLAUDE.md",
   priorRounds: [],
+  scope: { kind: "full" },
+  changedSinceStat: null,
 } as const;
 
 const qualityInputs = {
@@ -62,7 +64,7 @@ describe("renderAttemptSlot — retained reviewer feedback", () => {
       ...implementerInputs,
       latestReviewerFeedback: "Add the missing branch.",
     });
-    expect(slot).toContain("Previous reviewer feedback (CHANGES-REQUESTED)");
+    expect(slot).toContain("Previous verifier feedback (CHANGES-REQUESTED)");
     expect(slot).toContain("Add the missing branch.");
     expect(slot).toContain("Address the concerns above");
   });
@@ -133,7 +135,7 @@ describe("renderAttemptSlot — the quality pass (#185)", () => {
       /Previous gate-1 failure[\s\S]*failing test the quality pass\s+added reports a correctness defect/,
     );
     const review = renderAttemptSlot({ ...implementerInputs, latestReviewerFeedback: "finding" });
-    expect(review).toMatch(/Previous reviewer feedback[\s\S]*quality pass[\s\S]*not something to delete/);
+    expect(review).toMatch(/Previous verifier feedback[\s\S]*quality pass[\s\S]*not something to delete/);
     for (const followUp of [gate, review]) {
       const section = followUp.slice(followUp.indexOf("## Previous"), followUp.indexOf("## The quality pass"));
       expect(section).toMatch(/only\s+if it contradicts the\s+issue, and then\s+name the test and the reason in that\s+commit's message/);
@@ -304,6 +306,59 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
 });
 
 describe("renderReviewerSlot", () => {
+  // The verifier's first white-box round (#180) is the correctness review as
+  // it was before the verifier, byte for byte.
+  it("renders round 1 exactly as the correctness review did", () => {
+    const slot = renderReviewerSlot({
+      ...baseInputs,
+      commits: "a1 first",
+      stat: " x.ts | 1 +",
+    });
+    expect(slot).toBe(ROUND_ONE_REVIEW);
+  });
+
+  describe("from its second round on (#180)", () => {
+    const sinceSlot = (changedSinceStat: string | null = " y.ts | 2 +") =>
+      renderReviewerSlot({
+        ...baseInputs,
+        commits: "a1 first\nb2 second",
+        stat: " x.ts | 1 +\n y.ts | 2 +",
+        priorRounds: [{
+          round: 1,
+          head: "abc123",
+          correctness: { verdict: "CHANGES-REQUESTED", prose: "x.ts:1 crashes", specGap: null },
+        }],
+        scope: { kind: "since", sha: "abc123" },
+        changedSinceStat,
+      });
+
+    it("reviews only the change since the anchor, with its stat", () => {
+      const slot = sinceSlot();
+      expect(slot).toContain("## Changed since `abc123`\n\n```\n y.ts | 2 +\n```");
+      expect(slot).toContain("Run `git diff abc123..HEAD`");
+      expect(slot).toMatch(/The branch diff stat is context, not your review surface/);
+      expect(slot).not.toContain("Read the entire branch diff before deciding");
+    });
+
+    it("lets conclusions about unchanged code stand but keeps prior findings open", () => {
+      const slot = sinceSlot();
+      expect(slot).toMatch(/Conclusions the earlier rounds reached about code unchanged since `abc123`\s+stand/);
+      expect(slot).not.toContain("as you would with no history at all");
+      expect(slot).toMatch(/state whether it is addressed at this head; an unaddressed one\s+blocks\./);
+      expect(slot).toMatch(/addressed only when it is gone from every site/);
+    });
+
+    it("says so when nothing changed since the anchor", () => {
+      expect(sinceSlot("")).toContain("(empty — no changes since `abc123`)");
+    });
+
+    it("refuses a stat that does not match the scope", () => {
+      expect(() => sinceSlot(null)).toThrow(/changed-since stat must be supplied/);
+      expect(() => renderReviewerSlot({ ...baseInputs, commits: "a1", stat: "", changedSinceStat: "" }))
+        .toThrow(/changed-since stat must be supplied/);
+    });
+  });
+
   it("carries only the correctness reviewer's extension", () => {
     const slot = renderReviewerSlot({
       ...baseInputs,
@@ -542,11 +597,11 @@ describe("renderQualityFixSlot (#185, #187)", () => {
 describe("renderQualityReviewSlot (#187)", () => {
   const picture = { commits: "a1 first", stat: " whole | 1 +" } as const;
   const list = (
-    scope: QualityScope = { kind: "full" },
+    scope: ReviewScope = { kind: "full" },
     overrules: readonly QualityOverrule[] = [],
   ) => ({ kind: "list", scope, overrules }) as const;
   const renderList = (
-    scope?: QualityScope,
+    scope?: ReviewScope,
     changedSinceStat: string | null = null,
     overrules?: readonly QualityOverrule[],
   ) =>
@@ -1035,3 +1090,98 @@ describe("the chunk-base slots (#61)", () => {
     }
   });
 });
+
+const ROUND_ONE_REVIEW = `# Review
+
+Review the implementation on branch \`sandbar/issue-42-do-the-thing\` against \`origin/main\` — the ref
+this branch was seeded from.
+(That is also the ref to use for any git command of your own: this issue clone
+copies only \`origin/*\` for the source repository, so the bare local name
+\`main\` does not resolve.)
+
+Issue #42: do the thing
+
+## Commits on this branch
+
+\`\`\`
+a1 first
+\`\`\`
+
+## Branch diff stat
+
+\`\`\`
+ x.ts | 1 +
+\`\`\`
+
+Read the full patch with \`git diff origin/main...HEAD\` and inspect files in the worktree.
+
+## Review process
+
+Gate-1 is green at this head, which includes any standards fixes and tests the
+quality pass committed on top of the implementer's work. Review these two
+dimensions, using the project conventions in
+@CLAUDE.md to understand the implementation's invariants and settled
+choices:
+
+Read the entire branch diff before deciding: run \`git diff origin/main...HEAD\`
+and inspect every changed file named by the stat above. The stat is navigation,
+not the review surface.
+
+1. Correctness of logic: does the implementation actually work? Look for
+   correctness gaps the tests miss: edge cases, off-by-one errors, broken error
+   paths, concurrency hazards, and other state hazards.
+2. Spec conformance: compare the issue body to the branch, including missing
+   requirements and scope creep. An unmet requirement blocks wherever it is.
+
+Explicitly exclude style, coding standards, test-quality, and test-coverage
+judgments from this pass — the quality pass owns them. An implementer commit
+that changes or deletes a quality-pass test must name the test and why it
+contradicts the issue; judge that claim as part of spec conformance. A change request must
+name the defect's location, explain the concrete failure, and state the change
+that clears it. Do not block on speculation or preference: if you cannot name a
+concrete defect on either dimension, APPROVE.
+
+For each finding in the prior-round history from your correctness and spec
+dimensions, state whether it is addressed at this head; an unaddressed one
+blocks. Then review this branch as you would with no history at all. The history
+does not narrow what you may find or make new defects non-blocking.
+
+A change requested in an earlier round may not be reversed without naming that
+round and explaining why its request was wrong.
+
+Your role is strictly advisory. You must not modify the branch.
+Do not run any command that writes under \`.git\` (including commit, checkout,
+reset, branch, worktree, gc, or prune), do not modify files, push, or run gate
+commands. Read-only investigation only.
+
+If a dimension requests changes, put only its actionable findings under its
+exact heading: \`### Correctness\` or \`### Spec\`. Omit the heading of a dimension
+that passes.
+
+When, and only when, a fundamental implementation error was caused by a question
+the issue and project conventions do not answer, declare the missing decision in
+one optional free-text \`<spec-gap>\` block containing the unanswered question,
+followed by the answer this review applied.
+
+This is rare: issue vagueness alone is not a gap, nor is a finding whose answer
+the issue or conventions already determine. The answer is yours to decide; the
+block records that decision and never asks a human to make it. Prior review
+rounds and the issue's comments contain earlier records. Do not repeat one that
+has already been recorded. Emit at most one block, immediately before the
+verdict token; when several missing decisions caused the same fundamental error,
+record them together in that block.
+
+## Verdict
+
+Your output is only the blocking findings under their exact headings, an optional
+spec-gap block, and the verdict token. Do not include a summary, what you checked, non-blocking
+observations, or a restatement of the change.
+When approving, emit the verdict token alone on its line, after any spec-gap block.
+
+End your review with a single verdict token on its own:
+
+- \`<verdict>APPROVED</verdict>\` — branch meets the bar, ship it.
+- \`<verdict>CHANGES-REQUESTED</verdict>\` — list the defects above and the
+  implementer will address them in the next round.
+
+A missing verdict is a failed reviewer invocation and will be retried. Emit exactly one verdict.`;

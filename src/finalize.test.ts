@@ -298,7 +298,7 @@ describe("comment templates", () => {
     expect(body).toContain("stopped after 4 consecutive attempts without a green gate-1");
     expect(body).toContain("latest failing step: `tests`");
     expect(body).not.toContain("step `tests` was red for 4");
-    expect(body.indexOf("Latest correctness review (an earlier round)")).toBeLessThan(
+    expect(body.indexOf("Latest verifier report (an earlier round)")).toBeLessThan(
       body.indexOf("<details>"),
     );
     expect(body.endsWith("re-apply `ready-for-agent`.")).toBe(true);
@@ -321,9 +321,9 @@ describe("comment templates", () => {
     // every other assertion here would still pass.
     expect(body).toContain(READY_FOR_AGENT);
     expect(body).toContain(
-      "correctness review pass stopped after 4 consecutive rejections",
+      "verifier stopped after 4 consecutive rejections",
     );
-    expect(body).toContain("Latest correctness reviewer report");
+    expect(body).toContain("Latest verifier report:");
     expect(body.indexOf("foo not extracted")).toBeLessThan(
       body.indexOf("Action:"),
     );
@@ -1371,7 +1371,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.n).toBe(45);
     expect(calls.comments[0]!.body).toContain("too much indirection");
     expect(calls.comments[0]!.body).toContain(
-      "correctness review pass stopped after 4 consecutive rejections",
+      "verifier stopped after 4 consecutive rejections",
     );
     expect(calls.comments[0]!.body).toContain(
       "correct the governing instructions",

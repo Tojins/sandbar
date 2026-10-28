@@ -19,6 +19,7 @@ import {
 import { DEFAULT_MAX_GATE_ROUNDS } from "./config.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
+import { combineVerifier } from "./verifier.js";
 
 const defaultOpts = {
   issueBranch: "sandbar/issue-1-x",
@@ -98,6 +99,14 @@ const changes = (prose: string): ReviewerResult => ({
   verdict: "CHANGES-REQUESTED",
   prose,
 });
+// How a CHANGES-REQUESTED review's prose reaches the implementer and every
+// terminal: one `[white-box]` unit (#180).
+const whiteBox = (prose: string): string => `[white-box]\n${prose}`;
+const whiteBoxUnit = (prose: string) => ({
+  id: "white-box",
+  text: whiteBox(prose),
+  publicText: whiteBox(prose),
+}) as const;
 // The reviewer was invoked its full budget and reviewed nothing (#41).
 const harnessFailed = (detail = "invocation 1/2: …"): ReviewerResult => ({
   kind: "reviewer-harness-failed",
@@ -153,10 +162,11 @@ const gated = (gate: Gate1Result, head = "head"): LoopEvent => ({
   gate,
   head,
 });
+// The verifier is its white-box review alone until #180's runner joins it.
 const reviewed = (reviewer: ReviewerResult, head = "head"): LoopEvent => ({
-  kind: "correctness-result",
+  kind: "verifier-result",
   head,
-  reviewer,
+  outcome: combineVerifier(reviewer),
 });
 
 // One serial round after a COMPLETE (#185): the fixer, gate-1 on the head it
@@ -195,7 +205,7 @@ describe("inner-loop-machine — the serial round (#185)", () => {
       "run-implementer",
       "run-quality-list",
       "run-gate",
-      "run-correctness",
+      "run-verifier",
       "terminate",
     ]);
     expect(verdict).toEqual({ type: "DONE" });
@@ -215,7 +225,7 @@ describe("inner-loop-machine — the serial round (#185)", () => {
       { kind: "run-implementer", attempt: 2, failureTrace: "red", extraReprompt: null, latestReviewerFeedback: null },
       { kind: "run-quality-list", attempt: 2, scope: { kind: "since", sha: "head" } },
       { kind: "run-gate", attempt: 2, quality: qualityApproved },
-      { kind: "run-correctness", attempt: 2 },
+      { kind: "run-verifier", attempt: 2 },
     ]);
   });
 
@@ -235,7 +245,7 @@ describe("inner-loop-machine — the serial round (#185)", () => {
     expect(visiblePhases({ kind: "run-quality-verify", attempt: 1, fixRound: 1, anchor: "a", report: "r" }))
       .toEqual(["quality"]);
     expect(visiblePhases({ kind: "run-gate", attempt: 1, quality: qualityApproved })).toEqual(["gate-1"]);
-    expect(visiblePhases({ kind: "run-correctness", attempt: 1 })).toEqual(["review"]);
+    expect(visiblePhases({ kind: "run-verifier", attempt: 1 })).toEqual(["review"]);
   });
 
   it.each([
@@ -551,7 +561,12 @@ describe("inner-loop-machine — unchanged rejection adjudication (#167)", () =>
       kind: "run-adjudicator",
       attempt: 2,
       pass: "correctness",
-      rejection: { round: 1, head: "abc", report: "finding" },
+      rejection: {
+        round: 1,
+        head: "abc",
+        report: whiteBox("finding"),
+        units: [whiteBoxUnit("finding")],
+      },
     });
   });
 
@@ -584,7 +599,10 @@ describe("inner-loop-machine — unchanged rejection adjudication (#167)", () =>
       reasoning: "the null branch still crashes",
     });
     const feedback = asImpl(upheld.action).latestReviewerFeedback;
-    expect(feedback).toBe("Independent adjudicator: UPHELD\nthe null branch still crashes\n\nfinding");
+    expect(feedback).toBe(
+      `Independent adjudicator: UPHELD\nthe null branch still crashes\n\n${whiteBox("finding")}`,
+    );
+    expect(upheld.state.latestReviewerPublic).toBe(feedback);
     expect(upheld.state.correctnessFailures).toBe(1);
     // The same zero-commit move at the same head now takes the ordinary round.
     const again = step(upheld.state, impl(complete, [], null, null, 0, "abc"));
@@ -644,7 +662,7 @@ describe("inner-loop-machine — unchanged rejection adjudication (#167)", () =>
         type: "NEEDS-HUMAN",
         cause: "reviewer-harness-failed",
         failureTrace: "adjudicator: no ruling again",
-        latestReviewerProse: "finding",
+        latestReviewerProse: whiteBox("finding"),
       },
     });
   });
@@ -799,7 +817,7 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
     ]);
     const next = asImpl(r.action);
     expect(next.failureTrace).toBe("the quality pass's new test fails");
-    expect(next.latestReviewerFeedback).toBe("handle null");
+    expect(next.latestReviewerFeedback).toBe(whiteBox("handle null"));
     expect(r.state.correctnessFailures).toBe(1);
     expect(r.state.gateFailures).toBe(1);
   });
@@ -814,7 +832,7 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
       type: "NEEDS-HUMAN",
       cause: "gate-red",
       failureTrace: "second",
-      latestReviewerProse: "earlier finding",
+      latestReviewerProse: whiteBox("earlier finding"),
       budgetExhausted: { budget: "gate", roundsUsed: 2, failedStep: "test" },
       strandedHead: null,
     });
@@ -837,9 +855,14 @@ describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
       attempt: 2,
       failureTrace: "",
       extraReprompt: null,
-      latestReviewerFeedback: "handle null",
+      latestReviewerFeedback: whiteBox("handle null"),
     });
-    expect(r.state.pendingRejection).toEqual({ round: 1, head: "head", report: "handle null" });
+    expect(r.state.pendingRejection).toEqual({
+      round: 1,
+      head: "head",
+      report: whiteBox("handle null"),
+      units: [whiteBoxUnit("handle null")],
+    });
   });
 
   it("latest reviewer prose replaces an older one on a subsequent CHANGES-REQUESTED", () => {
@@ -847,7 +870,7 @@ describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
       impl(complete), ...round(gate1Ok, changes("first")),
       impl(complete), ...round(gate1Ok, changes("second")),
     ]);
-    expect(asImpl(r.action).latestReviewerFeedback).toBe("second");
+    expect(asImpl(r.action).latestReviewerFeedback).toBe(whiteBox("second"));
   });
 
   it("maxReviewRounds CHANGES-REQUESTED rounds → NEEDS-HUMAN-REVIEW with latest prose", () => {
@@ -860,7 +883,7 @@ describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
       type: "NEEDS-HUMAN-REVIEW",
       cause: "correctness-budget-exhausted",
       roundsUsed: 3,
-      latestReviewerProse: "three",
+      latestReviewerProse: whiteBox("three"),
     });
   });
 
@@ -880,7 +903,7 @@ describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
       impl(complete), quality, gated(gate1Ok),
     ]).state;
     expect(state.correctnessFailures).toBe(0);
-    expect(state.phase).toBe("needs-correctness");
+    expect(state.phase).toBe("needs-verifier");
   });
 
   it("parks immediately when the reviewer writes git state (#98)", () => {
@@ -893,6 +916,75 @@ describe("inner-loop-machine — correctness CHANGES-REQUESTED loop", () => {
       cause: "reviewer-wrote",
       latestReviewerProse: "reviewer committed",
     });
+  });
+});
+
+describe("inner-loop-machine — the verifier's two renderings (#180)", () => {
+  // A rejection whose private and public renderings differ, so every terminal
+  // shows which one it carries.
+  const split: LoopEvent = {
+    kind: "verifier-result",
+    head: "head",
+    outcome: {
+      kind: "rejected",
+      units: [{ id: "white-box", text: "private", publicText: "public" }],
+    },
+  };
+  const rejected = () => stepAll(initialState(defaultOpts), [impl(complete), ...round(gate1Ok), split]);
+
+  it("hands the implementer the private rendering and keeps the public one", () => {
+    const r = rejected();
+    expect(asImpl(r.action).latestReviewerFeedback).toBe("private");
+    expect(r.state.latestReviewerPublic).toBe("public");
+    expect(r.state.pendingRejection?.report).toBe("private");
+  });
+
+  it.each<[string, () => readonly LoopEvent[], number?]>([
+    ["off-branch-head", () => [impl(complete, [], detached()), impl(complete, [], detached())]],
+    ["uncommittable-worktree", () => [impl(complete, ["?? x"]), impl(complete, ["?? x"])]],
+    ["gate-red", () => [impl(complete), ...round(gate1Red("r1", "test"))], 1],
+    ["reviewer-harness-failed", () => [
+      impl(complete), ...round(gate1Ok, harnessFailed()),
+      impl(complete), ...round(gate1Ok, harnessFailed()),
+    ]],
+  ])("carries only the public rendering on %s", (cause, events, maxGateRounds) => {
+    const state = maxGateRounds === undefined
+      ? rejected().state
+      : { ...rejected().state, maxGateRounds };
+    const r = stepAll(state, events());
+    expect(r.action).toMatchObject({
+      kind: "terminate",
+      verdict: { cause, latestReviewerProse: "public" },
+    });
+  });
+
+  it("carries only the public rendering when the review budget runs out", () => {
+    const r = stepAll(initialState({ ...defaultOpts, maxReviewRounds: 1 }), [
+      impl(complete), ...round(gate1Ok), split,
+    ]);
+    expect(r.action).toEqual({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "correctness-budget-exhausted",
+        roundsUsed: 1,
+        latestReviewerProse: "public",
+      },
+    });
+  });
+
+  it("prepends an upheld ruling to both renderings", () => {
+    const disputed = step(rejected().state, impl(complete, [], null, null, 0, "head"));
+    const upheld = step(disputed.state, {
+      kind: "adjudicator-result",
+      head: "head",
+      ruling: "UPHELD",
+      reasoning: "still true",
+    });
+    expect(asImpl(upheld.action).latestReviewerFeedback)
+      .toBe("Independent adjudicator: UPHELD\nstill true\n\nprivate");
+    expect(upheld.state.latestReviewerPublic)
+      .toBe("Independent adjudicator: UPHELD\nstill true\n\npublic");
   });
 });
 
@@ -922,7 +1014,7 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
       impl(complete), ...round(gate1Ok, harnessFailed()),
     ]);
     const next = asImpl(r.action);
-    expect(next.latestReviewerFeedback).toBe("real finding");
+    expect(next.latestReviewerFeedback).toBe(whiteBox("real finding"));
     expect(next.extraReprompt).toBe(reviewerHarnessFailedReprompt(true));
   });
 
@@ -937,7 +1029,7 @@ describe("inner-loop-machine — reviewer harness failure (#41)", () => {
       type: "NEEDS-HUMAN",
       cause: "reviewer-harness-failed",
       failureTrace: "second",
-      latestReviewerProse: "real finding",
+      latestReviewerProse: whiteBox("real finding"),
       budgetExhausted: null,
       strandedHead: null,
     });
@@ -1011,14 +1103,14 @@ describe("inner-loop-machine — phase invariants", () => {
     ["a quality review before COMPLETE", quality, /quality-review-result event in phase needs-implementer/],
     ["a fixer result before COMPLETE", fixed(), /quality-fix-result event in phase needs-implementer/],
     ["a gate result before COMPLETE", gated(gate1Ok), /gate-result event in phase needs-implementer/],
-    ["a correctness result before COMPLETE", reviewed(approved()), /correctness-result event in phase needs-implementer/],
+    ["a correctness result before COMPLETE", reviewed(approved()), /verifier-result event in phase needs-implementer/],
   ] as const)("%s throws", (_name, event, message) => {
     expect(() => step(initialState(defaultOpts), event)).toThrow(message);
   });
 
   it("a correctness result before the gate throws", () => {
     const state = stepAll(initialState(defaultOpts), [impl(complete), quality]).state;
-    expect(() => step(state, reviewed(approved()))).toThrow(/expected needs-correctness/);
+    expect(() => step(state, reviewed(approved()))).toThrow(/expected needs-verifier/);
   });
 
   it.each([
@@ -1251,7 +1343,7 @@ describe("inner-loop-machine — HEAD off the issue branch (#27)", () => {
     {
       route: "reviewer harness failure",
       next: () => roundAfterRepair(round(gate1Ok, harnessFailed())),
-      routeContext: "reviewer could not be run",
+      routeContext: "code review could not be run",
     },
   ])("carries the free repair note and $route context into the next attempt", ({ next, routeContext }) => {
     const result = next();
