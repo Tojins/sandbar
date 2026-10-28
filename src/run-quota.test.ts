@@ -3602,6 +3602,47 @@ describe("run quota orchestration (#109)", () => {
       });
     });
 
+    it("tells the pull request again in the next closure", async () => {
+      seams.plan.mockResolvedValue({ ...resolution([]), landedChunks: [target] });
+      // The request is withdrawn while open, so nothing lands between the
+      // closures: only the closure bookkeeping is under test.
+      seams.landRequestPullRequests.mockImplementation(async () =>
+        Date.now() === OPEN.getTime()
+          ? []
+          : [{ number: 9, headRefName: target.branch, title: target.title, labels: ["land"] }]
+      );
+      vi.mocked(fetchOriginRefs)
+        .mockImplementationOnce(async () => {
+          vi.setSystemTime(OPEN);
+          return { sourceChanged: false, failures: [] };
+        })
+        .mockImplementationOnce(async () => {
+          vi.setSystemTime(CLOSED);
+          return { sourceChanged: false, failures: [] };
+        })
+        .mockRejectedValueOnce(new Error("stop after the second closure"));
+
+      await runAt(CLOSED);
+
+      expect(seams.commentOnChunkPullRequest).toHaveBeenCalledTimes(2);
+    });
+
+    it("lets a deferral for the chunk's own rework win over the window comment", async () => {
+      const reworked = { ...target, rework: [{ number: 43, title: "Issue 43" }] };
+      seams.plan.mockResolvedValue({ ...resolution([]), landedChunks: [reworked] });
+      seams.landRequestPullRequests.mockResolvedValue([
+        { number: 9, headRefName: target.branch, title: target.title, labels: ["land"] },
+      ]);
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockRejectedValueOnce(new Error("stop after a second closed poll"));
+
+      await runAt(CLOSED);
+
+      expect(seams.commentOnChunkPullRequest).not.toHaveBeenCalled();
+      expect(seams.merger).not.toHaveBeenCalled();
+    });
+
     it("lands a `land` request as before with no window configured", async () => {
       requestedWith(["land"]);
       seams.merger.mockResolvedValue(summary([]));

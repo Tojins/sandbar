@@ -30,7 +30,14 @@
 // taken when a pass is admitted; a pass already under way when the window
 // closes finishes.
 
+import { LAND_HOTFIX_LABEL } from "./chunks.js";
 import { type LandingWindowSettings, WEEKDAYS } from "./config.js";
+
+// Whether a closed window holds this chunk land request: every one does unless
+// a human asked for it as a hotfix.
+export const waitsForLandingWindow = (
+  request: { readonly landLabels: readonly string[] },
+): boolean => !request.landLabels.includes(LAND_HOTFIX_LABEL);
 
 // Null when nothing holds landings now — no window configured, or outside its
 // closed span — else when it reopens, e.g. `Mon 08:00 (Europe/Brussels)`.
@@ -63,9 +70,6 @@ function minuteOfWeek(timeZone: string, now: Date): number {
     }
     return value;
   };
-  const day = WEEKDAYS.findIndex((weekday) => weekday === part("weekday"));
-  if (day < 0) {
-    throw new Error(`Intl gave an unknown weekday for ${now.toISOString()} in ${timeZone}`);
-  }
+  const day = WEEKDAYS.indexOf(part("weekday") as (typeof WEEKDAYS)[number]);
   return day * 24 * 60 + Number(part("hour")) * 60 + Number(part("minute"));
 }

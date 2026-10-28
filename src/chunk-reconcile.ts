@@ -189,7 +189,7 @@ export async function fetchPullRequestsForBranches(
       "--json",
       PULL_REQUEST_FIELDS,
     ]);
-    if (!r.ok) continue;
+    if (!r.ok) return [];
     found.push(...parsePullRequests(r.stdout, new Set(["OPEN", "MERGED"])));
   }
   return found;
@@ -201,9 +201,9 @@ export async function fetchPullRequestsForBranches(
  * One listing per label, because `gh` ANDs repeated `--label`s; a pull request
  * carrying both is listed once.
  *
- * Fail-soft, like the rest of discovery here: a forge that could not be listed
- * means no chunk is landed this cycle, and the label is still on the pull
- * request for the next one.
+ * Fail-soft, like the rest of discovery here: if either listing fails, no
+ * chunk is landed this cycle (never a partial answer), and the labels are
+ * still on the pull requests for the next one.
  */
 export async function fetchLandRequestPullRequests(
   repo: RepoRef,

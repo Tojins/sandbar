@@ -347,13 +347,12 @@ import {
   describeChunkBranchDrift,
   refuseLandRequest,
   selectLandRequests,
-  waitsForLandingWindow,
 } from "./chunk-land.js";
 import {
   fetchLandRequestPullRequests,
   reconcileLandedChunks,
 } from "./chunk-reconcile.js";
-import { landingClosedUntil } from "./landing-window.js";
+import { landingClosedUntil, waitsForLandingWindow } from "./landing-window.js";
 import { postLaneOverrideNotices } from "./lanes.js";
 import {
   type PlanResolution,

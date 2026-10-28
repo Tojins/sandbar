@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { resolveLandingWindow } from "./config.js";
-import { landingClosedUntil } from "./landing-window.js";
+import { landingClosedUntil, waitsForLandingWindow } from "./landing-window.js";
 
 const outdoor = resolveLandingWindow({
   timeZone: "Europe/Brussels",
@@ -67,5 +67,13 @@ describe("resolveLandingWindow (#244)", () => {
     ["Fri 12:00", /must be \{ timeZone, closedFrom, closedUntil \}/],
   ])("refuses %j", (window, message) => {
     expect(() => resolveLandingWindow(window as never)).toThrow(message);
+  });
+});
+
+describe("waitsForLandingWindow (#244)", () => {
+  it("holds every request but a hotfix", () => {
+    expect(waitsForLandingWindow({ landLabels: ["land"] })).toBe(true);
+    expect(waitsForLandingWindow({ landLabels: ["land-hotfix"] })).toBe(false);
+    expect(waitsForLandingWindow({ landLabels: ["land", "land-hotfix"] })).toBe(false);
   });
 });

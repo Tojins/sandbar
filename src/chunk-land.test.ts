@@ -25,7 +25,6 @@ import {
   refuseLandRequest,
   selectLandRequests,
   selectReconciliations,
-  waitsForLandingWindow,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
 import { NEEDS_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
@@ -214,6 +213,20 @@ describe("refuseLandRequest (#176)", () => {
     landLabels: [LAND_LABEL],
   };
 
+  it("removes every land label the request carried", async () => {
+    const removed: string[] = [];
+    await refuseLandRequest(
+      { ...refusal, landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL] },
+      {
+        async commentOnPullRequest() {},
+        async removePullRequestLabel(number, label) {
+          removed.push(`${number}:${label}`);
+        },
+      },
+    );
+    expect(removed).toEqual([`9:${LAND_LABEL}`, `9:${LAND_HOTFIX_LABEL}`]);
+  });
+
   it("comments before removing land and performs no other write", async () => {
     const calls: string[] = [];
     await refuseLandRequest(refusal, {
@@ -271,12 +284,6 @@ describe("land-hotfix and the landing window (#244)", () => {
   it("carries the pull request's landing labels, and only those", () => {
     expect(requestWith(["bug", LAND_HOTFIX_LABEL, LAND_LABEL]).landLabels)
       .toEqual([LAND_HOTFIX_LABEL, LAND_LABEL]);
-  });
-
-  it("holds every request but a hotfix", () => {
-    expect(waitsForLandingWindow(requestWith([LAND_LABEL]))).toBe(true);
-    expect(waitsForLandingWindow(requestWith([LAND_HOTFIX_LABEL]))).toBe(false);
-    expect(waitsForLandingWindow(requestWith([LAND_LABEL, LAND_HOTFIX_LABEL]))).toBe(false);
   });
 
   it("tells the pull request when it lands and how to land it now", () => {
@@ -605,6 +612,29 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(calls.map((c) => c.op)).toContain("closePullRequest");
     expect(r.branchDeleted).toBe(true);
     expect(r.residue.join("\n")).toContain(`kept its \`${LAND_LABEL}\` label`);
+  });
+
+  it("takes every land label off the pull request", async () => {
+    const { adapter, calls } = makeWrapupAdapter();
+    await wrapUpLandedChunk(
+      { ...target, landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL] },
+      adapter,
+      { sourceBranch: "main", provenance: "sandbar" },
+    );
+    expect(calls.filter((c) => c.op === "removePullRequestLabel").map((c) => c.arg)).toEqual([
+      `9:${LAND_LABEL}`,
+      `9:${LAND_HOTFIX_LABEL}`,
+    ]);
+  });
+
+  it("names both labels when they will not come off", async () => {
+    const { adapter } = makeWrapupAdapter({ removePullRequestLabel: "no such label" });
+    const r = await wrapUpLandedChunk(
+      { ...target, landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL] },
+      adapter,
+      { sourceBranch: "main", provenance: "sandbar" },
+    );
+    expect(r.residue.join("\n")).toContain("kept its `land`/`land-hotfix` label");
   });
 
   it("skips the pull request entirely when there is none", async () => {

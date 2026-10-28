@@ -566,6 +566,19 @@ describe("the forge readers fail soft (#64)", () => {
     ]);
   });
 
+  it("lists a pull request carrying both land labels once", async () => {
+    await shimAnswering(JSON.stringify([{
+      number: 9,
+      headRefName: "sandbar/chunk-42-c",
+      title: "chunk 42",
+      state: "OPEN",
+      labels: [{ name: "land" }, { name: "land-hotfix" }],
+    }]));
+    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42", labels: ["land", "land-hotfix"] },
+    ]);
+  });
+
   it("tolerates a missing title, which is only ever prose", async () => {
     await shimAnswering(
       JSON.stringify([{ number: 9, headRefName: "sandbar/chunk-42-c", state: "OPEN", labels: LAND }]),

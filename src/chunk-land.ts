@@ -363,11 +363,6 @@ export type ChunkLandRefusal = ChunkBranchDrift & {
 const landLabelsOf = (pr: PullRequestSummary | undefined): readonly string[] =>
   pr?.labels.filter((label) => LAND_REQUEST_LABELS.includes(label)) ?? [];
 
-// Whether a closed landing window (#244, `landing-window.ts`) holds this
-// request: every one does unless a human asked for it as a hotfix.
-export const waitsForLandingWindow = (request: ChunkLandTarget): boolean =>
-  !request.landLabels.includes(LAND_HOTFIX_LABEL);
-
 export type ChunkLandSelection = {
   readonly requests: readonly ChunkLandTarget[];
   readonly refusals: readonly ChunkLandRefusal[];
