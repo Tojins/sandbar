@@ -7,7 +7,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  egressImageTag,
+  egressProxyNameFor,
   gateScope,
+  resolveNetworkNameFor,
+  sandboxNetworkNameFor,
   reflectScope,
   isScopedResourceName,
   networkNameFor,
@@ -331,6 +335,31 @@ describe("gate-stack resource names (#24)", () => {
     expect(podNameFor(S, "merger")).not.toBe(podNameFor(S, "42"));
     expect(stackContainerNameFor(S, "merger", "db")).toBe(
       `sandbar-${S}-merger-db`,
+    );
+  });
+});
+
+describe("egress resource names (#202)", () => {
+  const S = runScope("/tmp/sandbar-test-egress-names");
+
+  it("names one proxy per owner under the scoped prefix", () => {
+    expect(egressProxyNameFor(S, "sbx-42")).toBe(`sandbar-${S}-egress-sbx-42`);
+    expect(egressProxyNameFor(S, "42")).not.toBe(egressProxyNameFor(S, "sbx-42"));
+    expect(egressProxyNameFor(S, "resolve-3")).toContain(scopedResourcePrefix(S));
+  });
+
+  // Gate stackIds are issue numbers or "merger", so neither id below can be
+  // one, and a sandbox's network never aliases its own issue's gate network.
+  it("keeps the sandbox and resolve networks off every gate network", () => {
+    expect(sandboxNetworkNameFor(S, "42")).toBe(`sandbar-${S}-net-sbx-42`);
+    expect(sandboxNetworkNameFor(S, "42")).not.toBe(networkNameFor(S, "42"));
+    expect(resolveNetworkNameFor(S, 3)).toBe(`sandbar-${S}-net-resolve-3`);
+    expect(resolveNetworkNameFor(S, 3)).not.toBe(networkNameFor(S, "merger"));
+  });
+
+  it("tags the proxy image by scope and a fingerprint prefix", () => {
+    expect(egressImageTag(S, "9f2e1d70abcdef")).toBe(
+      `localhost/sandbar-egress:sb-egress-${S}-9f2e1d70`,
     );
   });
 });
