@@ -71,13 +71,14 @@ const available = podmanTestsEnabled({
   image: BASE,
 });
 
-// Gate runners share one remote Buildah cache, and another runner's cleanup can
-// remove a cache image after this build selected it but before it read the top
-// layer ("layer not known"). A fixture recipe opens with a process-private
-// LABEL so none of its layers is ever another runner's cache hit; the builds
-// within this process still share their own cache.
-const privateFrom = (base: string): string =>
-  `FROM ${base}\nLABEL sandbar.test.cache=${SCOPE}\n`;
+// Every podman build this file spawns runs without Buildah's layer cache. With
+// the cache on, each step scans EVERY image in the shared store, and an image
+// any other process removes mid-scan fails the build with "getting top layer
+// info: layer not known". No recipe content can opt out of that scan: a build
+// with private bytes failed 7 of 63 times beside a loop that built and removed
+// unrelated images, and 0 of 95 with BUILDAH_LAYERS=false, which the podman
+// client reads as its `--layers` default. Nothing here asserts on cache hits.
+process.env.BUILDAH_LAYERS = "false";
 
 const sha256 = async (path: string): Promise<string> =>
   createHash("sha256").update(await readFile(path)).digest("hex");
@@ -171,7 +172,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
     };
     await writeFile(
       join(root, "Containerfile"),
-      `${privateFrom(BASE)}COPY package-lock.json /lock.json\n`,
+      `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`,
     );
     await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
     onTestFinished(() => rm(root, { recursive: true, force: true }), 60_000);
@@ -198,7 +199,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       const context = await mkdtemp(join(tmpdir(), "sandbar-generated-context-"));
       onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
       await writeFile(join(context, "Containerfile"),
-        `${privateFrom(BASE)}COPY --chmod=0755 payload /usr/local/bin/payload\n`);
+        `FROM ${BASE}\nCOPY --chmod=0755 payload /usr/local/bin/payload\n`);
       await writeFile(join(context, "payload"), "generated-context\n");
       await buildImage({ tag, containerfile: "<generated>" }, {
         scope: SCOPE, root: "", contextRoot: context, capture: true,
@@ -448,7 +449,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         );
         await writeFile(
           join(context, "Containerfile"),
-          `${privateFrom("scratch")}COPY --chmod=0755 codex-${selectedVariant} /usr/local/bin/codex\n`,
+          `FROM scratch\nCOPY --chmod=0755 codex-${selectedVariant} /usr/local/bin/codex\n`,
         );
         await buildImage({ tag: toolsTag, containerfile: "<generated>" }, {
           scope: SCOPE, root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
@@ -494,7 +495,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       onTestFinished(() => rm(baseContext, { recursive: true, force: true }), 60_000);
       await writeFile(
         join(baseContext, "Containerfile"),
-        `${privateFrom("docker.io/library/alpine:3.22")}RUN adduser -D -u 1000 -h /home/node node\n`,
+        "FROM docker.io/library/alpine:3.22\nRUN adduser -D -u 1000 -h /home/node node\n",
       );
       await buildImage({ tag: uidBaseTag, containerfile: "<generated>" }, {
         scope: SCOPE, root: "", contextRoot: baseContext, capture: true,
@@ -513,7 +514,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       );
       await writeFile(
         join(context, "Containerfile"),
-        privateFrom("scratch") +
+        "FROM scratch\n" +
           "COPY --chmod=0755 codex-static /usr/local/bin/codex\n" +
           "COPY --chmod=0755 codex-code-mode-host-static /usr/local/bin/codex-code-mode-host\n",
       );
@@ -576,7 +577,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       // Containerfile, and that also never entered the tag-only cache key.
       await writeFile(
         join(root, "Containerfile"),
-        `${privateFrom(BASE)}COPY package-lock.json /lock.json\nRUN true\n`,
+        `FROM ${BASE}\nCOPY package-lock.json /lock.json\nRUN true\n`,
       );
       const fourth = await ensureImages([image], root, { scope: SCOPE });
       expect(fourth.get(TAG)).not.toBe(third.get(TAG));
@@ -687,10 +688,9 @@ describe.runIf(available)("ensureImages against real podman", () => {
     600_000,
   );
 
-  // Reconciliation removes intermediate image records. Buildah may hand one
-  // of those records to a concurrent build as a cache hit before the removal,
-  // then fail that build with "layer not known" when it follows the hit. Keep
-  // this destructive case behind this file's concurrent build cases.
+  // Reconciliation removes image records — the removal that fails a cached
+  // build mid-scan (see BUILDAH_LAYERS above). Keep this destructive case
+  // behind this file's concurrent build cases.
   it(
     "reconciles untagged predecessors and stopped tags without touching another scope",
     async ({ expect, task, onTestFinished }) => {
@@ -713,15 +713,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
           `FROM ${BASE}\n` +
           "COPY --from=intermediate /payload /payload\n",
       );
-      // Gate runners share one remote Buildah cache. Give this destructive
-      // fixture process-private layer bytes so another runner's cleanup cannot
-      // remove a cache image after this build selected it but before it read
-      // the top layer ("layer not known"). The builds within this test still
-      // share their own cache, which is the lifecycle behavior under test.
-      await writeFile(
-        join(root, "package-lock.json"),
-        `${JSON.stringify({ scope: ownScope, v: 1 })}\n`,
-      );
+      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
 
       // Reconciliation must reach same-tag predecessors and tags the current
       // config stopped naming while remaining blind to another scope's live
@@ -740,10 +732,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       await buildImage({ ...image, tag: sibling }, {
         scope: isolated.otherScope, root, capture: true,
       });
-      await writeFile(
-        join(root, "package-lock.json"),
-        `${JSON.stringify({ scope: ownScope, v: 99 })}\n`,
-      );
+      await writeFile(join(root, "package-lock.json"), '{"v":99}\n');
       await ensureImages([image], root, { scope: ownScope });
       const currentId = await imageId(TAG);
       expect(currentId).not.toBe(predecessorId);
