@@ -370,7 +370,7 @@ async function answerStep<T>(
   };
 }
 
-export function taggerPrompt(chunk: Bucket, minted: readonly string[]): string {
+function taggerPrompt(chunk: Bucket, minted: readonly string[]): string {
   const { vocabulary } = chunk;
   const labels = (items: readonly string[]): string => items.map((item) => `- ${item}`).join("\n");
   return render(TAGGER, {

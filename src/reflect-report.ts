@@ -67,7 +67,8 @@ export type Synthesis = {
 };
 
 // What a synthesis may cite: every key the synthesizer was shown (clusters,
-// candidates and `outlier:<N>`), and every file path in its workspace.
+// candidates and `outlier:<N>`), and every `sandbar/` and `consumer/` file
+// in its workspace as a target.
 export type SynthesisContext = {
   readonly keys: ReadonlySet<string>;
   readonly targets: ReadonlySet<string>;

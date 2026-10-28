@@ -43,7 +43,7 @@ End with one block in exactly this grammar:
 @proposal
 category: prose-edit | structural-check | deletion | issue-writing | missing-signal
 repo: sandbar | consumer
-target: <a file path in your working directory, or issue-writing>
+target: <a file under sandbar/ or consumer/, or issue-writing>
 evidence: <key>, <key>
 mechanism: lint | gate-step | sandbar-code | script
 event: <the event to add>
@@ -56,7 +56,8 @@ title: <one line>
 
 Give `mechanism:` only for a structural check, and `event:` only for a
 missing signal. The header lines end at the first blank line. The driver
-drops a proposal that cites an unknown key, names a target outside your
-working directory, or carries a field its category does not take.
+drops a proposal that cites an unknown key, names a target that is not a
+file under `sandbar/` or `consumer/`, or carries a field its category does
+not take.
 
 You only answer: do not modify any file, and run no command that writes.
