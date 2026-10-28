@@ -205,13 +205,11 @@ import {
 } from "./agent-tools.js";
 import {
   type EgressContext,
-  type EgressHandle,
-  type EgressReport,
+  type OwnerProxy,
   EGRESS_AGENT_ENV,
   EgressProxyDiedError,
   egressReport,
   ownerEgress,
-  startEgress,
 } from "./egress.js";
 import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
@@ -946,9 +944,8 @@ async function runSandboxCycle(
   let sandbox: Sandbox | null = null;
   let sandboxStack: SandboxStack | null = null;
   let stack: BoundStack | null = null;
-  let egress: EgressHandle | null = null;
+  let egress: OwnerProxy | null = null;
   const subject = { issue: Number(issue.id), title: issue.title };
-  const sandboxEgress = egressReport(opts.onEvent, { stack: "sandbox", ...subject });
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
   const priorReviewRounds: PriorReviewRound[] = [];
@@ -1067,7 +1064,7 @@ async function runSandboxCycle(
     // SOURCE and podman reads it at container start, so a missing one is a
     // bringup failure rather than an empty mount.
     if (sbxContainers.length > 0) await prepareSandboxLogDir(sandboxLogDir);
-    const holder: { stack: SandboxStack | null; egress: EgressHandle | null } = {
+    const holder: { stack: SandboxStack | null; egress: OwnerProxy | null } = {
       stack: null,
       egress: null,
     };
@@ -1096,8 +1093,10 @@ async function runSandboxCycle(
         // and once in the holder it is the teardown's to stop on any later
         // failure. The siblings join the sandbox's netns, so it covers them.
         if (config.egress !== null) {
-          holder.egress = await startEgress({
-            ...config.egress,
+          holder.egress = await ownerEgress(
+            config.egress,
+            egressReport(opts.onEvent, { stack: "sandbox", ...subject }),
+          ).start({
             owner: `sbx-${issue.id}`,
             networkName: egressNetwork,
             createNetwork: true,
@@ -1261,7 +1260,7 @@ async function runSandboxCycle(
     if (sandboxResult.status === "fulfilled") {
       sandbox = egress === null
         ? sandboxResult.value
-        : withEgressCheckpoints(sandboxResult.value, egress, sandboxEgress);
+        : withEgressCheckpoints(sandboxResult.value, egress);
     }
     if (stackResult.status === "fulfilled") stack = stackResult.value;
     if (sandbox === null || stack === null) {
@@ -1547,7 +1546,7 @@ async function runSandboxCycle(
     // its network goes with it.
     if (egress) {
       try {
-        await sandboxEgress.stopped(await egress.stop());
+        await egress.stop();
       } catch (err) {
         await opts.onEvent({
           kind: "complaint",
@@ -1564,14 +1563,7 @@ async function runSandboxCycle(
 // invocation whose proxy is dead raises that death instead — infrastructure,
 // so HARD-ERROR and a fresh sandbox, where the agent's error would have
 // charged the role with a network that no longer exists.
-export function withEgressCheckpoints(
-  sandbox: Sandbox,
-  egress: EgressHandle,
-  report: EgressReport,
-): Sandbox {
-  const checkpoint = async (): Promise<void> => {
-    await report.refusals((await egress.drain()).firstRefusals);
-  };
+export function withEgressCheckpoints(sandbox: Sandbox, egress: OwnerProxy): Sandbox {
   return {
     ...sandbox,
     run: async (o) => {
@@ -1580,10 +1572,10 @@ export function withEgressCheckpoints(
         result = await sandbox.run(o);
       } catch (err) {
         await egress.assertAlive();
-        await checkpoint();
+        await egress.checkpoint();
         throw err;
       }
-      await checkpoint();
+      await egress.checkpoint();
       return result;
     },
   };

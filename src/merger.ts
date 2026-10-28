@@ -3367,11 +3367,10 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       });
       // The attempt's own network and its only way out (#202), up before the
       // container and stopped after it is removed, with the other cleanup.
-      const egress = deps.egress;
       const network = resolveNetworkNameFor(deps.scope, attempt);
-      const proxy = egress === undefined
+      const proxy = deps.egress === undefined
         ? null
-        : await egress.start({
+        : await deps.egress.start({
             owner: `resolve-${attempt}`,
             networkName: network,
             createNetwork: true,
@@ -3453,9 +3452,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         removeContainer(),
       ]);
       disposeContainer?.();
-      const proxyStopped = proxy === null || egress === undefined
-        ? undefined
-        : (await Promise.allSettled([proxy.stop().then(egress.report.stopped)]))[0];
+      const [proxyStopped] = await Promise.allSettled([proxy?.stop()]);
       const proxyFailure = proxyStopped?.status === "rejected"
         ? proxyStopped.reason
         : undefined;

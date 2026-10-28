@@ -40,16 +40,15 @@
 // fine for a record that is never a decision input (#82).
 //
 // THE OWNERS (#223). With `config.egress` an allowlist, run.ts builds the image
-// at startup and hands every owner an `EgressContext` (logs in
-// `<runDir>/egress/`): the inner loop starts the sandbox's (`sbx-<issue>`) and
-// drains it after every agent invocation; gate-stack.ts starts each stack's
-// between its `--internal` network and its pod and drains it after every gate
-// run; merger.ts brackets each resolve attempt (`resolve-<n>`). The gate stack
-// gets an `OwnerEgress` whose `start` closes over the context, because this
-// module imports gate-stack.ts's podman helpers. `egressReport` is where the
-// records go: each drain's first sightings as `egress-refused` events, the
-// teardown summary as `egress`. Open egress starts nothing, and every argv
-// stays what it was.
+// at startup and every owner gets an `OwnerEgress` over the run's
+// `EgressContext` (logs in `<runDir>/egress/`) and an `egressReport`: the
+// inner loop starts the sandbox's proxy (`sbx-<issue>`) and checkpoints it
+// after every agent invocation; gate-stack.ts starts each stack's between its
+// `--internal` network and its pod and checkpoints it after every gate run;
+// merger.ts brackets each resolve attempt (`resolve-<n>`). A checkpoint
+// records its drain's first sightings as `egress-refused` events, and the
+// stop records the `egress` summary. Open egress starts nothing, and every
+// argv stays what it was.
 //
 // Decision 8's private ranges are the proxy's to enforce (egress-policy.ts).
 // RESIDUAL RISK (Decision 9), recorded rather than closed: an allowed host is
@@ -258,16 +257,41 @@ export type EgressOwner = {
   readonly ip?: string | undefined;
 };
 
-// An owner's egress as its caller hands it down: how to start its proxy and
-// where its records go. A function rather than the context, so gate-stack.ts,
-// whose podman helpers this module uses, imports nothing from it but types.
+// An owner's proxy as the owner uses it: what it checks and when it stops,
+// its records going to the report it was started with.
+export type OwnerProxy = {
+  readonly dnsArgs: readonly string[];
+  readonly assertAlive: () => Promise<void>;
+  // Records the refusals first sighted since the previous checkpoint, and
+  // answers every destination refused since then.
+  readonly checkpoint: () => Promise<readonly string[]>;
+  // Stops the proxy and records its summary.
+  readonly stop: () => Promise<void>;
+};
+
+// How an owner starts its proxy. A function rather than the context, so
+// gate-stack.ts, whose podman helpers this module uses, imports nothing from
+// it but types.
 export type OwnerEgress = {
-  readonly start: (owner: EgressOwner) => Promise<EgressHandle>;
-  readonly report: EgressReport;
+  readonly start: (owner: EgressOwner) => Promise<OwnerProxy>;
 };
 
 export function ownerEgress(context: EgressContext, report: EgressReport): OwnerEgress {
-  return { start: (owner) => startEgress({ ...context, ...owner }), report };
+  return {
+    start: async (owner) => {
+      const handle = await startEgress({ ...context, ...owner });
+      return {
+        dnsArgs: handle.dnsArgs,
+        assertAlive: handle.assertAlive,
+        checkpoint: async () => {
+          const { firstRefusals, refused } = await handle.drain();
+          await report.refusals(firstRefusals);
+          return refused;
+        },
+        stop: async () => report.stopped(await handle.stop()),
+      };
+    },
+  };
 }
 
 // The complete lines of the proxy's log past `offset`, and where they end.

@@ -1,17 +1,12 @@
 // The egress proxy's records on the caller side (#202): `egressReport` turns a
 // drain's first sightings and a teardown summary into run events, and the
-// inner loop's checkpoint drains after every agent invocation and lets a dead
-// proxy, not the agent, own a failure.
+// inner loop checkpoints the sandbox's proxy after every agent invocation and
+// lets a dead proxy, not the agent, own a failure.
 
 import { describe, expect, it, vi } from "vitest";
 
 import { AgentError, type Sandbox } from "./agent-sandbox.js";
-import {
-  type EgressHandle,
-  EgressProxyDiedError,
-  type EgressReport,
-  egressReport,
-} from "./egress.js";
+import { EgressProxyDiedError, type OwnerProxy, egressReport } from "./egress.js";
 import type { EgressRefusal } from "./egress-policy.js";
 import type { EventInput } from "./events.js";
 import { withEgressCheckpoints } from "./inner-loop.js";
@@ -58,32 +53,32 @@ describe("withEgressCheckpoints", () => {
       close: vi.fn(async () => ({})),
     } satisfies Sandbox;
     const egress = {
-      drain: vi.fn(async () => ({ firstRefusals: [refusal], refused: ["evil.test:443"] })),
+      dnsArgs: [],
+      checkpoint: vi.fn(async () => ["evil.test:443"]),
       assertAlive: vi.fn(async () => {
         if (!alive) throw new EgressProxyDiedError("egress proxy p died (gone)");
       }),
-    } as unknown as EgressHandle;
-    const report = { refusals: vi.fn(async () => undefined), stopped: vi.fn() } as unknown as EgressReport;
-    return { inner, egress, report, sandbox: withEgressCheckpoints(inner, egress, report) };
+      stop: vi.fn(async () => undefined),
+    } satisfies OwnerProxy;
+    return { inner, egress, sandbox: withEgressCheckpoints(inner, egress) };
   };
   const result = { stdout: "ok", commits: [], durationMs: 1, silent: false, maxGapMs: 0, endedBy: "exit", toolCalls: 0 } as const;
 
-  it("records the refusals an invocation's proxy first sighted", async () => {
-    const { sandbox, report, egress } = setup(async () => result);
+  it("checkpoints the proxy after an invocation", async () => {
+    const { sandbox, egress } = setup(async () => result);
     await expect(sandbox.run({} as never)).resolves.toBe(result);
-    expect(egress.drain).toHaveBeenCalledOnce();
-    expect(report.refusals).toHaveBeenCalledWith([refusal]);
+    expect(egress.checkpoint).toHaveBeenCalledOnce();
     expect(egress.assertAlive).not.toHaveBeenCalled();
   });
 
-  it("keeps the agent's failure while the proxy lives, and records its refusals", async () => {
+  it("keeps the agent's failure while the proxy lives, and checkpoints it", async () => {
     const failure = new AgentError("exit 1");
-    const { sandbox, report, egress } = setup(async () => {
+    const { sandbox, egress } = setup(async () => {
       throw failure;
     });
     await expect(sandbox.run({} as never)).rejects.toBe(failure);
     expect(egress.assertAlive).toHaveBeenCalledOnce();
-    expect(report.refusals).toHaveBeenCalledWith([refusal]);
+    expect(egress.checkpoint).toHaveBeenCalledOnce();
   });
 
   it("raises a dead proxy in place of the agent's failure", async () => {

@@ -145,7 +145,7 @@ import type {
   ResolvedStackContainer,
   ResolvedStackMount,
 } from "./config.js";
-import type { EgressHandle, EgressReport, OwnerEgress } from "./egress.js";
+import type { OwnerEgress, OwnerProxy } from "./egress.js";
 import { internalNetworkCreateArgs } from "./egress-policy.js";
 import { type ImageMap, ImageBuildError } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
@@ -899,8 +899,8 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   let podKept = false;
   // The stack's egress proxy (#202), once started; `stop` removes it between
   // the pod and the network, and every gate run checks and drains it.
-  let proxy: EgressHandle | null = null;
-  const startProxy = async (ip?: string): Promise<EgressHandle | null> => {
+  let proxy: OwnerProxy | null = null;
+  const startProxy = async (ip?: string): Promise<OwnerProxy | null> => {
     if (opts.egress === undefined) return null;
     proxy = await opts.egress.start({
       owner: opts.stackId,
@@ -909,10 +909,6 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       ip,
     });
     return proxy;
-  };
-  const stopProxy = async (): Promise<void> => {
-    if (proxy === null || opts.egress === undefined) return;
-    await opts.egress.report.stopped(await proxy.stop());
   };
   const resourceDeps = systemContainerResourceDeps(boundedPodman);
   const resourceSnapshotReader = opts.containerResourceSnapshot ??
@@ -1098,7 +1094,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     await attempt(POD_RM_ARGS(podName));
     // The proxy after the pod, its only client, and before the network, which
     // is the stack's (#202). Its own teardown failure names what it leaked.
-    const [proxyStopped] = await Promise.allSettled([stopProxy()]);
+    const [proxyStopped] = await Promise.allSettled([proxy?.stop()]);
     if (proxyStopped?.status === "rejected") teardownFailures.push(proxyStopped.reason);
     await attempt(["network", "rm", "-f", networkName]);
     const removalFailure = failures.length > 0
@@ -1294,9 +1290,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           recordTeardown,
           bringUpCtx,
         });
-        return proxy === null || opts.egress === undefined
-          ? result
-          : await withEgressRefusals(result, proxy, opts.egress.report);
+        return proxy === null ? result : await withEgressRefusals(result, proxy);
       },
     };
   } catch (err) {
@@ -2066,7 +2060,7 @@ type RunGateCtx = {
   readonly attach: ContainerAttachment;
   // The stack's egress proxy (#202), asked whether it is alive beside the
   // issue containers; null with open egress.
-  readonly egress: EgressHandle | null;
+  readonly egress: OwnerProxy | null;
   readonly worktreePath: string;
   readonly hideWorktreeGit: boolean;
   readonly nameOf: (c: ResolvedStackContainer) => string;
@@ -2729,17 +2723,16 @@ async function withContainerLogs(
   return { ...result, containerLogs: sections.join("\n") };
 }
 
-// After every gate run behind an egress allowlist (#202): the refusals the
-// proxy first sighted are recorded, and a red gate's container logs lead with
-// every destination it refused during the run, first sighting or not, so a
-// step that needs an unlisted host says so in the trace of every attempt.
+// After every gate run behind an egress allowlist (#202): the proxy's
+// checkpoint records what it first sighted, and a red gate's container logs
+// lead with every destination it refused during the run, first sighting or
+// not, so a step that needs an unlisted host says so in the trace of every
+// attempt.
 async function withEgressRefusals(
   result: GateResult,
-  egress: EgressHandle,
-  report: EgressReport,
+  egress: OwnerProxy,
 ): Promise<GateResult> {
-  const { firstRefusals, refused } = await egress.drain();
-  await report.refusals(firstRefusals);
+  const refused = await egress.checkpoint();
   if (result.ok || refused.length === 0) return result;
   return {
     ...result,
