@@ -143,15 +143,21 @@ describe("renderLabelSync", () => {
 
 // A `gh` on PATH that keeps a repository's labels and issues in a JSON file.
 // Issues hold label IDS, as GitHub's do, so a rename that keeps them is
-// visible and a delete-and-recreate would not be.
+// visible and a delete-and-recreate would not be. Each call holds a lock
+// directory, as the server serializes writes: the sync's steps run at once.
 const FAKE_GH = `#!/usr/bin/env node
 const fs = require("node:fs");
 const file = process.env.FAKE_GH_STATE;
+const lock = file + ".lock";
+for (;;) {
+  try { fs.mkdirSync(lock); break; } catch (e) { if (e.code !== "EEXIST") throw e; }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+}
 const state = JSON.parse(fs.readFileSync(file, "utf8"));
 const argv = process.argv.slice(2);
 const flag = (name) => argv[argv.indexOf(name) + 1];
 const find = (name) => state.labels.find((l) => l.name.toLowerCase() === name.toLowerCase());
-const fail = (message) => { process.stderr.write(message); process.exit(1); };
+let failure = null;
 state.calls.push(argv);
 if (argv[0] === "label" && argv[1] === "list") {
   process.stdout.write(JSON.stringify(state.labels.map(({ name, description, color }) => ({ name, description, color }))));
@@ -159,16 +165,18 @@ if (argv[0] === "label" && argv[1] === "list") {
   const label = find(argv[2]);
   const fields = { description: flag("--description"), color: flag("--color") };
   if (label) Object.assign(label, fields);
-  else state.labels.push({ id: state.labels.length + 1, name: argv[2], ...fields });
+  else state.labels.push({ id: Math.max(0, ...state.labels.map((l) => l.id)) + 1, name: argv[2], ...fields });
 } else if (argv[0] === "label" && argv[1] === "edit") {
   const label = find(argv[2]);
-  if (!label) fail("no label " + argv[2]);
-  if (find(flag("--name"))) fail("already exists");
-  Object.assign(label, { name: flag("--name"), description: flag("--description"), color: flag("--color") });
+  if (!label) failure = "no label " + argv[2];
+  else if (find(flag("--name"))) failure = "already exists";
+  else Object.assign(label, { name: flag("--name"), description: flag("--description"), color: flag("--color") });
 } else {
-  fail("unexpected gh " + argv.join(" "));
+  failure = "unexpected gh " + argv.join(" ");
 }
 fs.writeFileSync(file, JSON.stringify(state));
+fs.rmdirSync(lock);
+if (failure !== null) { process.stderr.write(failure); process.exitCode = 1; }
 `;
 
 type FakeRepo = {
