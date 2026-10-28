@@ -262,4 +262,19 @@ describe("syncLabels against a repository", () => {
     );
     expect(writes().some((argv) => argv.includes("bug"))).toBe(false);
   });
+
+  it("refuses a listing that may be truncated and writes nothing", async () => {
+    const labels = Array.from({ length: 1000 }, (_, i) => (
+      { id: i + 1, name: `l${i}`, description: "", color: "000000" }
+    ));
+    seed({ labels, issues: [] });
+    await expect(sync([host])).rejects.toThrow(/at least 1000 labels/);
+    expect(writes()).toEqual([]);
+  });
+
+  it("refuses a listing that is not labels with name, description and color", async () => {
+    seed({ labels: [{ id: 1, name: "x" }] as unknown as FakeRepo["labels"], issues: [] });
+    await expect(sync([host])).rejects.toThrow(/gh label list answered/);
+    expect(writes()).toEqual([]);
+  });
 });
