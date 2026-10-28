@@ -190,6 +190,27 @@ describe("parseSynthesis (#182 Design)", () => {
     expect(synthesis).toMatchObject({ proposals: [], dropped: [{ reason: expect.stringContaining(reason) }] });
   });
 
+  it.each([
+    ["a duplicated field", "title: A\ntitle: B", "title is given twice"],
+    ["a header line with no colon", "just words", "malformed header line: just words"],
+    ["a malformed line before an unknown field", "just words\nowner: me", "malformed header line: just words"],
+  ])("drops a proposal with %s, keeping the first reason", (_name, extra, reason) => {
+    const text = answer(["@proposal", "category: prose-edit", "repo: consumer", "target: consumer/CLAUDE.md",
+      "evidence: tag:quality:R3", extra, "", "Body."].join("\n"));
+    const synthesis = parseSynthesis(text, context);
+    expect(synthesis).toMatchObject({ proposals: [], dropped: [{ reason: expect.stringContaining(reason) }] });
+    expect(JSON.stringify(synthesis)).not.toContain("unknown field");
+  });
+
+  it("parses only the last proposals block when the prose quotes the tag earlier", () => {
+    const real = proposal(edit);
+    const stray = proposal({ ...edit, title: "Stray" });
+    const text = `I will emit a <proposals> block:\n<proposals>\n${stray}\n</proposals>\nRevised:\n<proposals>\n${real}\n</proposals>`;
+    expect(parseSynthesis(text, context)).toMatchObject({ proposals: [{ title: "Name the smoke fixture" }] });
+    expect(parseSynthesis(`quoting <proposals> in prose.\n<proposals>\n${real}\n</proposals>`, context))
+      .toMatchObject({ proposals: [{ title: "Name the smoke fixture" }] });
+  });
+
   it("drops a no-action line naming no known key, or giving no reason", () => {
     expect(parseSynthesis(answer("@no-action tag:quality:R9: no", "@no-action rule:quality:R6:"), context))
       .toEqual({ proposals: [], noAction: [], dropped: [

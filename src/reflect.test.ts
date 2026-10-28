@@ -99,16 +99,18 @@ const PROPOSALS = [
 function stub(answers: Partial<Record<ReflectStep, string | InvokeResult>> = {}) {
   const calls: string[] = [];
   const workspaces: string[] = [];
+  const prompts = new Map<string, string>();
   const openInvoker = (workspace: string): Invoker => ({
-    invoke: async (step, _prompt, name) => {
+    invoke: async (step, prompt, name) => {
       calls.push(name);
+      prompts.set(name, prompt);
       workspaces.push(workspace);
       const answer = answers[step] ?? (step === "tagger" ? TAGS : PROPOSALS);
       return typeof answer === "string" ? { answer, usage: { inputTokens: 100, outputTokens: 10 } } : answer;
     },
     close: async () => undefined,
   });
-  return { calls, workspaces, openInvoker };
+  return { calls, workspaces, prompts, openInvoker };
 }
 
 const run = (dir: string, logs: string, agents: ReturnType<typeof stub>, fields: Partial<RunConfig> = {}) =>
@@ -121,6 +123,9 @@ describe("reflect (#182, #208)", () => {
     const agents = stub();
     const { report, reportPath } = await run(dir, logs, agents);
     expect(agents.calls).toEqual(["tagger quality 1/1", "synthesizer"]);
+    const taggerPrompt = agents.prompts.get("tagger quality 1/1");
+    expect(taggerPrompt).toContain("- `R3`: ");
+    expect(taggerPrompt).toContain("### F1 (issue #7)");
     expect(report).toContain("## Proposals: consumer, prose-edit");
     expect(report).toContain(`- acme/app#7: \`${join(logs, RUN, "issue-7")}/quality-1.log\``);
     expect(report).toContain("| `tag:quality:R3` | 2 | 2 |");
@@ -152,6 +157,10 @@ describe("reflect (#182, #208)", () => {
     await run(dir, logs, model, { reflectSynthesizerModelId: "opus-next" });
     expect(model.calls).toEqual(["synthesizer"]);
 
+    const effort = stub();
+    await run(dir, logs, effort, { reflectSynthesizerEffort: "max" });
+    expect(effort.calls).toEqual(["synthesizer"]);
+
     const doc = stub();
     await writeFile(join(dir, "source", "CLAUDE.md"), "# Conventions, edited\n");
     git(["-C", join(dir, "source"), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "edit"]);
@@ -163,6 +172,43 @@ describe("reflect (#182, #208)", () => {
     await writeLogs(logs, [7, 8, 9]);
     await run(dir, logs, input);
     expect(input.calls).toEqual(["tagger quality 1/1", "synthesizer"]);
+  });
+
+  it("refuses a garbled cache file, naming it", async () => {
+    const { dir, logs } = await consumer();
+    await writeLogs(logs, [7, 8]);
+    await run(dir, logs, stub());
+    const cacheDir = join(dir, ".sandbar", "reflect", "cache");
+    const [file] = await readdir(cacheDir);
+    const path = join(cacheDir, file ?? "");
+    await writeFile(path, "{not json");
+    await expect(run(dir, logs, stub())).rejects.toThrow(/is not JSON; delete it/);
+    await writeFile(path, JSON.stringify({ usage: {} }));
+    await expect(run(dir, logs, stub())).rejects.toThrow(/is not a cached answer; delete it/);
+  });
+
+  it("closes the invoker and removes the workspace, and throws the step's error, when a call rejects", async () => {
+    const { dir, logs } = await consumer();
+    await writeLogs(logs, [7, 8]);
+    let closed = 0;
+    const openInvoker = (): Invoker => ({
+      invoke: () => Promise.reject(new Error("invoke broke")),
+      close: () => {
+        closed += 1;
+        return Promise.reject(new Error("close broke"));
+      },
+    });
+    await expect(reflect(configOf(dir), { logsDir: logs, window: { last: 10 }, agents: true, openInvoker }))
+      .rejects.toThrow("invoke broke");
+    expect(closed).toBe(1);
+    expect((await readdir(join(dir, ".sandbar", "reflect"))).filter((name) => name.startsWith("ws-"))).toEqual([]);
+  });
+
+  it("refuses a step routed to a provider no daemon role runs, before any podman", async () => {
+    const { dir, logs } = await consumer();
+    await writeLogs(logs, [7, 8]);
+    await expect(reflect(configOf(dir, { reflectTaggerAgent: "codex", reflectTaggerModelId: "gpt-5" }),
+      { logsDir: logs, window: { last: 10 }, agents: true })).rejects.toThrow(/no daemon role runs/);
   });
 
   it("makes no call over a window where nothing recurs", async () => {

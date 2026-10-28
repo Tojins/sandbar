@@ -288,11 +288,9 @@ async function openSandbox(config: ResolvedConfig, layout: RepoLayout, workspace
 
 function sandboxInvoker(config: ResolvedConfig, layout: RepoLayout, workspace: string): Invoker {
   let opening: Promise<Sandbox> | undefined;
-  let sandbox: Sandbox | undefined;
   return {
     invoke: async (step, prompt, name) => {
-      sandbox ??= await (opening ??= openSandbox(config, layout, workspace));
-      const open = sandbox;
+      const open = await (opening ??= openSandbox(config, layout, workspace));
       const { agent, model, effort } = routing(config, step);
       return guardReadOnly(workspace, async () => {
         try {
@@ -313,7 +311,8 @@ function sandboxInvoker(config: ResolvedConfig, layout: RepoLayout, workspace: s
       });
     },
     close: async () => {
-      await sandbox?.close();
+      // A failed open rejects here too; the invoke that opened it has thrown it.
+      await (await opening)?.close();
     },
   };
 }
@@ -339,7 +338,18 @@ async function readCache(path: string): Promise<CacheEntry | null> {
     if (!isErrno(err, "ENOENT")) throw err;
     return null;
   }
-  return JSON.parse(text) as CacheEntry;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    throw new SandbarError(`reflect's cache file ${path} is not JSON; delete it.`);
+  }
+  if (typeof parsed !== "object" || parsed === null || !("answer" in parsed) || typeof parsed.answer !== "string" ||
+    ("usage" in parsed && (typeof parsed.usage !== "object" || parsed.usage === null))) {
+    throw new SandbarError(`reflect's cache file ${path} is not a cached answer; delete it.`);
+  }
+  return parsed as CacheEntry;
 }
 
 // One step's answer, from the cache or from a call. Only an answer that
@@ -535,8 +545,11 @@ async function runAgents(
   await buildWorkspace(workspace, files);
   const invoker = (opts.openInvoker ?? ((path: string) => sandboxInvoker(config, layout, path)))(workspace);
   const cleanup = async (): Promise<void> => {
-    await invoker.close();
-    await rm(workspace, { recursive: true, force: true });
+    try {
+      await invoker.close();
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   };
   const ctx: StepContext = { config, invoker, cacheDir: join(reflectDir, "cache"), log: opts.log ?? (() => undefined) };
   const [steps] = await Promise.allSettled([agentSteps(ctx, { workspace, files, tip, stats, mining })]);
