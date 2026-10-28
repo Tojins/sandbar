@@ -195,11 +195,12 @@ describe("readCommitPaths (real git, #209)", () => {
   it("reads each commit's paths and names a sha the repo lacks as null", async () => {
     const dir = await tempDir();
     await git(dir, "init", "-q", "-b", "main");
-    await commit(dir, { "src/a.ts": "a" });
+    const root = await commit(dir, { "src/a.ts": "a" });
     const tests = await commit(dir, { "src/a.test.ts": "t", "package.json": "{}" });
     const empty = await commit(dir, {});
     const missing = "0".repeat(40);
-    expect(readCommitPaths(dir, [tests, empty, missing, tests])).toEqual(new Map([
+    expect(readCommitPaths(dir, [root, tests, empty, missing, tests])).toEqual(new Map([
+      [root, ["src/a.ts"]],
       [tests, ["package.json", "src/a.test.ts"]],
       [empty, []],
       [missing, null],
