@@ -2,7 +2,7 @@
 // tears the proxy down, `stop` withdraws it, and overlapping drains fold each
 // log line once.
 
-import { appendFile, mkdtemp } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rename, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -110,5 +110,31 @@ describe("startEgress drain", () => {
       .toEqual([{ host: "evil.test", port: null, via: "dns", enforced: true }]);
     expect(summary.allowed).toEqual({ "a.test:443": 1 });
     expect(summary.refused).toEqual({ "evil.test": 1 });
+  });
+
+  it("reads the log again after a drain rejects, and the first caller still sees the rejection", async () => {
+    const logDir = await mkdtemp(join(tmpdir(), "egress-drain-"));
+    podman.logPath = join(logDir, "owner.jsonl");
+    const handle = await startEgress({
+      scope: gateScope("/egress-drain-reject-test"),
+      owner: "owner",
+      networkName: "net",
+      createNetwork: false,
+      image: "img",
+      policy: { mode: "enforce", entries: [] } as never,
+      logDir,
+    });
+    // A directory where the log should be makes the read fail once.
+    await rename(podman.logPath, `${podman.logPath}.moved`);
+    await mkdir(podman.logPath);
+    await expect(handle.drain()).rejects.toThrow();
+    await rmdir(podman.logPath);
+    await rename(`${podman.logPath}.moved`, podman.logPath);
+    await appendFile(podman.logPath, '{"t":"refuse","via":"dns","host":"evil.test","port":null}\n');
+    const second = await handle.drain();
+    expect(second.firstRefusals).toEqual([
+      { host: "evil.test", port: null, via: "dns", enforced: true },
+    ]);
+    expect((await handle.stop()).refused).toEqual({ "evil.test": 1 });
   });
 });
