@@ -205,6 +205,24 @@ describe("requiredAgentProviders", () => {
     expect(requiredAgentProviders({ ...roles, scenarioWriter: false })).toEqual(["claude"]);
   });
 
+  it("adds the scenario runner's provider only while the writer is on (#180)", () => {
+    const roles = {
+      uiPrototypeCheck: true,
+      condenseAboveChars: null,
+      condenserAgent: "claude",
+      implementerAgent: "claude",
+      uiCheckAgent: "claude",
+      reviewerAgent: "claude",
+      reviewerQualityAgent: "claude",
+      adjudicatorAgent: "claude",
+      mergerAgent: "claude",
+      scenarioWriterAgent: "claude",
+      scenarioRunnerAgent: "codex",
+    } as const;
+    expect(requiredAgentProviders({ ...roles, scenarioWriter: true })).toEqual(["claude", "codex"]);
+    expect(requiredAgentProviders({ ...roles, scenarioWriter: false })).toEqual(["claude"]);
+  });
+
   it("is just claude for the default routing", () => {
     expect(
       requiredAgentProviders({

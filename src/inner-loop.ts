@@ -715,6 +715,9 @@ export type InnerLoopConfig = {
   readonly scenarioWriter: boolean;
   readonly scenarioWriterAgent: AgentProviderName;
   readonly scenarioWriterModelId: string;
+  // The verifier's scenario runner (#180), beside the white-box review.
+  readonly scenarioRunnerAgent: AgentProviderName;
+  readonly scenarioRunnerModelId: string;
   // Reasoning effort per call (#130), the third per-call knob beside the model
   // id and the CLI. Absent is a value — the CLI's default — and stays absent
   // on the log line.
@@ -725,6 +728,7 @@ export type InnerLoopConfig = {
   readonly uiCheckEffort?: string | undefined;
   readonly condenserEffort?: string | undefined;
   readonly scenarioWriterEffort?: string | undefined;
+  readonly scenarioRunnerEffort?: string | undefined;
   readonly uiPrototypeCheck: boolean;
   readonly partitionCheck: boolean;
   readonly maxContextChars: number;

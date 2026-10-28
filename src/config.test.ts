@@ -1173,6 +1173,62 @@ describe("resolveConfig", () => {
       .scenarioWriter).toBe(false);
   });
 
+  it("routes the scenario runner as the reviewer, model and effort while it shares the reviewer's CLI (#180)", () => {
+    expect(resolveConfig(minimal)).toMatchObject({
+      scenarioRunnerAgent: "claude",
+      scenarioRunnerModelId: "opus",
+      scenarioRunnerEffort: "high",
+    });
+    expect(resolveConfig({
+      ...minimal,
+      reviewerAgent: "codex",
+      reviewerModelId: "gpt-5.6-sol",
+      reviewerEffort: "xhigh",
+    })).toMatchObject({
+      scenarioRunnerAgent: "codex",
+      scenarioRunnerModelId: "gpt-5.6-sol",
+      scenarioRunnerEffort: "xhigh",
+    });
+    // Split to another CLI, it takes neither the reviewer's model nor its effort.
+    expect(resolveConfig({
+      ...minimal,
+      reviewerAgent: "codex",
+      reviewerModelId: "gpt-5.6-sol",
+      reviewerEffort: "xhigh",
+      scenarioRunnerAgent: "claude",
+    })).toMatchObject({
+      scenarioRunnerAgent: "claude",
+      scenarioRunnerModelId: "opus",
+      scenarioRunnerEffort: "high",
+    });
+    expect(resolveConfig({
+      ...minimal,
+      scenarioRunnerModelId: "sonnet",
+      scenarioRunnerEffort: "medium",
+    })).toMatchObject({ scenarioRunnerModelId: "sonnet", scenarioRunnerEffort: "medium" });
+  });
+
+  it("refuses a scenario runner moved half-way off claude, unless the writer is off (#180)", () => {
+    expect(() => resolveConfig({ ...minimal, scenarioRunnerAgent: "codex" }))
+      .toThrow(/config\.scenarioRunnerAgent is "codex"[\s\S]*config\.scenarioRunnerModelId/);
+    expect(resolveConfig({ ...minimal, scenarioWriter: false, scenarioRunnerAgent: "codex" })
+      .scenarioRunnerAgent).toBe("codex");
+    expect(() => resolveConfig({ ...minimal, scenarioRunnerEffort: "" }))
+      .toThrow(/config\.scenarioRunnerEffort/);
+  });
+
+  it("accepts a scenarioRunner prompt extension and a beforeScenarioRun hook (#180)", () => {
+    const hooks = { sandbox: { beforeScenarioRun: [{ command: "scripts/prepare.sh scenario-run" }] } };
+    expect(resolveConfig({
+      ...minimal,
+      sandboxHooks: hooks,
+      promptExtensions: { scenarioRunner: { text: "Log in as the demo user." } },
+    })).toMatchObject({
+      sandboxHooks: hooks,
+      promptExtensions: { scenarioRunner: { text: "Log in as the demo user." } },
+    });
+  });
+
   it("refuses a non-boolean scenarioWriter and a malformed scenarioWriterEffort (#203)", () => {
     expect(() => resolveConfig({ ...minimal, scenarioWriter: "yes" as never }))
       .toThrow(/config\.scenarioWriter must be a boolean/);

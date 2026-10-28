@@ -268,6 +268,11 @@ export type SandboxHooks = {
     // migrations to it. Valid only with `config.databaseCopies`; run by
     // `Sandbox.runHooks`, whose failure is reported and never retried.
     onDbCopyReady?: ReadonlyArray<SandboxHook>;
+    // Before each verifier round that runs scenarios (#180), after the copy
+    // and its `onDbCopyReady`, so the app the runner drives is served from the
+    // head under review. Run by `Sandbox.runHooks`; a failure makes the
+    // scenarios that need the app unverified and is never retried.
+    beforeScenarioRun?: ReadonlyArray<SandboxHook>;
   };
 };
 

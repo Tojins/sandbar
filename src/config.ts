@@ -102,6 +102,7 @@ export type PromptRole =
   | "reviewer"
   | "reviewerQuality"
   | "scenarioWriter"
+  | "scenarioRunner"
   | "merger";
 export type PromptExtension =
   | { readonly text: string }
@@ -144,6 +145,7 @@ const PROMPT_ROLES: readonly PromptRole[] = [
   "reviewer",
   "reviewerQuality",
   "scenarioWriter",
+  "scenarioRunner",
   "merger",
 ];
 
@@ -940,6 +942,12 @@ export type RunConfig = {
   // that snapshot.
   readonly scenarioWriter?: boolean;
   readonly scenarioWriterModelId?: string;
+  // The verifier's scenario runner (#180): beside the white-box review, it
+  // runs the written scenarios against the branch. It follows the reviewer's
+  // CLI, and takes the reviewer's model and effort only while it also runs
+  // that CLI, as the adjudicator takes its model. A path in
+  // `promptExtensions.scenarioRunner` is probed in the issue worktree.
+  readonly scenarioRunnerModelId?: string;
   readonly mergerModelId?: string;
   // `npm run reflect`'s two steps (#182, #208), never run by the daemon: the
   // tagger labels findings against a closed vocabulary ("sonnet"), the
@@ -967,6 +975,7 @@ export type RunConfig = {
   readonly adjudicatorAgent?: AgentProviderName;
   readonly condenserAgent?: AgentProviderName;
   readonly scenarioWriterAgent?: AgentProviderName;
+  readonly scenarioRunnerAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
   readonly reflectTaggerAgent?: AgentProviderName;
   readonly reflectSynthesizerAgent?: AgentProviderName;
@@ -979,7 +988,8 @@ export type RunConfig = {
   // the first invocation, loudly. A claude-routed role that leaves it unset
   // gets the driver default beside its default model — implementer, UI
   // checker and reviewer `high`, reviewer-quality and merger `medium`, the
-  // adjudicator the reviewer's, the reflect tagger `medium` and its
+  // adjudicator the reviewer's, the scenario runner the reviewer's while it
+  // runs the reviewer's CLI, the reflect tagger `medium` and its
   // synthesizer `high`; the condenser (#217) and the scenario writer (#203)
   // have none. A role routed elsewhere
   // has no driver default either:
@@ -994,6 +1004,7 @@ export type RunConfig = {
   readonly adjudicatorEffort?: string;
   readonly condenserEffort?: string;
   readonly scenarioWriterEffort?: string;
+  readonly scenarioRunnerEffort?: string;
   readonly mergerEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
@@ -1214,6 +1225,7 @@ export type ResolvedConfig = Required<
     | "adjudicatorEffort"
     | "condenserEffort"
     | "scenarioWriterEffort"
+    | "scenarioRunnerEffort"
     | "mergerEffort"
     | "reflectTaggerEffort"
     | "reflectSynthesizerEffort"
@@ -1233,6 +1245,7 @@ export type ResolvedConfig = Required<
   readonly adjudicatorEffort?: string;
   readonly condenserEffort?: string;
   readonly scenarioWriterEffort?: string;
+  readonly scenarioRunnerEffort?: string;
   readonly mergerEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
@@ -3091,6 +3104,18 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     config.adjudicatorAgent === undefined || adjudicatorAgent === reviewerAgent
       ? config.reviewerModelId
       : undefined;
+  // The scenario runner (#180) follows the reviewer on the adjudicator's
+  // rule, its effort included, so routing the reviewer elsewhere moves both
+  // verifier agents at once.
+  const scenarioRunnerAgent = parseAgentProviderName(
+    "scenarioRunnerAgent",
+    config.scenarioRunnerAgent ?? reviewerAgent,
+  );
+  const runnerFollowsReviewer =
+    config.scenarioRunnerAgent === undefined || scenarioRunnerAgent === reviewerAgent;
+  const inheritedScenarioRunnerModelId = runnerFollowsReviewer
+    ? config.reviewerModelId
+    : undefined;
   const condenseAboveChars = config.condenseAboveChars === undefined
     ? DEFAULT_CONDENSE_ABOVE_CHARS
     : config.condenseAboveChars === null
@@ -3158,6 +3183,16 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   }
   if (scenarioWriter) {
     assertRoleModelIdNamed("scenarioWriter", scenarioWriterAgent, config.scenarioWriterModelId);
+    assertRoleModelIdNamed(
+      "scenarioRunner",
+      scenarioRunnerAgent,
+      config.scenarioRunnerModelId ?? inheritedScenarioRunnerModelId,
+      {
+        agentField:
+          config.scenarioRunnerAgent === undefined ? "reviewerAgent" : "scenarioRunnerAgent",
+        modelField: "scenarioRunnerModelId",
+      },
+    );
   }
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   const reflectTaggerAgent = parseAgentProviderName(
@@ -3184,6 +3219,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "adjudicatorEffort",
     "condenserEffort",
     "scenarioWriterEffort",
+    "scenarioRunnerEffort",
     "mergerEffort",
     "reflectTaggerEffort",
     "reflectSynthesizerEffort",
@@ -3225,6 +3261,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     condenserModelId: condenserModelId ?? DEFAULT_CONDENSER_MODEL_ID,
     scenarioWriter,
     scenarioWriterModelId: config.scenarioWriterModelId ?? DEFAULT_SCENARIO_WRITER_MODEL_ID,
+    scenarioRunnerModelId:
+      config.scenarioRunnerModelId ??
+      inheritedScenarioRunnerModelId ??
+      DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     reflectTaggerModelId: config.reflectTaggerModelId ?? DEFAULT_REFLECT_TAGGER_MODEL_ID,
     reflectSynthesizerModelId:
@@ -3236,6 +3276,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     adjudicatorAgent,
     condenserAgent,
     scenarioWriterAgent,
+    scenarioRunnerAgent,
     mergerAgent,
     reflectTaggerAgent,
     reflectSynthesizerAgent,
@@ -3253,6 +3294,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       config.adjudicatorEffort ??
       config.reviewerEffort ??
       claudeEffort(adjudicatorAgent, DEFAULT_REVIEWER_EFFORT),
+    scenarioRunnerEffort:
+      config.scenarioRunnerEffort ??
+      (runnerFollowsReviewer ? config.reviewerEffort : undefined) ??
+      claudeEffort(scenarioRunnerAgent, DEFAULT_REVIEWER_EFFORT),
     mergerEffort:
       config.mergerEffort ?? claudeEffort(mergerAgent, DEFAULT_MERGER_EFFORT),
     reflectTaggerEffort:
@@ -3318,6 +3363,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       condenserAgent,
       scenarioWriter,
       scenarioWriterAgent,
+      scenarioRunnerAgent,
       implementerAgent,
       uiCheckAgent,
       reviewerAgent,
