@@ -275,7 +275,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.agentRuns).toBe(1);
@@ -315,7 +315,7 @@ describe("runResolveLoop — conflict mode", () => {
       [issue(40)],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(out).toMatchObject({
       kind: "abandon",
@@ -338,7 +338,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.agentRuns).toBe(2);
@@ -363,7 +363,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.agentRuns).toBe(2);
@@ -410,7 +410,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.headShaCalls).toBe(0);
@@ -451,7 +451,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(out.kind).toBe("abandon");
     if (out.kind === "abandon") {
@@ -475,7 +475,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.installCalls).toBe(2);
@@ -496,7 +496,7 @@ describe("runResolveLoop — gate-red mode", () => {
       [],
       gateRedMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.agentRuns).toBe(1);
@@ -518,7 +518,7 @@ describe("runResolveLoop — gate-red mode", () => {
       [issue(44)],
       gateRedMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(out).toMatchObject({
       kind: "abandon",
@@ -533,7 +533,7 @@ describe("runResolveLoop — gate-red mode", () => {
       agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
       gates: [{ ok: true }],
     });
-    await runResolveLoop(issue(42), [], gateRedMode, adapter, { projectAnchor, repoSlug, repoSlug });
+    await runResolveLoop(issue(42), [], gateRedMode, adapter, { projectAnchor, repoSlug });
     expect(calls.prompts[0]).toContain("Gate output");
     expect(calls.prompts[0]).toContain("test out");
   });
@@ -616,7 +616,7 @@ describe("runResolveLoop — multi-issue context", () => {
       [issue(40), issue(42), issue(44)],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
     );
     expect(calls.bodyFetches).toEqual(["42"]);
     expect(calls.prompts[0]).toContain("this branch body");
@@ -714,7 +714,7 @@ describe("runResolveLoop — logging", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
       (line) => {
         lines.push(line);
       },
@@ -809,7 +809,7 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
       gates: [{ ok: true }],
     });
     await expect(
-      runResolveLoop(issue(64), [], conflictMode, adapter, { projectAnchor, repoSlug, repoSlug }),
+      runResolveLoop(issue(64), [], conflictMode, adapter, { projectAnchor, repoSlug }),
     ).rejects.toBeInstanceOf(SandbarError);
     expect(calls.agentRuns).toBe(1);
   });
@@ -961,7 +961,7 @@ describe("runResolveLoop — the timeout is a spent attempt (#67)", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, repoSlug, repoSlug },
+      { projectAnchor, repoSlug },
       (l) => {
         lines.push(l);
       },
