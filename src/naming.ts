@@ -261,6 +261,36 @@ export function dbImportContainerName(rootScope: RunScope): string {
 }
 
 // ---------------------------------------------------------------------------
+// Database copies (#201)
+//
+//   copy dir         <root>/copies/sandbar-<scope>-issue-<issueId>-<seq>
+//   copy container   sandbar-<scope>-sbx-<issueId>-<container>-dbcopy
+//
+// The copy dir is scoped like a container, so the run that holds the workdir
+// lock owns every `copies/` entry under its prefix and sweeps them at startup
+// and quiescence (`sweepDbCopies`). `<seq>` counts copies within a run, so a
+// dropped copy's dir never collides with its successor's. The copy container
+// is the sandbox sibling's name plus `-dbcopy`, which config.ts keeps free,
+// so the orphan sweep in containers.ts reaps it with the siblings.
+// ---------------------------------------------------------------------------
+
+export function dbCopyDirName(scope: RunScope, issueId: string, seq: number): string {
+  return `${scopedResourcePrefix(scope)}issue-${issueId}-${seq}`;
+}
+
+export function isOwnDbCopyDir(scope: RunScope, name: string): boolean {
+  return name.startsWith(scopedResourcePrefix(scope));
+}
+
+export function sandboxDbCopyContainerNameFor(
+  scope: RunScope,
+  issueId: string,
+  container: string,
+): string {
+  return `${sandboxContainerNameFor(scope, issueId, container)}-dbcopy`;
+}
+
+// ---------------------------------------------------------------------------
 // Branch names (#58)
 //
 // Sandbar owns three ref SHAPES under the same prefix:
