@@ -29,7 +29,7 @@ import type { IssueRef } from "./merger.js";
 import type { PushResult } from "./push-result.js";
 
 const LABELS: LabelConfig = DEFAULT_LABELS;
-const { needsInfo: NEEDS_INFO, agentStuck: AGENT_STUCK } = DEFAULT_LABELS;
+const { handoff: HANDOFF } = DEFAULT_LABELS;
 
 // Most tests exercise terminal-specific behavior and predate the cross-cutting
 // spec-gap field. Keep their fixtures terse while the focused tests below pass
@@ -159,7 +159,7 @@ function makeAdapter(
         };
       }
       if (script.labelEditOk === false) {
-        return { ok: false, error: script.labelEditError ?? "'agent-stuck' not found" };
+        return { ok: false, error: script.labelEditError ?? "'needs-human' not found" };
       }
       return { ok: true };
     },
@@ -190,7 +190,7 @@ describe("comment templates", () => {
     const body = NEEDS_INFO_COMMENT_TEMPLATE(
       "sandbar/issue-45-t-45",
       "Q1?\nQ2?",
-      NEEDS_INFO,
+      HANDOFF,
       READY_FOR_AGENT,
       null,
       { kind: "removed" },
@@ -199,7 +199,7 @@ describe("comment templates", () => {
     expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("Q1?");
     expect(body).toContain("Q2?");
-    expect(body).toContain(NEEDS_INFO);
+    expect(body).toContain(HANDOFF);
     expect(body).toContain(READY_FOR_AGENT);
     // The branch is a LOCATION here and nothing more. STRANDED_COMMITS_NOTE is
     // appended to this same body when the run went off-branch, and it says none
@@ -213,7 +213,7 @@ describe("comment templates", () => {
     const body = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
       45,
       "New settings screen; tab order and empty state invented.",
-      NEEDS_INFO,
+      HANDOFF,
       READY_FOR_AGENT,
       null,
       null,
@@ -230,7 +230,7 @@ describe("comment templates", () => {
     expect(body).toContain("ASCII wireframe");
     expect(body).toContain("precise prose specification");
     expect(body).toContain("push it to the source branch before re-labelling");
-    expect(body).toContain(NEEDS_INFO);
+    expect(body).toContain(HANDOFF);
     expect(body).toContain(READY_FOR_AGENT);
     // The suggested path carries the real issue number, not a literal <n>.
     expect(body).toContain("docs/prototypes/issue-45.html");
@@ -244,7 +244,7 @@ describe("comment templates", () => {
     const early = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
       45,
       "x",
-      NEEDS_INFO,
+      HANDOFF,
       READY_FOR_AGENT,
       null,
       null,
@@ -255,7 +255,7 @@ describe("comment templates", () => {
     const late = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
       45,
       "x",
-      NEEDS_INFO,
+      HANDOFF,
       READY_FOR_AGENT,
       "sandbar/issue-45-t-45",
       null,
@@ -270,7 +270,7 @@ describe("comment templates", () => {
       700_000,
       600_000,
       "The branch is too broad.",
-      NEEDS_INFO,
+      HANDOFF,
       READY_FOR_AGENT,
       "sandbar/issue-45-t-45",
     );
@@ -288,14 +288,14 @@ describe("comment templates", () => {
       4,
       "E: boom\nstack…",
       "Reviewer report",
-      AGENT_STUCK,
+      HANDOFF,
       READY_FOR_AGENT,
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("E: boom");
     expect(body).toContain("stack…");
-    expect(body).toContain(AGENT_STUCK);
+    expect(body).toContain(HANDOFF);
     expect(body).toContain(READY_FOR_AGENT);
     expect(body).toContain("stopped after 4 consecutive attempts without a green gate-1");
     expect(body).toContain("latest failing step: `tests`");
@@ -318,7 +318,7 @@ describe("comment templates", () => {
       "sandbar/issue-576-tz",
       stackChange,
       { ok: false, failedStep: "test", failureTrace: "TimezoneAgreementTest failed" },
-      AGENT_STUCK,
+      HANDOFF,
       READY_FOR_AGENT,
     )).toBe(
       `${BOT_COMMENT_PREFIX} stopped: this branch changes \`gate/stack.json\` beyond ` +
@@ -328,13 +328,13 @@ describe("comment templates", () => {
         "<details><summary>Gate trace</summary>\n\n" +
         "```\nTimezoneAgreementTest failed\n```\n\n</details>\n\n" +
         "Action: use `sandbar/issue-576-tz`; land the stack change on the source " +
-        `branch by hand, then drop \`${AGENT_STUCK}\` and re-apply \`ready-for-agent\`.`,
+        `branch by hand, then drop \`${HANDOFF}\` and re-apply \`ready-for-agent\`.`,
     );
     expect(STACK_CHANGE_COMMENT_TEMPLATE(
       "sandbar/issue-576-tz",
       stackChange,
       { ok: true, failedStep: null, failureTrace: "" },
-      AGENT_STUCK,
+      HANDOFF,
       READY_FOR_AGENT,
     )).toContain("Gate-1 is green on the source branch's stack.\n\nAction:");
   });
@@ -344,14 +344,14 @@ describe("comment templates", () => {
       "sandbar/issue-45-t-45",
       4,
       "## Bar violations\n- foo not extracted\n- naming is unclear",
-      AGENT_STUCK,
+      HANDOFF,
       READY_FOR_AGENT,
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("foo not extracted");
     expect(body).toContain("naming is unclear");
-    expect(body).toContain(AGENT_STUCK);
+    expect(body).toContain(HANDOFF);
     // The LAST positional argument, which is what a signature shift silently
     // drops off the end: without this the whole call could slide one slot and
     // every other assertion here would still pass.
@@ -398,7 +398,7 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([{
       n: 400,
       remove: [READY_FOR_AGENT],
-      add: [AGENT_STUCK],
+      add: [HANDOFF],
     }]);
     expect(calls.pushes).toEqual([]);
     expect(calls.reclaims).toEqual([]);
@@ -407,20 +407,20 @@ describe("finalizeOne", () => {
   it("fails loud when a refresh park label flip is refused", async () => {
     const { adapter, calls } = makeAdapter({
       labelEditOk: false,
-      labelEditError: "'agent-stuck' not found",
+      labelEditError: "'needs-human' not found",
     });
 
     await expect(finalizeOne({
       kind: "chunk-refresh-failed",
       issue: issue(400),
       comment: "refresh diagnostics",
-    }, adapter, LABELS)).rejects.toThrow(/#400.*agent-stuck.*config/s);
+    }, adapter, LABELS)).rejects.toThrow(/#400.*needs-human.*config/s);
 
     expect(calls.comments).toEqual([{ n: 400, body: "refresh diagnostics" }]);
     expect(calls.labelEdits).toEqual([{
       n: 400,
       remove: [READY_FOR_AGENT],
-      add: [AGENT_STUCK],
+      add: [HANDOFF],
     }]);
   });
 
@@ -719,7 +719,7 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toHaveLength(2);
   });
 
-  it("merge-conflict: removes worktree, pushes branch + adds ready-for-human (merger already commented + dropped ready-for-agent)", async () => {
+  it("merge-conflict: removes worktree, pushes branch + adds the handoff label (merger already commented + dropped ready-for-agent)", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
@@ -734,11 +734,11 @@ describe("finalizeOne", () => {
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [], add: [AGENT_STUCK] },
+      { n: 45, remove: [], add: [HANDOFF] },
     ]);
   });
 
-  it("merge-gate-red: removes worktree, pushes branch + adds ready-for-human (merger already commented + dropped ready-for-agent)", async () => {
+  it("merge-gate-red: removes worktree, pushes branch + adds the handoff label (merger already commented + dropped ready-for-agent)", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
@@ -753,7 +753,7 @@ describe("finalizeOne", () => {
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [], add: [AGENT_STUCK] },
+      { n: 45, remove: [], add: [HANDOFF] },
     ]);
   });
 
@@ -774,7 +774,7 @@ describe("finalizeOne", () => {
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [], add: [AGENT_STUCK] },
+      { n: 45, remove: [], add: [HANDOFF] },
     ]);
   });
 
@@ -810,7 +810,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -839,7 +839,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("New settings screen; tab order invented.");
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -888,7 +888,7 @@ describe("finalizeOne", () => {
     // label flip regardless of what happened to the local branch.
     expect(calls.comments.length).toBe(1);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -958,11 +958,11 @@ describe("finalizeOne", () => {
     expect(calls.deletes).toEqual([]);
     expect(calls.forceDeletes).toEqual([]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
-  it("needs-partition publishes an ahead branch and parks under needs-info", async () => {
+  it("needs-partition publishes an ahead branch and parks under the handoff label", async () => {
     const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
     const i = issue(45);
     const action = await finalizeOne({
@@ -979,7 +979,7 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([i.branch]);
     expect(calls.comments[0]?.body).toContain("input_too_large");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -1042,7 +1042,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -1070,7 +1070,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("- container 'db': mounts");
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.labelEdits).toEqual([
-      { n: 576, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 576, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -1138,7 +1138,7 @@ describe("finalizeOne", () => {
     // Nor is it a gate failure — the gate is what went green.
     expect(body).not.toContain("without a green gate");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -1179,7 +1179,7 @@ describe("finalizeOne", () => {
     // terminal, and the harness trace is not the reviewer speaking.
     expect(body).not.toContain("the code reviewer's `CHANGES-REQUESTED` is the blocker");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -1253,7 +1253,7 @@ describe("finalizeOne", () => {
       expect(body).toContain("refs/sandbar/stranded/deadbeef1234");
       expect(calls.reclaims).toEqual([{ branch: i.branch }]);
       expect(calls.labelEdits).toEqual([
-        { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+        { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
       ]);
     },
   );
@@ -1445,7 +1445,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -1476,7 +1476,7 @@ describe("finalizeOne", () => {
     expect(anchored).toContain("_(quoted review omitted.)_");
     expect(anchored).toContain("Action:");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -1543,7 +1543,7 @@ describe("finalizeOne", () => {
       { branch: i.branch, keep: expect.stringContaining("human inspection") },
     ]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
     expect(calls.comments[0]!.body).toContain(refusal);
     expect(calls.comments[0]!.body).toContain("abc123");
@@ -1557,7 +1557,7 @@ describe("finalizeOne", () => {
     );
     expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
     expect(calls.comments[0]!.body.endsWith(
-      "resolve the handoff above, then drop `agent-stuck` and re-apply `ready-for-agent`.",
+      "resolve the handoff above, then drop `needs-human` and re-apply `ready-for-agent`.",
     )).toBe(true);
   });
 
@@ -1596,7 +1596,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("Inspect the preserved clone");
     expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
@@ -1648,12 +1648,12 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("<details><summary>Git refusal</summary>");
     expect(calls.comments[0]!.body).toContain("git -C '/host/.sandbar/repo.git' push");
     expect(calls.comments[0]!.body.endsWith(
-      "resolve the handoff above, then drop `agent-stuck` and re-apply `ready-for-agent`.",
+      "resolve the handoff above, then drop `needs-human` and re-apply `ready-for-agent`.",
     )).toBe(true);
     expect(calls.labelEdits).toEqual([{
       n: 63,
       remove: [READY_FOR_AGENT],
-      add: [AGENT_STUCK],
+      add: [HANDOFF],
     }]);
   });
 
@@ -1678,7 +1678,7 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([{
       n: 64,
       remove: [READY_FOR_AGENT],
-      add: [AGENT_STUCK],
+      add: [HANDOFF],
     }]);
   });
 
@@ -1858,7 +1858,7 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([{
       n: Number(input.issue.id),
       remove,
-      add: [AGENT_STUCK],
+      add: [HANDOFF],
     }]);
     expect(calls.deletes).toEqual([]);
     expect(calls.forceDeletes).toEqual([]);
@@ -2173,14 +2173,14 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("2 times");
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
   it("needs-human with a failed handoff label flip: still pushes + comments, then THROWS SandbarError (fail loud, #8)", async () => {
     const { adapter, calls } = makeAdapter({
       labelEditOk: false,
-      labelEditError: "'agent-stuck' not found",
+      labelEditError: "'needs-human' not found",
     });
     const i = issue(45);
     await expect(
@@ -2203,12 +2203,12 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([i.branch]);
     expect(calls.comments.length).toBe(1);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
+      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
     ]);
   });
 
   it("needs-human flip failure: the thrown error names the issue and the config cause", async () => {
-    const { adapter } = makeAdapter({ labelEditOk: false, labelEditError: "'agent-stuck' not found" });
+    const { adapter } = makeAdapter({ labelEditOk: false, labelEditError: "'needs-human' not found" });
     await expect(
       finalizeOne(
         {
@@ -2222,7 +2222,7 @@ describe("finalizeOne", () => {
         adapter,
         LABELS,
       ),
-    ).rejects.toThrow(/#45.*agent-stuck.*config/s);
+    ).rejects.toThrow(/#45.*needs-human.*config/s);
   });
 
   it("review-budget-exhausted with a failed handoff label flip: throws SandbarError", async () => {
@@ -2263,7 +2263,7 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [], add: [AGENT_STUCK] },
+      { n: 45, remove: [], add: [HANDOFF] },
     ]);
   });
 
@@ -2279,7 +2279,7 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toEqual([{
       n: 45,
       remove: [],
-      add: [AGENT_STUCK],
+      add: [HANDOFF],
     }]);
   });
 
@@ -2324,10 +2324,7 @@ describe("finalizeOne", () => {
 
   it("custom labels: a host's configured handoff label is used in the flip + comment", async () => {
     const { adapter, calls } = makeAdapter();
-    const custom: LabelConfig = {
-      needsInfo: "blocked-q",
-      agentStuck: "human-takeover",
-    };
+    const custom: LabelConfig = { handoff: "human-takeover" };
     const action = await finalizeOne(
       {
         kind: "needs-human",
@@ -2348,6 +2345,28 @@ describe("finalizeOne", () => {
       { n: 45, remove: [READY_FOR_AGENT], add: ["human-takeover"] },
     ]);
     expect(calls.comments[0]!.body).toContain("human-takeover");
+  });
+
+  // #242: a question for the human and an agent failure are one handoff; the
+  // comment, not the label, says which and what to do.
+  it("a NEEDS-INFO park and a merge-conflict park carry the same handoff label", async () => {
+    const { adapter, calls } = makeAdapter();
+    await finalizeOne(
+      { kind: "needs-info", issue: issue(45), questions: "Which currency?", strandedHead: null },
+      adapter,
+      LABELS,
+    );
+    await finalizeOne({ kind: "merge-conflict", issue: issue(46) }, adapter, LABELS);
+
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [READY_FOR_AGENT], add: ["needs-human"] },
+      { n: 46, remove: [], add: ["needs-human"] },
+    ]);
+    // The merger posts the conflict's comment (asserted in merger.test.ts).
+    expect(calls.comments.map((c) => c.n)).toEqual([45]);
+    expect(calls.comments[0]!.body).toContain(
+      "answer the questions, then drop `needs-human` and re-apply `ready-for-agent`.",
+    );
   });
 
   // #16: a handoff terminal must never annotate an already-CLOSED issue.
@@ -2443,8 +2462,8 @@ describe("finalizeAll", () => {
     ]);
     expect(calls.labelEdits).toEqual([
       { n: 10, remove: [READY_FOR_AGENT], add: [] },
-      { n: 11, remove: [READY_FOR_AGENT], add: [NEEDS_INFO] },
-      { n: 12, remove: [], add: [AGENT_STUCK] },
+      { n: 11, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 12, remove: [], add: [HANDOFF] },
     ]);
   });
 

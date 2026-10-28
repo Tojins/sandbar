@@ -118,7 +118,7 @@
 // `attempt`-lifecycle, so #24 D5 charges that failure to the BRANCH. The
 // implementer is then handed a gate red about a statfs source it can neither
 // see nor fix, on every attempt, for every issue in the cycle — the whole
-// budget spent onto `agent-stuck` with an "environment" trace. #48 made it
+// budget spent onto `needs-human` with an "environment" trace. #48 made it
 // reachable rather than theoretical: this repo's own gate mounts
 // `/run/user/<uid>/podman/podman.sock`, which exists only while that user's
 // `podman.socket` unit is active.

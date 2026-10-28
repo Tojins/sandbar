@@ -40,16 +40,19 @@ export const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
 // consecutive timeouts exhaust the default gate budget in an hour.
 export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
 
-// The handoff labels sandbar APPLIES when it parks an issue for a human. These
-// are NOT auto-created by sandbar (#8) — a host must define them in its repo,
-// and a missing/misconfigured label fails loud at finalize time rather than
-// being silently swallowed.
+// The handoff label sandbar APPLIES when it parks an issue for a human. It is
+// NOT auto-created by sandbar (#8) — a host must define it in its repo, and a
+// missing/misconfigured label fails loud at finalize time rather than being
+// silently swallowed.
 //
-// `agentStuck` is the single "the agent gave up, a human needs to take over"
-// label. Every agent-failure terminal (merge-conflict, merge-gate-red,
-// forge-unverified, silent-noop-exhausted, needs-human, review-budget-exhausted)
-// parks the issue here; the *reason* is carried in the bot comment, not encoded
-// in the label.
+// `handoff` is the single "the agent stopped, a human acts next" label (#242).
+// Every park — a NEEDS-INFO question, a missing UI prototype, a partition
+// request, and every agent-failure terminal (merge-conflict, merge-gate-red,
+// forge-unverified, silent-noop-exhausted, needs-human,
+// review-budget-exhausted) — lands here; the *reason*, and what the human
+// should do, is carried in the bot comment, not encoded in the label. Nothing
+// reads the label back, so a second one would only be one more thing for a
+// host to define and filter on.
 // `ready-for-human` is intentionally NOT in this set — it's reserved for
 // human-by-triage.
 //
@@ -58,11 +61,7 @@ export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
 // filter, the merger, and the host's issue-creation workflow. Making it a knob
 // in only one of those places would silently desync the queue.
 export type LabelConfig = {
-  // Agent paused with a question (NEEDS-INFO). Distinct from agentStuck: the
-  // agent isn't stuck, it's waiting on a human answer.
-  readonly needsInfo: string;
-  // The agent gave up; a human needs to take over.
-  readonly agentStuck: string;
+  readonly handoff: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -181,9 +180,29 @@ export function resolvePromptExtensions(
 }
 
 export const DEFAULT_LABELS: LabelConfig = {
-  needsInfo: "needs-info",
-  agentStuck: "agent-stuck",
+  handoff: "needs-human",
 };
+
+// #242 folded `needsInfo` and `agentStuck` into `handoff`. The config is
+// IMPORTED, so a host still naming either would have it spread into the
+// labels and never read, quietly parking under a label its repo may not
+// define; refused here, by name, like a removed top-level field.
+function resolveLabels(labels: Partial<LabelConfig> | undefined): LabelConfig {
+  const legacy = ["needsInfo", "agentStuck"].filter(
+    (key) => labels !== undefined && key in labels,
+  );
+  if (legacy.length > 0) {
+    throw new SandbarError(
+      `${legacy.map((key) => `config.labels.${key}`).join(" and ")} ` +
+        `${legacy.length > 1 ? "were" : "was"} removed (#242): every park now ` +
+        "applies one handoff label, config.labels.handoff (default " +
+        `\`${DEFAULT_LABELS.handoff}\`), and the bot comment says what the ` +
+        "human should do. Set labels: { handoff } instead, then relabel the " +
+        "open issues and delete the old labels.",
+    );
+  }
+  return { ...DEFAULT_LABELS, ...labels };
+}
 
 // ---------------------------------------------------------------------------
 // The gate stack (#24)
@@ -1032,7 +1051,8 @@ export type RunConfig = {
   readonly maxConcurrentGates?: number;
 
   // Overrides any subset of the default label vocabulary; unset keys fall back
-  // to DEFAULT_LABELS.
+  // to DEFAULT_LABELS. The removed `needsInfo`/`agentStuck` keys are refused
+  // (#242).
   readonly labels?: Partial<LabelConfig>;
 
   // Extra host paths copied into each issue worktree. A string keeps the
@@ -3245,7 +3265,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
         ? DEFAULT_MAX_CONCURRENT_GATES
         : requirePositiveInteger("maxConcurrentGates", config.maxConcurrentGates),
     copyToWorktree: resolveCopyToWorktree(config.copyToWorktree, cwd),
-    labels: { ...DEFAULT_LABELS, ...config.labels },
+    labels: resolveLabels(config.labels),
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
     deployWatch: resolveDeployWatch(config.deployWatch),

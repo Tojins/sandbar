@@ -98,15 +98,15 @@ defaults.
 | `maxQualityRounds` | `3` | See [Budgets](#budgets). |
 | `maxGateRounds` | `4` | See [Budgets](#budgets). |
 | `maxReviewRounds` | `4` | See [Budgets](#budgets). |
-| `labels` | `needs-info`, `agent-stuck` | Rename the tracker labels. |
+| `labels` | `{ handoff: "needs-human" }` | Rename the handoff label every park applies. The old `needsInfo`/`agentStuck` keys are refused. |
 | `copyToWorktree` | `[]` | Host-only files copied into each issue worktree. |
 | `claudeMdPath`, `contextMdPath`, `adrDir` | `CLAUDE.md`, `CONTEXT.md`, `docs/adr` | Anchor docs. |
 | `promptExtensions` | `{}` | Per-role `{ text }` or `{ path }` additions. `reviewerQuality` is a [standards file](#coding-standards). |
 | `coauthorTrailer` | from bot name/email | `Co-authored-by` line. |
 | `requiresSandbar` | none | Oldest driver version this config needs. |
 
-`ready-for-agent`, `auto-land` and `land` are fixed label names. `land` must
-exist in the repo; sandbar never creates it.
+`ready-for-agent`, `auto-land` and `land` are fixed label names. `land` and the
+handoff label must exist in the repo; sandbar never creates either.
 
 ### Credentials and role routing
 
@@ -233,7 +233,7 @@ then two read-only agents classify the issue:
   condenser fails, the roles read the whole thread.
 
 - **Partition check** (`partitionCheck`): if the issue won't fit
-  `maxContextChars`, it parks as `NEEDS-PARTITION` under `needs-info` and asks
+  `maxContextChars`, it parks as `NEEDS-PARTITION` under `needs-human` and asks
   for a `## Blocked by` chain.
 - **UI check** (`uiPrototypeCheck`): if the issue needs a UI prototype first,
   it parks for a human.
@@ -426,14 +426,14 @@ issue branch changes the file, a change to containers' `env` alone applies to
 that branch's gate-1 (and to its sandbox from the next one) and to the gate
 on its merge result when it lands. Any other change — mounts, images, flags,
 containers added or removed, steps — is not applied: gate-1 runs once on the
-source branch's stack, and the issue parks under `agent-stuck` with a comment
+source branch's stack, and the issue parks under `needs-human` with a comment
 listing what differs and how that gate went. Land the stack change on the
 source branch by hand, then re-queue the issue. A missing or invalid file on
 the branch counts as such a change.
 
 Landing applies the same rule to each merge result, including a merge-resolve
 agent's edits and a reviewed chunk. A result that changes the file beyond
-`env` is reverted: an issue parks under `agent-stuck`, a chunk's pull request
+`env` is reverted: an issue parks under `needs-human`, a chunk's pull request
 loses `land`, and either gets a comment listing what differs.
 
 ### Containers

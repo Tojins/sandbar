@@ -37,14 +37,14 @@ const runMergerWithAdapter = (
   adapter: MergerAdapter,
   log?: Parameters<typeof runMergerCore>[2],
   onGateRed?: Parameters<typeof runMergerCore>[3],
-  options: Omit<RunMergerOptions, "observations" | "agentStuckLabel" | "repoSlug"> & {
+  options: Omit<RunMergerOptions, "observations" | "handoffLabel" | "repoSlug"> & {
     readonly observations?: RunMergerOptions["observations"];
-    readonly agentStuckLabel?: string;
+    readonly handoffLabel?: string;
     readonly repoSlug?: string;
   } = {},
 ) => runMergerCore(issues, adapter, log, onGateRed, {
   ...options,
-  agentStuckLabel: options.agentStuckLabel ?? "agent-stuck",
+  handoffLabel: options.handoffLabel ?? "needs-human",
   repoSlug: options.repoSlug ?? "acme/app",
   observations: options.observations ?? DISCARD_MERGER_OBSERVATIONS,
 });
@@ -850,7 +850,7 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
     expect(calls.comments[0]!.msg).toContain("stopped on conflicts after 1 resolve attempt");
     expect(calls.comments[0]!.msg).toContain(reason);
     expect(calls.comments[0]!.msg.endsWith(
-      "drop `agent-stuck` and re-apply `ready-for-agent`.",
+      "drop `needs-human` and re-apply `ready-for-agent`.",
     )).toBe(true);
     expect(calls.removedLabels).toEqual([
       { n: 42, label: READY_FOR_AGENT_LABEL },
@@ -3455,7 +3455,7 @@ describe("runMergerWithAdapter — a merge result that changes the gate stack be
         stackChange: change,
         target: SOURCE_TARGET,
         branch: issue(42).branch,
-        stuckLabel: "agent-stuck",
+        handoffLabel: "needs-human",
       }),
     }]);
     expect(calls.comments[0]!.msg).toContain("- container 'db': image");
