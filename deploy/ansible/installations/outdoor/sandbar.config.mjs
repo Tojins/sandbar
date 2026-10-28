@@ -37,10 +37,10 @@ export default {
   // on this private repo may queue an issue.
   developers: "anyone",
 
-  // 0.59.0 is the first release that reads `databaseCopies` (#201); an
-  // older driver would drop it in silence. It also reads `gateStack: { path }`
-  // from the source tip (#186), which `gateStack` below uses.
-  requiresSandbar: "0.59.0",
+  // 0.60.9 is the first release that reads `egress` (#202); an older driver
+  // would drop it in silence. It also reads `databaseCopies` (#201) and
+  // `gateStack: { path }` from the source tip (#186), which both use below.
+  requiresSandbar: "0.60.9",
   botName: "sandbar",
   botEmail: "sandbar@sda.be",
   uiPort: 7331,
@@ -62,6 +62,35 @@ export default {
     root: "/srv/sandbar-db/installations/outdoor",
     container: "db",
     database: "locallpm",
+  },
+
+  // Every sandbox, sibling, gate and resolve container sits behind its own
+  // egress proxy (#202). Report mode refuses nothing: each host enforce would
+  // refuse lands in the run record as an `egress-refused` event, and those
+  // complete this list before it switches to "enforce". GitHub and the model
+  // APIs are sandbar's defaults. npm and packagist serve sandbox-prepare.sh's
+  // installs; the rest are the integrations the app reaches for real from a
+  // sandbox, as outdoor's source names them: Mews demo (configDev.php), the
+  // Peppol directory (peppolDirectory.php), VIES and the other GET-only
+  // registries (vatRegisters.php; HMRC at dev's sandbox host), and adfinity
+  // live for the recording proxy sibling (Tojins/outdoor#785), whose tenant
+  // host is a secret, hence the suffix.
+  egress: {
+    mode: "report",
+    allow: [
+      "npm",
+      "packagist",
+      "api.mews-demo.com",
+      "directory.peppol.eu",
+      "ec.europa.eu",
+      "www.uid-wse.admin.ch",
+      "wl-api.mf.gov.pl",
+      "data.brreg.no",
+      "recherche-entreprises.api.gouv.fr",
+      "test-api.service.hmrc.gov.uk",
+      "kbopub.economie.fgov.be",
+      "*.adfinity.app",
+    ],
   },
 
   // The gate images from stack.json, plus the agent's own. The sandbox image

@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
+import { resolveEgress } from "./config.js";
 import { EXIT_CODE_RESTART } from "./exit-conditions.js";
 import { RESTART_REQUEST_FILE } from "./restart-request.js";
 import { compareVersions, parseVersion } from "./requires-sandbar.js";
@@ -1457,6 +1458,19 @@ describe("committed installation data and configs", () => {
     expect(outdoorConfig).toMatch(/copyToWorktree:[\s\S]*?from:[\s\S]*?to:/);
     expect(outdoorConfig).toContain('const sandboxImage = "localhost/sandbar:outdoor";');
     expect(outdoorConfig).toContain('containerfile: "Containerfile.sandbar"');
+  });
+
+  // The `.mjs` is type-checked by nothing and imports what only the box has,
+  // so its `egress` literal is evaluated alone and resolved as the daemon would.
+  it("ships outdoor's egress allowlist in report mode, resolvable as written (#224)", () => {
+    const block = outdoorConfig.match(/^ {2}egress: (\{\n[\s\S]*?\n {2}\}),$/m)?.[1];
+    expect(block).toBeDefined();
+    const egress = resolveEgress(new Function(`return (${block});`)(), ["claude"]);
+    if (egress.kind !== "allowlist") throw new Error("outdoor's egress resolved open");
+    expect(egress.policy.mode).toBe("report");
+    expect(egress.policy.entries.map((entry) => entry.host)).toEqual(
+      expect.arrayContaining(["registry.npmjs.org", "repo.packagist.org", "api.mews-demo.com", "directory.peppol.eu", "ec.europa.eu"]),
+    );
   });
 
   // outdoorpub has no backend, database or CI: one image serves the agent
