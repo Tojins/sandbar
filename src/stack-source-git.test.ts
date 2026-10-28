@@ -200,6 +200,101 @@ describe("openStackSource over a stack file", () => {
 
     await expect(source.current()).rejects.toThrow(TypeError);
   });
+  describe("forHead", () => {
+    // Commit `text` as gate/stack.json on a branch `issue` cut from main.
+    const edit = async (text: string | null): Promise<void> => {
+      await git(repo, "checkout", "-q", "-B", "issue", "main");
+      if (text === null) await git(repo, "rm", "-q", "gate/stack.json");
+      else await writeFile(join(repo, "gate", "stack.json"), text);
+      await git(repo, "commit", "-qam", "edit");
+      await git(repo, "checkout", "-q", "main");
+    };
+    const mounted = (): GateStackConfig => {
+      const stack = stackWith({ TZ: "UTC" });
+      return {
+        ...stack,
+        containers: stack.containers.map((c) =>
+          c.name === "db" ? { ...c, mounts: [{ hostPath: "/etc", containerPath: "/x" }] } : c),
+      };
+    };
+
+    beforeEach(async () => {
+      await land(JSON.stringify(stackWith({ TZ: "UTC" })));
+    });
+
+    it("keeps the tip's stack for a branch that did not touch the file", async () => {
+      await git(repo, "branch", "issue", "main");
+      const source = await open();
+
+      const head = await source.forHead(repo, "issue");
+
+      expect(head.classification).toEqual({ kind: "same" });
+      expect(head.stack).toBe(source.accepted().stack);
+      expect(head.tipBlob).toMatch(/^[0-9a-f]{40}$/);
+    });
+
+    it("lays the branch's env over the tip's stack for an env-only edit", async () => {
+      await edit(JSON.stringify(stackWith({ TZ: "Europe/Brussels" })));
+      const source = await open();
+
+      const head = await source.forHead(repo, "issue");
+
+      expect(head.classification).toEqual({ kind: "env-only", containers: ["db"] });
+      expect(dbEnv(head.stack)).toEqual({ TZ: "Europe/Brussels" });
+    });
+
+    it("keeps the tip's stack and names the difference for a mount edit", async () => {
+      await edit(JSON.stringify(mounted()));
+      const source = await open();
+
+      const head = await source.forHead(repo, "issue");
+
+      expect(head.classification).toEqual({
+        kind: "non-env",
+        path: "gate/stack.json",
+        differences: [{ where: "container 'db'", what: "mounts" }],
+      });
+      expect(head.stack).toBe(source.accepted().stack);
+    });
+
+    it("reports a deleted or invalid branch file as a non-env change", async () => {
+      await edit(null);
+      const source = await open();
+      expect((await source.forHead(repo, "issue")).classification).toEqual({
+        kind: "non-env",
+        path: "gate/stack.json",
+        differences: [{ where: "gate/stack.json", what: "missing" }],
+      });
+
+      await edit("{ not json");
+      expect((await source.forHead(repo, "issue")).classification).toMatchObject({
+        kind: "non-env",
+        differences: [{
+          where: "gate/stack.json",
+          what: expect.stringMatching(/^does not validate: gate\/stack\.json at issue: not valid JSON/),
+        }],
+      });
+    });
+
+    it("takes a stack change landed after the branch was cut as the tip's, not the branch's", async () => {
+      await git(repo, "branch", "issue", "main");
+      await land(JSON.stringify(mounted()));
+      const source = await open();
+
+      const head = await source.forHead(repo, "issue");
+
+      expect(head.classification).toEqual({ kind: "same" });
+      expect(head.stack.containers[0]!.mounts).toHaveLength(1);
+    });
+
+    it("is `same` for a branch carrying the very edit that has since landed", async () => {
+      await edit(JSON.stringify(mounted()));
+      await land(JSON.stringify(mounted()));
+      const source = await open();
+
+      expect((await source.forHead(repo, "issue")).classification).toEqual({ kind: "same" });
+    });
+  });
 });
 
 describe("openStackSource over an inline stack", () => {
@@ -236,6 +331,14 @@ describe("openStackSource over an inline stack", () => {
     });
     await expect(source.current()).resolves.toBe(inline);
     expect(source.accepted()).toBe(inline);
+    expect(source.path).toBeNull();
+    // No branch reaches an inline stack.
+    await expect(source.forHead("/nonexistent", "HEAD")).resolves.toEqual({
+      stack: inline.stack,
+      attachments: inline.attachments,
+      classification: { kind: "same" },
+      tipBlob: null,
+    });
   });
 });
 

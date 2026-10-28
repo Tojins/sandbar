@@ -17,7 +17,6 @@ import {
   renderStackDifferences,
   stackInEffect,
 } from "./stack-change.js";
-import { stackSpecToken } from "./stack-source.js";
 
 const PATH = "gate/stack.json";
 
@@ -212,21 +211,6 @@ describe("stackInEffect", () => {
         what: expect.stringMatching(/^does not validate: gate\/stack\.json: step container 'app' sets env key 'GH_TOKEN'/),
       }],
     });
-  });
-});
-
-describe("stackSpecToken", () => {
-  it("differs for an env change and not for reordered keys", () => {
-    const reordered = resolve({
-      steps: [{ command: ["npm", "test"], in: "app", name: "test" }],
-      containers: [
-        { env: { MARIADB_ROOT_PASSWORD: "root" }, lifecycle: "issue", image: "docker.io/library/mariadb:10.11", name: "db" },
-        app(),
-      ],
-    });
-    expect(stackSpecToken(reordered)).toBe(stackSpecToken(tip));
-    const envChanged = resolve(config({ containers: [db({ env: { TZ: "UTC" } }), app()] }));
-    expect(stackSpecToken(envChanged)).not.toBe(stackSpecToken(tip));
   });
 });
 
