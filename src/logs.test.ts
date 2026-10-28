@@ -30,7 +30,7 @@ describe("agent invocation records (#135)", () => {
   it.each([
     [{ role: "implementer", attempt: 3, nudge: false }, "attempt-3.log"],
     [{ role: "implementer", attempt: 3, nudge: true }, "attempt-3-nudge.log"],
-    [{ role: "quality-list", attempt: 3, invocation: 2 }, "attempt-3-quality-list-2.log"],
+    [{ role: "quality-list", attempt: 3, group: "naming", invocation: 2 }, "attempt-3-quality-list-naming-2.log"],
     [{ role: "quality-fix", attempt: 3, fixRound: 2, invocation: 1 }, "attempt-3-quality-fix-2-1.log"],
     [{ role: "quality-verify", attempt: 3, fixRound: 2, invocation: 1 }, "attempt-3-quality-verify-2-1.log"],
     [

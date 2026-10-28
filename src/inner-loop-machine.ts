@@ -53,7 +53,8 @@
 // quality outcome reaches the implementer, which does not see the coding
 // standards. A lister or verify that produced no review after its retry, or a
 // fixer that crashed on its retry too, also continues to gate-1; the runner
-// owns those retries.
+// owns those retries. The lister's result may be the runner's fold of one
+// lister per rule group (#204); this machine reads it as one review.
 //
 // A fixer that exits normally with no commits disputes the latest report:
 // once per head, that report goes to the adjudicator. OVERRULED approves the

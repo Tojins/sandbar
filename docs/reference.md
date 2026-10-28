@@ -258,9 +258,12 @@ per admission, routed by `scenarioWriter*` and
 
 Each round after the implementer reports done:
 
-1. **Quality review.** A read-only violations lister checks tests and coding
-   standards. If it finds violations, a fixer commits fixes and a read-only
-   verify checks them. The fixer can dispute the list; an adjudicator rules.
+1. **Quality review.** Read-only violations listers, one per rule group of the
+   coding standards and all at once, check the branch: the built-in group's
+   lister also checks tests. Their findings are joined, each under a
+   `[group: <id>]` line. If there are any, one fixer commits fixes and one
+   read-only verify checks them against every group. The fixer can dispute the
+   list; an adjudicator rules.
 2. **Automatic tests** (gate-1): the gate stack, run once on the result.
 3. **Verifier**, only if the tests are green: a read-only code review of the
    branch's logic and its conformance to the issue. From its second round on it
@@ -301,8 +304,9 @@ A standards file is split into **rule groups** by its `##` headings:
   safe; that is your call. An unknown flag is warned about and ignored.
 - A file with no `##` other than Leave alone is one group, as before.
 - The built-in standards are one group, never janitor-flagged.
-- Above 5 groups in total, the built-in one included, sandbar warns: each group
-  costs a quality lister's fixed overhead.
+- Each group gets its own lister, which sees only that group, the preamble and
+  Leave alone. Above 5 groups in total, the built-in one included, sandbar
+  warns: each group costs a quality lister's fixed overhead.
 
 Problems in the file are warnings in the run's log, once per version of the
 file, and never stop a run.

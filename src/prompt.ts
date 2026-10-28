@@ -14,10 +14,13 @@
 // surface, plus every quality report an adjudicator overruled with its
 // ruling; its fixer gets the latest CHANGES-REQUESTED report (and an upheld
 // ruling); its verify gets that report and a stat of what the fixer changed.
-// All three grade by the standards inline, every rule group at once, as the
-// runner read them at the source tip (standards-groups.ts, #204), never an
-// @ref into the branch they grade; the implementer keeps the built-in text
-// plus its extension's @ref into its own worktree.
+// All three grade by the standards inline, as the runner read them at the
+// source tip (standards-groups.ts, #204), never an @ref into the branch they
+// grade; the implementer keeps the built-in text plus its extension's @ref
+// into its own worktree. A lister reads one rule group (#230): the built-in
+// group's lister owns the tests dimension and the conventions, a project
+// group's lister only that group's rules; the fixer and verify read every
+// group, and verify keeps each finding under its `[group: …]` line.
 // The verifier's white-box review (#180): diff stat + commits plus every
 // earlier white-box round (#88), a defect a round raised counting as addressed
 // only once it is gone from every site (#181); the lister's overrule history
@@ -84,7 +87,7 @@ import {
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
 import type { SandboxContainerStatus } from "./sandbox-stack.js";
-import { type QualityStandards, renderStandards } from "./standards-groups.js";
+import { type QualityStandards, type RuleGroup, renderStandards } from "./standards-groups.js";
 import { type ParsedVerdict, stripVerdictTokens } from "./verdict-parser.js";
 
 const exec = promisify(execFile);
@@ -99,6 +102,8 @@ const REVIEWER_FULL_HISTORY_TPL = loadTemplate("reviewer-full-history");
 const REVIEWER_SINCE_TPL = loadTemplate("reviewer-since");
 const REVIEWER_SINCE_HISTORY_TPL = loadTemplate("reviewer-since-history");
 const REVIEWER_QUALITY_TPL = loadTemplate("reviewer-quality");
+const REVIEWER_QUALITY_DIMENSIONS_SANDBAR_TPL = loadTemplate("reviewer-quality-dimensions-sandbar");
+const REVIEWER_QUALITY_DIMENSIONS_GROUP_TPL = loadTemplate("reviewer-quality-dimensions-group");
 const REVIEWER_QUALITY_LISTING_TPL = loadTemplate("reviewer-quality-listing");
 const REVIEWER_QUALITY_LISTING_SINCE_TPL = loadTemplate("reviewer-quality-listing-since");
 const REVIEWER_QUALITY_VERIFY_TPL = loadTemplate("reviewer-quality-verify");
@@ -346,14 +351,16 @@ export type QualityOverrule = {
   readonly ruling: string;
 };
 
-// The quality pass's two read-only modes (#187). A lister reads its scope; a
-// verify reads what changed since `anchor`, the head before the fixer, and
-// judges the report the fixer was given.
+// The quality pass's two read-only modes (#187). A lister reads its scope
+// against its one rule group (#230); a verify reads what changed since
+// `anchor`, the head before the fixer, and judges the report the fixer was
+// given against every group.
 export type QualityReviewMode =
   | {
       readonly kind: "list";
       readonly scope: ReviewScope;
       readonly overrules: readonly QualityOverrule[];
+      readonly group: RuleGroup;
     }
   | {
       readonly kind: "verify";
@@ -998,18 +1005,25 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
 
 // A whole-branch lister gets the exhaustive listing text; a scoped lister the
 // same text aimed at what changed since the last approved quality head, plus
-// the overrule history; a verify the report under check (#187).
+// the overrule history; a verify the report under check (#187). A project
+// group's lister reviews that group alone; the built-in group's lister and a
+// verify review tests and standards (#204).
 export function renderQualityReviewSlot(inputs: QualityReviewSlotRender): string {
   const { mode } = inputs;
   const anchor = qualityReviewAnchor(mode);
   const changedSince = renderChangedSince(anchor, inputs.changedSinceStat);
+  const projectGroup = mode.kind === "list" && mode.group.origin === "project" ? mode.group : null;
   const qualityMode = mode.kind === "verify"
     ? render(REVIEWER_QUALITY_VERIFY_TPL, {
         anchor: mode.anchor,
         report: reportProse(mode.report),
       })
     : anchor === null
-      ? REVIEWER_QUALITY_LISTING_TPL
+      ? render(REVIEWER_QUALITY_LISTING_TPL, {
+          listingScope: projectGroup === null
+            ? "this branch's tests and standards"
+            : `rule group ${projectGroup.name}`,
+        })
       : render(REVIEWER_QUALITY_LISTING_SINCE_TPL, { anchor });
   const priorRounds = mode.kind === "verify" || mode.overrules.length === 0
     ? ""
@@ -1019,7 +1033,15 @@ export function renderQualityReviewSlot(inputs: QualityReviewSlotRender): string
       }) + `\n\n${REVIEWER_QUALITY_OVERRULES_TPL}`;
   return render(REVIEWER_QUALITY_TPL, {
     ...branchSlotVars(inputs),
-    standards: renderStandards(inputs.standards, { kind: "all" }),
+    standards: renderStandards(
+      inputs.standards,
+      mode.kind === "list" ? { kind: "group", group: mode.group } : { kind: "all" },
+    ),
+    dimensions: projectGroup === null
+      ? render(REVIEWER_QUALITY_DIMENSIONS_SANDBAR_TPL, {
+          conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
+        })
+      : render(REVIEWER_QUALITY_DIMENSIONS_GROUP_TPL, { groupName: projectGroup.name }),
     priorRounds: section(priorRounds),
     changedSince: section(changedSince),
     qualityMode: section(qualityMode),

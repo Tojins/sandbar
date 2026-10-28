@@ -164,14 +164,18 @@ const qualityInputs = () => ({
   ...reviewerInputs(),
   standards: combineStandards(parseStandards(loadTemplate("coding-standards"), "sandbar"), null),
 });
-const listerInputs = (approvedHead: string | null = null) => ({
-  ...qualityInputs(),
-  mode: {
-    kind: "list",
-    scope: approvedHead === null ? { kind: "full" } : { kind: "since", sha: approvedHead },
-    overrules: [],
-  },
-} as const);
+const listerInputs = (approvedHead: string | null = null) => {
+  const inputs = qualityInputs();
+  return {
+    ...inputs,
+    mode: {
+      kind: "list",
+      scope: approvedHead === null ? { kind: "full" } : { kind: "since", sha: approvedHead },
+      overrules: [],
+      group: inputs.standards.groups[0]!,
+    },
+  } as const;
+};
 const verifyInputs = (anchor: string) => ({
   ...qualityInputs(),
   mode: { kind: "verify", anchor, report: "### Tests\nmissing" },

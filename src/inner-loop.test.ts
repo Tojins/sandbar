@@ -143,7 +143,8 @@ import {
   runInnerLoop,
   runPartitionCheck,
   runQualityFix,
-  runQualityReview,
+  runQualityList,
+  runQualityVerify,
   runAdjudicator,
   runAnchorCondense,
   runUiCheck,
@@ -1327,9 +1328,9 @@ describe("role prompt-extension wiring (#91)", () => {
   it("hands the quality lister only its own extension", async () => {
     const stop = new Error("stop after prompt construction");
     innerLoopMocks.buildQualityReviewPrompt.mockRejectedValueOnce(stop);
-    await expect(runQualityReview(
+    await expect(runQualityList(
       { kind: "run-quality-list", attempt: 1, scope: { kind: "full" } },
-      ctxWith() as unknown as Parameters<typeof runQualityReview>[1],
+      ctxWith() as unknown as Parameters<typeof runQualityList>[1],
     )).rejects.toBe(stop);
     expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1617,9 +1618,11 @@ describe("runVerifier (#121, #180, #185)", () => {
   });
 });
 
-describe("runQualityReview (#187)", () => {
+describe("runQualityList and runQualityVerify (#187, #204)", () => {
+  // Outputs per rule group a lister names, or "verify"; each call takes the
+  // next. Every run yields once, so parallel runs overlap.
   const reviewer = (
-    outputs: readonly (string | Error)[],
+    outputs: Readonly<Record<string, readonly (string | Error)[]>>,
     ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, standards: passStandards },
   ) => {
     innerLoopMocks.buildQualityReviewPrompt.mockReset().mockResolvedValue("quality review prompt");
@@ -1629,10 +1632,16 @@ describe("runQualityReview (#187)", () => {
     innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue("refs/heads/sandbar/issue-187");
     const filenames: string[] = [];
     const events: EventInput[] = [];
-    const queue = [...outputs];
+    const queues = new Map(Object.entries(outputs).map(([key, queue]) => [key, [...queue]]));
+    let active = 0;
+    let peak = 0;
     const sandbox = {
       worktreePath: "/worktree",
       run: vi.fn(async (options: Parameters<Sandbox["run"]>[0]) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setImmediate(resolve));
+        active -= 1;
         await options.onInvocationEnd?.({
           agent: options.name ?? options.agent.name,
           provider: options.agent.name,
@@ -1645,7 +1654,8 @@ describe("runQualityReview (#187)", () => {
           stdout: "",
           stderr: "",
         });
-        const next = queue.shift()!;
+        const key = /-group-([a-z0-9]+)/.exec(options.name ?? "")?.[1] ?? "verify";
+        const next = queues.get(key)!.shift()!;
         if (next instanceof Error) throw withPartialDurationMs(next, 4);
         return {
           stdout: next,
@@ -1686,8 +1696,10 @@ describe("runQualityReview (#187)", () => {
       quality: ledger,
       invocationSequence: createAgentInvocationSequencer().startCycle(),
     };
-    const run = (action: Parameters<typeof runQualityReview>[0]) => runQualityReview(action, ctx as unknown as Parameters<typeof runQualityReview>[1]);
-    return { ctx, sandbox, events, filenames, run };
+    type Ctx = Parameters<typeof runQualityList>[1];
+    const list = (action: Parameters<typeof runQualityList>[0]) => runQualityList(action, ctx as unknown as Ctx);
+    const verify = (action: Parameters<typeof runQualityVerify>[0]) => runQualityVerify(action, ctx as unknown as Ctx);
+    return { ctx, sandbox, events, filenames, list, verify, peak: () => peak };
   };
   const listAction = {
     kind: "run-quality-list",
@@ -1701,38 +1713,42 @@ describe("runQualityReview (#187)", () => {
     anchor: "fix-start",
     report: "### Tests\nsrc/a.ts:3",
   } as const;
+  const approve = ["<verdict>APPROVED</verdict>"];
 
-  it("opens the round and lists cold, read-only, on the quality routing", async () => {
+  it("opens the round and runs one cold, read-only lister per rule group at once", async () => {
     const overrule = { round: 1, head: "h0", report: "r", ruling: "fine" };
-    const { ctx, sandbox, events, filenames, run } = reviewer(
-      ["### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>"],
+    const { ctx, sandbox, events, filenames, list, peak } = reviewer(
+      { sandbar: ["### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>"], project: approve },
       { sinceImplementer: [], overrules: [overrule], openRound: null, standards: null },
     );
-    await expect(run(listAction)).resolves.toEqual({
+    await expect(list(listAction)).resolves.toEqual({
       kind: "quality-review-result",
       mode: "list",
       head: "review-head",
       review: {
         kind: "reviewer-result",
         verdict: "CHANGES-REQUESTED",
-        prose: "### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>",
+        prose: "[group: sandbar] Coding standards\n\n### Tests\nsrc/a.ts:3",
       },
     });
+    expect(peak()).toBe(2);
     expect(ctx.quality.openRound).toMatchObject({ attempt: 3, quality: null });
-    expect(ctx.quality.standards?.groups.map((group) => group.body)).toContain("quality only");
-    expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
-      standards: ctx.quality.standards,
-      mode: { kind: "list", scope: { kind: "full" }, overrules: [overrule] },
-    }));
-    const invocation = vi.mocked(sandbox.run).mock.calls[0]![0];
-    expect(invocation).toMatchObject({
-      name: "quality-list-187-attempt-3",
-      model: "quality-model",
-      completionSignal: [],
-    });
-    expect(invocation.env).toBeUndefined();
-    expect(filenames).toEqual(["attempt-3-quality-list-1.log"]);
-    expect(events).toEqual([expect.objectContaining({
+    const groups = ctx.quality.standards!.groups;
+    expect(groups.map((group) => [group.id, group.body])).toContainEqual(["project", "quality only"]);
+    for (const group of groups) {
+      expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
+        standards: ctx.quality.standards,
+        mode: { kind: "list", scope: { kind: "full" }, overrules: [overrule], group },
+      }));
+    }
+    const invocations = vi.mocked(sandbox.run).mock.calls.map(([options]) => options);
+    expect(invocations).toEqual([
+      expect.objectContaining({ name: "quality-list-187-attempt-3-group-sandbar", model: "quality-model", completionSignal: [] }),
+      expect.objectContaining({ name: "quality-list-187-attempt-3-group-project", model: "quality-model", completionSignal: [] }),
+    ]);
+    expect(invocations.map((options) => options.env)).toEqual([undefined, undefined]);
+    expect(filenames.sort()).toEqual(["attempt-3-quality-list-project-1.log", "attempt-3-quality-list-sandbar-1.log"]);
+    const recorded = {
       kind: "quality-review",
       attempt: 3,
       round: 3,
@@ -1743,25 +1759,43 @@ describe("runQualityReview (#187)", () => {
       model: "quality-model",
       effort: "high",
       result: "completed",
-      verdict: "CHANGES-REQUESTED",
-      prose: "### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>",
       usage: { toolCalls: 2, contextChars: "quality review prompt".length },
-    })]);
+    };
+    expect(events).toHaveLength(2);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ...recorded,
+        group: "sandbar",
+        verdict: "CHANGES-REQUESTED",
+        prose: "### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>",
+      }),
+      expect.objectContaining({ ...recorded, group: "project", verdict: "APPROVED" }),
+    ]));
+  });
+
+  it("approves only when every group's lister approves", async () => {
+    const { list } = reviewer({ sandbar: approve, project: approve });
+    await expect(list(listAction)).resolves.toMatchObject({
+      review: { kind: "reviewer-result", verdict: "APPROVED", prose: "" },
+    });
   });
 
   it("names a scoped lister's anchor in its record", async () => {
-    const { events, run } = reviewer(["<verdict>APPROVED</verdict>"]);
-    await run({ ...listAction, scope: { kind: "since", sha: "approved-head" } });
-    expect(events).toEqual([expect.objectContaining({ scope: "since:approved-head" })]);
+    const { events, list } = reviewer({ sandbar: approve, project: approve });
+    await list({ ...listAction, scope: { kind: "since", sha: "approved-head" } });
+    expect(events).toEqual([
+      expect.objectContaining({ scope: "since:approved-head" }),
+      expect.objectContaining({ scope: "since:approved-head" }),
+    ]);
   });
 
   it("verifies by the standards its lister read, never re-reading the source tip", async () => {
     const sentinel: QualityStandards = { groups: [], preamble: "sentinel", leaveAlone: [], warnings: [] };
-    const { ctx, run } = reviewer(
-      ["<verdict>APPROVED</verdict>"],
+    const { ctx, verify } = reviewer(
+      { verify: approve },
       { sinceImplementer: [], overrules: [], openRound: null, standards: sentinel },
     );
-    await run(verifyAction);
+    await verify(verifyAction);
     expect(ctx.quality.standards).toBe(sentinel);
     expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
       standards: sentinel,
@@ -1769,16 +1803,16 @@ describe("runQualityReview (#187)", () => {
   });
 
   it("rejects a verify that runs before any lister read the standards", async () => {
-    const { run } = reviewer(
-      ["<verdict>APPROVED</verdict>"],
+    const { verify } = reviewer(
+      { verify: approve },
       { sinceImplementer: [], overrules: [], openRound: null, standards: null },
     );
-    await expect(run(verifyAction)).rejects.toThrow(/before any lister read the standards/);
+    await expect(verify(verifyAction)).rejects.toThrow(/before any lister read the standards/);
   });
 
   it("verifies the fixer's step from its anchor without opening a round", async () => {
-    const { ctx, events, filenames, sandbox, run } = reviewer(["<verdict>APPROVED</verdict>"]);
-    await expect(run(verifyAction)).resolves.toMatchObject({
+    const { ctx, events, filenames, sandbox, verify } = reviewer({ verify: approve });
+    await expect(verify(verifyAction)).resolves.toMatchObject({
       kind: "quality-review-result",
       mode: "verify",
       review: { kind: "reviewer-result", verdict: "APPROVED" },
@@ -1793,48 +1827,116 @@ describe("runQualityReview (#187)", () => {
     expect(events).toEqual([expect.objectContaining({
       mode: "verify", scope: "since:fix-start", verdict: "APPROVED",
     })]);
+    expect(events[0]).not.toHaveProperty("group");
   });
 
-  it("retries a review with no verdict once, then reports the quality pass's harness failure", async () => {
-    const { events, run } = reviewer(["no token", new AgentError("codex exited 1")]);
-    await expect(run(listAction)).resolves.toMatchObject({
-      review: { kind: "reviewer-harness-failed", detail: expect.stringMatching(/^quality: /) },
+  it("retries a lister with no verdict once, then reports its group's harness failure", async () => {
+    const { events, list } = reviewer({ sandbar: ["no token", new AgentError("codex exited 1")], project: approve });
+    await expect(list(listAction)).resolves.toMatchObject({
+      review: { kind: "reviewer-harness-failed", detail: expect.stringMatching(/^\[group: sandbar\] quality: /) },
     });
-    expect(events.filter((event) => event.kind === "quality-review")).toEqual([
+    expect(events.filter((event) => event.kind === "quality-review" && event.group === "sandbar")).toEqual([
       expect.objectContaining({ invocation: 1, result: "completed", verdict: null, prose: "no token" }),
       expect.objectContaining({ invocation: 2, result: "failed", verdict: null }),
     ]);
     expect(events).toContainEqual(expect.objectContaining({
       kind: "notice",
-      message: expect.stringContaining("quality list invocation=1/2 no-review — retrying"),
+      message: expect.stringContaining("quality list [sandbar] invocation=1/2 no-review — retrying"),
     }));
   });
 
-  it("returns a write as the review's result and keeps the clone", async () => {
-    const { sandbox, run } = reviewer(["<verdict>APPROVED</verdict>"]);
+  // Snapshots are per invocation, so a sibling's write is every lister's.
+  it("returns a lister's write as the pass's result and keeps the clone", async () => {
+    const { sandbox, list } = reviewer({ sandbar: approve, project: approve });
     innerLoopMocks.branchTip
       .mockResolvedValueOnce("review-head")
       .mockResolvedValueOnce("review-head")
-      .mockResolvedValueOnce("moved");
-    await expect(run(verifyAction)).resolves.toMatchObject({
-      review: { kind: "reviewer-wrote", detail: expect.stringContaining("Quality reviewer changed git state") },
+      .mockResolvedValueOnce("review-head")
+      .mockResolvedValue("moved");
+    await expect(list(listAction)).resolves.toMatchObject({
+      review: {
+        kind: "reviewer-wrote",
+        detail: expect.stringMatching(/^\[group: sandbar\] Quality reviewer changed git state[\s\S]*\n\n\[group: project\] /),
+      },
     });
     expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
       expect.stringContaining("quality reviewer changed the repository"),
     );
   });
 
-  it("classifies a provider size refusal as a partition terminal", async () => {
-    const { run } = reviewer([new AgentInputTooLargeError("input_too_large")]);
-    await expect(run(listAction)).rejects.toMatchObject({
+  it("returns a verify's write as its result", async () => {
+    const { verify } = reviewer({ verify: approve });
+    innerLoopMocks.branchTip
+      .mockResolvedValueOnce("review-head")
+      .mockResolvedValueOnce("review-head")
+      .mockResolvedValueOnce("moved");
+    await expect(verify(verifyAction)).resolves.toMatchObject({
+      review: { kind: "reviewer-wrote", detail: expect.stringContaining("Quality reviewer changed git state") },
+    });
+  });
+
+  it("classifies a lister's provider size refusal as a partition terminal", async () => {
+    const { list } = reviewer({ sandbar: [new AgentInputTooLargeError("input_too_large")], project: approve });
+    await expect(list(listAction)).rejects.toMatchObject({
       verdict: { type: "NEEDS-PARTITION", cause: "provider-refused", slot: "review-quality" },
     });
   });
 
-  it("parks an oversized branch before the review runs", async () => {
-    const { sandbox, run } = reviewer([]);
+  // No lister is left running in the sandbox after the step returns, and a
+  // provider closure outranks any other failure whatever its group.
+  it("propagates a quota closure only after every lister has settled", async () => {
+    const quota = new AgentQuotaError("codex", { status: "rejected", window: "five_hour" });
+    const died = new EgressProxyDiedError("egress proxy p died (gone)");
+    const { events, list } = reviewer({ sandbar: [died], project: [quota] });
+    await expect(list(listAction)).rejects.toBe(quota);
+    expect(events.filter((event) => event.kind === "quality-review")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ group: "sandbar", result: "failed" }),
+      expect.objectContaining({ group: "project", result: "quota" }),
+    ]));
+  });
+
+  it.each([
+    ["a refused credential", new AgentCredentialError("refresh refused")],
+    ["a provider size refusal", new AgentInputTooLargeError("input_too_large")],
+  ])("rethrows %s ahead of an earlier group's plain failure, after every lister settled", async (_name, closure) => {
+    const died = new EgressProxyDiedError("egress proxy p died (gone)");
+    const { events, list } = reviewer({ sandbar: [died], project: [closure] });
+    const rejection = await list(listAction).then(() => null, (err: unknown) => err);
+    expect(rejection).not.toBe(died);
+    if (closure instanceof AgentCredentialError) expect(rejection).toBe(closure);
+    else expect(rejection).toMatchObject({ verdict: { type: "NEEDS-PARTITION" } });
+    expect(events.filter((event) => event.kind === "quality-review")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ group: "sandbar", result: "failed" }),
+      expect.objectContaining({ group: "project" }),
+    ]));
+  });
+
+  it("rethrows the first other failure when no lister closed its provider", async () => {
+    const died = new EgressProxyDiedError("egress proxy p died (gone)");
+    const { list } = reviewer({ sandbar: approve, project: [died] });
+    await expect(list(listAction)).rejects.toBe(died);
+  });
+
+  it("parks before any lister runs when the largest lister picture is over budget", async () => {
+    const { sandbox, list } = reviewer({});
+    innerLoopMocks.buildQualityReviewPrompt.mockReset()
+      .mockResolvedValueOnce("short")
+      .mockResolvedValueOnce("a longer project prompt");
+    innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(599_990);
+    await expect(list(listAction)).resolves.toEqual({
+      kind: "context-over-budget",
+      slot: "review-quality",
+      size: 599_990 + "a longer project prompt".length,
+      budget: 600_000,
+      detail: "The completed branch exceeds the configured context budget before the quality listers.",
+    });
+    expect(sandbox.run).not.toHaveBeenCalled();
+  });
+
+  it("parks an oversized branch before the verify runs", async () => {
+    const { sandbox, verify } = reviewer({});
     innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(600_000);
-    await expect(run(verifyAction)).resolves.toEqual({
+    await expect(verify(verifyAction)).resolves.toEqual({
       kind: "context-over-budget",
       slot: "review-quality",
       size: 600_000 + "quality review prompt".length,
@@ -3174,7 +3276,7 @@ describe("runInnerLoop context terminals (#158)", () => {
           commits: [],
         };
       }
-      if (name === "quality-list-158-attempt-1") {
+      if (name === "quality-list-158-attempt-1-group-sandbar") {
         return { ...approvedReview, stdout: "### Tests\nmissing\n<verdict>CHANGES-REQUESTED</verdict>" };
       }
       if (name.startsWith("quality-fix-")) return { ...completeRun, stdout: "fixed" };
@@ -3201,11 +3303,11 @@ describe("runInnerLoop context terminals (#158)", () => {
     });
     expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
       "implementer-158-attempt-1",
-      "quality-list-158-attempt-1",
+      "quality-list-158-attempt-1-group-sandbar",
       "quality-fix-158-attempt-1-fix-1",
       "quality-verify-158-attempt-1-fix-1",
       "implementer-158-attempt-2",
-      "quality-list-158-attempt-2",
+      "quality-list-158-attempt-2-group-sandbar",
       "reviewer-158-round-2",
       "implementer-158-attempt-3",
     ]);
@@ -3232,6 +3334,9 @@ describe("runInnerLoop context terminals (#158)", () => {
     expect(events.filter((event) => event.kind === "quality-pass")).toEqual([
       expect.objectContaining({ attempt: 1, result: "completed", commits: ["q1"] }),
     ]);
+    expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      mode: { kind: "verify", anchor: "head123", report: "[group: sandbar] Coding standards\n\n### Tests\nmissing" },
+    }));
     expect(events.filter((event) => event.kind === "phase").map((event) =>
       event.kind === "phase" ? event.phases : [],
     )).toEqual([
@@ -3266,7 +3371,7 @@ describe("runInnerLoop context terminals (#158)", () => {
     await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
     expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
       "implementer-158-attempt-1",
-      "quality-list-158-attempt-1",
+      "quality-list-158-attempt-1-group-sandbar",
       "quality-fix-158-attempt-1-fix-1",
       "quality-verify-158-attempt-1-fix-1",
       "reviewer-158-round-1",
@@ -3311,26 +3416,34 @@ describe("runInnerLoop context terminals (#158)", () => {
     await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
     expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
       "implementer-158-attempt-1",
-      "quality-list-158-attempt-1",
+      "quality-list-158-attempt-1-group-sandbar",
       "quality-fix-158-attempt-1-fix-1",
       "quality-adjudicator-158-round-1-fix-1",
       "implementer-158-attempt-2",
-      "quality-list-158-attempt-2",
+      "quality-list-158-attempt-2-group-sandbar",
       "reviewer-158-round-2",
       "implementer-158-attempt-3",
     ]);
     expect(events).toContainEqual(expect.objectContaining({
       kind: "adjudication", pass: "quality", round: 1, head: "head123", ruling: "OVERRULED",
     }));
-    expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenCalledWith(expect.objectContaining({
-      pass: "quality", head: "head123", report,
+    // The listers' combined report, tagged by group (#204), is what the
+    // fixer, the adjudicator and the next lister's overrules carry.
+    const combined = "[group: sandbar] Coding standards\n\n### Tests\nnothing to add";
+    expect(innerLoopMocks.buildQualityFixPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      report: combined,
     }));
+    expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      pass: "quality", head: "head123", report: combined,
+    }));
+    const sandbar = expect.objectContaining({ id: "sandbar" });
     expect(innerLoopMocks.buildQualityReviewPrompt.mock.calls.map(([inputs]) => inputs.mode)).toEqual([
-      { kind: "list", scope: { kind: "full" }, overrules: [] },
+      { kind: "list", scope: { kind: "full" }, overrules: [], group: sandbar },
       {
         kind: "list",
         scope: { kind: "since", sha: "head123" },
-        overrules: [{ round: 1, head: "head123", report, ruling: "the test exists" }],
+        overrules: [{ round: 1, head: "head123", report: combined, ruling: "the test exists" }],
+        group: sandbar,
       },
     ]);
     expect(events.filter((event) => event.kind === "review-round")[0]).toMatchObject({
@@ -3495,7 +3608,7 @@ describe("runInnerLoop context terminals (#158)", () => {
 
       const done = runInnerLoop(issue, opts);
       await vi.waitFor(() => expect(writer.settled).toHaveBeenCalled());
-      expect(names(sandbox)).toEqual(["implementer-158-attempt-1", "quality-list-158-attempt-1"]);
+      expect(names(sandbox)).toEqual(["implementer-158-attempt-1", "quality-list-158-attempt-1-group-sandbar"]);
       expect(writer.start).toHaveBeenCalledWith({
         imageName: "sandbox-image",
         seedRef: "origin/main",
@@ -3839,7 +3952,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
           record,
         );
         await opts.attemptLogger.writeInvocation(
-          sequence.filename({ role: "quality-list", attempt: 1, invocation: 1 }),
+          sequence.filename({ role: "quality-list", attempt: 1, group: "sandbar", invocation: 1 }),
           record,
         );
         // The gate artefact comes from the same sequence as the invocations
@@ -3899,19 +4012,19 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       expect((await readdir(issueLogger.dir)).sort()).toEqual([
         "attempt-1-gate.log",
         "attempt-1-nudge.log",
-        "attempt-1-quality-list-1.log",
+        "attempt-1-quality-list-sandbar-1.log",
         "attempt-1.log",
         "attempt-2-gate.log",
         "attempt-2-nudge.log",
-        "attempt-2-quality-list-1.log",
+        "attempt-2-quality-list-sandbar-1.log",
         "attempt-2.log",
         "attempt-3-gate.log",
         "attempt-3-nudge.log",
-        "attempt-3-quality-list-1.log",
+        "attempt-3-quality-list-sandbar-1.log",
         "attempt-3.log",
         "attempt-4-gate.log",
         "attempt-4-nudge.log",
-        "attempt-4-quality-list-1.log",
+        "attempt-4-quality-list-sandbar-1.log",
         "attempt-4.log",
         "ui-check-1.log",
         "ui-check-2.log",
