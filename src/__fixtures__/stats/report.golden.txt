@@ -1,0 +1,179 @@
+# Sandbar scorecard: last 10 runs
+
+## Runs
+run                           schema  driver
+run-2026-09-01T10-00-00-000Z  5       sandbar 0.49.12
+run-2026-09-02T08-30-00-000Z  5       sandbar 0.49.13
+
+## Skipped runs
+run  schema  reason
+
+## Ignored event kinds
+kind  events
+
+## Outcomes per cycle
+outcome             auto  review  input    cached   cacheWrite  output  reasoning
+DONE                2     0       2560700  8020000  223000      102500  23500
+NEEDS-INFO          0     0       -        -        -           -       -
+NEEDS-UI-PROTOTYPE  0     0       -        -        -           -       -
+NEEDS-PARTITION     0     1       12       30000    9000        800     -
+NEEDS-HUMAN         0     0       -        -        -           -       -
+NEEDS-HUMAN-REVIEW  0     0       -        -        -           -       -
+HARD-ERROR          0     0       -        -        -           -       -
+QUOTA               0     0       -        -        -           -       -
+CREDENTIAL          0     0       -        -        -           -       -
+REJECTED            0     0       -        -        -           -       -
+interrupted         1     0       40       500000   -           3000    -
+
+## Outcomes by cause
+outcome:cause      cycles
+DONE:-             2
+interrupted:-      1
+NEEDS-PARTITION:-  1
+
+## Per DONE issue
+metric                           of  n  sum      median   p90      max
+attempts                         2   2  4        2        2        2
+gate rounds                      2   2  4        2        2        2
+quality rounds                   2   2  4        2        2        2
+review rounds                    2   2  3        1        2        2
+tokens: partition-check          0   0  -        -        -        -
+tokens: ui-check                 0   0  -        -        -        -
+tokens: implementer              2   2  6055670  2610270  3445400  3445400
+tokens: quality-list             0   0  -        -        -        -
+tokens: quality-fix              2   2  1980000  657000   1323000  1323000
+tokens: quality-verify           0   0  -        -        -        -
+tokens: review                   2   2  2733000  931000   1802000  1802000
+tokens: adjudicator:quality      0   0  -        -        -        -
+tokens: adjudicator:correctness  1   1  137530   137530   137530   137530
+tokens: adjudicator:scenarios    0   0  -        -        -        -
+tokens: scenario-writer          0   0  -        -        -        -
+tokens: scenario-runner          0   0  -        -        -        -
+tokens: condenser                0   0  -        -        -        -
+tokens: resolve                  1   0  -        -        -        -
+
+## Pass rejections
+pass            runs  rejected  rate
+gate-1          4     1         25.0%
+quality-list    0     0         -
+quality-verify  0     0         -
+correctness     3     2         66.7%
+scenarios       0     0         -
+
+## Adjudication
+pass         rulings  overruled  rate
+quality      0        0          -
+correctness  1        1          100.0%
+scenarios    0        0          -
+
+## Context depth per invocation
+role                     metric        of  n  sum     median  p90     max
+partition-check          first         1   0  -       -       -       -
+partition-check          peak          1   1  39000   39000   39000   39000
+partition-check          contextChars  1   1  31000   31000   31000   31000
+partition-check          toolCalls     1   1  3       3       3       3
+ui-check                 first         0   0  -       -       -       -
+ui-check                 peak          0   0  -       -       -       -
+ui-check                 contextChars  0   0  -       -       -       -
+ui-check                 toolCalls     0   0  -       -       -       -
+implementer              first         5   0  -       -       -       -
+implementer              peak          5   4  389000  96000   118000  118000
+implementer              contextChars  5   5  248000  51000   61000   61000
+implementer              toolCalls     5   5  146     18      64      64
+quality-list             first         0   0  -       -       -       -
+quality-list             peak          0   0  -       -       -       -
+quality-list             contextChars  0   0  -       -       -       -
+quality-list             toolCalls     0   0  -       -       -       -
+quality-fix              first         4   0  -       -       -       -
+quality-fix              peak          4   3  174000  58000   61000   61000
+quality-fix              contextChars  4   3  170000  58000   62000   62000
+quality-fix              toolCalls     4   3  51      17      22      22
+quality-verify           first         0   0  -       -       -       -
+quality-verify           peak          0   0  -       -       -       -
+quality-verify           contextChars  0   0  -       -       -       -
+quality-verify           toolCalls     0   0  -       -       -       -
+review                   first         3   0  -       -       -       -
+review                   peak          3   3  207000  69000   70000   70000
+review                   contextChars  3   3  181000  60000   63000   63000
+review                   toolCalls     3   3  83      28      30      30
+adjudicator:quality      first         0   0  -       -       -       -
+adjudicator:quality      peak          0   0  -       -       -       -
+adjudicator:quality      contextChars  0   0  -       -       -       -
+adjudicator:quality      toolCalls     0   0  -       -       -       -
+adjudicator:correctness  first         1   0  -       -       -       -
+adjudicator:correctness  peak          1   1  47000   47000   47000   47000
+adjudicator:correctness  contextChars  1   1  45000   45000   45000   45000
+adjudicator:correctness  toolCalls     1   1  6       6       6       6
+adjudicator:scenarios    first         0   0  -       -       -       -
+adjudicator:scenarios    peak          0   0  -       -       -       -
+adjudicator:scenarios    contextChars  0   0  -       -       -       -
+adjudicator:scenarios    toolCalls     0   0  -       -       -       -
+scenario-writer          first         0   0  -       -       -       -
+scenario-writer          peak          0   0  -       -       -       -
+scenario-writer          contextChars  0   0  -       -       -       -
+scenario-writer          toolCalls     0   0  -       -       -       -
+scenario-runner          first         0   0  -       -       -       -
+scenario-runner          peak          0   0  -       -       -       -
+scenario-runner          contextChars  0   0  -       -       -       -
+scenario-runner          toolCalls     0   0  -       -       -       -
+condenser                first         0   0  -       -       -       -
+condenser                peak          0   0  -       -       -       -
+condenser                contextChars  0   0  -       -       -       -
+condenser                toolCalls     0   0  -       -       -       -
+resolve                  first         1   0  -       -       -       -
+resolve                  peak          1   0  -       -       -       -
+resolve                  contextChars  1   0  -       -       -       -
+resolve                  toolCalls     1   0  -       -       -       -
+
+## Landed then broken
+check   runs  red  green  unverified
+gate-2  3     1    -      -
+deploy  0     0    0      0
+
+## Scenarios
+issues  pass  fail  unverified  writerFailed  perIssue of  perIssue n  perIssue sum  perIssue median  perIssue p90  perIssue max
+0       0     0     0           0             0            0           -             -                -             -
+
+## Quality rule groups
+group  janitor  listers  changesRequested  findings n  findings sum  soleGroupFixerCommits
+
+## DB copies
+metric                 of  n  sum  median  p90  max
+copies                 0
+peak concurrent        0
+volume used bytes max  -
+unique bytes           0   0  -    -       -    -
+peak memory bytes      0   0  -    -       -    -
+
+## Issue anchors
+chars             of  n  sum  median  p90  max
+raw               0   0  -    -       -    -
+after trace drop  0   0  -    -       -    -
+condensed         0   0  -    -       -    -
+
+## Janitor
+task  runs  outcomes
+
+## Issues
+issue  lane    outcome          cause  cycles  interrupted  attempts  gate  quality  review  specGaps  tokens   durationMs
+41     auto    DONE             -      1       0            2         2     2        2       -         6570400  1749000
+42     auto    DONE             -      2       1            2         2     2        1       -         4335800  1274000
+43     review  NEEDS-PARTITION  -      1       0            0         0     0        0       -         39812    43000
+
+## Invocations
+run                           issue  role                     attempt  round  invocation  provider  model            result     verdict            durationMs  tokens   firstContext  peakContext  toolCalls  peakMemoryBytes  oomKilled  transcript
+run-2026-09-01T10-00-00-000Z  41     implementer              1        -      -           claude    claude-opus-4-7  COMPLETE   -                  612000      2509310  -             118000       64         1900000000       false      -
+run-2026-09-01T10-00-00-000Z  41     quality-fix              1        1      -           codex     gpt-5.5          completed  -                  201000      769000   -             61000        22         -                -          -
+run-2026-09-01T10-00-00-000Z  41     review                   1        1      1           codex     gpt-5.5          completed  CHANGES-REQUESTED  240000      932000   -             70000        30         -                -          -
+run-2026-09-01T10-00-00-000Z  41     implementer              2        -      -           claude    claude-opus-4-7  COMPLETE   -                  180000      936090   -             96000        18         1700000000       false      -
+run-2026-09-01T10-00-00-000Z  41     quality-fix              2        2      -           codex     gpt-5.5          completed  -                  120000      554000   -             55000        12         -                -          -
+run-2026-09-01T10-00-00-000Z  41     review                   2        2      1           codex     gpt-5.5          completed  APPROVED           200000      870000   -             68000        25         -                -          -
+run-2026-09-01T10-00-00-000Z  42     implementer              1        -      -           claude    claude-opus-4-7  FAILED     -                  300000      503040   -             71000        9          -                -          -
+run-2026-09-02T08-30-00-000Z  43     partition-check          -        -      1           claude    claude-opus-4-7  PARTITION  -                  41000       39812    -             39000        3          -                -          -
+run-2026-09-02T08-30-00-000Z  42     implementer              1        -      -           claude    claude-opus-4-7  COMPLETE   -                  420000      1885200  -             104000       41         2100000000       false      -
+run-2026-09-02T08-30-00-000Z  42     quality-fix              1        1      -           codex     gpt-5.5          completed  -                  150000      657000   -             58000        17         -                -          -
+run-2026-09-02T08-30-00-000Z  42     implementer              2        -      -           claude    claude-opus-4-7  COMPLETE   -                  160000      725070   -             -            14         -                -          -
+run-2026-09-02T08-30-00-000Z  42     quality-fix              2        2      -           codex     gpt-5.5          failed     -                  60000       -        -             -            -          -                -          -
+run-2026-09-02T08-30-00-000Z  42     review                   2        2      1           codex     gpt-5.5          completed  CHANGES-REQUESTED  210000      931000   -             69000        28         -                -          -
+run-2026-09-02T08-30-00-000Z  42     adjudicator:correctness  2        2      -           claude    claude-opus-4-7  OVERRULED  OVERRULED          95000       137530   -             47000        6          -                -          -
+run-2026-09-02T08-30-00-000Z  42     resolve                  1        -      -           -         -                exit       -                  130000      -        -             -            -          800000000        -          -
