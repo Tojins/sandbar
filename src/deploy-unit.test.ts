@@ -1469,7 +1469,20 @@ describe("committed installation data and configs", () => {
     if (egress.kind !== "allowlist") throw new Error("outdoor's egress resolved open");
     expect(egress.policy.mode).toBe("report");
     expect(egress.policy.entries.map((entry) => entry.host)).toEqual(
-      expect.arrayContaining(["registry.npmjs.org", "repo.packagist.org", "api.mews-demo.com", "directory.peppol.eu", "ec.europa.eu"]),
+      expect.arrayContaining([
+        "registry.npmjs.org",
+        "repo.packagist.org",
+        "api.mews-demo.com",
+        "directory.peppol.eu",
+        "ec.europa.eu",
+        "www.uid-wse.admin.ch",
+        "wl-api.mf.gov.pl",
+        "data.brreg.no",
+        "recherche-entreprises.api.gouv.fr",
+        "test-api.service.hmrc.gov.uk",
+        "kbopub.economie.fgov.be",
+        "*.adfinity.app",
+      ]),
     );
   });
 
