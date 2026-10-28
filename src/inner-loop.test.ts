@@ -1717,6 +1717,27 @@ describe("runQualityReview (#187)", () => {
     expect(events).toEqual([expect.objectContaining({ scope: "since:approved-head" })]);
   });
 
+  it("verifies by the standards its lister read, never re-reading the source tip", async () => {
+    const sentinel: QualityStandards = { groups: [], preamble: "sentinel", leaveAlone: [], warnings: [] };
+    const { ctx, run } = reviewer(
+      ["<verdict>APPROVED</verdict>"],
+      { sinceImplementer: [], overrules: [], openRound: null, standards: sentinel },
+    );
+    await run(verifyAction);
+    expect(ctx.quality.standards).toBe(sentinel);
+    expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      standards: sentinel,
+    }));
+  });
+
+  it("rejects a verify that runs before any lister read the standards", async () => {
+    const { run } = reviewer(
+      ["<verdict>APPROVED</verdict>"],
+      { sinceImplementer: [], overrules: [], openRound: null, standards: null },
+    );
+    await expect(run(verifyAction)).rejects.toThrow(/before any lister read the standards/);
+  });
+
   it("verifies the fixer's step from its anchor without opening a round", async () => {
     const { ctx, events, filenames, sandbox, run } = reviewer(["<verdict>APPROVED</verdict>"]);
     await expect(run(verifyAction)).resolves.toMatchObject({
@@ -1883,6 +1904,14 @@ describe("runQualityFix (#185, #187)", () => {
       ),
     };
   };
+
+  it("rejects a fixer that runs before any lister read the standards", async () => {
+    const { run } = fixer(
+      { kind: "exit" },
+      { sinceImplementer: [], overrules: [], openRound: null, standards: null },
+    );
+    await expect(run()).rejects.toThrow(/before any lister read the standards/);
+  });
 
   it("runs a cold fixer on its own routing under the quality author", async () => {
     const { sandbox, filenames, run } = fixer({ kind: "exit" });
