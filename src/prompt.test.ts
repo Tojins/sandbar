@@ -67,6 +67,16 @@ describe("renderAttemptSlot — retained reviewer feedback", () => {
     expect(slot).toContain("Address the concerns above");
   });
 
+  it("asks for a failing-first test over every same-defect site of a behavior finding (#181)", () => {
+    const slot = renderAttemptSlot({
+      ...implementerInputs,
+      latestReviewerFeedback: "Null input crashes.",
+    });
+    expect(slot).toMatch(/test that fails at this\s+head/);
+    expect(slot).toMatch(/every other site with the same defect on this branch or in code it relies\s+on/);
+    expect(slot).toMatch(/commit message how you reproduced\s+it/);
+  });
+
   it("says a harness failure leaves an earlier rejection standing", () => {
     const slot = renderAttemptSlot({
       ...implementerInputs,
@@ -126,7 +136,7 @@ describe("renderAttemptSlot — the quality pass (#185)", () => {
     expect(review).toMatch(/Previous reviewer feedback[\s\S]*quality pass[\s\S]*not something to delete/);
     for (const followUp of [gate, review]) {
       const section = followUp.slice(followUp.indexOf("## Previous"), followUp.indexOf("## The quality pass"));
-      expect(section).toMatch(/only if it contradicts the\s+issue, and then\s+name the test and the reason in that commit's message/);
+      expect(section).toMatch(/only\s+if it contradicts the\s+issue, and then\s+name the test and the reason in that\s+commit's message/);
     }
   });
 });
@@ -620,6 +630,9 @@ describe("renderQualityReviewSlot (#187)", () => {
       ruling: "the wrapper carries the retry",
     }]);
     expect(slot).toContain("## Prior review rounds");
+    // Overruled findings are not violations, so they get no "addressed" rule.
+    expect(slot).toContain("in order.\n\n### Round 2");
+    expect(slot).not.toContain("gone from every site");
     expect(slot).toContain(
       "### Round 2 — head=bbb2222\nquality: OVERRULED\n### Standards\nsrc/a.ts:9 is a wrapper\n\n" +
         "Adjudicator's ruling:\nthe wrapper carries the retry",
@@ -704,10 +717,17 @@ describe("reviewer prior-round history (#88)", () => {
   it("renders one prior correctness rejection without its verdict token", () => {
     const slot = render([rejection]);
     expect(slot).toContain(
-      "## Prior review rounds\n\nThe following rounds reviewed earlier heads of this branch, in order:\n\n" +
+      "## Prior review rounds\n\nThe following rounds reviewed earlier heads of this branch, in order.\n\n" +
+        "A defect they raised is addressed only when it is gone from every site on this\n" +
+        "branch or in code it relies on, not just the site cited.\n\n" +
         "### Round 1 — head=1111111\ncorrectness: CHANGES-REQUESTED\nNull input crashes.",
     );
     expect(slot).not.toContain("<verdict>CHANGES-REQUESTED</verdict>\n\n## Review process");
+  });
+
+  it("adds the every-site rule only when there is history (#181)", () => {
+    expect(render([rejection])).toMatch(/gone from every site on this\s+branch/);
+    expect(render([])).not.toContain("gone from every site");
   });
 
   // The strip recognises exactly what `parseVerdict` does (#113): well-formed

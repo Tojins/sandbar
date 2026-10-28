@@ -3,8 +3,10 @@
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
 // commit list + diff stat (progressive disclosure, #158), the quality fixer's
 // commits since the last attempt (#185), sandbox-stack report #44, gate trace,
-// the latest correctness rejection, and the same built-in coding standards
-// the quality pass applies plus a live pre-promise diff checklist (#78).
+// the latest correctness rejection — an accepted behavior finding is fixed at
+// every same-defect site behind a failing-first test (#181) — and the same
+// built-in coding standards the quality pass applies plus a live pre-promise
+// diff checklist (#78).
 // The quality pass (#187): its lister gets diff
 // stat + commits, the exhaustive listing text and, once a quality pass has
 // approved a head, a stat of what changed since that head as its only review
@@ -12,7 +14,9 @@
 // ruling; its fixer gets the latest CHANGES-REQUESTED report (and an upheld
 // ruling); its verify gets that report and a stat of what the fixer changed.
 // Correctness reviewer: diff stat + commits plus every earlier correctness
-// round (#88). Every prompt is self-sufficient because no role resumes
+// round (#88), a defect a round raised counting as addressed only once it is
+// gone from every site (#181); the lister's overrule history shares that
+// section but not that rule. Every prompt is self-sufficient because no role resumes
 // another's session — which is what lets each role sit on its own vendor
 // (#121).
 // The adjudicator (#167) gets the shared anchors plus one rejected report of
@@ -75,6 +79,7 @@ const REVIEWER_QUALITY_OVERRULES_TPL = loadTemplate("reviewer-quality-overrules"
 const QUALITY_FIXER_TPL = loadTemplate("quality-fixer");
 const QUALITY_FIXER_RULING_TPL = loadTemplate("quality-fixer-ruling");
 const REVIEWER_PRIOR_ROUNDS_TPL = loadTemplate("reviewer-prior-rounds");
+const REVIEWER_PRIOR_ROUNDS_ADDRESSED_TPL = loadTemplate("reviewer-prior-rounds-addressed");
 const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards");
 const IMPLEMENTER_TPL = loadTemplate("implementer");
 const UI_CHECK_TPL = loadTemplate("ui-check");
@@ -856,6 +861,7 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
   const priorRounds = inputs.priorRounds.length === 0
     ? ""
     : render(REVIEWER_PRIOR_ROUNDS_TPL, {
+        addressed: section(REVIEWER_PRIOR_ROUNDS_ADDRESSED_TPL),
         rounds: inputs.priorRounds.map(renderPriorReviewRound).join("\n\n"),
       });
   return render(REVIEWER_TPL, {
@@ -893,6 +899,7 @@ export function renderQualityReviewSlot(inputs: QualityReviewSlotRender): string
   const priorRounds = mode.kind === "verify" || mode.overrules.length === 0
     ? ""
     : render(REVIEWER_PRIOR_ROUNDS_TPL, {
+        addressed: "",
         rounds: mode.overrules.map(renderQualityOverrule).join("\n\n"),
       }) + `\n\n${REVIEWER_QUALITY_OVERRULES_TPL}`;
   return render(REVIEWER_QUALITY_TPL, {
