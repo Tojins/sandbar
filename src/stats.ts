@@ -329,9 +329,9 @@ function invocationRow(
 
 const VERDICTS: ReadonlySet<string> = new Set(["APPROVED", "CHANGES-REQUESTED"]);
 
-type Tally = { runs: number; rejected: number };
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
-const count = (tally: Tally, rejected: boolean): void => {
+const count = (tally: Mutable<PassCount>, rejected: boolean): void => {
   tally.runs += 1;
   if (rejected) tally.rejected += 1;
 };
@@ -339,14 +339,14 @@ const count = (tally: Tally, rejected: boolean): void => {
 export function computeStats(input: StatsInput): StatsReport {
   const cycles: Cycle[] = [];
   const invocations: Row[] = [];
-  const passes: Record<PassName, Tally> = {
+  const passes: Record<PassName, Mutable<PassCount>> = {
     "gate-1": { runs: 0, rejected: 0 },
     "quality-list": { runs: 0, rejected: 0 },
     "quality-verify": { runs: 0, rejected: 0 },
     correctness: { runs: 0, rejected: 0 },
     scenarios: { runs: 0, rejected: 0 },
   };
-  const adjudication: Record<AdjudicatedPass, { rulings: number; overruled: number }> = {
+  const adjudication: Record<AdjudicatedPass, Mutable<RulingCount>> = {
     quality: { rulings: 0, overruled: 0 },
     correctness: { rulings: 0, overruled: 0 },
     scenarios: { rulings: 0, overruled: 0 },

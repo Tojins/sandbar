@@ -182,6 +182,19 @@ describe("readStatsInput (#194)", () => {
     ]);
   });
 
+  it.each([
+    ["missing", undefined, "unsupported event schema undefined"],
+    ["a string", "6", "unsupported event schema 6"],
+  ])("skips a run whose schemaVersion is %s, with no version", async (_name, version, reason) => {
+    const logs = await makeTemporaryDirectory();
+    await mkdir(join(logs, "run-2026-09-05T00-00-00-000Z"));
+    await writeFile(join(logs, "run-2026-09-05T00-00-00-000Z", "events.jsonl"), jsonl([runStart(version)]));
+    const input = await readStatsInput(logs, { last: 10 }, { withProse: false });
+    expect(input.runs).toEqual([]);
+    expect(input.skipped).toEqual([{ run: "run-2026-09-05T00-00-00-000Z", reason }]);
+    expect(input.skipped[0]).not.toHaveProperty("schemaVersion");
+  });
+
   it("reads no prose unless asked", async () => {
     const logs = await makeTemporaryDirectory();
     await mkdir(join(logs, "run-2026-09-05T00-00-00-000Z", "issue-7"), { recursive: true });

@@ -208,11 +208,8 @@ async function readStatsRun(dir: string, run: string, withProse: boolean): Promi
     };
   }
   const { events, ignoredKinds } = normalize(parsed.events);
-  // `parseEventLines` checked this; the narrowing is for the type.
-  const start = events[0];
-  if (start?.kind !== "run-start") {
-    throw new EventRecordReadError(`Run record ${path} does not begin with run-start`);
-  }
+  // `parseEventLines` guarantees the first event is run-start, and the normalisers keep it.
+  const start = events[0] as Extract<StatsEvent, { kind: "run-start" }>;
   return {
     kind: "read",
     run: {

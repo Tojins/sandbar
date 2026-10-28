@@ -1,6 +1,6 @@
 // Runs the built entry as `npm run stats` does: `npm test` builds dist/ first.
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,5 +61,27 @@ describe("npm run stats (#194)", () => {
     expect(JSON.parse(json.stdout).runs).toEqual([
       { run: "run-2026-09-02T08-30-00-000Z", schemaVersion: 5, driver: "sandbar 0.49.13" },
     ]);
+  });
+
+  it("reads the speech section only with --with-prose", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbar-stats-cli-"));
+    temporaryDirectories.add(dir);
+    const run = join(dir, "run-2026-09-05T00-00-00-000Z");
+    await mkdir(join(run, "issue-7"), { recursive: true });
+    const row = (fields: object) => JSON.stringify({ ts: "2026-09-05T00:00:00Z", ...fields });
+    await writeFile(join(run, "events.jsonl"), [
+      row({ kind: "run-start", schemaVersion: 6, driver: "sandbar test", configPath: null,
+        workdir: "/w", maxParallelIssues: 1, pid: 1, seq: 1 }),
+      row({ kind: "ui-check", seq: 2, issue: 7, invocation: 1, provider: "claude", model: "m",
+        effort: null, durationMs: 1, result: "CLEAR", transcript: "ui-check-1.log" }),
+    ].join("\n") + "\n");
+    await writeFile(
+      join(run, "issue-7", "ui-check-1.log"),
+      "header\n\n--- speech ---\n<ui-check>CLEAR</ui-check>\n--- stdout tail ---\n",
+    );
+    const withProse = await stats(["--logs", dir, "--json", "--with-prose"]);
+    expect(JSON.parse(withProse.stdout).invocations[0].prose).toBe("<ui-check>CLEAR</ui-check>");
+    const bare = await stats(["--logs", dir, "--json"]);
+    expect(JSON.parse(bare.stdout).invocations[0]).not.toHaveProperty("prose");
   });
 });

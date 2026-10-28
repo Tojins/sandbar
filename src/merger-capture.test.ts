@@ -265,6 +265,20 @@ describe("parseCapturedAgentRun (#74)", () => {
     expect(run.output).toBe("");
   });
 
+  it("takes the first command's context depth from a claude tool_call", () => {
+    const assistant = (input: number, command: string) => JSON.stringify({
+      type: "assistant",
+      message: {
+        usage: { input_tokens: input },
+        content: [{ type: "tool_use", name: "Bash", input: { command } }],
+      },
+    });
+    const raw = [assistant(100, "git status"), assistant(250, "git diff")].join("\n");
+    const run = parseCapturedAgentRun(captured(raw), buildAgentProvider("claude", "m"));
+    expect(run.firstContext).toBe(100);
+    expect(run.peakContext).toBe(250);
+  });
+
   it("takes the default claude promise from its parsed result event", () => {
     const raw = [
       JSON.stringify({

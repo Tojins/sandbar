@@ -1804,6 +1804,7 @@ describe("run quota orchestration (#109)", () => {
         issueId: "1", attempt: 1, container: "resolve-1", end: "exit",
         exitCode: 137, signal: null, durationMs: 40, stdout: "", stderr: "",
         mode: "still-conflicted", peakMemoryBytes: 4000, oomKilled: true,
+        usage: { inputTokens: 5, outputTokens: 6 }, toolCalls: 3, peakContext: 90, firstContext: 20,
       });
       await options.observations.onGate("1", {
         ok: false, durationMs: 50, stdout: "", stderr: "", exitCode: 137,
@@ -1852,6 +1853,8 @@ describe("run quota orchestration (#109)", () => {
     }));
     expect(eventsOf("resolve-attempt")).toContainEqual(expect.objectContaining({
       issue: 1, peakMemoryBytes: 4000, oomKilled: true,
+      provider: expect.any(String), model: expect.any(String),
+      usage: { inputTokens: 5, outputTokens: 6, toolCalls: 3, peakContext: 90, firstContext: 20 },
     }));
     expect(eventsOf("gate")).toContainEqual(expect.objectContaining({
       gate: "gate-2",

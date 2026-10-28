@@ -68,6 +68,14 @@ describe("computeStats cycles (#194)", () => {
     expect(report.perDoneIssue.tokensByRole.implementer).toMatchObject({ of: 1, n: 1, sum: 7 });
   });
 
+  it("lets a cycle's first terminal decide its outcome", () => {
+    const report = computeStats(input([
+      run("run-1", [admitted(1), terminal(1, "NEEDS-INFO"), terminal(1, "DONE")]),
+    ]));
+    expect(report.outcomes.byLane.auto).toMatchObject({ "NEEDS-INFO": 1, DONE: 0 });
+    expect(report.issues[0]?.outcome).toBe("NEEDS-INFO");
+  });
+
   it("rolls a DONE issue up across two runs, its outcome its last cycle's", () => {
     const report = computeStats(input([
       run("run-1", [admitted(2), implementer(2, 1), terminal(2, "NEEDS-INFO", { specGaps: 1 })]),

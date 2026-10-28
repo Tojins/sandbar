@@ -485,7 +485,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     const events: EventInput[] = [];
     const reviewerFailure = new Error("reviewer disconnected");
     seams.partialUsage.set(reviewerFailure, {
-      usage: { inputTokens: 7 }, toolCalls: 2, peakContext: 52,
+      usage: { inputTokens: 7 }, toolCalls: 2, peakContext: 52, firstContext: 15,
     });
     seams.sandboxRun
       .mockResolvedValueOnce({
@@ -499,7 +499,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
         peakContext: 23,
         commits: [{ sha: "implemented-sha" }],
       })
-      .mockResolvedValueOnce(listerRun)
+      .mockResolvedValueOnce({ ...listerRun, firstContext: 30 })
       .mockRejectedValueOnce(reviewerFailure)
       .mockResolvedValueOnce({
         stdout: "<verdict>APPROVED</verdict>",
@@ -507,6 +507,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
         maxGapMs: 2,
         toolCalls: 4,
         peakContext: 73,
+        firstContext: 16,
         commits: [],
       });
 
@@ -522,7 +523,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>",
       durationMs: 5, maxGapMs: 1,
       transcript: "attempt-1-quality-list-1.log",
-      usage: { toolCalls: 2, peakContext: 40, contextChars: 14 },
+      usage: { toolCalls: 2, peakContext: 40, firstContext: 30, contextChars: 14 },
     }]);
     expect(events.filter((event) => event.kind === "review-pass")).toEqual([
       {
@@ -530,14 +531,14 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
         invocation: 1, provider: "claude", model: "model",
         effort: null, result: "failed", durationMs: expect.any(Number),
         transcript: "attempt-1-reviewer-1.log",
-        usage: { inputTokens: 7, toolCalls: 2, peakContext: 52, contextChars: 18 },
+        usage: { inputTokens: 7, toolCalls: 2, peakContext: 52, firstContext: 15, contextChars: 18 },
       },
       {
         kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
         invocation: 2, provider: "claude", model: "model",
         effort: null, result: "completed", durationMs: 31, maxGapMs: 2,
         transcript: "attempt-1-reviewer-2.log",
-        usage: { toolCalls: 4, peakContext: 73, contextChars: 18 },
+        usage: { toolCalls: 4, peakContext: 73, firstContext: 16, contextChars: 18 },
       },
     ]);
     expect(events.filter((event) => event.kind === "phase")).toEqual([
