@@ -393,7 +393,10 @@ export function podmanTestScope(label: string): PodmanTestScope {
     // container in the scope — its container kind has an empty infix, so
     // bare-`podman run` fixtures named through `stackContainerNameFor` go too —
     // and the network. `reconcileImages` takes every labelled image, including
-    // untagged predecessors and intermediate stages.
+    // untagged predecessors and intermediate stages. It runs unbounded, as the
+    // container sweep does: the daemon's 30s per-command bound killed `images
+    // -a` mid-wait on a gate host busy committing builds, and the caller's
+    // `afterAll` timeout is this teardown's bound.
     const failures: unknown[] = [];
     const [containers] = await Promise.allSettled([
       cleanupOrphanContainers(scope),
@@ -405,7 +408,11 @@ export function podmanTestScope(label: string): PodmanTestScope {
     }
     for (const s of [scope, otherScope]) {
       const [images] = await Promise.allSettled([
-        reconcileImages({ scope: s, liveTags: new Set() }),
+        reconcileImages({
+          scope: s,
+          liveTags: new Set(),
+          run: (args) => exec(RUNTIME, [...args]),
+        }),
       ]);
       if (images?.status === "rejected") failures.push(images.reason);
     }
