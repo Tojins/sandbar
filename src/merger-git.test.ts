@@ -472,17 +472,38 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(await originHas("main")).toBe(await git(wt, "rev-parse", "HEAD"));
   });
 
-  it("aborts a conflicting source re-merge and says why", async () => {
+  it("leaves a conflicting source re-merge in progress for the caller, and says why", async () => {
     await commit(wt, "a.txt", "ours\n");
     const head = await git(wt, "rev-parse", "HEAD");
     await commit(seed, "a.txt", "theirs\n");
     await git(seed, "push", "-q", "origin", "main");
 
-    const sync = await adapter().syncWithSource();
-    expect(sync.ok).toBe(false);
+    const a = adapter();
+    const sync = await a.syncWithSource();
+    expect(sync).toMatchObject({ ok: false, conflicted: true });
     expect(sync.reason).toMatch(/CONFLICT/);
+    expect(await a.unmergedPaths()).toEqual(["a.txt"]);
+    // The caller's way out (#68 declined) restores the pre-sync tree.
+    await a.abortMerge();
     expect(await git(wt, "rev-parse", "HEAD")).toBe(head);
     expect(await git(wt, "status", "--porcelain")).toBe("");
+  });
+
+  it("commits a settled source re-merge with its own message (#68)", async () => {
+    await commit(wt, "a.txt", "ours\n");
+    await commit(seed, "a.txt", "theirs\n");
+    await git(seed, "push", "-q", "origin", "main");
+
+    const a = adapter();
+    expect((await a.syncWithSource()).conflicted).toBe(true);
+    await a.writeWorktreeFile("a.txt", "settled\n");
+    await a.stagePath("a.txt");
+    expect(await a.commitMerge()).toEqual({ ok: true });
+    expect(await git(wt, "log", "-1", "--format=%s")).toBe(
+      "Merge origin/main into the sandbar merge result",
+    );
+    expect(await git(wt, "log", "-1", "--format=%B")).not.toMatch(/Conflicts/);
+    await expect(a.push()).resolves.toEqual({ kind: "ok" });
   });
 
   it("reports a non-fast-forward member ref as a race", async () => {

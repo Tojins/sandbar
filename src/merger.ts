@@ -183,8 +183,11 @@
 //              gate-2 run again on that composed tree, and the push is retried
 //              once. A `--ff-only` pull could never recover this: HEAD carries
 //              the cycle's merge commits, so a moved origin is always
-//              divergent. A conflicting re-merge, a red re-gate or a second
-//              race is a hard fail; nothing has landed in any of them.
+//              divergent. The re-merge's version collision is settled by
+//              `resolveVersionCollision` (#68) — origin's tip bumped `version`
+//              too, so it conflicts by construction. Any other conflict, a red
+//              re-gate or a second race is a hard fail; nothing has landed in
+//              any of them.
 //
 //   verified — nothing reaches the source branch until the FORGE agrees. The
 //              merge result goes to a scratch integration branch, sandbar polls
@@ -790,8 +793,14 @@ export type MergerAdapter = ResolveAdapter & {
   push(): Promise<PushResult>;
   // After a push race: fetch origin/<sourceBranch> and merge it into HEAD
   // (--no-ff, so the cycle's own merge commits are kept, never rewritten). A
-  // failed merge is aborted before answering.
-  syncWithSource(): Promise<{ readonly ok: boolean; readonly reason: string }>;
+  // merge that stopped on conflicts is LEFT IN PROGRESS with `conflicted`, so
+  // the caller can settle the version collision (#68) or `abortMerge`; any
+  // other failure is aborted before answering.
+  syncWithSource(): Promise<{
+    readonly ok: boolean;
+    readonly reason: string;
+    readonly conflicted?: boolean;
+  }>;
   // --- the version collision (#68) ---
   // The unmerged set on its own, without the `git status` + `git diff` that
   // `conflictDigest` runs to build the agent's prompt. Asked twice per
@@ -2559,7 +2568,15 @@ export async function runMergerWithAdapter(
   if (push.kind === "race") {
     await emit(`push race; merging origin's new tip`);
     const sync = await adapter.syncWithSource();
-    if (!sync.ok) {
+    // Origin's new tip bumped `version` too, so this merge conflicts in the
+    // version files by construction (#68), same as a merge between branches.
+    // Anything the mechanical resolution cannot finish stays a hard fail.
+    const settled =
+      !sync.ok &&
+      sync.conflicted === true &&
+      (await resolveVersionCollision(adapter, emit, "origin")) === "completed";
+    if (!sync.ok && !settled) {
+      if (sync.conflicted === true) await adapter.abortMerge();
       await emit(`sync with origin failed: ${sync.reason}`);
       throw new MergerError(
         "Push to origin source branch was rejected (origin moved during the cycle) and " +
@@ -3558,6 +3575,13 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         return { ok: true, reason: "" };
       } catch (err) {
         if (!hasExitCode(err)) throw err;
+        if ((await unmergedPaths()).length > 0) {
+          return {
+            ok: false,
+            reason: `merge failed: ${pushErrorReason(err)}`,
+            conflicted: true,
+          };
+        }
         try {
           await exec("git", ["merge", "--abort"], { cwd });
         } catch (abortErr) {

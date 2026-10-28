@@ -109,7 +109,9 @@ type Script = {
   installs?: boolean[];
   gates?: GateResp[];
   pushes?: PushResult[];
-  pulls?: boolean[];
+  // `conflict` stops the re-merge on the conflicted worktree `conflictFiles`
+  // and `otherConflicts` describe, as a scripted `conflict` merge does (#68).
+  pulls?: (boolean | "conflict")[];
   heads?: string[];
   // #60: what origin has for a chunk branch, by branch name. A missing entry
   // means origin has no such branch and the base is the source branch.
@@ -335,6 +337,16 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       if (r === undefined) throw new Error("sync called but not scripted");
       calls.pulls++;
       calls.order.push("sync");
+      if (r === "conflict") {
+        merging = true;
+        unmerged = new Map(Object.entries(script.conflictFiles ?? {}));
+        otherUnmerged = [...(script.otherConflicts ?? ["foo"])];
+        return {
+          ok: false,
+          reason: "merge failed: CONFLICT (content)",
+          conflicted: true,
+        };
+      }
       return { ok: r, reason: r ? "" : "merge failed: CONFLICT (content)" };
     },
     // #68.
@@ -1201,6 +1213,55 @@ describe("runMergerWithAdapter — the version collision is resolved without an 
     expect(calls.fileWrites).toEqual([]);
     expect(calls.mergeCommits).toBe(0);
     expect(lines.some((l) => l.startsWith("version-collision"))).toBe(false);
+  });
+
+  // Origin's new tip bumped `version` too, so a push race's re-merge collides
+  // exactly like two branches do.
+  it("settles a push race's re-merge too, then re-gates and pushes", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }, { ok: true }],
+      pushes: [{ kind: "race" }, { kind: "ok" }],
+      pulls: ["conflict"],
+      conflictFiles: {
+        "package.json": PKG_CONFLICT,
+        "package-lock.json": LOCK_CONFLICT,
+      },
+      otherConflicts: [],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.pushed).toBe(true);
+    expect(calls.pushes).toBe(2);
+    expect(calls.aborts).toBe(0);
+    expect(calls.agentRuns).toEqual([]);
+    expect(calls.order.slice(calls.order.indexOf("sync"))).toEqual([
+      "sync",
+      "merge-commit",
+      "install",
+      "gate",
+    ]);
+    expect(calls.closes.map((c) => c.n)).toEqual([42]);
+  });
+
+  it("aborts a push race's re-merge that conflicts beyond the version files", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      pushes: [{ kind: "race" }],
+      pulls: ["conflict"],
+      conflictFiles: { "package.json": PKG_CONFLICT },
+      otherConflicts: ["src/merger.ts"],
+    });
+
+    await expect(runMergerWithAdapter([issue(42)], adapter)).rejects.toBeInstanceOf(
+      MergerError,
+    );
+    expect(calls.aborts).toBe(1);
+    expect(calls.mergeCommits).toBe(0);
+    expect(calls.agentRuns).toEqual([]);
+    expect(calls.pushes).toBe(1);
+    expect(calls.closes).toEqual([]);
   });
 });
 
