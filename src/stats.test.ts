@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { agg, computeStats, renderStatsTables } from "./stats.js";
+import { agg, computeStats, describeWindow, renderStatsTables } from "./stats.js";
 import { readStatsInput, type StatsEvent, type StatsInput, type StatsRun } from "./stats-record.js";
 
 let seq = 0;
@@ -27,6 +27,14 @@ const run = (name: string, events: readonly StatsEvent[]): StatsRun =>
 
 const input = (runs: readonly StatsRun[], withProse = false): StatsInput =>
   ({ window: { last: 10 }, withProse, runs, skipped: [], ignoredKinds: {} });
+
+describe("describeWindow (#215)", () => {
+  it("names a last, since and runs window", () => {
+    expect(describeWindow({ last: 3 })).toBe("last 3 runs");
+    expect(describeWindow({ since: "2026-01-01" })).toBe("runs since 2026-01-01");
+    expect(describeWindow({ runs: ["run-a", "run-b"] })).toBe("runs run-a, run-b");
+  });
+});
 
 describe("agg (#194, #82)", () => {
   it("separates the population from what was measured", () => {
