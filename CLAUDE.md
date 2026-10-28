@@ -15,6 +15,8 @@ cited GitHub issue (`#N`) and the commit history.
 - `npm run check` — `tsc --noEmit`; the only static gate (no linter).
 - `npm test` — rebuild, then `vitest run`.
 - `npx vitest run src/<file>.test.ts [-t "<name>"]` — one file / one test.
+- `npm run structure` — the structural checks sandbar's gate runs as steps
+  (`scripts/structure/`, #183): today `version`, the branch's bump.
 
 Node ≥ 20.6, ESM, NodeNext: imports in `src/` use `.js` even for `.ts` files.
 
