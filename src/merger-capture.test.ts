@@ -29,7 +29,7 @@ import {
   realAdapter,
   resolveAgentCredentials,
 } from "./merger.js";
-import { runScope } from "./naming.js";
+import { resolveNetworkNameFor, runScope } from "./naming.js";
 import { readPodmanCalls, writePodmanShim } from "./podman-shim.test-util.js";
 import { isInfraFailure, parseResolveSignal } from "./resolve-loop.js";
 import type { BoundedRuntimeResult } from "./runtime.js";
@@ -1041,6 +1041,86 @@ describe("resolve provider invocation (#74)", () => {
       expect.objectContaining({ cause: reaping }),
       expect.objectContaining({ cause: measurement }),
       expect.objectContaining({ cause: removal }),
+    ]);
+  });
+
+  it("starts the attempt's egress proxy, stops it after the removal and reports a failed stop", async () => {
+    const stopFailure = new Error("proxy stop failed");
+    const order: string[] = [];
+    const notices: Array<{ message: string; cause: unknown }> = [];
+    const restoreReporter = setCleanupReporter((_kind, message, cause) => {
+      notices.push({ message, cause });
+    });
+    const runtimeResult = (stdout = ""): BoundedRuntimeResult => ({
+      stdout, stderr: "", exitCode: 0, timedOut: false, maxBufferExceeded: false, errorMessage: "",
+    });
+    const podman = vi.fn(async (args: readonly string[]) => {
+      order.push(args[0] ?? "");
+      if (args[0] === "inspect") return runtimeResult("\nfalse\n");
+      if (args[0] === "stats") return runtimeResult("1024 / 2048\n");
+      return runtimeResult();
+    });
+    const captureResolveProcess = vi.fn(async (_file: string, args: readonly string[]) => ({
+      stdout: args[0] === "run"
+        ? "container-id\n"
+        : JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: "<promise>COMMITTED</promise>" },
+          }),
+      stderr: "", end: "exit" as const, exitCode: 0, signal: null, durationMs: 1,
+      container: "resolve-test",
+    }));
+    const scope = runScope("/worktree");
+    const start = vi.fn(async (_owner: unknown) => {
+      order.push("proxy-start");
+      return {
+        dnsArgs: ["--dns", "10.0.0.2"],
+        assertAlive: async () => undefined,
+        checkpoint: async () => [],
+        stop: async () => {
+          order.push("proxy-stop");
+          throw stopFailure;
+        },
+      };
+    });
+    const adapter = realAdapter({
+      cwd: "/worktree",
+      cacheDir: "/cache.git",
+      scope,
+      repo: { owner: "acme", name: "app" },
+      sourceBranch: "main",
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      sandboxImage: "sandbox-image",
+      env: () => undefined,
+      runStackGate: async () => { throw new Error("not called"); },
+      podman,
+      captureResolveProcess,
+      egress: { start },
+    });
+
+    try {
+      await expect(adapter.runResolveAgent("resolve this", 2)).resolves.toMatchObject({
+        output: "<promise>COMMITTED</promise>",
+      });
+    } finally {
+      restoreReporter();
+    }
+    expect(start).toHaveBeenCalledWith({
+      owner: "resolve-2",
+      networkName: resolveNetworkNameFor(scope, 2),
+      createNetwork: true,
+    });
+    expect(order[0]).toBe("proxy-start");
+    expect(order.indexOf("proxy-stop")).toBeGreaterThan(order.lastIndexOf("rm"));
+    expect(notices).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining("egress proxy teardown also failed"),
+        cause: stopFailure,
+      }),
     ]);
   });
 });

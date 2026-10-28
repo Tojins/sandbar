@@ -220,6 +220,7 @@ import {
 import { reconcileImages } from "./image-lifecycle.js";
 import {
   type EgressContext,
+  type OwnerEgress,
   currentEgressImageTag,
   egressReport,
   ensureEgressImage,
@@ -577,6 +578,17 @@ export function innerLoopConfigOf(
     botName: config.botName,
     botEmail: config.botEmail,
   };
+}
+
+// The `egress` option of a gate stack or the resolve adapter (#202): theirs to
+// start a proxy with, its records going to the run record. Nothing with open
+// egress.
+export function egressOf(
+  context: EgressContext | null,
+  emit: Parameters<typeof egressReport>[0],
+  stack: "gate" | "resolve",
+): { readonly egress?: OwnerEgress } {
+  return context === null ? {} : { egress: ownerEgress(context, egressReport(emit, { stack })) };
 }
 
 export async function verifyFinalizedTrackerState(
@@ -2790,9 +2802,7 @@ export async function run(
               stack: "gate",
               ...record,
             }).then(() => undefined),
-            ...(egressContext === null ? {} : {
-              egress: ownerEgress(egressContext, egressReport(runRecord.emit, { stack: "gate" })),
-            }),
+            ...egressOf(egressContext, runRecord.emit, "gate"),
             // gate-2 needs this as much as gate-1 does (#37): the merge result
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
@@ -2826,9 +2836,7 @@ export async function run(
             },
             stackChange: async () => stackChangeOf((await headStack()).classification),
             beforeOriginWrite: renewOriginLease,
-            ...(egressContext === null ? {} : {
-              egress: ownerEgress(egressContext, egressReport(runRecord.emit, { stack: "resolve" })),
-            }),
+            ...egressOf(egressContext, runRecord.emit, "resolve"),
           });
 
           // The only site that supplies the probe tree by hand — the two

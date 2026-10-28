@@ -23,6 +23,7 @@ import {
   gateDirtyWorktreePaths,
   gateReuseToken,
   gateStackImagesOf,
+  printedEgressReport,
   shouldHideWorktreeGit,
 } from "./gate-run.js";
 
@@ -267,5 +268,32 @@ describe("gateStackImagesOf", () => {
         stack(),
       ).map((i) => i.tag),
     ).toEqual(["localhost/app:gate"]);
+  });
+});
+
+describe("printedEgressReport", () => {
+  const enforced = { host: "evil.example", port: 443, via: "tls", enforced: true } as const;
+  const reportOnly = { host: null, port: null, via: "dns", enforced: false } as const;
+
+  it("prints an enforced refusal as refused, and a report-mode one as would refuse", async () => {
+    const printed: string[] = [];
+    await printedEgressReport((t) => printed.push(t)).refusals([enforced, reportOnly]);
+    expect(printed).toEqual([
+      "egress refused evil.example:443 (tls)\n",
+      "egress would refuse (no host) (dns)\n",
+    ]);
+  });
+
+  it("prints the summary's first refusals when the proxy stops", async () => {
+    const printed: string[] = [];
+    await printedEgressReport((t) => printed.push(t)).stopped({
+      mode: "enforce",
+      allowed: {},
+      refused: {},
+      upstreamErrors: {},
+      firstRefusals: [enforced],
+      durationMs: 1,
+    } as never);
+    expect(printed).toEqual(["egress refused evil.example:443 (tls)\n"]);
   });
 });

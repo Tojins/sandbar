@@ -6,6 +6,8 @@ import { promisify } from "node:util";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const innerLoopMocks = vi.hoisted(() => ({
+  ownerEgress: vi.fn(),
+  podmanOptions: [] as unknown[],
   buildPrompt: vi.fn(async () => "implementer prompt"),
   buildPartitionCheckPrompt: vi.fn(async () => "partition check prompt"),
   buildUiCheckPrompt: vi.fn(async () => "ui check prompt"),
@@ -56,10 +58,22 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   branchIsAheadOfSeed: innerLoopMocks.branchIsAheadOfSeed,
 }));
 
-vi.mock("./agent-sandbox.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./agent-sandbox.js")>()),
+vi.mock("./agent-sandbox.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./agent-sandbox.js")>();
+  return {
+  ...original,
   prepareWorktree: innerLoopMocks.prepareWorktree,
   createSandbox: innerLoopMocks.createSandbox,
+  podman: (options: Parameters<typeof import("./agent-sandbox.js").podman>[0]) => {
+    innerLoopMocks.podmanOptions.push(options);
+    return original.podman(options);
+  },
+  };
+});
+
+vi.mock("./egress.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./egress.js")>()),
+  ownerEgress: innerLoopMocks.ownerEgress,
 }));
 
 vi.mock("./agent-tools.js", async (importOriginal) => ({
@@ -106,6 +120,8 @@ import {
   type Sandbox,
 } from "./agent-sandbox.js";
 import { AgentToolsImageError } from "./agent-tools.js";
+import { EGRESS_AGENT_ENV, EgressProxyDiedError } from "./egress.js";
+import { sandboxNetworkNameFor } from "./naming.js";
 import {
   QUALITY_FIXER_MAX_INVOCATIONS,
   closedReviewRound,
@@ -1562,6 +1578,15 @@ describe("runVerifier (#121, #180, #185)", () => {
     });
     expect(sandbox.preserveWorktree).toHaveBeenCalled();
   });
+
+  it("lets a dead egress proxy propagate instead of failing the reviewer (#202)", async () => {
+    const died = new EgressProxyDiedError("egress proxy p died (gone)");
+    const { sandbox, run } = scripted([
+      { output: "", error: died, durationMs: 1, resources: {} },
+    ]);
+    await expect(run()).rejects.toBe(died);
+    expect(sandbox.run).toHaveBeenCalledOnce();
+  });
 });
 
 describe("runQualityReview (#187)", () => {
@@ -2817,6 +2842,83 @@ describe("runInnerLoop context terminals (#158)", () => {
       `refs/heads/${issue.branch}`,
     );
     innerLoopMocks.headMismatch.mockReset().mockResolvedValue(null);
+  });
+
+  describe("behind an egress allowlist (#202)", () => {
+    const calls: string[] = [];
+    const proxy = (name: string, stop: () => Promise<void> = async () => undefined) => ({
+      dnsArgs: ["--dns", "10.0.0.2"],
+      assertAlive: vi.fn(async () => undefined),
+      checkpoint: vi.fn(async () => []),
+      stop: vi.fn(async () => {
+        calls.push(`stop ${name}`);
+        await stop();
+      }),
+    });
+    const wire = () => {
+      const sandboxProxy = proxy("proxy");
+      const sandboxStart = vi.fn(async (_owner: unknown) => sandboxProxy);
+      const gateOwner = { start: vi.fn() };
+      innerLoopMocks.ownerEgress
+        .mockReset()
+        .mockReturnValueOnce({ start: sandboxStart })
+        .mockReturnValueOnce(gateOwner);
+      innerLoopMocks.podmanOptions.length = 0;
+      return { sandboxProxy, sandboxStart, gateOwner };
+    };
+    const egress = { policy: { mode: "enforce" } };
+
+    it("starts the sandbox proxy, wires its network into the sandbox and gate stack, and stops it last", async () => {
+      calls.length = 0;
+      const { sandboxProxy, sandboxStart, gateOwner } = wire();
+      const { sandbox, stack, opts } = harness(async (options) =>
+        /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : completeRun,
+        { egress } as never,
+      );
+      stack.stop.mockImplementation(async () => { calls.push("stop stack"); });
+      sandbox.close = vi.fn(async () => { calls.push("close sandbox"); });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+
+      const network = sandboxNetworkNameFor("w12345678", issue.id);
+      expect(sandboxStart).toHaveBeenCalledExactlyOnceWith({
+        owner: `sbx-${issue.id}`,
+        networkName: network,
+        createNetwork: true,
+      });
+      expect(innerLoopMocks.podmanOptions).toEqual([
+        expect.objectContaining({
+          network,
+          dnsArgs: sandboxProxy.dnsArgs,
+          env: EGRESS_AGENT_ENV,
+        }),
+      ]);
+      expect(innerLoopMocks.startStack).toHaveBeenCalledWith(
+        expect.objectContaining({ egress: gateOwner }),
+      );
+      expect(calls).toEqual(["stop stack", "close sandbox", "stop proxy"]);
+    });
+
+    it("stops every sandbox proxy it started when a later setup step fails", async () => {
+      calls.length = 0;
+      const started: ReturnType<typeof proxy>[] = [];
+      innerLoopMocks.ownerEgress.mockReset().mockImplementation(() => ({
+        start: vi.fn(async () => {
+          const next = proxy("proxy");
+          started.push(next);
+          return next;
+        }),
+      }));
+      const { opts } = harness(async () => completeRun, { egress } as never);
+      innerLoopMocks.createSandbox.mockRejectedValue(new Error("sandbox bringup failed"));
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+        type: "HARD-ERROR",
+        reason: "sandbox bringup failed",
+      });
+      expect(started.length).toBeGreaterThan(0);
+      for (const p of started) expect(p.stop).toHaveBeenCalledOnce();
+    });
   });
 
   it("keeps routine clone-reuse reports out of complaints", async () => {

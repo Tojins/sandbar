@@ -678,7 +678,7 @@ async function gate(
   return result.ok ? GATE_EXIT_GREEN : GATE_EXIT_RED;
 }
 
-function printedEgressReport(err: (text: string) => void): EgressReport {
+export function printedEgressReport(err: (text: string) => void): EgressReport {
   const refusals = async (found: readonly EgressRefusal[]): Promise<void> => {
     for (const r of found) {
       err(
