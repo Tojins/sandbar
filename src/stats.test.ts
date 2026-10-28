@@ -281,7 +281,7 @@ describe("computeStats prose (#182)", () => {
     ]);
   });
 
-  it("carries the commits an implementer or quality fixer made", () => {
+  it("carries the commits an implementer or quality fixer made, the fixer's by sha", () => {
     const fixer = (fields: Record<string, unknown>) => ev({
       kind: "quality-pass", issue: 1, attempt: 1, round: 1, provider: "codex", model: "m",
       effort: null, durationMs: 1, ...fields,
@@ -292,8 +292,8 @@ describe("computeStats prose (#182)", () => {
       fixer({ result: "completed", commits: ["a", "b"], discarded: {} }),
       fixer({ result: "quota" }),
     ])]));
-    expect(report.invocations.map((row) => [row.role, row.commits])).toEqual([
-      ["implementer", 1], ["quality-fix", 2], ["quality-fix", null],
+    expect(report.invocations.map((row) => [row.role, row.commits, row.shas])).toEqual([
+      ["implementer", 1, null], ["quality-fix", 2, ["a", "b"]], ["quality-fix", null, null],
     ]);
   });
 });
