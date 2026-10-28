@@ -95,7 +95,10 @@ After refreshing the clone and pulling images, the play runs the driver's
 `sandbar config-digest` over the installation config, as the installation user.
 It prints a sha256 of the evaluated `gateStack` and `images` with keys in
 canonical order, so a config that computes its stack is covered and keys sandbar
-ignores (`anchor`, `half`, `comment`) are not. When that differs from
+ignores (`anchor`, `half`, `comment`) are not. A stack file
+(`gateStack: { path }`, #186) is hashed as its path alone: the daemon reads it
+from `origin/main` at every gate, so a change to its env, mounts or steps takes
+effect without a restart, and only a change to `images` asks for one. When that differs from
 `~/installation/config-digest`, or the file is missing, the play requests a
 restart and then records the new digest — in that order, so a play that fails
 between the two asks again. A missing file counts as changed, so the first play
@@ -159,10 +162,12 @@ Every play also pulls the images each installation's gate stack runs but its
 config does not build — the images a run refuses to start without and never
 pulls itself (#24 D7). The list is the driver's `sandbar pulled-images` over the
 installation config, because the config is a program that may read its gate
-stack from the consumer clone; only images podman lacks are pulled. The pull
-channel follows landings on this repository and on every consumer's `main`, so
-an image a consumer commit adds is pulled within one tick of its landing, and
-the same play asks that daemon to restart into it. A failed play retries every tick until it
+stack from the consumer clone or name a stack file in it; only images podman
+lacks are pulled. The pull channel follows landings on this repository and on
+every consumer's `main`, so an image a consumer commit adds is pulled within
+one tick of its landing. A daemon reading a stack file takes the new stack at
+its next gate once that image is present (until then it keeps gating with the
+last stack it accepted); one with an inline stack is asked to restart into it. A failed play retries every tick until it
 succeeds; running the play by hand is not recorded and therefore costs one extra
 idempotent play at the next tick. Until that convergence succeeds, the daemon's
 next start refuses at preflight and names the `podman pull` line.

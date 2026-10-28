@@ -48,6 +48,8 @@
 //                                        (#37, #46)
 //   gate-stack-standalone-podman.test.ts the standalone gate's accommodations
 //                                        (#45)
+//   bound-stack-podman.test.ts           a bound stack restarting when its
+//                                        spec changes (#186)
 //
 // Any local image with a shell would do. mariadb is chosen because it serves a
 // real listener for the readiness and pod-namespace assertions, and because

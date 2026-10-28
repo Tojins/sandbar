@@ -22,7 +22,9 @@ export type {
   MergeModeConfig,
   // The gate stack (#24) — every type a `gateStack` / `images` literal is
   // built from, so a consumer can factor pieces out into typed constants.
+  // `GateStackFile` is the `{ path }` form read from the source tip (#186).
   GateStackConfig,
+  GateStackFile,
   StackContainer,
   StackMount,
   Readiness,

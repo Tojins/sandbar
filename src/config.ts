@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -145,6 +145,13 @@ export const DEFAULT_LABELS: LabelConfig = {
 // config surface. Because several runner environments flatten into one
 // sandbox, resolution refuses conflicting destinations/keys and collisions
 // with config.env; `sandboxGateAttachmentsOf` owns that contract.
+//
+// Two forms (#186). The inline stack is validated here, at load. A stack file
+// (`{ path }`) is only a path at load: the run reads it from the source tip
+// whenever a stack is resolved (stack-source.ts), and validates the text with
+// `resolveStackFile`, so this module is still the one place a stack is
+// validated — just invoked later, with messages labelled by where the text
+// came from instead of `config.gateStack`.
 //
 // This replaces the single `dbSidecar` + two fixed `gateCommands` of #20/#15.
 // The sidecar dissolved into `containers[]` the moment the pod removed the need
@@ -475,6 +482,28 @@ export type SandboxGateAttachments = {
   readonly mounts: readonly ResolvedStackMount[];
 };
 
+// The gate stack kept in the consumer's repository rather than in the config
+// (#186). `path` is repo-relative; the driver reads it from the source tip
+// whenever a stack is resolved — see stack-source.ts — so a landed change to
+// it reaches the next gate without a restart.
+export type GateStackFile = {
+  readonly path: string;
+};
+
+// A validated stack and what the implementer sandbox inherits from it, which
+// are always derived together because the second is part of the validation.
+export type ResolvedStack = {
+  readonly stack: ResolvedGateStack;
+  readonly attachments: SandboxGateAttachments;
+};
+
+// The inline form is resolved at load and lives in the installation, so no
+// branch can touch it. The file form is only a path here: what it holds is a
+// fact about the source tip at the moment a stack is resolved.
+export type ResolvedStackSource =
+  | ({ readonly kind: "inline" } & ResolvedStack)
+  | { readonly kind: "file"; readonly path: string };
+
 // How a cycle's merge result reaches the source branch (#22).
 //
 // `direct` is the default and what sandbar has always done: merge locally, gate
@@ -582,8 +611,10 @@ export type RunConfig = {
   readonly sandboxImage: string;
 
   // The containers and steps that produce a verdict about a commit (#24). No
-  // default: what it takes to test this repo is repo identity.
-  readonly gateStack: GateStackConfig;
+  // default: what it takes to test this repo is repo identity. Either the
+  // stack itself, or `{ path }` naming a JSON file of the same shape in the
+  // repository, read from `origin/<sourceBranch>` at gate time (#186).
+  readonly gateStack: GateStackConfig | GateStackFile;
 
   // Commit/author identity for the bot. `coauthorTrailer` defaults to a
   // `Co-authored-by:` line derived from these two (see resolveConfig), so a
@@ -905,9 +936,7 @@ export type ResolvedConfig = Required<
   readonly maxConcurrentGates?: number;
   readonly copyToWorktree: readonly ResolvedCopyToWorktreeEntry[];
   readonly labels: LabelConfig;
-  readonly gateStack: ResolvedGateStack;
-  // Derived from gateStack; never a consumer-facing config field (#166).
-  readonly sandboxGateAttachments: SandboxGateAttachments;
+  readonly gateStack: ResolvedStackSource;
   readonly mergeMode: ResolvedMergeMode;
 };
 
@@ -1146,33 +1175,203 @@ export function resolveMergeMode(
 // parseable back into its parts by a human reading `podman ps`.
 const CONTAINER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 
+// What a validation message about the inline stack starts with. A stack file's
+// messages start with its own label instead, which says where it was read from
+// (`gate/stack.json at origin/main`), because that is where the fix goes.
+const INLINE_STACK_LABEL = "config.gateStack";
+
+function resolveStackSource(
+  gateStack: GateStackConfig | GateStackFile,
+  env: Readonly<Record<string, string>>,
+): ResolvedStackSource {
+  if (!("path" in gateStack)) {
+    const stack = resolveGateStack(gateStack);
+    return {
+      kind: "inline",
+      stack,
+      attachments: sandboxGateAttachmentsOf(stack, env),
+    };
+  }
+  if (Object.keys(gateStack).length !== 1) {
+    throw new SandbarError(
+      "config.gateStack: `{ path }` takes no other keys. The containers and " +
+        "steps are in the file it names.",
+    );
+  }
+  const { path } = gateStack;
+  if (typeof path !== "string" || path.trim() === "") {
+    throw new SandbarError(
+      "config.gateStack.path must be a non-empty, repository-relative path.",
+    );
+  }
+  // The file is read out of a commit, which has no outside: an absolute path
+  // or a `..` names nothing there.
+  if (isAbsolute(path) || path.split("/").includes("..")) {
+    throw new SandbarError(
+      `config.gateStack.path ('${path}') must be relative to the repository ` +
+        "root and must not contain '..'.",
+    );
+  }
+  return { kind: "file", path: posix.normalize(path) };
+}
+
+const isRecord = (v: unknown): v is Readonly<Record<string, unknown>> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+const isString = (v: unknown): v is string => typeof v === "string";
+const isStrings = (v: unknown): boolean =>
+  Array.isArray(v) && v.every(isString);
+const isBoolean = (v: unknown): boolean => typeof v === "boolean";
+const isNumber = (v: unknown): boolean => typeof v === "number";
+
+// A field's JSON shape, and how a message names it.
+type FieldShape = readonly [(v: unknown) => boolean, string];
+// Tables are keyed by the type's own keys, so a field added to `StackContainer`
+// or `GateStep` fails compilation until its shape is stated here.
+type RequiredKeys<T> = { [K in keyof T]-?: {} extends Pick<T, K> ? never : K }[keyof T];
+type FieldShapes<T, Required extends boolean> = Readonly<Record<
+  Required extends true ? RequiredKeys<T> & string : Exclude<keyof T, RequiredKeys<T>> & string,
+  FieldShape
+>>;
+
+// The JSON types `resolveGateStack` assumes. An inline stack is a program the
+// operator wrote and runs as it stands; a stack file is text read at gate time,
+// and a wrong type in it has to be a validation message the stack source can
+// complain with, not a TypeError out of the middle of a check. Unknown keys are
+// ignored, as they are inline.
+const CONTAINER_REQUIRED: FieldShapes<StackContainer, true> = {
+  name: [isString, "a string"],
+  image: [isString, "a string"],
+};
+const CONTAINER_OPTIONAL: FieldShapes<StackContainer, false> = {
+  lifecycle: [(v) => v === "issue" || v === "attempt", '"issue" or "attempt"'],
+  env: [(v) => isRecord(v) && Object.values(v).every(isString), "an object of strings"],
+  args: [isStrings, "a list of strings"],
+  mounts: [
+    (v) =>
+      Array.isArray(v) &&
+      v.every((m) =>
+        isRecord(m) &&
+        isString(m.hostPath) &&
+        isString(m.containerPath) &&
+        (m.mode === undefined || isString(m.mode))),
+    "a list of { hostPath, containerPath, mode? } objects",
+  ],
+  mountWorktree: [isString, "a string"],
+  servesWorktree: [isBoolean, "a boolean"],
+  inSandbox: [isBoolean, "a boolean"],
+  hold: [isBoolean, "a boolean"],
+  readiness: [
+    (v) => isRecord(v) && (v.command === undefined || isStrings(v.command)),
+    "an object whose command is a list of strings",
+  ],
+  readinessTimeoutMs: [isNumber, "a number"],
+  postReadyCommands: [
+    (v) => Array.isArray(v) && v.every(isStrings),
+    "a list of argv lists",
+  ],
+};
+const STEP_REQUIRED: FieldShapes<GateStep, true> = {
+  name: [isString, "a string"],
+  in: [isString, "a string"],
+  command: [isStrings, "a list of strings"],
+};
+const STEP_OPTIONAL: FieldShapes<GateStep, false> = {
+  timeoutMs: [isNumber, "a number"],
+};
+
+function checkFieldShapes(
+  label: string,
+  where: string,
+  value: unknown,
+  required: Readonly<Record<string, FieldShape>>,
+  optional: Readonly<Record<string, FieldShape>>,
+): void {
+  if (!isRecord(value)) {
+    throw new SandbarError(`${label}: ${where} must be an object.`);
+  }
+  for (const [field, [ok, what]] of Object.entries(required)) {
+    if (!ok(value[field])) {
+      throw new SandbarError(`${label}: ${where} needs '${field}' as ${what}.`);
+    }
+  }
+  for (const [field, [ok, what]] of Object.entries(optional)) {
+    if (value[field] !== undefined && !ok(value[field])) {
+      throw new SandbarError(`${label}: ${where} has '${field}' that is not ${what}.`);
+    }
+  }
+}
+
+function parseStackJson(text: string, label: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    throw new SandbarError(`${label}: not valid JSON (${err.message}).`);
+  }
+}
+
+// The one validation of a stack file's text (#186), wherever it was read from:
+// the source tip inside a run, the gated tree for `sandbar gate`, the clone
+// for `pulled-images`. Only `containers` and `steps` are read — a file may
+// carry keys for its own tooling (outdoor's `images`, `anchor`, `half`,
+// `comment`). Every message starts with `label`, which says where the text
+// came from.
+export function resolveStackFile(
+  text: string,
+  label: string,
+  configEnv: Readonly<Record<string, string>>,
+): ResolvedStack {
+  const parsed = parseStackJson(text, label);
+  if (!isRecord(parsed)) {
+    throw new SandbarError(`${label}: must be a JSON object.`);
+  }
+  const { containers, steps } = parsed;
+  if (!Array.isArray(containers) || !Array.isArray(steps)) {
+    throw new SandbarError(
+      `${label}: needs 'containers' and 'steps' as lists.`,
+    );
+  }
+  containers.forEach((c, i) =>
+    checkFieldShapes(label, `containers[${i}]`, c, CONTAINER_REQUIRED, CONTAINER_OPTIONAL));
+  steps.forEach((s, i) =>
+    checkFieldShapes(label, `steps[${i}]`, s, STEP_REQUIRED, STEP_OPTIONAL));
+  // The shapes above are exactly what this type promises.
+  const stack = resolveGateStack({ containers, steps } as GateStackConfig, label);
+  return { stack, attachments: sandboxGateAttachmentsOf(stack, configEnv, label) };
+}
+
 // Every validation below is a config mistake that would otherwise surface as an
 // opaque podman error minutes into a run, or — worse — as a gate that reports a
 // verdict about the wrong thing. They are checked at resolve time, before the
 // lock is taken, so a typo costs a second rather than a cycle.
-export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
+export function resolveGateStack(
+  stack: GateStackConfig,
+  label = INLINE_STACK_LABEL,
+): ResolvedGateStack {
   if (stack.containers.length === 0) {
     throw new SandbarError(
-      "config.gateStack: containers must not be empty — a stack with no " +
+      `${label}: containers must not be empty — a stack with no ` +
         "containers has nowhere to run a step.",
     );
   }
   if (stack.steps.length === 0) {
     throw new SandbarError(
-      "config.gateStack: steps must not be empty — a gate that runs no steps " +
+      `${label}: steps must not be empty — a gate that runs no steps ` +
         "would report success for every commit.",
     );
   }
 
   const seen = new Set<string>();
-  const containers = stack.containers.map((c) => resolveStackContainer(c, seen));
+  const containers = stack.containers.map((c) =>
+    resolveStackContainer(c, seen, label),
+  );
 
   // A stack where nothing mounts the worktree gates the same bytes on every
   // attempt: it can go green while the branch under test is broken, which is
   // the one failure mode the whole gate exists to prevent.
   if (!containers.some((c) => c.mountWorktree !== null)) {
     throw new SandbarError(
-      "config.gateStack: no container declares `mountWorktree`, so no step can " +
+      `${label}: no container declares \`mountWorktree\`, so no step can ` +
         "see the code under test. The gate would return the same verdict for " +
         "every commit.",
     );
@@ -1191,27 +1390,27 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
   for (const step of stack.steps) {
     const stepName = step.name.trim();
     if (!stepName) {
-      throw new SandbarError("config.gateStack: every step needs a name.");
+      throw new SandbarError(`${label}: every step needs a name.`);
     }
     // Compared trimmed, because the uniqueness rule exists so the failing step
     // is identifiable in the trace, and "test" and "test " render identically
     // there. Container names get this for free from CONTAINER_NAME_RE.
     if (stepNames.has(stepName)) {
       throw new SandbarError(
-        `config.gateStack: duplicate step name '${step.name}'. Step names ` +
+        `${label}: duplicate step name '${step.name}'. Step names ` +
           "identify the failing step in the trace, so they must be unique.",
       );
     }
     stepNames.add(stepName);
     if (!byName.has(step.in)) {
       throw new SandbarError(
-        `config.gateStack: step '${step.name}' runs in '${step.in}', which is ` +
+        `${label}: step '${step.name}' runs in '${step.in}', which is ` +
           `not a declared container (have: ${[...byName].join(", ")}).`,
       );
     }
     if (step.command.length === 0) {
       throw new SandbarError(
-        `config.gateStack: step '${step.name}' has an empty command.`,
+        `${label}: step '${step.name}' has an empty command.`,
       );
     }
     // The bound is a `setTimeout` sandbar owns (gate-stack.ts, `boundedPodman`),
@@ -1223,7 +1422,7 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
     const timeoutMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new SandbarError(
-        `config.gateStack: step '${step.name}' has a non-positive or ` +
+        `${label}: step '${step.name}' has a non-positive or ` +
           `non-finite timeoutMs (${String(timeoutMs)}). A non-positive or NaN ` +
           "bound fires immediately, killing every step before it can run; an " +
           "infinite one never fires, and an unbounded step hangs the run " +
@@ -1260,7 +1459,7 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
   if (!mounting.some((c) => steppedInto.has(c.name) || c.servesWorktree)) {
     const names = mounting.map((c) => `'${c.name}'`).join(", ");
     throw new SandbarError(
-      `config.gateStack: ${names} mount the worktree but no step runs in ` +
+      `${label}: ${names} mount the worktree but no step runs in ` +
         `${mounting.length === 1 ? "it" : "any of them"}, and none declares ` +
         "`servesWorktree`. Every step runs in a container that cannot see the " +
         "code under test, so the gate would return the same verdict for every " +
@@ -1293,7 +1492,7 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
   for (const c of containers) {
     if (c.mountWorktree === null || c.lifecycle !== "issue" || c.hold) continue;
     throw new SandbarError(
-      `config.gateStack: container '${c.name}' is lifecycle 'issue', mounts ` +
+      `${label}: container '${c.name}' is lifecycle 'issue', mounts ` +
         "the worktree and runs its own entrypoint. An `issue` container is " +
         "reused across attempts because it depends only on its image and its " +
         "env — so a failure to start it is infra, and costs two HARD-ERROR " +
@@ -1315,6 +1514,7 @@ export function resolveGateStack(stack: GateStackConfig): ResolvedGateStack {
 export function sandboxGateAttachmentsOf(
   stack: ResolvedGateStack,
   configEnv: Readonly<Record<string, string>>,
+  label = INLINE_STACK_LABEL,
 ): SandboxGateAttachments {
   const steppedInto = new Set(stack.steps.map((step) => step.in));
   const envByKey = new Map<
@@ -1333,7 +1533,7 @@ export function sandboxGateAttachmentsOf(
     for (const [key, value] of Object.entries(container.env)) {
       if (Object.hasOwn(configEnv, key)) {
         throw new SandbarError(
-          `config.gateStack: step container '${container.name}' sets env key ` +
+          `${label}: step container '${container.name}' sets env key ` +
             `'${key}', which collides with config.env. Both would enter the ` +
             "implementer sandbox and neither source may silently override the other.",
         );
@@ -1341,7 +1541,7 @@ export function sandboxGateAttachmentsOf(
       const previous = envByKey.get(key);
       if (previous !== undefined && previous.value !== value) {
         throw new SandbarError(
-          `config.gateStack: step containers '${previous.container}' and ` +
+          `${label}: step containers '${previous.container}' and ` +
             `'${container.name}' disagree on env key '${key}'. Their gate env ` +
             "is flattened into one implementer sandbox, so the values must match.",
         );
@@ -1359,7 +1559,7 @@ export function sandboxGateAttachmentsOf(
           previous.mount.mode !== mount.mode)
       ) {
         throw new SandbarError(
-          `config.gateStack: step containers '${previous.container}' and ` +
+          `${label}: step containers '${previous.container}' and ` +
             `'${container.name}' disagree on mount destination ` +
             `'${mount.containerPath}' (${previous.mount.hostPath}:` +
             `${previous.mount.mode} versus ${mount.hostPath}:${mount.mode}). ` +
@@ -1418,7 +1618,11 @@ const RETIRED_READINESS: Readonly<Record<string, string>> = {
 // Rejected at resolve time, before the lock: a readiness mistake otherwise
 // surfaces as a container that never comes ready, minutes in, after a full
 // readiness budget.
-function checkReadiness(containerName: string, readiness: Readiness): void {
+function checkReadiness(
+  containerName: string,
+  readiness: Readiness,
+  label: string,
+): void {
   // Read through a widened view. Consumer config is a PROGRAM, not a
   // type-checked call site, so the retired kinds arrive as values the
   // `Readiness` type says cannot exist — which is exactly the case that needs
@@ -1433,14 +1637,14 @@ function checkReadiness(containerName: string, readiness: Readiness): void {
       : undefined;
   if (retired !== undefined) {
     throw new SandbarError(
-      `config.gateStack: container '${containerName}' declares the retired ` +
+      `${label}: container '${containerName}' declares the retired ` +
         `'${kind as string}' readiness kind (#43). Podman evaluates the probe ` +
         `inside the container now, so there is one kind: ${retired}`,
     );
   }
   if (kind !== "healthcheck") {
     throw new SandbarError(
-      `config.gateStack: container '${containerName}' has an unknown ` +
+      `${label}: container '${containerName}' has an unknown ` +
         `readiness kind (${JSON.stringify(kind)}). The only kind is ` +
         '"healthcheck".',
     );
@@ -1450,7 +1654,7 @@ function checkReadiness(containerName: string, readiness: Readiness): void {
   // check that can never pass and spends the whole readiness budget.
   if (!Array.isArray(readiness.command) || readiness.command.length === 0) {
     throw new SandbarError(
-      `config.gateStack: container '${containerName}' has an empty ` +
+      `${label}: container '${containerName}' has an empty ` +
         "healthcheck readiness command.",
     );
   }
@@ -1459,16 +1663,17 @@ function checkReadiness(containerName: string, readiness: Readiness): void {
 function resolveStackContainer(
   c: StackContainer,
   seen: Set<string>,
+  label: string,
 ): ResolvedStackContainer {
   if (!CONTAINER_NAME_RE.test(c.name)) {
     throw new SandbarError(
-      `config.gateStack: container name '${c.name}' is not a valid podman name ` +
+      `${label}: container name '${c.name}' is not a valid podman name ` +
         "(alphanumeric first character, then alphanumerics, '_', '.' or '-').",
     );
   }
   if (seen.has(c.name)) {
     throw new SandbarError(
-      `config.gateStack: duplicate container name '${c.name}'. Names become ` +
+      `${label}: duplicate container name '${c.name}'. Names become ` +
         "container names and are what a step's `in` refers to.",
     );
   }
@@ -1476,7 +1681,7 @@ function resolveStackContainer(
 
   if (!c.image.trim()) {
     throw new SandbarError(
-      `config.gateStack: container '${c.name}' has no image.`,
+      `${label}: container '${c.name}' has no image.`,
     );
   }
   const hold = c.hold ?? false;
@@ -1485,7 +1690,7 @@ function resolveStackContainer(
   // arguments would vanish rather than fail.
   if (hold && (c.args?.length ?? 0) > 0) {
     throw new SandbarError(
-      `config.gateStack: container '${c.name}' sets both 'hold' and 'args'. ` +
+      `${label}: container '${c.name}' sets both 'hold' and 'args'. ` +
         "'hold' overrides the entrypoint with `sleep infinity`, so 'args' would " +
         "never reach the image.",
     );
@@ -1493,7 +1698,7 @@ function resolveStackContainer(
   if (c.mountWorktree !== undefined) {
     if (!c.mountWorktree.startsWith("/")) {
       throw new SandbarError(
-        `config.gateStack: container '${c.name}' has a relative mountWorktree ` +
+        `${label}: container '${c.name}' has a relative mountWorktree ` +
           `('${c.mountWorktree}'). It is a path inside the container and must be ` +
           "absolute.",
       );
@@ -1504,7 +1709,7 @@ function resolveStackContainer(
     // sandbar builds. It was the one left unchecked.
     if (c.mountWorktree.includes(":")) {
       throw new SandbarError(
-        `config.gateStack: container '${c.name}' has a mountWorktree ` +
+        `${label}: container '${c.name}' has a mountWorktree ` +
           `containing ":" ('${c.mountWorktree}'). podman -v specs are ` +
           "colon-delimited and offer no escape, so this would re-split into a " +
           "different path and mount options.",
@@ -1512,7 +1717,7 @@ function resolveStackContainer(
     }
     if (c.mountWorktree === "/") {
       throw new SandbarError(
-        `config.gateStack: container '${c.name}' mounts the worktree at '/', ` +
+        `${label}: container '${c.name}' mounts the worktree at '/', ` +
           "which would shadow the image's entire filesystem.",
       );
     }
@@ -1520,7 +1725,7 @@ function resolveStackContainer(
     // Nothing to serve. Left unchecked it would be a false answer to the one
     // question the #29 rule asks, which is worse than no answer.
     throw new SandbarError(
-      `config.gateStack: container '${c.name}' sets 'servesWorktree' but does ` +
+      `${label}: container '${c.name}' sets 'servesWorktree' but does ` +
         "not set 'mountWorktree', so it cannot see the code under test and " +
         "has nothing to serve to the steps.",
     );
@@ -1538,7 +1743,7 @@ function resolveStackContainer(
     (c.postReadyCommands?.length ?? 0) === 0
   ) {
     throw new SandbarError(
-      `config.gateStack: container '${c.name}' sets 'servesWorktree' with ` +
+      `${label}: container '${c.name}' sets 'servesWorktree' with ` +
         "'hold' and no 'postReadyCommands'. 'hold' overrides the entrypoint " +
         "with `sleep infinity`, so nothing in this container ever runs and it " +
         "can serve nothing. Either run a step in it (then it is stepped into " +
@@ -1562,7 +1767,7 @@ function resolveStackContainer(
     (c.postReadyCommands?.length ?? 0) === 0
   ) {
     throw new SandbarError(
-      `config.gateStack: container '${c.name}' sets 'inSandbox' with 'hold' ` +
+      `${label}: container '${c.name}' sets 'inSandbox' with 'hold' ` +
         "and no 'postReadyCommands'. 'hold' overrides the entrypoint with " +
         "`sleep infinity`, so the sandbox copy would run nothing at all and " +
         "the agent would be told about a service that does not exist. Either " +
@@ -1575,7 +1780,7 @@ function resolveStackContainer(
     // colon anywhere would re-split the spec into different paths + options.
     if (m.hostPath.includes(":") || m.containerPath.includes(":")) {
       throw new SandbarError(
-        `config.gateStack: container '${c.name}' has a mount path containing ` +
+        `${label}: container '${c.name}' has a mount path containing ` +
           `":" (${m.hostPath} -> ${m.containerPath}). podman -v specs are ` +
           "colon-delimited and offer no escape.",
       );
@@ -1585,7 +1790,7 @@ function resolveStackContainer(
     // podman is perfectly happy to do it.
     if (!m.hostPath.trim()) {
       throw new SandbarError(
-        `config.gateStack: container '${c.name}' has a mount with an empty ` +
+        `${label}: container '${c.name}' has a mount with an empty ` +
           `hostPath (-> ${m.containerPath}). It is resolved against the ` +
           "worktree, and empty resolves to the worktree root.",
       );
@@ -1595,7 +1800,7 @@ function resolveStackContainer(
     // arrives as a gate red blamed on the branch.
     if (!m.containerPath.startsWith("/")) {
       throw new SandbarError(
-        `config.gateStack: container '${c.name}' has a mount with a relative ` +
+        `${label}: container '${c.name}' has a mount with a relative ` +
           `containerPath ('${m.containerPath}'). It is a path inside the ` +
           "container and must be absolute.",
       );
@@ -1606,14 +1811,14 @@ function resolveStackContainer(
     // blamed on the branch, minutes into a run, over a config string.
     if (m.mode !== undefined && m.mode !== "ro" && m.mode !== "rw") {
       throw new SandbarError(
-        `config.gateStack: container '${c.name}' has a mount with an unknown ` +
+        `${label}: container '${c.name}' has a mount with an unknown ` +
           `mode ('${String(m.mode)}' for ${m.hostPath} -> ${m.containerPath}). ` +
           'Use "ro" (the default) or "rw".',
       );
     }
   }
   const readiness = c.readiness ?? null;
-  if (readiness !== null) checkReadiness(c.name, readiness);
+  if (readiness !== null) checkReadiness(c.name, readiness, label);
   for (const command of c.postReadyCommands ?? []) {
     // Checked like `step.command` and `readiness.command`, which it sits
     // beside: an empty argv reaches podman as a bare `exec <container>` and
@@ -1621,7 +1826,7 @@ function resolveStackContainer(
     // `issue` container, a branch-blamed gate red for an `attempt` one.
     if (command.length === 0) {
       throw new SandbarError(
-        `config.gateStack: container '${c.name}' has an empty postReadyCommand.`,
+        `${label}: container '${c.name}' has an empty postReadyCommand.`,
       );
     }
   }
@@ -1631,7 +1836,7 @@ function resolveStackContainer(
   for (const key of Object.keys(c.env ?? {})) {
     if (key === "CI") {
       throw new SandbarError(
-        `config.gateStack: container '${c.name}' sets the reserved env key ` +
+        `${label}: container '${c.name}' sets the reserved env key ` +
           "'CI'. sandbar sets CI=true for every stack container and step, and " +
           "a value here would be silently overridden.",
       );
@@ -1640,7 +1845,7 @@ function resolveStackContainer(
   const readinessTimeoutMs = c.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
     throw new SandbarError(
-      `config.gateStack: container '${c.name}' has a non-positive or ` +
+      `${label}: container '${c.name}' has a non-positive or ` +
         `non-finite readinessTimeoutMs (${String(readinessTimeoutMs)}). NaN — ` +
         "the shape `Number(process.env.X)` produces on an unset var — would " +
         "make the readiness poll spin forever holding the run's lock.",
@@ -2055,11 +2260,9 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const ghOwner = requireRepoPart("ghOwner", config.ghOwner);
   const ghRepo = requireRepoPart("ghRepo", config.ghRepo);
   const developers = requireDevelopers(config.developers);
-  const gateStack = resolveGateStack(config.gateStack);
   const env = resolveEnv(config.env);
-  const sandboxGateAttachments = sandboxGateAttachmentsOf(gateStack, env);
+  const gateStack = resolveStackSource(config.gateStack, env);
   const images = resolveImages(config.images, config.sandboxImage);
-  checkRebuildOnIsUsed(images, gateStack, config.sandboxImage);
   // Resolved to absolute HERE, not left as the host wrote it (#34). Since every
   // git call now runs with `cwd` as its process cwd, a RELATIVE `cwd` is
   // double-rooted the moment a path derived from it is passed as an argument:
@@ -2275,7 +2478,6 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     copyToWorktree: resolveCopyToWorktree(config.copyToWorktree, cwd),
     labels: { ...DEFAULT_LABELS, ...config.labels },
     gateStack,
-    sandboxGateAttachments,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
     defaultLane: requireLane(config.defaultLane),
   };

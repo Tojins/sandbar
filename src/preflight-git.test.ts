@@ -26,13 +26,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentProviderName } from "./agent-providers.js";
 import { makeEnvReader } from "./env.js";
+import { SandbarError } from "./errors.js";
 import {
   EVENT_SCHEMA_VERSION,
   type EventInput,
   type RunEvent,
 } from "./events.js";
+import { type ResolvedStack, resolveGateStack } from "./config.js";
 import {
-  type DeclaredMount,
   deleteMergedSandbarBranches,
   fetchOriginRefs,
   fetchPlanningRefs,
@@ -40,6 +41,7 @@ import {
   PreflightError,
   reconcileClosedIssueBranches,
   runPreflight,
+  stackHostState,
   syncKeptIssueBranches,
   which,
 } from "./preflight.js";
@@ -47,6 +49,23 @@ import { type RepoLayout, ensureRepoCache, repoLayout } from "./repo-cache.js";
 import { reduceRunEvents } from "./run-state.js";
 
 const exec = promisify(execFile);
+
+// A stack whose runner mounts each of `hostPaths` from the host.
+const stackMounting = (hostPaths: readonly string[]) => resolveGateStack({
+  containers: [{
+    name: "gate",
+    image: "localhost/app:gate",
+    mountWorktree: "/workspace",
+    hold: true,
+    mounts: hostPaths.map((hostPath, i) => ({ hostPath, containerPath: `/m${i}` })),
+  }],
+  steps: [{ name: "test", in: "gate", command: ["true"] }],
+});
+
+const EMPTY_STACK: ResolvedStack = {
+  stack: stackMounting([]),
+  attachments: { env: {}, mounts: [] },
+};
 
 const git = (repo: string, ...args: string[]) =>
   exec("git", args, { cwd: repo });
@@ -133,8 +152,13 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     developers: "anyone" as const,
     env: makeEnvReader({}),
     sourceBranch: "main",
-    pulledImages: [] as readonly string[],
-    mountSources: [] as readonly DeclaredMount[],
+    images: [],
+    // An inline stack: these cases are about the repository, and the source a
+    // stack file is read from has its own suite (stack-source-git.test.ts).
+    openStackSource: async () => ({
+      current: async () => EMPTY_STACK,
+      accepted: () => EMPTY_STACK,
+    }),
     // The default routing (#72): claude for both roles, and claude for the
     // merger, so the set the credential check walks is the one every
     // pre-#72 config produces.
@@ -313,6 +337,56 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     expect(String(error)).toContain("does not appear to be a git repository");
   });
 
+  // #186: the stack the run would start on is unreadable, so nothing past the
+  // fetch can be judged; the fetch's own failure, which may explain it, comes
+  // with it.
+  it("refuses with the stack source's message beside a failed refresh", async () => {
+    await git(target, "remote", "set-url", "origin", join(target, "missing-origin"));
+
+    const error = await runPreflight(
+      {
+        ...cfg(layoutAt(target)),
+        openStackSource: async () => {
+          throw new SandbarError("gate/stack.json at origin/main: no such file.");
+        },
+      } as Parameters<typeof runPreflight>[0],
+      {
+        lookup: async () => undefined,
+        connect: async () => undefined,
+        wait: async () => undefined,
+        now: () => 0,
+      },
+    ).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(PreflightError);
+    expect((error as PreflightError).failures).toEqual([
+      expect.stringContaining("Fetching origin refs"),
+      "gate/stack.json at origin/main: no such file.",
+    ]);
+  });
+
+  it("refuses with the stack source's message alone when the refresh succeeded", async () => {
+    const error = await runPreflight(
+      {
+        ...cfg(layoutAt(target)),
+        openStackSource: async () => {
+          throw new SandbarError("gate/stack.json at origin/main: no such file.");
+        },
+      } as Parameters<typeof runPreflight>[0],
+      {
+        lookup: async () => undefined,
+        connect: async () => undefined,
+        wait: async () => undefined,
+        now: () => 0,
+      },
+    ).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(PreflightError);
+    expect((error as PreflightError).failures).toEqual([
+      "gate/stack.json at origin/main: no such file.",
+    ]);
+  });
+
   it("abandons an origin-deleted closed branch through preflight and announces it", async () => {
     await installPassingPreflightShims();
     const origin = await giveTargetBareOrigin();
@@ -332,7 +406,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     await expect(runPreflight(
       { ...passingCfg(), onEvent: (event) => events.push(event) },
       localReachability,
-    )).resolves.toBe("anyone");
+    )).resolves.toMatchObject({ readyLabelPolicy: "anyone" });
 
     expect(events).toContainEqual({
       kind: "preflight",
@@ -369,7 +443,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     await expect(runPreflight(
       { ...passingCfg(), onEvent: (event) => events.push(event) },
       localReachability,
-    )).resolves.toBe("anyone");
+    )).resolves.toMatchObject({ readyLabelPolicy: "anyone" });
 
     const complaint = events.find((event) =>
       event.kind === "complaint" &&
@@ -1070,13 +1144,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const present = join(target, "a.txt");
       const absent = join(target, "run", "podman.sock");
 
-      const state = await gatherState({
-        ...cfg(layoutAt(target)),
-        mountSources: [
-          { container: "gate", hostPath: present },
-          { container: "gate", hostPath: absent },
-        ],
-      }, GH_READY, "anyone");
+      const state = await stackHostState(stackMounting([present, absent]), [], true);
 
       expect(state.missingMountSources).toEqual([
         {
@@ -1093,14 +1161,11 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const dangling = join(target, "dangling");
       await symlink(join(target, "nothing-here"), dangling);
 
-      const state = await gatherState({
-        ...cfg(layoutAt(target)),
-        mountSources: [{ container: "db", hostPath: dangling }],
-      }, GH_READY, "anyone");
+      const state = await stackHostState(stackMounting([dangling]), [], true);
 
       expect(state.missingMountSources).toEqual([
         {
-          container: "db",
+          container: "gate",
           hostPath: dangling,
           detail: "no such file or directory",
         },
@@ -1108,7 +1173,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("reports nothing when the stack declares no absolute sources", async () => {
-      const state = await gatherState(cfg(layoutAt(target)), GH_READY, "anyone");
+      const state = await stackHostState(stackMounting(["fixtures/seed.sql"]), [], true);
       expect(state.missingMountSources).toEqual([]);
     });
 

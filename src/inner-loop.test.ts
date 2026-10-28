@@ -128,6 +128,7 @@ import { initialState } from "./inner-loop-machine.js";
 import { parsePromise } from "./promise-parser.js";
 import { loadTemplate } from "./prompts.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
+import type { SandboxGateAttachments } from "./config.js";
 import {
   containerResourcesOf,
   type ContainerResources,
@@ -655,11 +656,11 @@ describe("silent implementer attempt policy (#116)", () => {
         implementerAgent: "codex",
         implementerModelId: "model",
         promptExtensions,
-        sandboxGateAttachments: { env: {}, mounts: [] },
       },
       anchorOpts: {},
       base: { ref: "origin/main" },
       gateStack: {},
+      sandboxGateAttachments: { env: {}, mounts: [] },
       worktreePath: "/unused",
       accumulated: [],
       priorReviewRounds: [],
@@ -2117,8 +2118,9 @@ describe("runGate admission (#142)", () => {
         gateSemaphore,
         attemptLogger: { writeGate: vi.fn() },
         onEvent: (event: EventInput) => events.push(event),
+        stackSource: { current: async () => ({ stack: { containers: [], steps: [] } }) },
       },
-      gateStack: { runGate },
+      gateStack: { ensure: async () => ({ runGate }) },
       quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 1, timer: () => 0, quality: null } },
       invocationSequence: createAgentInvocationSequencer().startCycle(),
     }) as unknown as Parameters<typeof runGate>[1];
@@ -2186,8 +2188,9 @@ describe("runGate admission (#142)", () => {
         gateSemaphore: createGateSemaphore(undefined),
         attemptLogger: { writeGate },
         onEvent: () => undefined,
+        stackSource: { current: async () => ({ stack: { containers: [], steps: [] } }) },
       },
-      gateStack: { runGate: async () => gate },
+      gateStack: { ensure: async () => ({ runGate: async () => gate }) },
       quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 2, timer: () => 0, quality: null } },
       invocationSequence: sequencer.startCycle(),
     } as unknown as Parameters<typeof runGate>[1];
@@ -2210,6 +2213,54 @@ describe("runGate admission (#142)", () => {
       exitCode: 1,
       containerLogs: "db tail",
     });
+  });
+
+  // #186: a stack change that landed mid-issue reaches the next gate-1.
+  it("re-reads the stack source and runs gate-1 on the stack bound to it", async () => {
+    const tipStack = { containers: [], steps: [] };
+    const gate: GateResult = {
+      ok: true, stdout: "", stderr: "", exitCode: 0, failedStep: null,
+      durationMs: 1, steps: [], containerLogs: "",
+    };
+    const runGateOnBound = vi.fn(async () => gate);
+    const ensure = vi.fn(async () => ({ runGate: runGateOnBound }));
+    const laterStack = { containers: [], steps: [{ name: "later", in: "x", command: ["true"] }] };
+    const current = vi.fn()
+      .mockResolvedValueOnce({ stack: tipStack })
+      .mockResolvedValueOnce({ stack: laterStack });
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
+    const ctx = {
+      issue: { id: "186", title: "stack", branch: "sandbar/issue-186" },
+      worktreePath: "/worktree",
+      opts: {
+        gateSemaphore: createGateSemaphore(undefined),
+        attemptLogger: { writeGate: vi.fn() },
+        onEvent: () => undefined,
+        stackSource: { current },
+      },
+      gateStack: { ensure },
+      quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 1, timer: () => 0, quality: null } },
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+    } as unknown as Parameters<typeof runGate>[1];
+
+    const result = await runGate({
+      kind: "run-gate",
+      attempt: 1,
+      quality: { verdict: "APPROVED", rounds: 0 },
+    }, ctx);
+
+    expect(current).toHaveBeenCalledOnce();
+    expect(ensure).toHaveBeenCalledExactlyOnceWith(tipStack);
+    expect(runGateOnBound).toHaveBeenCalledOnce();
+    expect(result.gate.ok).toBe(true);
+
+    // The next gate-1 asks again and hands the bound stack the new spec.
+    await runGate({
+      kind: "run-gate",
+      attempt: 2,
+      quality: { verdict: "APPROVED", rounds: 0 },
+    }, ctx);
+    expect(ensure).toHaveBeenLastCalledWith(laterStack);
   });
 });
 
@@ -2238,7 +2289,12 @@ describe("runInnerLoop context terminals (#158)", () => {
 
   const harness = (
     run: Sandbox["run"],
-    overrides: Partial<Parameters<typeof runInnerLoop>[1]["config"]> = {},
+    {
+      sandboxGateAttachments = { env: {}, mounts: [] },
+      ...overrides
+    }: Partial<Parameters<typeof runInnerLoop>[1]["config"]> & {
+      readonly sandboxGateAttachments?: SandboxGateAttachments;
+    } = {},
   ) => {
     const events: EventInput[] = [];
     const sandbox = {
@@ -2295,10 +2351,14 @@ describe("runInnerLoop context terminals (#158)", () => {
         sandboxImage: "sandbox-image",
         agentImages: {},
         scope: "w12345678",
-        gateStack: { containers: [], steps: [] },
-        sandboxGateAttachments: { env: {}, mounts: [] },
         claudeMdPath: "CLAUDE.md",
         ...overrides,
+      },
+      stackSource: {
+        current: async () => ({
+          stack: { containers: [], steps: [] },
+          attachments: sandboxGateAttachments,
+        }),
       },
       hooks: {},
       copyToWorktree: [],

@@ -19,9 +19,14 @@
 // container's netns, so it must exist first, and they must be up before a
 // consumer's `onSandboxReady` hook runs.
 // The step-running gate containers' declared mounts and env are attached to
-// the agent sandbox too (#166). Config resolution has already flattened and
+// the agent sandbox too (#166). Stack resolution has already flattened and
 // validated them; this layer only roots relative sources in the issue worktree
 // and preserves gate env as literal container values.
+//
+// The stack comes from `opts.stackSource` (#186): read once at setup for the
+// sandbox, its siblings and its attachments (like the sandbox image, #46), and
+// again before EVERY gate-1, where the `BoundStack` restarts the gate stack if
+// the source tip's stack has changed since it started.
 //
 // The partition and UI-prototype decisions (#158/#126) are cold agent calls in
 // the existing issue sandbox and spend no convergence budget. Partition runs
@@ -155,7 +160,6 @@ import type {
   PromptExtension,
   PromptExtensions,
   ResolvedCopyToWorktreeEntry,
-  ResolvedGateStack,
   SandboxGateAttachments,
 } from "./config.js";
 import {
@@ -173,8 +177,6 @@ import type { GateSemaphore } from "./gate-semaphore.js";
 import {
   ContainerBringupError,
   resolveStackMountHostPath,
-  type Stack,
-  startStack,
 } from "./gate-stack.js";
 import {
   type HeadMismatch,
@@ -222,6 +224,7 @@ import {
   sandboxContainers,
   startSandboxStack,
 } from "./sandbox-stack.js";
+import { type BoundStack, type StackSource, bindStack } from "./stack-source.js";
 import {
   REVIEWER_MAX_INVOCATIONS,
   type ReviewerInvocation,
@@ -590,8 +593,6 @@ export type InnerLoopConfig = {
   // This run's podman resource scope (#28) — see naming.ts. Both the agent
   // sandbox container and the gate stack are named under it.
   readonly scope: RunScope;
-  readonly gateStack: ResolvedGateStack;
-  readonly sandboxGateAttachments: SandboxGateAttachments;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -610,6 +611,10 @@ export type InnerLoopOptions = {
   // its build cache is: two branches that make the same lockfile change produce
   // the same content-addressed tag and must not build it twice.
   readonly branchImages?: BranchImages;
+  // Where the gate stack comes from (#186): read at setup for the sandbox and
+  // the gate stack's first start, and again before every gate-1, so a stack
+  // change that lands on the source branch mid-issue reaches the next gate.
+  readonly stackSource: StackSource;
   // Where each sandbox sibling's followed log is written on the host (#44 D4),
   // one subdirectory per issue. The run's cycle log directory, so the files are
   // an offline artefact beside the attempt transcripts rather than a second
@@ -823,7 +828,7 @@ async function runSandboxCycle(
   const branchImages = opts.branchImages;
   let sandbox: Sandbox | null = null;
   let sandboxStack: SandboxStack | null = null;
-  let stack: Stack | null = null;
+  let stack: BoundStack | null = null;
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
   const priorReviewRounds: PriorReviewRound[] = [];
@@ -924,7 +929,10 @@ async function runSandboxCycle(
     // `inSandbox` subset, which is empty for every consumer that declares none
     // — and then the log mount is absent, no sibling is created and the prompt
     // slot renders to nothing.
-    const sbxContainers = sandboxContainers(config.gateStack);
+    // Once per sandbox, like the sandbox image (#46): the agent's siblings
+    // and its gate attachments come from the stack in effect at setup.
+    const setupStack = await opts.stackSource.current();
+    const sbxContainers = sandboxContainers(setupStack.stack);
     const sandboxLogDir = join(
       opts.sandboxLogBaseDir ?? config.layout.logsDir,
       `issue-${issue.id}`,
@@ -971,7 +979,7 @@ async function runSandboxCycle(
           // answered from the spec rather than assumed: only a gate container
           // running the same tag makes the failure show up a second time, as a
           // red against the branch.
-          gateRunsSameImage: config.gateStack.containers.some(
+          gateRunsSameImage: setupStack.stack.containers.some(
             (c) => c.image === config.sandboxImage,
           ),
           onFallback: async (detail) => {
@@ -993,7 +1001,7 @@ async function runSandboxCycle(
             sandboxPath: SANDBOX_LOG_MOUNT,
             readonly: true,
           }]),
-          ...config.sandboxGateAttachments.mounts.map((mount) => ({
+          ...setupStack.attachments.mounts.map((mount) => ({
             hostPath: resolveStackMountHostPath(worktreePath, mount),
             sandboxPath: mount.containerPath,
             readonly: mount.mode === "ro",
@@ -1012,7 +1020,7 @@ async function runSandboxCycle(
           }),
           hooks: opts.hooks,
           env: config.env,
-          literalEnv: config.sandboxGateAttachments.env,
+          literalEnv: setupStack.attachments.env,
           preparedWorktreePath: worktreePath,
           ...(extraMounts.length === 0 ? {} : { extraMounts }),
           onNotice: (severity, message) => opts.onEvent(
@@ -1035,7 +1043,7 @@ async function runSandboxCycle(
                   holder.stack = await startSandboxStack({
                     issueId: issue.id,
                     scope: config.scope,
-                    spec: config.gateStack,
+                    spec: setupStack.stack,
                     worktreePath,
                     anchorContainerName: containerName,
                     logDir: sandboxLogDir,
@@ -1057,10 +1065,9 @@ async function runSandboxCycle(
       })(), (ms) => {
         sandboxMs = ms;
       }),
-      stamp(startStack({
+      stamp(bindStack({
         stackId: issue.id,
         scope: config.scope,
-        spec: config.gateStack,
         worktreePath,
         hideWorktreeGit: true,
         onNotice: (message) => opts.onEvent({
@@ -1079,7 +1086,7 @@ async function runSandboxCycle(
         ...(branchImages
           ? { images: (only: ReadonlySet<string>) => branchImages.resolve(worktreePath, only) }
           : {}),
-      }), (ms) => {
+      }, setupStack.stack), (ms) => {
         stackMs = ms;
       }),
     ]);
@@ -1116,9 +1123,10 @@ async function runSandboxCycle(
       ...(stackMs === null ? {} : { stackMs }),
     });
 
-    // startStack already registered stack.stop with the cleanup registry before
-    // it created any podman resource, so no re-registration is needed here.
-    const gateStack: Stack = stack;
+    // Every startStack behind the bound stack registers its own stop with the
+    // cleanup registry before it creates any podman resource, so no
+    // re-registration is needed here.
+    const gateStack: BoundStack = stack;
 
     // No probe tree here on purpose (#34): `buildPrompt` derives it from
     // `inputs.worktreePath`, so this site cannot hand the anchor the wrong
@@ -1154,7 +1162,7 @@ async function runSandboxCycle(
         promptExtension: config.promptExtensions?.implementer,
         sandboxStack: sandboxStatuses,
         sandboxHasGateAttachments: hasSandboxGateAttachments(
-          config.sandboxGateAttachments,
+          setupStack.attachments,
         ),
       }, anchorOpts);
       const size = contextChars(
@@ -1203,6 +1211,7 @@ async function runSandboxCycle(
         anchorOpts,
         base,
         gateStack,
+        sandboxGateAttachments: setupStack.attachments,
         worktreePath,
         accumulated,
         priorReviewRounds,
@@ -1387,7 +1396,11 @@ type ExecuteActionCtx = {
   // builders so the implementer's diff and the reviewer's changeset are the
   // same range (#61).
   readonly base: IssueBranchBase;
-  readonly gateStack: Stack;
+  // Bound to the stack in effect at the last gate-1, and restarted when the
+  // next one finds the source tip's stack changed (#186).
+  readonly gateStack: BoundStack;
+  // What this sandbox inherited from the stack at setup (#166).
+  readonly sandboxGateAttachments: SandboxGateAttachments;
   // The issue worktree. Same tree the sandbox edits, the stack mounts and the
   // clean-assert reads — one tree, which is the whole point of D1.
   readonly worktreePath: string;
@@ -2101,7 +2114,7 @@ export async function runImplementer(
         : {}),
       sandboxStack: ctx.sandboxStatuses,
       sandboxHasGateAttachments: hasSandboxGateAttachments(
-        config.sandboxGateAttachments,
+        ctx.sandboxGateAttachments,
       ),
     },
     anchorOpts,
@@ -2444,7 +2457,8 @@ export async function runGate(
   if (round === null) throw new Error("gate-1 dispatched without a quality pass opening its round");
   round.quality = action.quality;
   const head = await requireIssueTip(ctx, "before gate-1");
-  const admitted = await opts.gateSemaphore.run(() => gateStack.runGate());
+  const stack = await gateStack.ensure((await opts.stackSource.current()).stack);
+  const admitted = await opts.gateSemaphore.run(() => stack.runGate());
   const gate1 = admitted.value;
   // Before the verdict is classified, for #135's reason: the re-prompt is the
   // only other reader of this output, and a green gate has no re-prompt at all
