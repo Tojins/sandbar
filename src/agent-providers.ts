@@ -4,7 +4,7 @@
 //
 // The config splits the MODEL per call (`implementerModelId`, `uiCheckModelId`,
 // correctness `reviewerModelId`, `reviewerQualityModelId`,
-// `adjudicatorModelId`, and `mergerModelId`); this is the vendor knob beside
+// `adjudicatorModelId`, `condenserModelId` and `mergerModelId`); this is the vendor knob beside
 // it, and `*Effort` (#130) is
 // the third per-call knob:
 // the reasoning effort, passed through `buildAgentProvider` for the provider
@@ -21,6 +21,8 @@
 // The earlier, single-call UI classifier (#126) similarly names
 // `uiCheckAgent`, defaulting to `implementerAgent`; when its gate is disabled,
 // that provider is absent from `requiredAgentProviders` because no call uses it.
+// The issue-thread condenser (#217) names `condenserAgent`, defaulting to the
+// quality pass's, and is likewise absent when `condenseAboveChars` is null.
 // The pressure that wants the vendor
 // knob is the implementer's: a review round is one bounded sequential chain,
 // while an implementer attempt is a long multi-tool session, with several of
@@ -364,14 +366,16 @@ export function parseAgentProviderName(
 // what preflight has to find a credential for.
 //
 // Every invoked routing knob participates, the reviewer's quality pass included
-// (#121); the UI checker participates only when enabled (#126). Requiring the
-// routed set up front is deliberate
-// over discovering a missing credential in the resolve loop, after a run may
-// already have landed work — and for the quality pass it is also what puts its
-// CLI in the sandbox image (#75), a pass that opens every round being a pass
-// whose missing binary is a fixer that cannot run at all.
+// (#121); the UI checker (#126) and the condenser (#217) participate only when
+// enabled. Requiring the routed set up front is deliberate over discovering a
+// missing credential in the resolve loop, after a run may already have landed
+// work — and for the quality pass it is also what puts its CLI in the sandbox
+// image (#75), a pass that opens every round being a pass whose missing
+// binary is a fixer that cannot run at all.
 export function requiredAgentProviders(roles: {
   readonly uiPrototypeCheck: boolean;
+  readonly condenseAboveChars: number | null;
+  readonly condenserAgent: AgentProviderName;
   readonly implementerAgent: AgentProviderName;
   readonly uiCheckAgent: AgentProviderName;
   readonly reviewerAgent: AgentProviderName;
@@ -385,6 +389,7 @@ export function requiredAgentProviders(roles: {
     roles.reviewerAgent,
     roles.reviewerQualityAgent,
     roles.adjudicatorAgent,
+    ...(roles.condenseAboveChars === null ? [] : [roles.condenserAgent]),
     roles.mergerAgent,
   ]);
   // Ordered by the canonical list, not by insertion: the set feeds a refusal
@@ -419,6 +424,7 @@ export function assertRoleModelIdNamed(
     | "uiCheck"
     | "reviewer"
     | "adjudicator"
+    | "condenser"
     | "merger"
     | "reflectTagger"
     | "reflectSynthesizer",

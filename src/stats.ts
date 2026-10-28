@@ -34,8 +34,13 @@
 // measured has null statistics, never 0. Quantiles are nearest-rank. A token
 // sum is null where no invocation in it reported that bucket. The rows for
 // scenarios (#180, #203), quality rule groups (#204), DB copies (#201),
-// deploys (#198), anchors (#197) and the janitor (#205) are empty until those
-// issues emit their events; each adds its own reducer arm here.
+// deploys (#198) and the janitor (#205) are empty until those issues emit
+// their events; each adds its own reducer arm here.
+//
+// Anchors (#217) are one sample per `issue-anchor` event — every loop's
+// opening step — sized before the trace drop, after it, and as the roles
+// received it; `condenser` tallies how the step ended. A step that called
+// the condenser is also an invocation row of role `condenser`.
 //
 // `gates` and `terminals` list every gate run and every terminal in the
 // window, in record order, for a reader that keys on their typed fields
@@ -314,10 +319,20 @@ const AGENT_KINDS: ReadonlySet<StatsEvent["kind"]> = new Set([
   "review-pass", "adjudication", "resolve-attempt",
 ]);
 
-const isAgentEvent = (event: StatsEvent): event is AgentEvent => AGENT_KINDS.has(event.kind);
+// An anchor step that called the condenser; the others made no invocation.
+type CondenserEvent = Extract<StatsEvent, { kind: "issue-anchor" }> & {
+  readonly provider: string;
+  readonly model: string;
+  readonly effort: string | null;
+  readonly durationMs: number;
+};
 
-const roleOf = (event: AgentEvent): Role =>
-  event.kind === "quality-review" ? (event.mode === "list" ? "quality-list" : "quality-verify")
+const isAgentEvent = (event: StatsEvent): event is AgentEvent | CondenserEvent =>
+  event.kind === "issue-anchor" ? event.provider !== undefined : AGENT_KINDS.has(event.kind);
+
+const roleOf = (event: AgentEvent | CondenserEvent): Role =>
+  event.kind === "issue-anchor" ? "condenser"
+    : event.kind === "quality-review" ? (event.mode === "list" ? "quality-list" : "quality-verify")
     : event.kind === "quality-pass" ? "quality-fix"
     : event.kind === "review-pass" ? "review"
     : event.kind === "adjudication" ? `adjudicator:${event.pass}`
@@ -326,7 +341,7 @@ const roleOf = (event: AgentEvent): Role =>
 
 function invocationRow(
   run: string,
-  event: AgentEvent,
+  event: AgentEvent | CondenserEvent,
   prose: ReadonlyMap<string, string> | null,
 ): Row {
   const transcript = event.kind === "resolve-attempt" ? null : event.transcript ?? null;
@@ -392,6 +407,7 @@ export function computeStats(input: StatsInput): StatsReport {
     scenarios: { rulings: 0, overruled: 0 },
   };
   const gate2 = { runs: 0, red: 0 };
+  const anchors: Extract<StatsEvent, { kind: "issue-anchor" }>[] = [];
 
   for (const { run, events, prose } of input.runs) {
     // Each issue's latest cycle in this run; it keeps the events that follow
@@ -477,6 +493,9 @@ export function computeStats(input: StatsInput): StatsReport {
           for (const row of judged) row.verdict = event.correctness;
           break;
         }
+        case "issue-anchor":
+          anchors.push(event);
+          break;
         case "adjudication":
           adjudication[event.pass].rulings += 1;
           if (event.ruling === "OVERRULED") adjudication[event.pass].overruled += 1;
@@ -540,7 +559,13 @@ export function computeStats(input: StatsInput): StatsReport {
       volumeUsedBytesMax: null,
       peakMemoryBytes: agg([]),
     },
-    anchors: { issues: 0, raw: agg([]), afterTraceDrop: agg([]), condensed: agg([]), condenser: {} },
+    anchors: {
+      issues: new Set(anchors.map((event) => event.issue)).size,
+      raw: agg(anchors.map((event) => event.rawChars)),
+      afterTraceDrop: agg(anchors.map((event) => event.tracedChars)),
+      condensed: agg(anchors.map((event) => event.anchorChars)),
+      condenser: tally(anchors.map((event) => event.result)),
+    },
     janitor: { runs: 0, byTask: {} },
     invocations,
     gates,

@@ -242,6 +242,40 @@ describe("computeStats passes and context (#194)", () => {
   });
 });
 
+describe("computeStats anchors (#217)", () => {
+  const anchor = (issue: number, result: string, chars: readonly [number, number, number], call = {}) =>
+    ev({
+      kind: "issue-anchor", issue, title: `Issue ${issue}`, result,
+      rawChars: chars[0], tracedChars: chars[1], anchorChars: chars[2], comments: 4,
+      dropped: chars[1] === chars[2] ? 0 : 2, ...call,
+    });
+
+  it("sizes each anchor step and counts only a condenser call as an invocation", () => {
+    const report = computeStats(input([run("run-1", [
+      admitted(1),
+      anchor(1, "condensed", [40_000, 30_000, 12_000], {
+        provider: "claude", model: "sonnet", effort: null, durationMs: 9,
+        transcript: "anchor-condense-1.log", usage: { outputTokens: 5 },
+      }),
+      admitted(2),
+      anchor(2, "below-threshold", [6_000, 5_000, 5_000]),
+      anchor(1, "cache-hit", [40_000, 30_000, 12_000]),
+    ])]));
+    expect(report.anchors).toEqual({
+      issues: 2,
+      raw: agg([40_000, 6_000, 40_000]),
+      afterTraceDrop: agg([30_000, 5_000, 30_000]),
+      condensed: agg([12_000, 5_000, 12_000]),
+      condenser: { condensed: 1, "below-threshold": 1, "cache-hit": 1 },
+    });
+    expect(report.invocations).toEqual([expect.objectContaining({
+      issue: 1, role: "condenser", provider: "claude", model: "sonnet", effort: null,
+      result: "condensed", durationMs: 9, transcript: "anchor-condense-1.log",
+      tokens: { input: null, cached: null, cacheWrite: null, output: 5, reasoning: null },
+    })]);
+  });
+});
+
 describe("computeStats prose (#182)", () => {
   it("carries speech and the terminal reason only with --with-prose", () => {
     const events = [

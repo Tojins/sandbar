@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { agentInvocationFilename, createTranscriptTree } from "./logs.js";
+import {
+  agentInvocationFilename,
+  createAgentInvocationSequencer,
+  createTranscriptTree,
+} from "./logs.js";
 
 const temporaryDirectories = new Set<string>();
 
@@ -38,10 +42,24 @@ describe("agent invocation records (#135)", () => {
     [{ role: "adjudicator", attempt: 3, invocation: 1 },
       "attempt-3-adjudicator-1.log"],
     [{ role: "gate", attempt: 3 }, "attempt-3-gate.log"],
+    [{ role: "anchor-condense", invocation: 2 }, "anchor-condense-2.log"],
     [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
     [{ role: "partition-check", invocation: 2 }, "partition-check-2.log"],
   ] as const)("names %j as %s", (identity, expected) => {
     expect(agentInvocationFilename(identity)).toBe(expected);
+  });
+
+  it("numbers each pre-attempt role on its own run-wide counter across cycles", () => {
+    const sequencer = createAgentInvocationSequencer();
+    const first = sequencer.startCycle();
+    expect(first.filename({ role: "anchor-condense", invocation: 1 })).toBe("anchor-condense-1.log");
+    expect(first.filename({ role: "ui-check", invocation: 1 })).toBe("ui-check-1.log");
+    expect(first.filename({ role: "ui-check", invocation: 2 })).toBe("ui-check-2.log");
+    const second = sequencer.startCycle();
+    expect(second.filename({ role: "anchor-condense", invocation: 1 })).toBe("anchor-condense-2.log");
+    expect(second.filename({ role: "ui-check", invocation: 1 })).toBe("ui-check-3.log");
+    expect(second.filename({ role: "partition-check", invocation: 1 })).toBe("partition-check-1.log");
+    expect(second.filename({ role: "implementer", attempt: 1, nudge: false })).toBe("attempt-1.log");
   });
 });
 

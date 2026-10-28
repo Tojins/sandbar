@@ -21,10 +21,14 @@
 // its mode and verdict; the fixer's row names its commits and whatever the
 // host discarded after it; a round's row names how its quality pass ended
 // when that was not an approval.
+// The anchor step (#217) is a pre-attempt phase like the UI check: no lane
+// span, and a feed row naming how it ended and what it dropped, warning when
+// the thread fell back uncondensed.
 
 import type {
   GateStepEvent,
   HeldReason,
+  IssueAnchorResult,
   RecomputeWaiting,
   RunEvent,
   WaitingReason,
@@ -361,6 +365,12 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = `setup complete · ${event.durationMs}ms`;
       tone = "dim";
       break;
+    case "issue-anchor":
+      text = `issue anchor · ${event.result}${
+        event.dropped === 0 ? "" : ` · ${event.dropped} of ${event.comments} comments dropped`
+      }`;
+      tone = ANCHOR_TONE[event.result];
+      break;
     case "ui-check":
       text = `UI check ${event.invocation} · ${event.result ?? "finished"}`;
       tone = "dim";
@@ -414,6 +424,19 @@ function feedText(event: RunEvent): FeedEvent | null {
       : {}),
   };
 }
+
+// A fallback to the uncondensed thread is worth a look; a write parked.
+const ANCHOR_TONE = {
+  "below-threshold": "dim",
+  "cache-hit": "dim",
+  condensed: "dim",
+  unparseable: "warn",
+  failed: "warn",
+  quota: "warn",
+  credential: "warn",
+  "input-too-large": "warn",
+  wrote: "bad",
+} as const satisfies Record<IssueAnchorResult, FeedEvent["tone"]>;
 
 function finishRunningSpan(issue: MutableIssue, at: string): void {
   const last = issue.spans.at(-1);

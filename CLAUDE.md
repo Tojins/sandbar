@@ -51,8 +51,10 @@ and the gate stack (`config.gateStack`, #24).
    components of review-gated issues), `chunk-follow-up.ts` (PR review →
    re-queue members, #95), `chunk-reconcile.ts` (finish already-merged chunks).
 2. **Inner loop** — `inner-loop-machine.ts` (pure state machine) +
-   `inner-loop.ts` (I/O). One sandbox per issue: partition check (#158), UI
-   check (#126), then implementer attempts → quality pass (read-only lister →
+   `inner-loop.ts` (I/O). One sandbox per issue: anchor condenser (#217, only
+   above `condenseAboveChars`, once per thread change, falls back
+   uncondensed), partition check (#158), UI check (#126), then implementer
+   attempts → quality pass (read-only lister →
    fixer that writes commits → read-only verify, #187) → gate-1 → verifier
    (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
    patch-scoped from round 2) → adjudicator on dispute of either pass (#167).
@@ -112,9 +114,11 @@ holds planning until reset (`forge-rate-limit.ts`) instead of halting.
   configured); quality lister 5.0k, verify 5.3k, fixer 4.8k; verifier
   white-box 4.1k; adjudicator 1.1k + the report; UI check 1.6k and partition
   check 1.5k + the issue anchor; resolve 1.2k + anchor + paths/trace; reflect
-  tagger 1.2k + the chunk, synthesizer 2.4k (no anchor). The
-  issue anchor (median 5.6k, max 41k measured, #197) has sandbar's traces and
-  quoted reviewer prose dropped by `issue-anchor.ts`. Look before you add a
+  tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser
+  1.3k + the thread (no anchor). The issue anchor (median 5.6k, max 41k
+  measured, #197) has sandbar's traces and quoted reviewer prose dropped and,
+  above `condenseAboveChars`, superseded comments stubbed from a cached
+  condenser answer by `issue-anchor.ts` (#217). Look before you add a
   paragraph to any of these.
 - **Event record** `events.ts` is the source of truth (#70/#132); the UI
   (`run-state.ts`, `ui-server.ts`) is a pure projection of it.

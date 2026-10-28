@@ -49,6 +49,14 @@
 // issues group without parsing `reason`. A `resolve-attempt` carries its
 // provider, model and usage.
 //
+// `issue-anchor` records the anchor step that opens every loop (#217): the
+// anchor's size before sandbar's traces are dropped (`rawChars`), after
+// (`tracedChars`) and as the roles receive it (`anchorChars`), how many
+// comments it had and dropped, and whether the thread was below the
+// threshold, already cached, condensed, or fell back uncondensed. Only a
+// condenser call carries the agent fields. The sizes are reports, never
+// decision inputs (#82).
+//
 // Additive changes do not bump EVENT_SCHEMA_VERSION (#194). Additive means a
 // new kind, a new optional field or a new union member; a field that earlier
 // records lack is optional. A bump is reserved for removing a field or
@@ -123,6 +131,7 @@ export type TitledEventIssue = {
 };
 
 export type IssuePhase =
+  | "anchor"
   | "partition-check"
   | "ui-check"
   | "implementer"
@@ -191,6 +200,19 @@ export type UsageFields = {
     readonly resetsAt?: number;
   };
 };
+
+// How the anchor step ended (#217). The last five fell back to the uncondensed
+// thread; `wrote` parked the issue.
+export type IssueAnchorResult =
+  | "below-threshold"
+  | "cache-hit"
+  | "condensed"
+  | "unparseable"
+  | "failed"
+  | "quota"
+  | "credential"
+  | "input-too-large"
+  | "wrote";
 
 // The machine's typed reason for a parking terminal (`Verdict`), recorded
 // beside its prose `reason`.
@@ -304,6 +326,7 @@ export type EventInput =
   | (EventIssue & { readonly kind: "origin-sync"; readonly outcome: IssueBranchOriginSync["kind"]; readonly detail: string })
   | (EventIssue & { readonly kind: "phase"; readonly attempt: number; readonly phases: readonly IssuePhase[] })
   | (EventIssue & { readonly kind: "setup"; readonly durationMs: number; readonly worktreeMs?: number; readonly sandboxMs?: number; readonly stackMs?: number; readonly detail?: string })
+  | (EventIssue & ContainerResources & { readonly kind: "issue-anchor"; readonly result: IssueAnchorResult; readonly rawChars: number; readonly tracedChars: number; readonly anchorChars: number; readonly comments: number; readonly dropped: number; readonly provider?: string; readonly model?: string; readonly effort?: string | null; readonly durationMs?: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "partition-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly result: "CLEAR" | "PARTITION" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits?: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })

@@ -65,7 +65,10 @@
 // every other role, and reads only what the conflict needs. The hint asks for
 // `--json title,body`, not `--comments`: piped (and the agent's stdout always
 // is), `--comments` prints only the raw thread — no title or body, and
-// sandbar's traces left in (see `issue-anchor.ts`).
+// sandbar's traces left in (see `issue-anchor.ts`). The primary issue's own
+// anchor (the adapter's `getIssueBody`) is the one every inner-loop role
+// reads: trace-dropped, and condensed when the inner loop cached a condenser
+// answer for that exact thread (#217).
 
 import { SandbarError } from "./errors.js";
 import {

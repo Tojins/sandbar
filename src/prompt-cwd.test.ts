@@ -206,6 +206,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       {
         repo: CONFIGURED,
         repoDir: target,
+        anchorCacheDir: join(target, "anchor-cache"),
         probeWorktree: target,
         claudeMdPath: "CLAUDE.md",
         sourceBranch: "main",
@@ -218,7 +219,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   });
 
   it("builds the UI check from only the configured issue anchor and role contract", async () => {
-    const prompt = await buildUiCheckPrompt("1", CONFIGURED);
+    const prompt = await buildUiCheckPrompt("1", CONFIGURED, join(target, "anchor-cache"));
     expect(prompt).toContain("Issue #1: acme/app");
     expect(prompt).toContain("# UI prototype check");
     expect(prompt).not.toContain("Last 10 commits");
@@ -230,6 +231,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
+      anchorCacheDir: join(target, "anchor-cache"),
       worktreePath: launchedFrom,
       sourceBranch: "main",
       base: sourceBranchBase("main"),
@@ -321,6 +323,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
+      anchorCacheDir: join(target, "anchor-cache"),
       worktreePath: launchedFrom,
       sourceBranch: "main",
       base: sourceBranchBase("main"),
@@ -341,6 +344,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
+      anchorCacheDir: join(target, "anchor-cache"),
       worktreePath: launchedFrom,
       sourceBranch: "main",
       base: sourceBranchBase("main"),
@@ -367,6 +371,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       {
         repo: CONFIGURED,
         repoDir: target,
+        anchorCacheDir: join(target, "anchor-cache"),
         claudeMdPath: "CLAUDE.md",
         contextMdPath: "CONTEXT.md",
         sourceBranch: "main",
@@ -392,6 +397,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       {
         repo: CONFIGURED,
         repoDir: target,
+        anchorCacheDir: join(target, "anchor-cache"),
         claudeMdPath: "CLAUDE.md",
         sourceBranch: "main",
       },
@@ -406,6 +412,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
       repo: CONFIGURED,
       repoDir: target,
+      anchorCacheDir: join(target, "anchor-cache"),
       worktreePath: launchedFrom,
       sourceBranch: "main",
       base: sourceBranchBase("main"),

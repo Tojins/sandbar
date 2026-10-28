@@ -28,13 +28,18 @@
 // from the code.
 // The UI and partition checkers (#126/#158) are intentionally smaller: issue
 // anchor plus their own decision contracts, with no project standards, diff or
-// prior-round history. The partition check is gated on the context budget: a split is
-// asked for only when the whole issue plausibly exceeds it and names outcomes
-// that land alone; the per-piece estimates it renders are for the human.
+// prior-round history. The anchor condenser (#217) is smaller still: its
+// contract and the thread to classify, with no anchor layer at all. The
+// partition check is gated on the context budget: a split is asked for only
+// when the whole issue plausibly exceeds it and names outcomes that land
+// alone; the per-piece estimates it renders are for the human.
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure
-// throws (SandbarError) instead of degrading to a placeholder.
+// throws (SandbarError) instead of degrading to a placeholder. Every role gets
+// it only through `buildIssueAnchor`, which reads the condenser's cache in
+// `anchorCacheDir` (issue-anchor.ts), so each role sees the condensed thread
+// whenever the inner loop's `needs-anchor` step condensed this exact thread.
 //
 // Every range a slot renders is anchored at the issue branch's SEED REF, never
 // a bare branch name (#40, #61): the agents' worktree head namespace holds
@@ -61,7 +66,11 @@ import { SandbarError, isErrno, isExitCode } from "./errors.js";
 import type { PromptExtension } from "./config.js";
 import type { IssueBranchBase } from "./git-ops.js";
 import type { ReviewScope, ReviewPass } from "./inner-loop-machine.js";
-import { fetchIssueText } from "./issue-anchor.js";
+import {
+  type IssueJson,
+  fetchIssueText,
+  renderCondenserInput,
+} from "./issue-anchor.js";
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
 import type { SandboxContainerStatus } from "./sandbox-stack.js";
@@ -91,6 +100,7 @@ const REVIEWER_PROJECT_STANDARDS_TPL = loadTemplate("reviewer-project-standards"
 const IMPLEMENTER_TPL = loadTemplate("implementer");
 const UI_CHECK_TPL = loadTemplate("ui-check");
 const PARTITION_CHECK_TPL = loadTemplate("partition-check");
+const ANCHOR_CONDENSER_TPL = loadTemplate("anchor-condenser");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
 const IMPLEMENTER_QUALITY_COMMITS_TPL = loadTemplate("implementer-quality-commits");
@@ -200,12 +210,15 @@ export type ProjectAnchorOptions = {
   //
   // `repoDir` is the bare cache, where the `git log` runs (#38).
   //
+  // `anchorCacheDir` is where the condenser's answers are cached (#217).
+  //
   // The tree the emitted `@refs` will be RESOLVED against is deliberately NOT
   // a field here — it is `buildProjectAnchor`'s second argument, so that the
   // two prompt builders can DERIVE it from the worktree they are already
   // given rather than a caller having to remember to supply it. See there.
   readonly repo: RepoRef;
   readonly repoDir: string;
+  readonly anchorCacheDir: string;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -267,6 +280,7 @@ export type ReviewerPromptInputs = {
   // `CODING_STANDARDS.md` must be reviewed against it.
   readonly repo: RepoRef;
   readonly repoDir: string;
+  readonly anchorCacheDir: string;
   readonly worktreePath: string;
   // The project history the anchor quotes, and the branch the review prose
   // tells the reviewer does not resolve locally. NOT the range's anchor since
@@ -350,7 +364,7 @@ export async function buildPrompt(
     // this module directly, and silently drops the `@ref` for any doc the
     // branch itself adds.
     await buildProjectAnchor(anchor, inputs.worktreePath),
-    await buildIssueAnchor(inputs.issue.id, anchor.repo),
+    await buildIssueAnchor(inputs.issue.id, anchor.repo, anchor.anchorCacheDir),
     await buildAttemptSlot(inputs, anchor),
   ];
   return layers.join("\n\n---\n\n");
@@ -363,8 +377,12 @@ export async function buildPrompt(
 export async function buildUiCheckPrompt(
   issueId: string,
   repo: RepoRef,
+  anchorCacheDir: string,
 ): Promise<string> {
-  return [await buildIssueAnchor(issueId, repo), UI_CHECK_TPL].join("\n\n---\n\n");
+  return [
+    await buildIssueAnchor(issueId, repo, anchorCacheDir),
+    UI_CHECK_TPL,
+  ].join("\n\n---\n\n");
 }
 
 // The independent fan-out classifier (#158). Like the UI check, it receives
@@ -373,11 +391,21 @@ export async function buildUiCheckPrompt(
 export async function buildPartitionCheckPrompt(
   issueId: string,
   repo: RepoRef,
+  anchorCacheDir: string,
   budgetChars: number,
 ): Promise<string> {
   return [
-    await buildIssueAnchor(issueId, repo),
+    await buildIssueAnchor(issueId, repo, anchorCacheDir),
     render(PARTITION_CHECK_TPL, { budgetChars: String(budgetChars) }),
+  ].join("\n\n---\n\n");
+}
+
+// The thread condenser (#217): its contract, then the issue it classifies, as
+// fetched for the anchor it would condense.
+export function buildCondenserPrompt(issueId: string, issue: IssueJson): string {
+  return [
+    render(ANCHOR_CONDENSER_TPL, { count: String(issue.comments?.length ?? 0) }),
+    renderCondenserInput(issueId, issue),
   ].join("\n\n---\n\n");
 }
 
@@ -427,7 +455,7 @@ async function buildBranchRoleAnchors(
       },
       inputs.worktreePath,
     ),
-    buildIssueAnchor(inputs.issue.id, inputs.repo),
+    buildIssueAnchor(inputs.issue.id, inputs.repo, inputs.anchorCacheDir),
   ]);
 }
 
@@ -565,7 +593,7 @@ export async function buildAdjudicatorPrompt(
 // reviewer was handed no `@ref` to the very standards the commit under review
 // had just authored.
 export async function buildProjectAnchor(
-  opts: ProjectAnchorOptions,
+  opts: Omit<ProjectAnchorOptions, "anchorCacheDir">,
   probeWorktree: string,
 ): Promise<string> {
   // The @refs stay exactly as the host wrote them — the agent resolves them
@@ -617,8 +645,9 @@ export async function buildProjectAnchor(
 async function buildIssueAnchor(
   issueId: string,
   repo: RepoRef,
+  anchorCacheDir: string,
 ): Promise<string> {
-  return `# Issue anchor\n\n${await fetchIssueText(issueId, repo)}`;
+  return `# Issue anchor\n\n${await fetchIssueText(issueId, repo, anchorCacheDir)}`;
 }
 
 async function buildAttemptSlot(

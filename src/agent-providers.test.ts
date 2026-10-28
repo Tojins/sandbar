@@ -287,6 +287,26 @@ describe("requiredAgentProviders", () => {
     expect(a).toEqual(b);
   });
 
+  it("includes the condenser's provider only while the step is on (#217)", () => {
+    const roles = {
+      uiPrototypeCheck: true,
+      implementerAgent: "claude" as const,
+      uiCheckAgent: "claude" as const,
+      reviewerAgent: "claude" as const,
+      reviewerQualityAgent: "claude" as const,
+      adjudicatorAgent: "claude" as const,
+      condenserAgent: "codex" as const,
+      mergerAgent: "claude" as const,
+    };
+    expect(requiredAgentProviders({ ...roles, condenseAboveChars: 20_000 })).toEqual([
+      "claude",
+      "codex",
+    ]);
+    expect(requiredAgentProviders({ ...roles, condenseAboveChars: null })).toEqual([
+      "claude",
+    ]);
+  });
+
   it("includes the UI-check provider only while the check is enabled (#126)", () => {
     const roles = {
       implementerAgent: "claude" as const,

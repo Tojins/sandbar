@@ -91,6 +91,7 @@ defaults.
 | `keepAwakeWhileIdle` | `false` | Hold the wake lock while idle too. |
 | `partitionCheck` | `true` | Ask whether an issue is too big before starting it. |
 | `uiPrototypeCheck` | `true` | Ask whether an issue needs a UI prototype first. |
+| `condenseAboveChars` | `20000` | Condense issue threads longer than this; `null` turns it off. |
 | `maxContextChars` | `600000` | Context budget per role (prompt plus diff). |
 | `maxQualityRounds` | `3` | See [Budgets](#budgets). |
 | `maxGateRounds` | `4` | See [Budgets](#budgets). |
@@ -122,14 +123,15 @@ export default { /* ... */ env, ...routing };
   reach agent containers. An empty value inherits from the launching shell.
 - **Routing** keys `SANDBAR_<ROLE>_AGENT`, `_MODEL_ID` and `_EFFORT` choose the
   agent CLI, model and effort per role. Roles: `IMPLEMENTER`, `UI_CHECK`,
-  `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, `MERGER`, and `npm run
-  reflect`'s `REFLECT_TAGGER` and `REFLECT_SYNTHESIZER`. They never enter a
+  `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, `CONDENSER`, `MERGER`, and
+  `npm run reflect`'s `REFLECT_TAGGER` and `REFLECT_SYNTHESIZER`. They never enter a
   sandbox. Defaults are claude with `opus` at `high` for the implementer and
   reviewer (and so the adjudicator), `sonnet` at `high` for the UI check,
   `sonnet` at `medium` for the quality pass and the reflect tagger, `opus`
   at `medium` for the merger and `opus` at `high` for the reflect
-  synthesizer. A role routed off claude gets no effort flag unless it names
-  one.
+  synthesizer. The condenser follows the quality pass's CLI, on `sonnet` when
+  that is claude, with no effort flag. A role routed off claude gets no effort
+  flag unless it names one.
 
 [`sandbar.env.example`](../sandbar.env.example) lists every key.
 
@@ -216,7 +218,14 @@ private installation directory on the host.
 
 ### Pre-checks
 
-Before the first attempt, two read-only agents classify the issue:
+Before the first attempt, a read-only condenser may shorten the issue thread,
+then two read-only agents classify the issue:
+
+- **Condenser** (`condenseAboveChars`): when the thread, without sandbar's own
+  traces, is longer than the threshold, it marks the comments a later one
+  superseded. Every role then reads those as one-line stubs and every other
+  comment verbatim. The answer is cached until the thread changes; if the
+  condenser fails, the roles read the whole thread.
 
 - **Partition check** (`partitionCheck`): if the issue won't fit
   `maxContextChars`, it parks as `NEEDS-PARTITION` under `needs-info` and asks

@@ -40,6 +40,14 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 vi.mock("./issue-anchor.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./issue-anchor.js")>(),
   fetchIssueSnapshot: vi.fn(async () => ({ title: "Issue", body: "", comments: [] })),
+  fetchIssueAnchor: vi.fn(async () => ({
+    text: "Issue #1: Issue",
+    json: { title: "Issue", body: "", comments: [] },
+    key: "key",
+    cache: { kind: "miss", problem: null },
+    rawChars: 15,
+    tracedChars: 15,
+  })),
 }));
 
 vi.mock("./agent-sandbox.js", async (importOriginal) => {
@@ -147,6 +155,7 @@ const config = (
     worktreesDir: "/tmp/.sandbar/worktrees",
     issueClonesDir: "/tmp/.sandbar/issues",
     logsDir: "/tmp/.sandbar/logs",
+    anchorCacheDir: "/tmp/.sandbar/anchor-cache",
   },
   repo: { owner: "o", name: "r" },
   sourceBranch: "main",
@@ -158,6 +167,7 @@ const config = (
   reviewerQualityModelId: "model",
   implementerAgent,
   partitionCheck: false,
+  condenseAboveChars: 20_000,
   maxContextChars: 600_000,
   uiCheckAgent,
   reviewerAgent: "claude",
@@ -547,6 +557,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       },
     ]);
     expect(events.filter((event) => event.kind === "phase")).toEqual([
+      { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["anchor"] },
       { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["implementer"] },
       { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["quality"] },
       { kind: "phase", issue: 125, title: "Issue 125", attempt: 1, phases: ["gate-1"] },

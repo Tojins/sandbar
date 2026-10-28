@@ -1057,6 +1057,58 @@ describe("resolveConfig", () => {
     expect(sameProvider.adjudicatorModelId).toBe("gpt-5.6-sol");
   });
 
+  it("routes the condenser to the quality pass's CLI, on sonnet when that is claude (#217)", () => {
+    const r = resolveConfig(minimal);
+    expect(r.condenseAboveChars).toBe(20_000);
+    expect(r.condenserAgent).toBe("claude");
+    expect(r.condenserModelId).toBe("sonnet");
+    expect(r.condenserEffort).toBeUndefined();
+    // A Sonnet-class job: the quality model is never inherited on claude.
+    expect(resolveConfig({ ...minimal, reviewerQualityModelId: "opus" }).condenserModelId)
+      .toBe("sonnet");
+
+    const quality = resolveConfig({
+      ...minimal,
+      reviewerQualityAgent: "codex",
+      reviewerQualityModelId: "gpt-5.6-sol",
+    });
+    expect(quality.condenserAgent).toBe("codex");
+    expect(quality.condenserModelId).toBe("gpt-5.6-sol");
+    expect(quality.condenserEffort).toBeUndefined();
+
+    expect(resolveConfig({
+      ...minimal,
+      condenseAboveChars: 5_000,
+      condenserAgent: "codex",
+      condenserModelId: "gpt-5.6-mini",
+      condenserEffort: "low",
+    })).toMatchObject({
+      condenseAboveChars: 5_000,
+      condenserAgent: "codex",
+      condenserModelId: "gpt-5.6-mini",
+      condenserEffort: "low",
+    });
+  });
+
+  it("refuses a condenser split from claude with no model, unless the step is off (#217)", () => {
+    expect(() => resolveConfig({ ...minimal, condenserAgent: "codex" }))
+      .toThrow(/config\.condenserAgent is "codex"[\s\S]*config\.condenserModelId/);
+    // A codex quality pass's model says nothing about the claude condenser's.
+    expect(resolveConfig({
+      ...minimal,
+      reviewerQualityAgent: "codex",
+      reviewerQualityModelId: "gpt-5.6-sol",
+      condenserAgent: "claude",
+    }).condenserModelId).toBe("sonnet");
+    const off = resolveConfig({ ...minimal, condenseAboveChars: null, condenserAgent: "codex" });
+    expect(off.condenseAboveChars).toBeNull();
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])("refuses condenseAboveChars %s", (value) => {
+    expect(() => resolveConfig({ ...minimal, condenseAboveChars: value }))
+      .toThrow(/config\.condenseAboveChars must be a positive integer/);
+  });
+
   // A renamed field is #66's silent failure by construction: the config is
   // IMPORTED, so the old spelling would be spread through and never read while
   // the pass ran on the default model.

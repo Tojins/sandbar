@@ -33,6 +33,14 @@ const innerLoopMocks = vi.hoisted(() => ({
   revParse: vi.fn(async () => "seed-sha"),
   isAncestor: vi.fn(async (_cwd: string, _ancestor: string, _descendant: string) => true),
   fetchIssueSnapshot: vi.fn(async (): Promise<IssueJson> => ({ title: "Issue", body: "", comments: [] })),
+  fetchIssueAnchor: vi.fn(async (): Promise<IssueAnchor> => ({
+    text: "Issue #1: Issue",
+    json: { title: "Issue", body: "", comments: [] },
+    key: "key",
+    cache: { kind: "miss", problem: null },
+    rawChars: 15,
+    tracedChars: 15,
+  })),
 }));
 
 vi.mock("./prompt.js", async (importOriginal) => ({
@@ -81,6 +89,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 vi.mock("./issue-anchor.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./issue-anchor.js")>()),
   fetchIssueSnapshot: innerLoopMocks.fetchIssueSnapshot,
+  fetchIssueAnchor: innerLoopMocks.fetchIssueAnchor,
 }));
 
 import {
@@ -101,6 +110,7 @@ import { AgentToolsImageError } from "./agent-tools.js";
 import {
   QUALITY_FIXER_MAX_INVOCATIONS,
   closedReviewRound,
+  createRunProviderState,
   enforceReadOnlyAgentSnapshot,
   qualityAuthorEnv,
   readOnlyAgentSnapshotChanged,
@@ -112,6 +122,7 @@ import {
   runQualityFix,
   runQualityReview,
   runAdjudicator,
+  runAnchorCondense,
   runUiCheck,
   runSandboxAndPublish,
   selectPromiseNudge,
@@ -123,7 +134,14 @@ import {
   createTranscriptTree,
 } from "./logs.js";
 import type { HeadMismatch } from "./git-ops.js";
-import type { IssueJson } from "./issue-anchor.js";
+import {
+  type CondenseAnswer,
+  type IssueAnchor,
+  type IssueJson,
+  condenseKey,
+  readCondenseCache,
+  renderIssueText,
+} from "./issue-anchor.js";
 import type { EventInput } from "./events.js";
 import type { GateResult } from "./gate.js";
 import { type ReviewerResult, initialState } from "./inner-loop-machine.js";
@@ -144,6 +162,197 @@ const deferred = <T,>() => {
   });
   return { promise, resolve };
 };
+
+describe("runAnchorCondense (#217)", () => {
+  const thread: IssueJson = {
+    title: "Pick a store",
+    body: "Persist it.",
+    comments: [
+      { author: { login: "a" }, createdAt: "2026-01-01T00:00:00Z", body: "Option A." },
+      { author: { login: "b" }, createdAt: "2026-01-02T00:00:00Z", body: "Decision: option B." },
+      { author: { login: "c" }, createdAt: "2026-01-03T00:00:00Z", body: "Thanks." },
+    ],
+  };
+  const answer: CondenseAnswer = [
+    { kind: "drop", by: 2, reason: "overruled" },
+    { kind: "keep" },
+    { kind: "keep" },
+  ];
+  const repo = { owner: "owner", name: "repo" };
+  const condensedChars = renderIssueText("217", thread, { answer, repo }).length;
+  const VALID = "<condense>\nC1 DROP C2 overruled\nC2 KEEP\nC3 KEEP\n</condense>";
+
+  let cacheDir: string;
+  beforeEach(async () => {
+    cacheDir = await mkdtemp(join(tmpdir(), "anchor-condense-"));
+    innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    return async () => {
+      await rm(cacheDir, { recursive: true, force: true });
+    };
+  });
+
+  const context = (
+    run: (options: Parameters<Sandbox["run"]>[0]) => Promise<unknown>,
+    anchor: Partial<IssueAnchor> = {},
+    config: { readonly condenseAboveChars?: number | null } = {},
+  ) => {
+    const fetched: IssueAnchor = {
+      text: renderIssueText("217", thread),
+      json: thread,
+      key: condenseKey(thread),
+      cache: { kind: "miss", problem: null },
+      rawChars: 40_000,
+      tracedChars: 30_000,
+      ...anchor,
+    };
+    innerLoopMocks.fetchIssueAnchor.mockResolvedValueOnce(fetched);
+    const events: EventInput[] = [];
+    const writes: string[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(run),
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(),
+    } as unknown as Sandbox;
+    const providerState = createRunProviderState();
+    const ctx = {
+      issue: { id: "217", title: "condense", branch: "sandbar/issue-217" },
+      sandbox,
+      opts: {
+        attemptLogger: { writeInvocation: vi.fn(async (filename) => writes.push(filename)) },
+        onEvent: (event: EventInput) => events.push(event),
+        providerState,
+      },
+      config: {
+        layout: { anchorCacheDir: cacheDir },
+        repo,
+        condenserAgent: "claude",
+        condenserModelId: "sonnet",
+        condenseAboveChars: 20_000,
+        ...config,
+      },
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+    } as unknown as Parameters<typeof runAnchorCondense>[1];
+    return { ctx, sandbox, events, writes, providerState, fetched };
+  };
+  const answered = (stdout: string) => async () => ({
+    stdout, commits: [], durationMs: 5, silent: false, toolCalls: 1,
+  });
+  const sizes = { issue: 217, title: "condense", rawChars: 40_000, tracedChars: 30_000, comments: 3 };
+  const cached = () => readCondenseCache(cacheDir, "217", condenseKey(thread), 3);
+
+  it.each([
+    ["below the threshold", { tracedChars: 15_000 }, {}],
+    ["with the step off", {}, { condenseAboveChars: null }],
+  ] as const)("makes no call %s", async (_name, anchor, config) => {
+    const { ctx, sandbox, events } = context(answered(VALID), anchor, config);
+    await expect(runAnchorCondense({ kind: "run-anchor-condense" }, ctx))
+      .resolves.toEqual({ kind: "anchor-ready" });
+    expect(sandbox.run).not.toHaveBeenCalled();
+    const tracedChars = anchor.tracedChars ?? 30_000;
+    expect(events).toEqual([{
+      kind: "issue-anchor", ...sizes, tracedChars,
+      result: "below-threshold", anchorChars: tracedChars, dropped: 0,
+    }]);
+  });
+
+  it("makes no call when the cache answers this thread", async () => {
+    const text = renderIssueText("217", thread, { answer, repo });
+    const { ctx, sandbox, events } = context(answered(VALID), { text, cache: { kind: "hit", answer } });
+    await expect(runAnchorCondense({ kind: "run-anchor-condense" }, ctx))
+      .resolves.toEqual({ kind: "anchor-ready" });
+    expect(sandbox.run).not.toHaveBeenCalled();
+    expect(events).toEqual([{
+      kind: "issue-anchor", ...sizes, result: "cache-hit", anchorChars: text.length, dropped: 1,
+    }]);
+  });
+
+  it("condenses once with no completion signal and caches the answer", async () => {
+    const { ctx, sandbox, events, writes } = context(answered(VALID));
+    await expect(runAnchorCondense({ kind: "run-anchor-condense" }, ctx))
+      .resolves.toEqual({ kind: "anchor-ready" });
+    expect(sandbox.run).toHaveBeenCalledOnce();
+    const invocation = vi.mocked(sandbox.run).mock.calls[0]![0];
+    expect(invocation).toMatchObject({ name: "anchor-condense-217", model: "sonnet", completionSignal: [] });
+    expect(invocation.prompt).toContain("comments C1…C3");
+    expect(invocation.prompt).toContain("### C3 — c — 2026-01-03T00:00:00Z");
+    await invocation.onInvocationEnd?.({} as never);
+    expect(writes).toEqual(["anchor-condense-1.log"]);
+    expect(await cached()).toEqual({ kind: "hit", answer });
+    expect(events).toEqual([{
+      kind: "issue-anchor", ...sizes, result: "condensed", anchorChars: condensedChars, dropped: 1,
+      provider: "claude", model: "sonnet", effort: null, durationMs: 5,
+      transcript: "anchor-condense-1.log", usage: { toolCalls: 1 },
+    }]);
+  });
+
+  it.each([
+    ["an unparseable answer", answered("C1 KEEP"), "unparseable"],
+    ["a harness failure", async () => { throw new AgentError("exited 1"); }, "failed"],
+    ["a size refusal", async () => { throw new AgentInputTooLargeError("too long"); }, "input-too-large"],
+    ["a closed quota", async () => {
+      throw new AgentQuotaError("claude", { status: "rejected", window: "five_hour" });
+    }, "quota"],
+    ["a refused credential", async () => { throw new AgentCredentialError("expired"); }, "credential"],
+  ] as const)("goes on uncondensed after %s, caching nothing", async (_name, run, result) => {
+    const { ctx, events } = context(run);
+    await expect(runAnchorCondense({ kind: "run-anchor-condense" }, ctx))
+      .resolves.toEqual({ kind: "anchor-ready" });
+    expect(events).toEqual([expect.objectContaining({
+      kind: "issue-anchor", result, anchorChars: 30_000, dropped: 0,
+    })]);
+    expect(await cached()).toEqual({ kind: "miss", problem: null });
+  });
+
+  it("propagates an error that is not an agent invocation's, recording nothing", async () => {
+    const { ctx, events } = context(async () => { throw new TypeError("bug"); });
+    await expect(runAnchorCondense({ kind: "run-anchor-condense" }, ctx))
+      .rejects.toThrow("bug");
+    expect(events).toEqual([]);
+    expect(await cached()).toEqual({ kind: "miss", problem: null });
+  });
+
+  it("records a closed provider for the run and never calls it again", async () => {
+    const { ctx, sandbox, providerState, fetched } = context(async () => {
+      throw new AgentQuotaError("claude", { status: "rejected", window: "five_hour" });
+    });
+    await runAnchorCondense({ kind: "run-anchor-condense" }, ctx);
+    expect(providerState.get("claude")).toMatchObject({ cause: "quota" });
+    innerLoopMocks.fetchIssueAnchor.mockResolvedValueOnce(fetched);
+    await expect(runAnchorCondense({ kind: "run-anchor-condense" }, ctx))
+      .resolves.toEqual({ kind: "anchor-ready" });
+    expect(sandbox.run).toHaveBeenCalledOnce();
+  });
+
+  it("parks a condenser that wrote, trusting none of its answer", async () => {
+    const { ctx, sandbox, events } = context(answered(VALID));
+    innerLoopMocks.branchTip.mockReset()
+      .mockResolvedValueOnce("tip-a")
+      .mockResolvedValueOnce("tip-b");
+    await expect(runAnchorCondense({ kind: "run-anchor-condense" }, ctx)).resolves.toEqual({
+      kind: "anchor-condenser-wrote",
+      detail: expect.stringContaining("Anchor condenser changed git state"),
+    });
+    expect(sandbox.preserveWorktree).toHaveBeenCalledWith(
+      expect.stringContaining("anchor condenser changed the repository"),
+    );
+    expect(events).toEqual([expect.objectContaining({ result: "wrote", dropped: 0 })]);
+    expect(await cached()).toEqual({ kind: "miss", problem: null });
+  });
+
+  it("logs an unusable cache entry and condenses afresh", async () => {
+    const { ctx, sandbox, events } = context(answered(VALID), {
+      cache: { kind: "miss", problem: "anchor cache /x/217.json is not JSON" },
+    });
+    await runAnchorCondense({ kind: "run-anchor-condense" }, ctx);
+    expect(sandbox.run).toHaveBeenCalledOnce();
+    expect(events[0]).toEqual({
+      kind: "notice",
+      message: "issue=217 anchor cache /x/217.json is not JSON; read as a miss",
+    });
+  });
+});
 
 describe("runUiCheck (#126)", () => {
   const context = (runs: readonly string[], events: EventInput[] = []) => {
@@ -201,6 +410,7 @@ describe("runUiCheck (#126)", () => {
           onEvent: (event: EventInput) => events.push(event),
         },
         config: {
+          layout: { anchorCacheDir: "/anchor-cache" },
           repo: { owner: "owner", name: "repo" },
           uiCheckAgent: "codex",
           uiCheckModelId: "gpt-5.6-sol",
@@ -445,6 +655,7 @@ describe("runPartitionCheck (#158)", () => {
         onEvent: (event: EventInput) => events.push(event),
       },
       config: {
+        layout: { anchorCacheDir: "/anchor-cache" },
         repo: { owner: "owner", name: "repo" },
         implementerAgent: "codex",
         implementerModelId: "gpt-5.6-sol",
@@ -2517,6 +2728,7 @@ describe("runInnerLoop context terminals (#158)", () => {
           repoDir: "/repo",
           worktreesDir: "/worktrees",
           logsDir: "/logs",
+          anchorCacheDir: "/anchor-cache",
         },
         repo: { owner: "owner", name: "repo" },
         sourceBranch: "main",
@@ -2533,6 +2745,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         adjudicatorModelId: "correctness-model",
         uiPrototypeCheck: false,
         partitionCheck: false,
+        condenseAboveChars: 20_000,
         maxContextChars: 600_000,
         maxQualityRounds: 3,
         maxGateRounds: 4,
@@ -2853,6 +3066,7 @@ describe("runInnerLoop context terminals (#158)", () => {
     expect(events.filter((event) => event.kind === "phase").map((event) =>
       event.kind === "phase" ? event.phases : [],
     )).toEqual([
+      ["anchor"],
       ["implementer"], ["quality"], ["quality"], ["quality"], ["gate-1"],
       ["implementer"], ["quality"], ["gate-1"], ["review"],
       ["implementer"], [],

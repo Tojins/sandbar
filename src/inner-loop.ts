@@ -35,13 +35,19 @@
 // still runs once, on the tip's stack alone, and the state machine parks the
 // issue with NEEDS-STACK-CHANGE.
 //
-// The partition and UI-prototype decisions (#158/#126) are cold agent calls in
-// the existing issue sandbox and spend no convergence budget. Partition runs
-// once per admission and only at the seed; UI runs once per sandbox cycle, so
-// a fresh HARD-ERROR asks it again. Before each quality role and before the
-// verifier, that role's complete picture (rendered prompt plus
-// seed-anchored net diff) is measured against the configured useful-context
-// budget; a resumed branch gets the same enforcement at admission. A provider
+// Every sandbox cycle opens with the anchor step (#217, `runAnchorCondense`):
+// above `condenseAboveChars`, and unless the anchor cache already answers
+// this exact thread, one cold condenser call whose answer is cached for every
+// later anchor read. It is the one pre-attempt role whose failure, a closed
+// provider included, does not stop the issue: the roles then read the
+// uncondensed thread. The partition and UI-prototype decisions (#158/#126)
+// are cold agent calls in the existing issue sandbox and spend no convergence
+// budget. Partition runs once per admission and only at the seed; UI runs
+// once per sandbox cycle, so a fresh HARD-ERROR asks it again. Before each
+// quality role and before the verifier, that role's complete picture
+// (rendered prompt plus seed-anchored net diff) is measured against the
+// configured useful-context budget; a resumed branch gets the same
+// enforcement at admission. A provider
 // size refusal maps to the same partition terminal instead of entering
 // HARD-ERROR replay. Two deliberate exceptions to "all branching lives in the
 // SM" stay within one action each. The promise nudge in runImplementer gives
@@ -111,10 +117,10 @@
 // host cache on success (#98), as does each settled fixer invocation. After an
 // implementer invocation failure the same publish is recovery-only: its
 // failure is logged and may not replace the provider error.
-// Partition-check, UI-check, reviewer, quality lister and verify, and
-// adjudicator invocations snapshot tip and status; any mutation parks the
-// issue and preserves the clone rather than trusting that call. The quality
-// fixer is the one cold role exempt (#185).
+// Anchor-condenser, partition-check, UI-check, reviewer, quality lister and
+// verify, and adjudicator invocations snapshot tip and status; any mutation
+// parks the issue and preserves the clone rather than trusting that call. The
+// quality fixer is the one cold role exempt (#185).
 // Invocation filenames use one run-owned, per-issue sequence across fresh
 // HARD-ERROR cycles and later admissions: the state machine's attempt and
 // UI-check counters restart at both boundaries, but an earlier invocation
@@ -180,7 +186,12 @@ import {
 } from "./agent-tools.js";
 import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
-import type { EventInput, QualityPassEvent, UsageFields } from "./events.js";
+import type {
+  EventInput,
+  IssueAnchorResult,
+  QualityPassEvent,
+  UsageFields,
+} from "./events.js";
 import { parseVerdict } from "./verdict-parser.js";
 import { parsePartitionCheck } from "./partition-check-parser.js";
 import { summarizeGateFailure } from "./gate.js";
@@ -219,7 +230,14 @@ import {
   step,
   visiblePhases,
 } from "./inner-loop-machine.js";
-import { fetchIssueSnapshot } from "./issue-anchor.js";
+import {
+  droppedComments,
+  fetchIssueAnchor,
+  fetchIssueSnapshot,
+  parseCondenseAnswer,
+  renderIssueText,
+  writeCondenseCache,
+} from "./issue-anchor.js";
 import type { AgentInvocationSequence, AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
@@ -269,6 +287,7 @@ import {
   type ReviewerPromptInputs,
   buildPrompt,
   buildAdjudicatorPrompt,
+  buildCondenserPrompt,
   buildCorrectnessPrompt,
   buildPartitionCheckPrompt,
   buildQualityFixPrompt,
@@ -404,7 +423,8 @@ export type Terminal =
         | "quality-reviewer-wrote"
         | "adjudicator-wrote"
         | "ui-checker-wrote"
-        | "partition-checker-wrote";
+        | "partition-checker-wrote"
+        | "anchor-condenser-wrote";
       readonly commits: readonly { sha: string }[];
       readonly specGaps: readonly SpecGap[];
     }
@@ -547,6 +567,18 @@ class PartitionRequiredError extends Error {
   }
 }
 
+// What a pre-attempt role's failed invocation records as its result.
+const agentFailureResult = (
+  err: unknown,
+): "input-too-large" | "quota" | "credential" | "failed" =>
+  err instanceof AgentInputTooLargeError
+    ? "input-too-large"
+    : err instanceof AgentQuotaError
+      ? "quota"
+      : err instanceof AgentCredentialError
+        ? "credential"
+        : "failed";
+
 const providerSizeRefusal = (
   err: unknown,
   slot: ContextSlot,
@@ -586,6 +618,7 @@ export type InnerLoopConfig = {
   readonly reviewerQualityModelId: string;
   readonly adjudicatorModelId: string;
   readonly uiCheckModelId: string;
+  readonly condenserModelId: string;
   // Which CLI each role runs (#72). Paired with the model id above rather than
   // folded into it: the two are independent choices, and every provider takes
   // whatever id it is handed. `agent-providers.ts` owns the set and the
@@ -600,6 +633,10 @@ export type InnerLoopConfig = {
   // The pre-attempt UI classifier (#126), defaulted during config resolution
   // to the implementer's provider and model but routed independently here.
   readonly uiCheckAgent: AgentProviderName;
+  // The issue-thread condenser (#217), which runs only above
+  // `condenseAboveChars`; null turns it off.
+  readonly condenserAgent: AgentProviderName;
+  readonly condenseAboveChars: number | null;
   // Reasoning effort per call (#130), the third per-call knob beside the model
   // id and the CLI. Absent is a value — the CLI's default — and stays absent
   // on the log line.
@@ -608,6 +645,7 @@ export type InnerLoopConfig = {
   readonly reviewerQualityEffort?: string | undefined;
   readonly adjudicatorEffort?: string | undefined;
   readonly uiCheckEffort?: string | undefined;
+  readonly condenserEffort?: string | undefined;
   readonly uiPrototypeCheck: boolean;
   readonly partitionCheck: boolean;
   readonly maxContextChars: number;
@@ -1183,6 +1221,7 @@ async function runSandboxCycle(
     const anchorOpts = {
       repo: config.repo,
       repoDir: config.layout.repoDir,
+      anchorCacheDir: config.layout.anchorCacheDir,
       claudeMdPath: config.claudeMdPath,
       contextMdPath: config.contextMdPath,
       adrDir: config.adrDir,
@@ -1520,6 +1559,8 @@ async function executeAction(
   ctx: ExecuteActionCtx,
 ): Promise<LoopEvent> {
   switch (action.kind) {
+    case "run-anchor-condense":
+      return runAnchorCondense(action, ctx);
     case "run-partition-check":
       return runPartitionCheck(action, ctx);
     case "run-ui-check":
@@ -1542,6 +1583,126 @@ async function executeAction(
   }
 }
 
+// The thread condenser (#217), once per sandbox cycle ahead of the partition
+// check that measures the anchor. Below `condenseAboveChars`, or when the
+// cache already answers this exact thread, it makes no call. Otherwise one
+// read-only call: an answer that parses is cached for every later anchor
+// read, and any other outcome but a write leaves the roles the uncondensed
+// thread. The condenser is an optimisation, so neither its failure nor its
+// provider's closure stops the issue; `runWithProviderState` still records a
+// closure for the run, and a failure is not cached, so the next loop asks
+// again.
+export async function runAnchorCondense(
+  _action: Extract<LoopAction, { kind: "run-anchor-condense" }>,
+  ctx: ExecuteActionCtx,
+): Promise<Extract<LoopEvent, { kind: "anchor-ready" | "anchor-condenser-wrote" }>> {
+  const { issue, sandbox, opts, config } = ctx;
+  const anchor = await fetchIssueAnchor(issue.id, config.repo, config.layout.anchorCacheDir);
+  if (anchor.cache.kind === "miss" && anchor.cache.problem !== null) {
+    await opts.onEvent({
+      kind: "notice",
+      message: `issue=${issue.id} ${anchor.cache.problem}; read as a miss`,
+    });
+  }
+  const comments = anchor.json.comments?.length ?? 0;
+  const record = (fields: {
+    readonly result: IssueAnchorResult;
+    readonly anchorChars: number;
+    readonly dropped: number;
+  } & Partial<Pick<
+    Extract<EventInput, { kind: "issue-anchor" }>,
+    "provider" | "model" | "effort" | "durationMs" | "endedBy" | "transcript" | "usage"
+  >> & ContainerResources): Promise<void> | void => opts.onEvent({
+    kind: "issue-anchor",
+    issue: Number(issue.id),
+    title: issue.title,
+    rawChars: anchor.rawChars,
+    tracedChars: anchor.tracedChars,
+    comments,
+    ...fields,
+  });
+  const ready = { kind: "anchor-ready" } as const;
+  if (config.condenseAboveChars === null || anchor.tracedChars <= config.condenseAboveChars) {
+    await record({ result: "below-threshold", anchorChars: anchor.tracedChars, dropped: 0 });
+    return ready;
+  }
+  if (anchor.cache.kind === "hit") {
+    await record({
+      result: "cache-hit",
+      anchorChars: anchor.text.length,
+      dropped: droppedComments(anchor.cache.answer),
+    });
+    return ready;
+  }
+
+  const before = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
+  const timer = startTimer();
+  const transcript = ctx.invocationSequence.filename({ role: "anchor-condense", invocation: 1 });
+  let run: Awaited<ReturnType<Sandbox["run"]>> | null = null;
+  let failure: unknown = null;
+  try {
+    run = await runWithProviderState(opts.providerState, config.condenserAgent, () => sandbox.run({
+      name: `anchor-condense-${issue.id}`,
+      model: config.condenserModelId,
+      agent: buildAgentProvider(config.condenserAgent, config.condenserModelId, {
+        effort: config.condenserEffort,
+      }),
+      prompt: buildCondenserPrompt(issue.id, anchor.json),
+      completionSignal: [],
+      ...invocationLog(opts.attemptLogger, transcript),
+    }));
+  } catch (err) {
+    // A run that ended without an answer; anything else is the host's.
+    if (!(err instanceof AgentError || err instanceof AgentIdleTimeoutError ||
+      err instanceof AgentQuotaError || err instanceof AgentCredentialError ||
+      err instanceof AgentInputTooLargeError)) throw err;
+    failure = err;
+  }
+  const wrote = await enforceReadOnlyAgentSnapshot(
+    sandbox,
+    before,
+    await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch),
+    "Anchor condenser",
+    run?.stdout ?? agentPartialOutput(failure),
+  );
+  const parsed = run === null || wrote !== null ? null : parseCondenseAnswer(run.stdout, comments);
+  const answer = parsed?.kind === "valid" ? parsed.answer : null;
+  if (answer !== null) {
+    await writeCondenseCache(config.layout.anchorCacheDir, issue.id, {
+      key: anchor.key,
+      answer,
+      provider: config.condenserAgent,
+      model: config.condenserModelId,
+    });
+  }
+  const partial = run === null ? agentPartialUsage(failure) : {};
+  const usage = usageFields(
+    run ?? partial,
+    run?.rateLimit ?? partial.rateLimit ??
+      (failure instanceof AgentQuotaError ? failure.measurement : undefined),
+  );
+  await record({
+    result: wrote !== null
+      ? "wrote"
+      : run === null
+        ? agentFailureResult(failure)
+        : answer === null ? "unparseable" : "condensed",
+    anchorChars: answer === null
+      ? anchor.tracedChars
+      : renderIssueText(issue.id, anchor.json, { answer, repo: config.repo }).length,
+    dropped: answer === null ? 0 : droppedComments(answer),
+    provider: config.condenserAgent,
+    model: config.condenserModelId,
+    effort: config.condenserEffort ?? null,
+    durationMs: run?.durationMs ?? agentPartialDurationMs(failure) ?? timer(),
+    ...(run === null ? {} : { endedBy: run.endedBy }),
+    transcript,
+    ...(usage === undefined ? {} : { usage }),
+    ...(run === null ? agentPartialContainerResources(failure) : containerResourcesOf(run)),
+  });
+  return wrote === null ? ready : { kind: "anchor-condenser-wrote", detail: wrote };
+}
+
 export async function runPartitionCheck(
   _action: Extract<LoopAction, { kind: "run-partition-check" }>,
   ctx: ExecuteActionCtx,
@@ -1552,6 +1713,7 @@ export async function runPartitionCheck(
   const basePrompt = await buildPartitionCheckPrompt(
     issue.id,
     config.repo,
+    config.layout.anchorCacheDir,
     config.maxContextChars,
   );
   const size = contextChars(
@@ -1621,13 +1783,7 @@ export async function runPartitionCheck(
     if (outcome.kind === "failed") {
       const { err } = outcome;
       await log(
-        err instanceof AgentInputTooLargeError
-          ? "input-too-large"
-          : err instanceof AgentQuotaError
-            ? "quota"
-            : err instanceof AgentCredentialError
-              ? "credential"
-              : "failed",
+        agentFailureResult(err),
         agentPartialDurationMs(err) ?? timer(),
         agentPartialUsage(err),
         agentPartialContainerResources(err),
@@ -1688,7 +1844,11 @@ export async function runUiCheck(
   Extract<LoopEvent, { kind: "ui-check-result" | "ui-checker-wrote" }>
 > {
   const { issue, sandbox, opts, config } = ctx;
-  const basePrompt = await buildUiCheckPrompt(issue.id, config.repo);
+  const basePrompt = await buildUiCheckPrompt(
+    issue.id,
+    config.repo,
+    config.layout.anchorCacheDir,
+  );
   let prompt = basePrompt;
 
   // One correction at most. Neither invocation owns a completion signal:
@@ -1747,13 +1907,7 @@ export async function runUiCheck(
       const partial = agentPartialUsage(err);
       const resources = agentPartialContainerResources(err);
       await logInvocation(
-        err instanceof AgentInputTooLargeError
-          ? "input-too-large"
-          : err instanceof AgentQuotaError
-          ? "quota"
-          : err instanceof AgentCredentialError
-            ? "credential"
-            : "failed",
+        agentFailureResult(err),
         agentPartialDurationMs(err) ?? timer(),
         undefined,
         partial,
@@ -1828,6 +1982,7 @@ const branchRoleInputs = (
 ): ReviewerPromptInputs => ({
   issue: ctx.issue,
   repo: ctx.config.repo,
+  anchorCacheDir: ctx.config.layout.anchorCacheDir,
   repoDir: ctx.config.layout.repoDir,
   worktreePath: ctx.sandbox.worktreePath,
   sourceBranch: ctx.config.sourceBranch,
@@ -2583,7 +2738,13 @@ export async function enforceReadOnlyAgentSnapshot(
   sandbox: Pick<Sandbox, "preserveWorktree" | "syncBranchToCache">,
   before: ReadOnlyAgentSnapshot,
   after: ReadOnlyAgentSnapshot,
-  role: "Reviewer" | "Quality reviewer" | "Adjudicator" | "UI checker" | "Partition checker",
+  role:
+    | "Reviewer"
+    | "Quality reviewer"
+    | "Adjudicator"
+    | "UI checker"
+    | "Partition checker"
+    | "Anchor condenser",
   transcript: string,
 ): Promise<string | null> {
   if (!readOnlyAgentSnapshotChanged(before, after)) return null;

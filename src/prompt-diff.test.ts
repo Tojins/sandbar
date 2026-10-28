@@ -120,6 +120,7 @@ async function commitLongPath(subject: string): Promise<void> {
 const anchorOpts = (sourceBranch = "main") => ({
   repo: REPO,
   repoDir,
+  anchorCacheDir: join(repoDir, "anchor-cache"),
   claudeMdPath: "CLAUDE.md",
   sourceBranch,
 });
@@ -139,6 +140,7 @@ const reviewerInputs = (base = sourceBranchBase("main"), sourceBranch = "main") 
   issue: ISSUE,
   repo: REPO,
   repoDir,
+  anchorCacheDir: join(repoDir, "anchor-cache"),
   worktreePath: worktree,
   sourceBranch,
   base,

@@ -63,8 +63,19 @@ export type AgentInvocationIdentity =
   | { readonly role: "reviewer"; readonly attempt: number; readonly invocation: number }
   | { readonly role: "adjudicator"; readonly attempt: number; readonly invocation: number }
   | { readonly role: "gate"; readonly attempt: number }
-  | { readonly role: "ui-check"; readonly invocation: number }
-  | { readonly role: "partition-check"; readonly invocation: number };
+  | { readonly role: PreAttemptRole; readonly invocation: number };
+
+// Roles that run before attempt 1 and number only their own invocations.
+const PRE_ATTEMPT_ROLES = {
+  "anchor-condense": true,
+  "ui-check": true,
+  "partition-check": true,
+} as const;
+type PreAttemptRole = keyof typeof PRE_ATTEMPT_ROLES;
+const isPreAttempt = (
+  identity: AgentInvocationIdentity,
+): identity is Extract<AgentInvocationIdentity, { role: PreAttemptRole }> =>
+  identity.role in PRE_ATTEMPT_ROLES;
 
 export type AgentInvocationSequence = {
   filename(identity: AgentInvocationIdentity): string;
@@ -86,10 +97,10 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
       return `attempt-${identity.attempt}-adjudicator-${identity.invocation}.log`;
     case "gate":
       return `attempt-${identity.attempt}-gate.log`;
+    case "anchor-condense":
     case "ui-check":
-      return `ui-check-${identity.invocation}.log`;
     case "partition-check":
-      return `partition-check-${identity.invocation}.log`;
+      return `${identity.role}-${identity.invocation}.log`;
   }
 }
 
@@ -97,23 +108,21 @@ export function createAgentInvocationSequencer(): {
   startCycle(): AgentInvocationSequence;
 } {
   let nextAttempt = 1;
-  let nextUiCheck = 1;
-  let nextPartitionCheck = 1;
+  const nextPreAttempt: Record<PreAttemptRole, number> = {
+    "anchor-condense": 1,
+    "ui-check": 1,
+    "partition-check": 1,
+  };
   return {
     startCycle() {
       const attemptOffset = nextAttempt - 1;
-      const uiCheckOffset = nextUiCheck - 1;
-      const partitionCheckOffset = nextPartitionCheck - 1;
+      const preAttemptStart = { ...nextPreAttempt };
       return {
         filename(identity) {
-          if (identity.role === "ui-check") {
-            const invocation = uiCheckOffset + identity.invocation;
-            nextUiCheck = Math.max(nextUiCheck, invocation + 1);
-            return agentInvocationFilename({ ...identity, invocation });
-          }
-          if (identity.role === "partition-check") {
-            const invocation = partitionCheckOffset + identity.invocation;
-            nextPartitionCheck = Math.max(nextPartitionCheck, invocation + 1);
+          if (isPreAttempt(identity)) {
+            const { role } = identity;
+            const invocation = preAttemptStart[role] - 1 + identity.invocation;
+            nextPreAttempt[role] = Math.max(nextPreAttempt[role], invocation + 1);
             return agentInvocationFilename({ ...identity, invocation });
           }
           const attempt = attemptOffset + identity.attempt;
