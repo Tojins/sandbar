@@ -178,6 +178,13 @@ export default {
   //   database: "app",
   // },
 
+  // Idle tasks run when no issue is admissible, each committing into its own
+  // rolling draft pull request that waits for `land`. `prompt` is "standards"
+  // (the standards groups flagged {janitor}), { file } or { skill }.
+  // janitor: {
+  //   tasks: [{ name: "tidy-tests", prompt: "standards", runsPerDay: 4, paths: ["src"] }],
+  // },
+
   // `auto` lets the gate decide. `review` lands connected review-gated issues
   // on a draft chunk pull request. An issue's `auto-land` label overrides the
   // default, unless review-gating reaches it through `## Blocked by`; inherited

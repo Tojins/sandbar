@@ -1703,7 +1703,7 @@ export async function run(
         janitor.run = null;
         pool.wakeExternal();
       }
-    })().catch(stopInternalFailure);
+    })();
     janitor.run = { task: task.name, controller, settled };
   };
   let providerExitPending: TerminalExit | null = null;
