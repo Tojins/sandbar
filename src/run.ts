@@ -141,6 +141,10 @@
 // deploy watch (#198, `deploy-watch.ts`) unless tracker reads are held: one
 // tick in flight at most, never awaited, and stopped by cleanup ahead of the
 // lease release and run-end. A rate limit it meets sets planning's hold.
+// With `config.databaseCopies`, every recompute also reads the nightly base
+// import's outcome (#201, `db-base.ts`): each new attempt is a `db-base`
+// event, and a missing or stale dump or a failed import is a complaint once
+// per run. The import itself runs beside the daemon, never in it.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
 // Every gate-1 and gate-2 call passes through one run-wide FIFO semaphore
@@ -223,6 +227,7 @@ import {
   graphRootSpaceIsLow,
   podmanGraphRoot,
 } from "./disk-space.js";
+import { createDbBaseWatch } from "./db-base.js";
 import { createDeployWatcher, realDeployWatchAdapter } from "./deploy-watch.js";
 import {
   SandbarError,
@@ -1202,6 +1207,7 @@ export async function run(
         configEnv: config.env,
         images: config.images,
         sandboxImage: config.sandboxImage,
+        databaseCopies: config.databaseCopies,
         hostChecks: (stack) => checkStackOnHost(stack, config.images, hostUid),
         onEvent: (event) => runRecord.emit(event).then(() => undefined),
       }),
@@ -2018,6 +2024,12 @@ export async function run(
     if (trackerHeldUntil === null) deployWatcher?.kick();
   };
 
+  // The nightly base import's outcome (#201), when database copies are on.
+  const dbBaseWatch = config.databaseCopies === null ? null : createDbBaseWatch({
+    cfg: config.databaseCopies,
+    emit: (event) => runRecord.emit(event),
+  });
+
   const recoverFromRefRefreshFailure = async (
     boundary: "Poll refresh" | "Planning ref refresh" | "Tracker read",
     failures: readonly string[],
@@ -2203,6 +2215,7 @@ export async function run(
             `${measuredSpace.availableBytes} bytes free after image reconciliation`,
         });
       }
+      await dbBaseWatch?.observe();
       // The poll snapshot is not a plan-time containment answer. A landing
       // pass pushes from an ephemeral merger clone, and a human may move the
       // source branch between any two wakes, so neither necessarily updates

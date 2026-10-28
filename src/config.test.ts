@@ -41,6 +41,7 @@ import {
   type GateStackConfig,
   type ResolvedConfig,
   type RunConfig,
+  type StackContainer,
 } from "./config.js";
 import { sandbarVersion } from "./version.js";
 
@@ -1529,5 +1530,110 @@ describe("resolveConfig — deployWatch (#198)", () => {
   ])("refuses %s", (_, deployWatch, message) => {
     expect(() => resolveConfig({ ...minimal, deployWatch: deployWatch as never })).toThrow(message);
     expect(() => resolveConfig({ ...minimal, deployWatch: deployWatch as never })).toThrow(SandbarError);
+  });
+});
+
+describe("resolveConfig — databaseCopies (#201)", () => {
+  const dbc = {
+    dump: "/srv/sandbar-db/drops/widgets/widgets-latest.sql.gz",
+    root: "/srv/sandbar-db/installations/widgets",
+    container: "db",
+    database: "widgets",
+  };
+  // `minimal`'s db, made a sandbox sibling so it can take a copy.
+  const stack = minimal.gateStack as GateStackConfig;
+  const withDb = (db: Partial<StackContainer>): GateStackConfig => ({
+    ...stack,
+    containers: stack.containers.map((c) =>
+      c.name === "db" ? { ...c, inSandbox: true, ...db } : c),
+  });
+  const valid = { ...minimal, gateStack: withDb({}), databaseCopies: dbc };
+
+  it("is off by default", () => {
+    expect(resolveConfig(minimal).databaseCopies).toBeNull();
+  });
+
+  it("applies every default", () => {
+    expect(resolveConfig(valid).databaseCopies).toEqual({
+      ...dbc,
+      datadir: "/var/lib/mysql",
+      bufferPoolBytes: 256 * 1024 * 1024,
+      importBufferPoolBytes: 1024 * 1024 * 1024,
+      importTimeoutMs: 4 * 60 * 60_000,
+      staleAfterMs: 36 * 60 * 60_000,
+    });
+  });
+
+  it("keeps what the config names, with its paths normalised", () => {
+    const r = resolveConfig({
+      ...valid,
+      databaseCopies: {
+        ...dbc,
+        root: "/srv/db//widgets/",
+        datadir: "/data",
+        bufferPoolBytes: 32 * 1024 * 1024,
+        importBufferPoolBytes: 4096,
+        importTimeoutMs: 5,
+        staleAfterMs: 6,
+      },
+    });
+    expect(r.databaseCopies).toMatchObject({
+      root: "/srv/db/widgets/",
+      datadir: "/data",
+      bufferPoolBytes: 32 * 1024 * 1024,
+      importBufferPoolBytes: 4096,
+      importTimeoutMs: 5,
+      staleAfterMs: 6,
+    });
+  });
+
+  it.each([
+    ["a non-object", "db", /config\.databaseCopies must be/],
+    ["a relative dump", { ...dbc, dump: "drops/x.sql.gz" }, /databaseCopies\.dump must be an absolute path/],
+    ["a root with ':'", { ...dbc, root: "/srv/a:b" }, /databaseCopies\.root must be an absolute path without ':'/],
+    ["a missing root", { ...dbc, root: undefined }, /databaseCopies\.root/],
+    ["a relative datadir", { ...dbc, datadir: "var/lib/mysql" }, /databaseCopies\.datadir/],
+    ["a container name podman refuses", { ...dbc, container: "-db" }, /databaseCopies\.container must name/],
+    ["a database name with a quote", { ...dbc, database: "app`; DROP" }, /databaseCopies\.database must be 1-64/],
+    ["a database name over 64 characters", { ...dbc, database: "a".repeat(65) }, /databaseCopies\.database/],
+    ["an empty database name", { ...dbc, database: "" }, /databaseCopies\.database/],
+    ["a buffer pool under 32 MiB", { ...dbc, bufferPoolBytes: 32 * 1024 * 1024 - 1 }, /bufferPoolBytes must be a whole number of bytes, at least 33554432/],
+    ["a fractional import pool", { ...dbc, importBufferPoolBytes: 1.5 }, /importBufferPoolBytes/],
+    ["a zero import pool", { ...dbc, importBufferPoolBytes: 0 }, /importBufferPoolBytes/],
+    ["a NaN import timeout", { ...dbc, importTimeoutMs: Number.NaN }, /databaseCopies\.importTimeoutMs/],
+    ["a zero stale threshold", { ...dbc, staleAfterMs: 0 }, /databaseCopies\.staleAfterMs/],
+  ])("refuses %s", (_, databaseCopies, message) => {
+    const resolve = () => resolveConfig({ ...valid, databaseCopies: databaseCopies as never });
+    expect(resolve).toThrow(message);
+    expect(resolve).toThrow(SandbarError);
+  });
+
+  it.each([
+    ["missing from the stack", { ...dbc, container: "cache" }, withDb({}), "is not a container of this stack"],
+    ["not a sandbox sibling", dbc, withDb({ inSandbox: false }), "must set inSandbox: a copy replaces its sandbox sibling"],
+    ["held", dbc, withDb({ hold: true, readiness: undefined, postReadyCommands: [["true"]] }), "must run its image's server, not hold"],
+    ["without a readiness probe", dbc, withDb({ readiness: undefined }), "needs a readiness probe to import and copy against"],
+  ])("refuses an inline target %s", (_, databaseCopies, gateStack, why) => {
+    expect(() => resolveConfig({ ...minimal, gateStack, databaseCopies })).toThrow(
+      new SandbarError(`config.gateStack: config.databaseCopies.container '${databaseCopies.container}' ${why}.`),
+    );
+  });
+
+  it("refuses a stack that already names the copy's container", () => {
+    const gateStack = withDb({});
+    expect(() => resolveConfig({
+      ...minimal,
+      databaseCopies: dbc,
+      gateStack: {
+        ...gateStack,
+        containers: [...gateStack.containers, { name: "db-dbcopy", image: "localhost/x", hold: true }],
+      },
+    })).toThrow(/cannot be used while a container is named 'db-dbcopy'/);
+  });
+
+  // A stack file states its containers only at the tip: the stack source asks.
+  it("does not ask the target of a stack file at load", () => {
+    expect(resolveConfig({ ...valid, gateStack: { path: "gate/stack.json" } }).databaseCopies)
+      .not.toBeNull();
   });
 });

@@ -619,6 +619,40 @@ export type DeployWatchConfig = {
   readonly timeoutMs?: number;
 };
 
+// Per-agent database copies (#201), of which this release has the nightly base
+// (`db-base.ts`): `sandbar db-base`, run by a systemd timer beside the daemon,
+// imports each new dump into a base datadir under `root` and swaps
+// `<root>/current` to it; the daemon only reads the outcome. The base is built
+// by the stack's own `container`, the sandbox sibling a copy will replace, so
+// its image and args are what the base is made with — there is no separate
+// image key. `assertDatabaseCopiesTarget` says what that container must be.
+export type DatabaseCopiesConfig = {
+  // Absolute path of the dump drop (#200), a gzipped SQL file replaced only by
+  // rename.
+  readonly dump: string;
+  // Absolute directory on the reflink volume that holds the bases.
+  readonly root: string;
+  // The stack container whose sandbox sibling receives a copy.
+  readonly container: string;
+  // The schema the dump loads into.
+  readonly database: string;
+  // Where the container keeps its datadir. Default: "/var/lib/mysql".
+  readonly datadir?: string;
+  // A copy's InnoDB buffer pool. Default: 256 MiB; at least 32 MiB.
+  readonly bufferPoolBytes?: number;
+  // The import's buffer pool. Default: 1 GiB.
+  readonly importBufferPoolBytes?: number;
+  // How long one import may take, bringup to clean shutdown. Default: 4 hours.
+  readonly importTimeoutMs?: number;
+  // How old the dump may be before the run complains. Default: 36 hours.
+  readonly staleAfterMs?: number;
+};
+
+export type DatabaseCopiesSettings = Required<DatabaseCopiesConfig>;
+
+// A container `assertDatabaseCopiesTarget` accepted.
+export type DbCopyTarget = ResolvedStackContainer & { readonly readiness: Readiness };
+
 // RunConfig is DEVIATIONS-ONLY by design. A consumer should write down two
 // kinds of thing and nothing else:
 //
@@ -930,6 +964,10 @@ export type RunConfig = {
   // Default: unset, no watch.
   readonly deployWatch?: DeployWatchConfig;
 
+  // Import the consumer's nightly database dump into a base for agents' copies
+  // (#201). Default: unset, no import and no copies.
+  readonly databaseCopies?: DatabaseCopiesConfig;
+
   // Which landing lane an issue takes when it carries no `auto-land` label
   // (#57, §1 of #54): "auto" — the gate is the last word, what sandbar has
   // always done — or "review", where a human looks before the work lands.
@@ -1000,7 +1038,7 @@ export type RunConfig = {
 // merely `Required<>`d because resolution changes their TYPE, not just their
 // presence: `labels` widens from Partial to the fully-populated vocabulary,
 // `gateStack` and `mergeMode` become their resolved-and-validated forms, and
-// `deployWatch` is null when the watch is off.
+// `deployWatch` and `databaseCopies` are null when they are off.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
@@ -1008,6 +1046,7 @@ export type ResolvedConfig = Required<
     | "gateStack"
     | "mergeMode"
     | "deployWatch"
+    | "databaseCopies"
     | "requiresSandbar"
     | "implementerEffort"
     | "uiCheckEffort"
@@ -1042,6 +1081,7 @@ export type ResolvedConfig = Required<
   readonly gateStack: ResolvedStackSource;
   readonly mergeMode: ResolvedMergeMode;
   readonly deployWatch: DeployWatchSettings | null;
+  readonly databaseCopies: DatabaseCopiesSettings | null;
 };
 
 export const DEFAULT_CWD = (): string => process.cwd();
@@ -1105,6 +1145,15 @@ export const DEFAULT_NO_CHECKS_GRACE_MS = 120_000;
 export const DEFAULT_DEPLOY_WATCH_LABEL = "deploy-red";
 // Outdoor's deploy runs take two to four minutes; its slowest red took 29.
 export const DEFAULT_DEPLOY_WATCH_TIMEOUT_MS = 60 * 60_000;
+const MIB = 1024 * 1024;
+export const DEFAULT_DB_DATADIR = "/var/lib/mysql";
+export const DEFAULT_DB_BUFFER_POOL_BYTES = 256 * MIB;
+export const MIN_DB_BUFFER_POOL_BYTES = 32 * MIB;
+export const DEFAULT_DB_IMPORT_BUFFER_POOL_BYTES = 1024 * MIB;
+// Outdoor's ~470 MB gzipped dump is estimated at an 8 GB datadir (#201).
+export const DEFAULT_DB_IMPORT_TIMEOUT_MS = 4 * 60 * 60_000;
+// A nightly dump with a day's slack.
+export const DEFAULT_DB_STALE_AFTER_MS = 36 * 60 * 60_000;
 
 // Non-negative, finite, real number. `> 0` alone lets NaN and Infinity through:
 // NaN fails every comparison, so `elapsed >= NaN` is never true and the check
@@ -1340,6 +1389,108 @@ export function resolveDeployWatch(
       watch.timeoutMs ?? DEFAULT_DEPLOY_WATCH_TIMEOUT_MS,
     ),
   };
+}
+
+// An absolute host path a podman `-v` spec can carry.
+function requireAbsoluteHostPath(field: string, value: unknown): string {
+  if (typeof value !== "string" || !isAbsolute(value) || value.includes(":")) {
+    throw new SandbarError(
+      `config.${field} must be an absolute path without ':' (got ${JSON.stringify(value)}).`,
+    );
+  }
+  return posix.normalize(value);
+}
+
+function requireBytesAtLeast(field: string, value: unknown, min: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min) {
+    throw new SandbarError(
+      `config.${field} must be a whole number of bytes, at least ${min} ` +
+        `(got ${String(value)}).`,
+    );
+  }
+  return value;
+}
+
+// Shape and defaults only. What the named container must be is a fact about
+// the stack, which a stack file only states at gate time:
+// `assertDatabaseCopiesTarget`.
+export function resolveDatabaseCopies(
+  dbc: DatabaseCopiesConfig | undefined,
+): DatabaseCopiesSettings | null {
+  if (dbc === undefined) return null;
+  if (!isRecord(dbc)) {
+    throw new SandbarError(
+      "config.databaseCopies must be { dump, root, container, database, ... }.",
+    );
+  }
+  const { container, database } = dbc;
+  if (typeof container !== "string" || !CONTAINER_NAME_RE.test(container)) {
+    throw new SandbarError(
+      "config.databaseCopies.container must name a gate stack container " +
+        `(got ${JSON.stringify(container)}).`,
+    );
+  }
+  // Interpolated into SQL as an identifier, so the grammar is the guard.
+  if (typeof database !== "string" || !/^[A-Za-z0-9_]{1,64}$/.test(database)) {
+    throw new SandbarError(
+      "config.databaseCopies.database must be 1-64 letters, digits or " +
+        `underscores (got ${JSON.stringify(database)}).`,
+    );
+  }
+  return {
+    dump: requireAbsoluteHostPath("databaseCopies.dump", dbc.dump),
+    root: requireAbsoluteHostPath("databaseCopies.root", dbc.root),
+    container,
+    database,
+    datadir: requireAbsoluteHostPath(
+      "databaseCopies.datadir",
+      dbc.datadir ?? DEFAULT_DB_DATADIR,
+    ),
+    bufferPoolBytes: requireBytesAtLeast(
+      "databaseCopies.bufferPoolBytes",
+      dbc.bufferPoolBytes ?? DEFAULT_DB_BUFFER_POOL_BYTES,
+      MIN_DB_BUFFER_POOL_BYTES,
+    ),
+    importBufferPoolBytes: requireBytesAtLeast(
+      "databaseCopies.importBufferPoolBytes",
+      dbc.importBufferPoolBytes ?? DEFAULT_DB_IMPORT_BUFFER_POOL_BYTES,
+      1,
+    ),
+    importTimeoutMs: requirePositiveMs(
+      "databaseCopies.importTimeoutMs",
+      dbc.importTimeoutMs ?? DEFAULT_DB_IMPORT_TIMEOUT_MS,
+    ),
+    staleAfterMs: requirePositiveMs(
+      "databaseCopies.staleAfterMs",
+      dbc.staleAfterMs ?? DEFAULT_DB_STALE_AFTER_MS,
+    ),
+  };
+}
+
+// The container a base is imported by and a copy replaces, checked wherever a
+// stack is resolved: at load for the inline stack, and by the stack source
+// for a stack file, where a failure refuses the run at startup and keeps the
+// last accepted stack afterwards (#186). It must run beside the agent, be a
+// real server rather than a held shell, and say when it is ready, since both
+// the import and a copy wait on that probe; and the name its copy runs under,
+// `<container>-dbcopy`, must be free.
+export function assertDatabaseCopiesTarget(
+  stack: ResolvedGateStack,
+  dbc: DatabaseCopiesSettings,
+  label = INLINE_STACK_LABEL,
+): DbCopyTarget {
+  const name = dbc.container;
+  const target = stack.containers.find((c) => c.name === name);
+  const refuse = (why: string) =>
+    new SandbarError(`${label}: config.databaseCopies.container '${name}' ${why}.`);
+  if (target === undefined) throw refuse("is not a container of this stack");
+  if (!target.inSandbox) throw refuse("must set inSandbox: a copy replaces its sandbox sibling");
+  if (target.hold) throw refuse("must run its image's server, not hold");
+  if (target.readiness === null) throw refuse("needs a readiness probe to import and copy against");
+  if (stack.containers.some((c) => c.name === `${name}-dbcopy`)) {
+    throw refuse(`cannot be used while a container is named '${name}-dbcopy', the name its copy runs under`);
+  }
+  return { ...target, readiness: target.readiness };
 }
 
 // Podman container-name grammar, and also what makes `sandbar-<id>-<name>`
@@ -2544,6 +2695,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const developers = requireDevelopers(config.developers);
   const env = resolveEnv(config.env);
   const gateStack = resolveStackSource(config.gateStack, env);
+  const databaseCopies = resolveDatabaseCopies(config.databaseCopies);
+  if (databaseCopies !== null && gateStack.kind === "inline") {
+    assertDatabaseCopiesTarget(gateStack.stack, databaseCopies);
+  }
   const images = resolveImages(config.images, config.sandboxImage);
   // Resolved to absolute HERE, not left as the host wrote it (#34). Since every
   // git call now runs with `cwd` as its process cwd, a RELATIVE `cwd` is
@@ -2829,6 +2984,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
     deployWatch: resolveDeployWatch(config.deployWatch),
+    databaseCopies,
     defaultLane: requireLane(config.defaultLane),
   };
 }

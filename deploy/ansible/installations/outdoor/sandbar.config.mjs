@@ -37,9 +37,10 @@ export default {
   // on this private repo may queue an issue.
   developers: "anyone",
 
-  // 0.53.0 is the first release that reads `gateStack: { path }` from the
-  // source tip (#186), which `gateStack` below uses.
-  requiresSandbar: "0.53.0",
+  // 0.59.0 is the first release that reads `databaseCopies` (#201); an
+  // older driver would drop it in silence. It also reads `gateStack: { path }`
+  // from the source tip (#186), which `gateStack` below uses.
+  requiresSandbar: "0.59.0",
   botName: "sandbar",
   botEmail: "sandbar@sda.be",
   uiPort: 7331,
@@ -51,6 +52,17 @@ export default {
 
   sandboxImage,
   gateStack: { path: "gate/stack.json" },
+
+  // Prod's nightly dump (Tojins/outdoor#781), pushed to this box's drop and
+  // imported by sandbar-db-base.timer into a base on the reflink volume
+  // (Tojins/sandbar#200, #201). The stack's `db` sibling builds the base, so
+  // it has the same server and options as the database a copy replaces.
+  databaseCopies: {
+    dump: "/srv/sandbar-db/drops/outdoor/outdoor-latest.sql.gz",
+    root: "/srv/sandbar-db/installations/outdoor",
+    container: "db",
+    database: "locallpm",
+  },
 
   // The gate images from stack.json, plus the agent's own. The sandbox image
   // is built FROM the php and runner gate images, and the list builds in

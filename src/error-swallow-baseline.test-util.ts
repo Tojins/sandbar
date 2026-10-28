@@ -25,6 +25,9 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "cleanup.ts": 1,
   "cli.ts": 2,
   "containers.ts": 1,
+  // The nightly base's job error (#201) runs the import's teardown, logs a
+  // failure of that teardown with its cause, and rethrows the original.
+  "db-base.ts": 2,
   // The deploy watcher's tick (#198) classifies a rate limit, an unanswered
   // request, a forge answer and a lease lost to cleanup; anything else is
   // rethrown.

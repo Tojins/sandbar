@@ -27,8 +27,11 @@ After an interrupted run, check `ps -ef | grep [f]orks.js`.
 
 A library with a thin bin (#38): `run(config)` in `src/index.ts` is the
 contract; `src/cli.ts` imports `--config` (default `./sandbar.config.mjs`) and
-dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132), `pulled-images` and
-`config-digest` (#190, `src/config-digest.ts`).
+dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132), `pulled-images`,
+`config-digest` (#190, `src/config-digest.ts`) and `db-base` (#201,
+`src/db-base.ts`; pure layer `db-copy-policy.ts`): with
+`config.databaseCopies`, a systemd timer beside the daemon imports each new
+dump into a base datadir and swaps `<root>/current` to it.
 `npm run stats` (`src/stats-cli.ts`, #194) is a repo script, not a verb: the
 factory scorecard over run records (`stats-record.ts` reads, `stats.ts`
 reduces); nothing in the daemon imports it.
@@ -81,6 +84,8 @@ Daemon polling and the six exits (`stuck`, `quota`, `credential`, `storage`,
 holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 With `config.deployWatch`, polls and landings also kick the deploy watch
 (`deploy-watch.ts`, #198), which never blocks the loop.
+With `config.databaseCopies`, every recompute reads the base import's outcome
+(`createDbBaseWatch`, #201) into `db-base` events and stale/failed complaints.
 
 ## Invariants — where they live
 

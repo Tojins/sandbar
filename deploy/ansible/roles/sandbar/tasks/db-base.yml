@@ -1,0 +1,28 @@
+---
+# The nightly base import (#201), included only where prod pushes a dump.
+# Beside the daemon and outside it: `sandbar db-base` exits after each run,
+# and its unit is not part of the daemon's, so a restart request never touches
+# an import.
+- name: Install the database base import unit and its timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ sandbar_home }}/.config/systemd/user/{{ item }}"
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0644"
+  loop:
+    - sandbar-db-base.service
+    - sandbar-db-base.timer
+
+- name: Enable and start the database base import timer
+  ansible.builtin.systemd_service:
+    name: sandbar-db-base.timer
+    scope: user
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+  become_user: "{{ sandbar_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ sandbar_user_uid.stdout }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ sandbar_user_uid.stdout }}/bus"

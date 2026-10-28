@@ -220,6 +220,29 @@ describe("parseArgs: the config-digest subcommand", () => {
   });
 });
 
+describe("parseArgs: the db-base subcommand (#201)", () => {
+  it("uses the same config-path contract as a run, and takes --force", () => {
+    expect(parseArgs(["db-base"])).toEqual({
+      kind: "db-base",
+      configPath: "sandbar.config.mjs",
+      force: false,
+    });
+    expect(parseArgs(["db-base", "--force", "--config", "other.mjs"])).toEqual({
+      kind: "db-base",
+      configPath: "other.mjs",
+      force: true,
+    });
+  });
+
+  it("refuses --force anywhere else, and the other subcommands' flags here", () => {
+    expect(() => parseArgs(["--force"])).toThrow(/'--force' is a `sandbar db-base` flag/);
+    expect(() => parseArgs(["gate", "--force"])).toThrow(/sandbar db-base/);
+    expect(() => parseArgs(["db-base", "--keep"])).toThrow(/sandbar gate/);
+    expect(() => parseArgs(["db-base", "--port=7332"])).toThrow(/sandbar ui --port/);
+    expect(() => parseArgs(["db-base", "extra"])).toThrow(/Unrecognised argument/);
+  });
+});
+
 // The bin's headline behaviour. A test that runs from the directory it points
 // at cannot see this — `process.cwd()` and `dirname(configPath)` coincide and
 // it passes with the default deleted — so every case here names a config path

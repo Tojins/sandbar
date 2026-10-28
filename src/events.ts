@@ -77,6 +77,12 @@
 // covered within the deadline has null `runId` and `attempt`, and `sha` is
 // its merge commit. A new kind, so no bump.
 //
+// `db-base` (#201, `db-base.ts`) is one attempt of the nightly base import,
+// recorded once per run when the daemon first reads it from
+// `import-status.json`: imported with the base's size, or failed with a
+// reason code, never a server message. A stale dump or a failed import is
+// also a complaint; the feed shows neither event. A new kind, so no bump.
+//
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
@@ -88,6 +94,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ChunkBlockReason } from "./chunks.js";
+import type { DbBaseEvent } from "./db-copy-policy.js";
 import type { DeployEvent } from "./deploy-watch.js";
 import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
@@ -321,6 +328,7 @@ export type EventInput =
   | { readonly kind: "reconcile"; readonly action: "trace" | "landed-chunk" | "land-requested" | "chunk-refreshed" | "chunk-refresh-failed"; readonly detail: string }
   | { readonly kind: "notice"; readonly message: string }
   | DeployEvent
+  | DbBaseEvent
   | {
       readonly kind: "complaint";
       readonly severity: "warning" | "error";

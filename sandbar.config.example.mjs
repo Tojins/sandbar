@@ -153,6 +153,18 @@ export default {
   // label (or `label`) and `ready-for-human` must already exist.
   // deployWatch: { workflow: "deploy.yml", notifyLogin: "your-login" },
 
+  // Import a nightly prod dump into a base datadir for agents' database copies.
+  // `sandbar db-base`, run from a timer beside the daemon, imports each new
+  // dump with the gate stack's `container` (an inSandbox server with a
+  // readiness probe) and swaps `<root>/current` to it; the run complains when
+  // the dump is stale or an import failed.
+  // databaseCopies: {
+  //   dump: "/srv/sandbar-db/drops/you/app-latest.sql.gz",
+  //   root: "/srv/sandbar-db/installations/you",
+  //   container: "db",
+  //   database: "app",
+  // },
+
   // `auto` lets the gate decide. `review` lands connected review-gated issues
   // on a draft chunk pull request. An issue's `auto-land` label overrides the
   // default, unless review-gating reaches it through `## Blocked by`; inherited
