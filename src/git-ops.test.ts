@@ -14,6 +14,7 @@ import {
   dirtyWorktreePaths,
   ensureIssueBranch,
   fastForwardOffBranchHead,
+  forkPoint,
   headMismatch,
   settleQualityResidue,
   symbolicHeadRef,
@@ -1358,5 +1359,39 @@ describe("ensureIssueBranch — origin's copy of the branch (#112)", () => {
 
     expect(base.originSync).toMatchObject({ kind: "origin-unreadable" });
     expect(await tip(cache, `refs/heads/${B}`)).toBe(await tip(cache, "origin/main"));
+  });
+});
+
+describe("forkPoint (#203)", () => {
+  let repo: string;
+  const git = (...args: string[]) => exec("git", args, { cwd: repo });
+  const sha = async (ref: string) => (await git("rev-parse", ref)).stdout.trim();
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), "sandbar-forkpoint-"));
+    await git("init", "-q", "-b", "main");
+    await git("config", "user.email", "t@t");
+    await git("config", "user.name", "t");
+    await git("commit", "-q", "--allow-empty", "-m", "seed");
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it("is the seed commit the branch forked at, not the tip, and survives the seed advancing", async () => {
+    const seed = await sha("HEAD");
+    await git("update-ref", "refs/remotes/origin/main", seed);
+    await git("checkout", "-q", "-b", "issue-1");
+    await git("commit", "-q", "--allow-empty", "-m", "one");
+    await git("commit", "-q", "--allow-empty", "-m", "two");
+    const tip = await sha("issue-1");
+    await git("checkout", "-q", "main");
+    await git("commit", "-q", "--allow-empty", "-m", "seed moves on");
+    await git("update-ref", "refs/remotes/origin/main", await sha("main"));
+
+    const forked = await forkPoint(repo, "origin/main", "issue-1");
+    expect(forked).toBe(seed);
+    expect(forked).not.toBe(tip);
   });
 });
