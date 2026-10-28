@@ -126,8 +126,6 @@ export type TerminalRow = {
   readonly issue: number;
   readonly terminal: TerminalKind;
   readonly cause: string | null;
-  // Only with --with-prose.
-  readonly reason?: string | null;
 };
 
 export type IssueRollup = {
@@ -429,7 +427,6 @@ export function computeStats(input: StatsInput): StatsReport {
             issue: event.issue,
             terminal: event.terminal,
             cause: event.cause ?? null,
-            ...(input.withProse ? { reason: event.reason } : {}),
           });
           if (cycle !== undefined && cycle.ended === null) cycle.ended = event;
           break;

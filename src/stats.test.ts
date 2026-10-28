@@ -261,7 +261,6 @@ describe("computeStats prose (#182)", () => {
     const bare = computeStats(input([run("run-1", events)]));
     expect(bare.invocations[0]).not.toHaveProperty("prose");
     expect(bare.issues[0]).not.toHaveProperty("reason");
-    expect(bare.terminals[0]).not.toHaveProperty("reason");
   });
 
   it("lists every gate with its red steps and every terminal with its cause", () => {
@@ -270,15 +269,15 @@ describe("computeStats prose (#182)", () => {
       admitted(1),
       ev({ kind: "gate", issue: 1, attempt: 1, gate: "gate-1", ok: false, durationMs: 1,
         steps: { build: step(true), smoke: step(false) } }),
-      terminal(1, "NEEDS-HUMAN", { cause: "gate-red", reason: "red twice" }),
+      terminal(1, "NEEDS-HUMAN", { cause: "gate-red" }),
       ev({ kind: "gate", issue: 1, gate: "gate-2", ok: false, durationMs: 1 }),
-    ])], true));
+    ])]));
     expect(report.gates).toEqual([
       { run: "run-1", issue: 1, gate: "gate-1", attempt: 1, ok: false, redSteps: ["smoke"] },
       { run: "run-1", issue: 1, gate: "gate-2", attempt: null, ok: false, redSteps: [] },
     ]);
     expect(report.terminals).toEqual([
-      { run: "run-1", issue: 1, terminal: "NEEDS-HUMAN", cause: "gate-red", reason: "red twice" },
+      { run: "run-1", issue: 1, terminal: "NEEDS-HUMAN", cause: "gate-red" },
     ]);
   });
 
