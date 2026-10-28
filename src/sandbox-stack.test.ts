@@ -181,6 +181,8 @@ describe("startSandboxStack (#44 D3)", () => {
         return { stop: () => {} };
       },
       measure: async () => ({}),
+      pause: async () => {},
+      resume: async () => {},
     };
     return { broughtUp, labels, removed, followed, deps };
   };
@@ -693,5 +695,142 @@ describe("startSandboxStack (#44 D3)", () => {
     await expect(stack.stop()).rejects.toThrow(
       new RegExp(`Clean up with: podman rm -f -t 0 .*sbx-44-app.*sbx-44-db`),
     );
+  });
+
+  // #201: a copy runs beside its target, never in place of it, and every
+  // podman step of the swap happens in an order the agent can rely on.
+  describe("database copy swap", () => {
+    const COPY = `sandbar-${SCOPE}-sbx-44-db-dbcopy`;
+    const DB = `sandbar-${SCOPE}-sbx-44-db`;
+
+    const timeline = (fail: (name: string) => ContainerBringupError | null = () => null) => {
+      const ops: string[] = [];
+      const records: ContainerTeardown[] = [];
+      const r = recorder();
+      const deps: SandboxStackDeps = {
+        ...r.deps,
+        bringUp: async (containers, ctx) => {
+          for (const c of containers) {
+            ops.push(`up ${ctx.nameOf(c)} ${c.args.join(" ")}`.trim());
+            const err = fail(ctx.nameOf(c));
+            if (err) throw err;
+          }
+        },
+        follow: (name, _path, since) => {
+          ops.push(`follow ${name}${since === undefined ? "" : " since"}`);
+          return { stop: () => ops.push(`unfollow ${name}`) };
+        },
+        remove: async (name) => {
+          ops.push(`rm ${name}`);
+          return null;
+        },
+        measure: async (name) => {
+          ops.push(`measure ${name}`);
+          return { peakMemoryBytes: 1 };
+        },
+        pause: async (name) => {
+          ops.push(`stop ${name}`);
+        },
+        resume: async (name) => {
+          ops.push(`start ${name}`);
+        },
+      };
+      const start = () => startSandboxStack(
+        {
+          issueId: "44",
+          scope: SCOPE,
+          spec: twoLifecycles(),
+          worktreePath: "/wt",
+          anchorContainerName: ANCHOR,
+          logDir,
+          onContainerTeardown: (record) => {
+            records.push(record);
+          },
+        },
+        deps,
+      );
+      return { ops, records, start };
+    };
+
+    const copyOf = (stack: Awaited<ReturnType<ReturnType<typeof timeline>["start"]>>) => {
+      const db = twoLifecycles().containers[0]!;
+      return stack.swapDbCopyIn({
+        container: { ...db, args: ["--innodb-buffer-pool-size=1"] },
+        label: "c1 (dump of 2026-10-28)",
+      });
+    };
+
+    it("stops the target, brings the copy up under its own name, and follows it into the target's log", async () => {
+      const t = timeline();
+      const stack = await t.start();
+      t.ops.length = 0;
+      expect(await copyOf(stack)).toBe(true);
+      expect(t.ops).toEqual([
+        `unfollow ${DB}`,
+        `stop ${DB}`,
+        `up ${COPY} --innodb-buffer-pool-size=1`,
+        `follow ${COPY}`,
+      ]);
+      expect(await readFile(join(logDir, "db.log"), "utf8"))
+        .toContain("[sandbar] 'db' stopped; db copy c1 (dump of 2026-10-28) started");
+    });
+
+    it("at swap-out measures and removes the copy, then restarts the target and follows it from the restart", async () => {
+      const t = timeline();
+      const stack = await t.start();
+      await copyOf(stack);
+      t.ops.length = 0;
+      await stack.swapDbCopyOut();
+      expect(t.ops).toEqual([
+        `unfollow ${COPY}`,
+        `measure ${COPY}`,
+        `rm ${COPY}`,
+        `start ${DB}`,
+        `follow ${DB} since`,
+      ]);
+      expect(t.records).toEqual([
+        expect.objectContaining({ name: "db-dbcopy", container: COPY, lifecycle: "issue", peakMemoryBytes: 1 }),
+      ]);
+      await expect(stack.swapDbCopyOut()).rejects.toThrow(/runs no database copy/);
+    });
+
+    it("removes a copy that did not come up and restarts the target, noting why in its log", async () => {
+      const t = timeline((name) => name === COPY
+        ? new ContainerBringupError(COPY, "sandbox stack: container 'db' did not become ready", "tail")
+        : null);
+      const stack = await t.start();
+      t.ops.length = 0;
+      expect(await copyOf(stack)).toBe(false);
+      expect(t.ops.slice(-4)).toEqual([`measure ${COPY}`, `rm ${COPY}`, `start ${DB}`, `follow ${DB} since`]);
+      expect(await readFile(join(logDir, "db.log"), "utf8")).toContain("did not become ready");
+      // The slot is free again.
+      expect(await copyOf(stack)).toBe(false);
+    });
+
+    it("removes a copy still in at stop, before the siblings", async () => {
+      const t = timeline();
+      const stack = await t.start();
+      await copyOf(stack);
+      t.ops.length = 0;
+      await stack.stop();
+      expect(t.ops.filter((op) => op.startsWith("rm "))).toEqual([
+        `rm ${COPY}`,
+        `rm sandbar-${SCOPE}-sbx-44-app`,
+        `rm ${DB}`,
+      ]);
+      expect(t.records.map((r) => r.name)).toEqual(["db-dbcopy", "app", "db"]);
+    });
+
+    it("refuses a second copy, and a copy of a container that is not a sibling", async () => {
+      const t = timeline();
+      const stack = await t.start();
+      await copyOf(stack);
+      await expect(copyOf(stack)).rejects.toThrow(/already runs a database copy/);
+      await stack.swapDbCopyOut();
+      await expect(stack.swapDbCopyIn({
+        container: { ...twoLifecycles().containers[0]!, name: "cache" },
+        label: "c2",
+      })).rejects.toThrow(/'cache' is not a sibling/);
+    });
   });
 });
