@@ -1394,7 +1394,7 @@ describe("a janitor subject's {{subject}} line (#205)", () => {
         subject: janitor,
         commits: "a1",
         stat: " x | 1 +",
-        mode: { kind: "list", scope: { kind: "full" }, overrules: [] },
+        mode: { kind: "list", scope: { kind: "full" }, overrules: [], group: qualityInputs.standards.groups[0]! },
         changedSinceStat: null,
       }),
     ];

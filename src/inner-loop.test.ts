@@ -36,6 +36,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   forkPoint: vi.fn(async () => "fork-sha"),
   createScenarioWriterTask: vi.fn(),
   createDbCopySlot: vi.fn(),
+  prepareSandboxLogDir: vi.fn(async (_dir: string) => undefined),
   startSandboxStack: vi.fn(),
   isAncestor: vi.fn(async (_cwd: string, _ancestor: string, _descendant: string) => true),
   fetchIssueAnchor: vi.fn(async (): Promise<IssueAnchor> => ({
@@ -118,7 +119,7 @@ vi.mock("./db-copy.js", async (importOriginal) => ({
 vi.mock("./sandbox-stack.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./sandbox-stack.js")>()),
   startSandboxStack: innerLoopMocks.startSandboxStack,
-  prepareSandboxLogDir: async () => undefined,
+  prepareSandboxLogDir: innerLoopMocks.prepareSandboxLogDir,
 }));
 
 vi.mock("./issue-anchor.js", async (importOriginal) => ({
@@ -4238,18 +4239,23 @@ describe("runInnerLoop context terminals (#158)", () => {
         const { opts } = harness(routine, {
           layout: { repoDir: "/repo", worktreesDir: "/worktrees", logsDir, anchorCacheDir: "/anchor-cache" },
         } as never);
+        const janitorStack = {
+          containers: [{ name: "app", image: "app", inSandbox: true }],
+          steps: [],
+        };
         const stackSource = {
           path: null,
+          current: async () => ({ stack: janitorStack }),
           forHead: async () => ({
-            stack: {
-              containers: [{ name: "app", image: "app", inSandbox: true }],
-              steps: [],
-            },
+            stack: janitorStack,
             attachments: { env: {}, mounts: [] },
             classification: { kind: "same" },
             tipBlob: null,
           }),
         } as unknown as typeof opts.stackSource;
+
+        const real = await vi.importActual<typeof import("./sandbox-stack.js")>("./sandbox-stack.js");
+        innerLoopMocks.prepareSandboxLogDir.mockImplementationOnce(real.prepareSandboxLogDir);
 
         await runInnerLoop(janitorIssue, { ...opts, stackSource, janitor });
 
