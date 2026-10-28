@@ -22,6 +22,10 @@
 // Before them, its commands: one line each, prefixed with the context depth
 // the provider reported when the command was issued, or `-` when it reported
 // none. The agent never reports that depth itself; it is read off the stream.
+// Each admission also files the issue as `gh` returned it then (#195):
+// `issue-snapshot-<n>.json`, create-only, numbered by its own per-issue
+// sequence so a later admission in the same run never overwrites an earlier
+// one. The writer answers with the filename, which `admitted` records.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -31,12 +35,14 @@ import { join } from "node:path";
 // resource formatter is the sole runtime helper and has no template inputs.
 import type { ResolveAttemptRecord } from "./resolve-loop.js";
 import type { AgentInvocationRecord } from "./agent-sandbox.js";
+import type { IssueJson } from "./issue-anchor.js";
 import { formatContainerResources } from "./container-resources.js";
 
 export type AttemptLogger = {
   writeInvocation(filename: string, record: AgentInvocationRecord): Promise<void>;
   writeGate(filename: string, gate: AttemptGateRecord): Promise<void>;
   startInvocationCycle(): AgentInvocationSequence;
+  writeIssueSnapshot(issue: IssueJson): Promise<string>;
 };
 
 // The `gate` role is not an agent invocation, but it is an artefact OF one
@@ -210,9 +216,15 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
   const dir = join(runDir, `issue-${issueId}`);
   await mkdir(dir, { recursive: true });
   const invocationSequencer = createAgentInvocationSequencer();
+  let nextSnapshot = 1;
   return {
     dir,
     startInvocationCycle: () => invocationSequencer.startCycle(),
+    async writeIssueSnapshot(issue) {
+      const filename = `issue-snapshot-${nextSnapshot++}.json`;
+      await writeFile(join(dir, filename), `${JSON.stringify(issue, null, 2)}\n`, { flag: "wx" });
+      return filename;
+    },
     async writeInvocation(filename, record) {
       const resources = formatContainerResources(record);
       const header = [

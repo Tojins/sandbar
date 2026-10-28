@@ -30,6 +30,8 @@ const innerLoopMocks = vi.hoisted(() => ({
   headMismatch: vi.fn(async () => null),
   symbolicHeadRef: vi.fn(async () => "refs/heads/sandbar/issue-126" as string | null),
   settleQualityResidue: vi.fn(),
+  revParse: vi.fn(async () => "seed-sha"),
+  fetchIssueSnapshot: vi.fn(async (): Promise<IssueJson> => ({ title: "Issue", body: "", comments: [] })),
 }));
 
 vi.mock("./prompt.js", async (importOriginal) => ({
@@ -71,6 +73,12 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   settleQualityResidue: innerLoopMocks.settleQualityResidue,
   branchCommitsSinceSeed: innerLoopMocks.branchCommitsSinceSeed,
   ensureIssueBranch: innerLoopMocks.ensureIssueBranch,
+  revParse: innerLoopMocks.revParse,
+}));
+
+vi.mock("./issue-anchor.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./issue-anchor.js")>()),
+  fetchIssueSnapshot: innerLoopMocks.fetchIssueSnapshot,
 }));
 
 import {
@@ -113,6 +121,7 @@ import {
   createTranscriptTree,
 } from "./logs.js";
 import type { HeadMismatch } from "./git-ops.js";
+import type { IssueJson } from "./issue-anchor.js";
 import type { EventInput } from "./events.js";
 import type { GateResult } from "./gate.js";
 import { initialState } from "./inner-loop-machine.js";
@@ -2297,6 +2306,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         startInvocationCycle: createAgentInvocationSequencer().startCycle,
         writeInvocation: vi.fn(async () => undefined),
         writeGate: vi.fn(async () => undefined),
+        writeIssueSnapshot: vi.fn(async () => "issue-snapshot-1.json"),
       },
       gateSemaphore: createGateSemaphore(undefined),
       onEvent: (event: EventInput) => events.push(event),
@@ -2797,6 +2807,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       const gitOps = await vi.importActual<typeof import("./git-ops.js")>("./git-ops.js");
       const prompt = await vi.importActual<typeof import("./prompt.js")>("./prompt.js");
       innerLoopMocks.ensureIssueBranch.mockImplementation(gitOps.ensureIssueBranch as never);
+      innerLoopMocks.revParse.mockImplementation(gitOps.revParse);
       innerLoopMocks.branchCommitsSinceSeed.mockImplementation(gitOps.branchCommitsSinceSeed);
       innerLoopMocks.branchIsAheadOfSeed.mockImplementation(prompt.branchIsAheadOfSeed);
       // The clone the sandbox works in, reused by a later cycle as it is.
@@ -2809,6 +2820,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       });
       return async () => {
         innerLoopMocks.branchCommitsSinceSeed.mockReset().mockResolvedValue([]);
+        innerLoopMocks.revParse.mockReset().mockResolvedValue("seed-sha");
         await rm(root, { recursive: true, force: true });
       };
     });
@@ -2863,6 +2875,13 @@ describe("runInnerLoop context terminals (#158)", () => {
       layout());
 
       await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      // The seed's commit, not the branch's: the branch carries a later one.
+      expect(events.filter((event) => event.kind === "admitted")).toEqual([
+        expect.objectContaining({
+          seedRef: "origin/main",
+          seedSha: (await git(origin, "rev-parse", "main")).stdout.trim(),
+        }),
+      ]);
       expect(events).toContainEqual(expect.objectContaining({
         kind: "origin-sync",
         outcome: "resumed-from-origin",
@@ -2922,6 +2941,54 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       runCycle,
     )).resolves.toMatchObject({ type: "DONE" });
     expect(enabled).toEqual([true, false]);
+  });
+
+  it("files the issue snapshot on the first admission only (#195)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandbar-issue-snapshot-"));
+    try {
+      const issueLogger = await (await createTranscriptTree(root)).issue("195");
+      const issueJson = { title: "Replay", body: "as admitted", comments: [] };
+      innerLoopMocks.fetchIssueSnapshot.mockReset().mockResolvedValue(issueJson);
+      const outcomes = [
+        { verdict: { type: "HARD-ERROR" as const, reason: "socket refused" }, accumulatedCommits: [], specGaps: [] },
+        { verdict: { type: "DONE" as const, commits: [] }, accumulatedCommits: [], specGaps: [] },
+      ];
+      const runCycle = vi.fn(async (_issue, opts) => {
+        await opts.onEvent({
+          kind: "admitted",
+          issue: 195,
+          title: "Replay",
+          branch: "sandbar/issue-195-replay",
+          chunk: null,
+          seedRef: "origin/main",
+          seedSha: "seed-sha",
+        });
+        return outcomes.shift()!;
+      });
+      const events: EventInput[] = [];
+      const repo = { owner: "o", name: "r" };
+
+      await expect(runInnerLoop(
+        { id: "195", title: "Replay", branch: "sandbar/issue-195-replay" },
+        {
+          config: { partitionCheck: false, repo },
+          attemptLogger: issueLogger,
+          onEvent: (event) => events.push(event),
+        } as unknown as Parameters<typeof runInnerLoop>[1],
+        runCycle,
+      )).resolves.toMatchObject({ type: "DONE" });
+
+      expect(runCycle).toHaveBeenCalledTimes(2);
+      expect(innerLoopMocks.fetchIssueSnapshot).toHaveBeenCalledExactlyOnceWith("195", repo);
+      expect(events.filter((event) => event.kind === "admitted")).toEqual([
+        expect.objectContaining({ seedSha: "seed-sha", issueSnapshot: "issue-snapshot-1.json" }),
+      ]);
+      expect(await readdir(issueLogger.dir)).toEqual(["issue-snapshot-1.json"]);
+      expect(JSON.parse(await readFile(join(issueLogger.dir, "issue-snapshot-1.json"), "utf8")))
+        .toEqual(issueJson);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("keeps every invocation record across retries and later admissions", async () => {

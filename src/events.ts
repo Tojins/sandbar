@@ -35,6 +35,11 @@
 // An agent-role event of a completed invocation carries `endedBy`: `exit`, or
 // `result-then-silence` when a successful Claude result was followed by a
 // whole completion grace of silence (#189). A report only; absent on failure.
+// `admitted` records what a replay needs to rerun the issue faithfully (#195):
+// `seedSha`, the commit `seedRef` named at admission, and `issueSnapshot`,
+// the filename of the issue JSON filed in the issue's log directory. Both are
+// optional, without a schema bump, because records written before them lack
+// them.
 //
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
@@ -255,7 +260,7 @@ export type EventInput =
     }
   | { readonly kind: "exit"; readonly tag: ExitTag; readonly reason: string; readonly exitCode: number }
   | { readonly kind: "run-end"; readonly reason: string }
-  | (TitledEventIssue & { readonly kind: "admitted"; readonly branch: string; readonly chunk: string | null; readonly seedRef: string })
+  | (TitledEventIssue & { readonly kind: "admitted"; readonly branch: string; readonly chunk: string | null; readonly seedRef: string; readonly seedSha?: string; readonly issueSnapshot?: string })
   | (EventIssue & { readonly kind: "origin-sync"; readonly outcome: IssueBranchOriginSync["kind"]; readonly detail: string })
   | (EventIssue & { readonly kind: "phase"; readonly attempt: number; readonly phases: readonly IssuePhase[] })
   | (EventIssue & { readonly kind: "setup"; readonly durationMs: number; readonly worktreeMs?: number; readonly sandboxMs?: number; readonly stackMs?: number; readonly detail?: string })
