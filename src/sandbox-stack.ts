@@ -493,17 +493,11 @@ export async function startSandboxStack(
 
   // A container that reached `podman run` has a name to remove even if it never
   // became ready, so teardown has to know about it before readiness is decided.
-  const claim = (
-    group: readonly ResolvedStackContainer[],
-    claimedName: (c: ResolvedStackContainer) => string = nameOf,
-    recordName: (c: ResolvedStackContainer) => string = (c) => c.name,
-  ): void => {
+  const claim = (group: readonly ResolvedStackContainer[]): void => {
     for (const c of group) {
-      const name = claimedName(c);
+      const name = nameOf(c);
       if (!created.includes(name)) created.push(name);
-      if (!lives.has(name)) {
-        lives.set(name, { name: recordName(c), lifecycle: c.lifecycle, elapsed: startTimer() });
-      }
+      if (!lives.has(name)) lives.set(name, { name: c.name, lifecycle: c.lifecycle, elapsed: startTimer() });
     }
   };
 
@@ -628,7 +622,8 @@ export async function startSandboxStack(
     await deps.pause(nameOf(target));
     await note(target, `'${target.name}' stopped; db copy ${label} started`);
     dbCopy = { name, target };
-    claim([container], () => name, (c) => `${c.name}-dbcopy`);
+    created.push(name);
+    lives.set(name, { name: `${target.name}-dbcopy`, lifecycle: target.lifecycle, elapsed: startTimer() });
     try {
       await bringUp([container], { ...ctx, nameOf: () => name });
     } catch (err) {
