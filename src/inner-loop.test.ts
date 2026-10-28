@@ -3835,6 +3835,20 @@ describe("runInnerLoop context terminals (#158)", () => {
       expect(vi.mocked(sandbox.run)).toHaveBeenCalledOnce();
       expect(events).not.toContainEqual(expect.objectContaining({ kind: "hard-error" }));
       expect(events).not.toContainEqual(expect.objectContaining({ kind: "complaint" }));
+      // The UI's janitor row stands until an empty phase closes it.
+      expect(events.filter((event) => event.kind === "phase").at(-1))
+        .toMatchObject({ janitor: task, phases: [] });
+    });
+
+    it("closes its phase when a setup failure surfaces after the retries", async () => {
+      innerLoopMocks.prepareWorktree.mockRejectedValue(new Error("podman"));
+      const { opts, events } = harness(routine);
+
+      await expect(runInnerLoop(janitorIssue, { ...opts, janitor }))
+        .resolves.toMatchObject({ type: "HARD-ERROR" });
+
+      expect(events.filter((event) => event.kind === "hard-error")).toHaveLength(2);
+      expect(events.at(-1)).toMatchObject({ kind: "phase", janitor: task, phases: [] });
     });
 
     it("rejects before setup when the signal is already aborted", async () => {

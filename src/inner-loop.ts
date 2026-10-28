@@ -173,7 +173,9 @@
 // `origin-sync` is emitted; the anchor step, partition check, UI check and
 // scenario writer are off, every role reads the rendered task anchor in place
 // of the issue's (no `gh` call), and every event names the task
-// (`EventSubject`). `InnerLoopOptions.signal` pre-empts any loop: an abort
+// (`EventSubject`). Having no `terminal`, it ends on an empty `phase` on
+// every exit, an abort or a surfaced catch included, not only at the machine's
+// `terminate`. `InnerLoopOptions.signal` pre-empts any loop: an abort
 // runs the cycle's teardown at once, so the in-flight action fails within
 // seconds instead of holding its slot, and from then on any result or
 // rejection becomes `InnerLoopAbortedError`, never a HARD-ERROR retry. The
@@ -893,10 +895,19 @@ export async function runInnerLoop(
     ? opts.config
     : { ...opts.config, partitionCheck: false, uiPrototypeCheck: false, scenarioWriter: false };
   let partitionCheckPending = config.partitionCheck;
+  // A janitor's header row (#205) stands from a `phase` or a retry's
+  // `hard-error` until an empty `phase`, which a cycle emits only at the
+  // machine's `terminate`; the `finally` closes it on every other exit.
+  let phaseOpen = false;
+  let phaseAttempt = 1;
   const cycleOptions: InnerLoopOptions = {
     ...opts,
     config,
     onEvent: async (event) => {
+      if (event.kind === "phase") {
+        phaseOpen = event.phases.length > 0;
+        phaseAttempt = event.attempt;
+      }
       if (event.kind === "admitted") {
         if (admitted) return;
         const issueSnapshot = await opts.attemptLogger.writeIssueSnapshot(
@@ -946,6 +957,7 @@ export async function runInnerLoop(
         max: HARD_ERROR_MAX_RETRIES,
         reason,
       });
+      phaseOpen = true;
     }
   } finally {
     // A no-op once the join has heard it; otherwise the admission has ended
@@ -958,6 +970,10 @@ export async function runInnerLoop(
         severity: "error",
         message: `issue=${issue.id} scenario writer failed: ${err instanceof Error ? err.message : String(err)}`,
       });
+    }
+    // An issue's row is closed by its `terminal`, which a janitor run has none of.
+    if (opts.janitor !== undefined && phaseOpen) {
+      await opts.onEvent({ kind: "phase", ...subject, attempt: phaseAttempt, phases: [] });
     }
   }
 }
