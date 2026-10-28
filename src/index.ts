@@ -19,6 +19,7 @@ export type {
   RunConfig,
   CopyToWorktreeEntry,
   LabelConfig,
+  LabelDeclaration,
   MergeModeConfig,
   // The gate stack (#24) — every type a `gateStack` / `images` literal is
   // built from, so a consumer can factor pieces out into typed constants.
@@ -51,8 +52,8 @@ export {
 export { AUTO_LAND_LABEL, type Lane } from "./lanes.js";
 // The label sandbar puts on a review-gated issue once its work is on its
 // chunk's branch (#60), exported on the same grounds as `AUTO_LAND_LABEL` and
-// with one more: sandbar never creates labels. This cue is display-only, so a
+// with one more: the run never creates labels. This cue is display-only, so a
 // host may create it for reviewers or omit it without affecting correctness.
-// A setup script that does create it should spell it from here rather than by
-// hand.
+// `sandbar labels sync` (#245) creates it with the other protocol labels; a
+// setup script of a host's own should spell it from here rather than by hand.
 export { NEEDS_REVIEW_LABEL } from "./chunks.js";
