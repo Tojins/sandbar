@@ -89,7 +89,10 @@ With `config.deployWatch`, polls and landings also kick the deploy watch
   shell-out names its repo; every `gh` call passes `--repo` (`repo-ref.ts`).
 - **Isolation**: per-issue hardlink clones, scoped resource names
   (`naming.ts`, `containers.ts`); `reclaimIssueClone` in `agent-sandbox.ts` is
-  the one way to remove a clone. Branch shapes are owned by `naming.ts`.
+  the one way to remove a clone. A read-only seed snapshot under
+  `<workDir>/snapshots` (`createSeedSnapshotSandbox`, #203) is not a clone:
+  its own close removes it, and preflight sweeps the directory. Branch shapes
+  are owned by `naming.ts`.
 - **Origin owns issue and chunk branches** (`git-ops.ts`, `chunks.ts`).
 - **Locks**: per-workdir `lock.ts` (#32), repo-wide origin lease
   `origin-lock.ts` (#139), host wake lock `keepawake.ts` (#117).

@@ -48,10 +48,16 @@
 // group: whether an end that kills only the exec client leaves the agent and
 // its background children alive in the container, and whether the reap does
 // not. It has a control for the same reason the first one does.
+//
+// The third (#203) asks it of the seed snapshot: that a `:ro` mount refuses
+// the agent's writes while git can still read the tree. It needs git in the
+// container, which no stock image here carries, so it builds alpine plus git
+// once per file (a network pull, as ensure-images-podman.test.ts already makes).
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -59,6 +65,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, it } from "vitest";
 
 import { scopedResourcePrefix } from "./naming.js";
+import { repoLayout, type RepoLayout } from "./repo-cache.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
@@ -71,7 +78,9 @@ import {
   type SandboxProvider,
   agentProcessGroupCommand,
   createSandbox,
+  createSeedSnapshotSandbox,
   parseStreamJsonLine,
+  podman,
   podmanExec,
   reapProcessGroupCommand,
   sandboxRunArgs,
@@ -113,7 +122,7 @@ const available = podmanTestsEnabled({
 // every cycle. With the scope carrying the uniqueness, the per-container part
 // of the name is free to be the one thing a human reading debris wants from
 // it: which of the two variants this was.
-const { scope: SCOPE, cleanup } = podmanTestScope("agent-sandbox");
+const { scope: SCOPE, testImageTag, cleanup } = podmanTestScope("agent-sandbox");
 
 // This process's own scoped sweep, for whatever a finished hook did not reach.
 afterAll(async () => {
@@ -429,5 +438,127 @@ describe.runIf(available)("an agent's process group against real podman (#189)",
     } finally {
       await sandbox.close();
     }
+  }, 120_000);
+});
+
+// #203: the seed snapshot through the real provider. The cache holds a seed,
+// a tag and an issue branch one commit past the seed; the snapshot must carry
+// the seed's tree and none of those refs, and its container must refuse a
+// write that git's own reads survive.
+const GIT_BASE = "docker.io/library/alpine:3.22";
+const snapshotAvailable = podmanTestsEnabled({
+  what: "seed snapshot podman tests",
+  image: GIT_BASE,
+});
+
+describe.runIf(snapshotAvailable)("a seed snapshot sandbox against real podman (#203)", () => {
+  let imageName: string;
+  let root: string;
+  let layout: RepoLayout;
+  let seedSha: string;
+
+  beforeAll(async () => {
+    imageName = testImageTag("seed-snapshot-git");
+    const context = await mkdtemp(join(tmpdir(), "asb-podman-203-image-"));
+    try {
+      await writeFile(
+        join(context, "Containerfile"),
+        `FROM ${GIT_BASE}\nRUN apk add --no-cache git && adduser -D -u 1000 -h /home/agent agent\n`,
+      );
+      await exec(RUNTIME, ["build", "-q", "-t", imageName, context]);
+    } finally {
+      await rm(context, { recursive: true, force: true });
+    }
+
+    root = await mkdtemp(join(tmpdir(), "asb-podman-203-"));
+    layout = repoLayout(root, ".sandbar");
+    const source = join(root, "source");
+    const git = (...args: string[]) =>
+      exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: source });
+    await exec("git", ["init", "-q", "-b", "main", source]);
+    await writeFile(join(source, "seed.txt"), "seed\n");
+    await git("add", "seed.txt");
+    await git("commit", "-qm", "seed");
+    await git("tag", "v1");
+    seedSha = (await git("rev-parse", "HEAD")).stdout.trim();
+    await git("checkout", "-qb", "sandbar/issue-203-snapshot");
+    await writeFile(join(source, "work.txt"), "implementer\n");
+    await git("add", "work.txt");
+    await git("commit", "-qm", "implementer work");
+    await exec("git", ["clone", "-q", "--bare", source, layout.repoDir]);
+  }, 600_000);
+
+  afterAll(async () => {
+    if (root) await rm(root, { recursive: true, force: true });
+  }, 60_000);
+
+  const open = (issueId: string, notices: string[] = []) =>
+    createSeedSnapshotSandbox({
+      layout,
+      issueId,
+      seedSha,
+      sandbox: podman({ imageName, namePrefix: scopedResourcePrefix(SCOPE) }),
+      env: {},
+      extraMounts: [],
+      onNotice: (_severity, message) => {
+        notices.push(message);
+      },
+    });
+  const snapshotGit = async (path: string, ...args: string[]) =>
+    (await exec("git", args, { cwd: path })).stdout.trim();
+  const containerExists = (name: string): Promise<boolean> =>
+    exec(RUNTIME, ["container", "exists", name]).then(() => true, () => false);
+
+  it.concurrent("is the seed, detached, with no refs and no origin, read-only to its agent", async ({ expect }) => {
+    const sandbox = await open("203");
+    try {
+      expect(sandbox.worktreePath).toBe(join(layout.snapshotsDir, "issue-203-seed"));
+      expect(await snapshotGit(sandbox.worktreePath, "rev-parse", "HEAD")).toBe(seedSha);
+      await expect(snapshotGit(sandbox.worktreePath, "symbolic-ref", "-q", "HEAD")).rejects.toThrow();
+      expect(await snapshotGit(sandbox.worktreePath, "for-each-ref")).toBe("");
+      expect(await snapshotGit(sandbox.worktreePath, "remote")).toBe("");
+      expect(existsSync(join(sandbox.worktreePath, "work.txt"))).toBe(false);
+
+      // Through `run`, so the safe.directory it sets is the one git reads by.
+      const probe =
+        "if touch x 2>/dev/null; then t=wrote; else t=refused; fi; " +
+        "h=$(git log -1 --format=%H) && s=$(git status --porcelain) && " +
+        "printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"%s %s [%s]\"}\\n' \"$t\" \"$h\" \"$s\"";
+      const agent: AgentProvider = {
+        name: "claude-code",
+        env: {},
+        buildPrintCommand: () => ({ command: probe, stdin: "" }),
+        parseStreamLine: parseStreamJsonLine,
+      };
+      const result = await sandbox.run({
+        agent,
+        prompt: "go",
+        completionSignal: [],
+        idleTimeoutSeconds: 60,
+      });
+      expect(result.stdout).toBe(`refused ${seedSha} []`);
+      expect("commits" in result).toBe(false);
+      expect(await sandbox.changed()).toBeNull();
+    } finally {
+      await sandbox.close();
+    }
+    expect(await containerExists(sandbox.containerName)).toBe(false);
+    expect(existsSync(sandbox.worktreePath)).toBe(false);
+  }, 120_000);
+
+  it.concurrent("reports a change and keeps the snapshot when close preserves it", async ({ expect }) => {
+    const notices: string[] = [];
+    const sandbox = await open("204", notices);
+    try {
+      await writeFile(join(sandbox.worktreePath, "stray.txt"), "host write\n");
+      expect(await sandbox.changed()).toContain("?? stray.txt");
+    } finally {
+      await sandbox.close({ preserve: "the scenario writer wrote" });
+    }
+    expect(await containerExists(sandbox.containerName)).toBe(false);
+    expect(existsSync(join(sandbox.worktreePath, "stray.txt"))).toBe(true);
+    expect(notices).toEqual([
+      `Seed snapshot preserved at ${sandbox.worktreePath}: the scenario writer wrote`,
+    ]);
   }, 120_000);
 });
