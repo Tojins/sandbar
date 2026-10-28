@@ -3410,6 +3410,33 @@ describe("runInnerLoop context terminals (#158)", () => {
     });
   });
 
+  it("sizes the resumed branch's admission prompt without the rules the stack settles (#183)", async () => {
+    innerLoopMocks.branchIsAheadOfSeed.mockResolvedValue(true);
+    innerLoopMocks.buildPrompt.mockClear();
+    innerLoopMocks.buildPrompt.mockResolvedValue("0123456789");
+    innerLoopMocks.measureNetDiffChars.mockResolvedValue(91);
+    const { opts } = harness(vi.fn(), { maxContextChars: 100 });
+    opts.stackSource = {
+      ...opts.stackSource,
+      forHead: async () => ({
+        stack: {
+          containers: [],
+          steps: [{ name: "tests-structure", settles: ["missing-tests"] }],
+        },
+        attachments: { env: {}, mounts: [] },
+        classification: { kind: "same" },
+        tipBlob: null,
+      }),
+    } as unknown as typeof opts.stackSource;
+
+    await runInnerLoop(issue, opts);
+
+    expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ attempt: 1, settled: new Set(["missing-tests"]) }),
+      expect.anything(),
+    );
+  });
+
   it("admits a resumed branch at budget and skips the partition classifier", async () => {
     innerLoopMocks.branchIsAheadOfSeed.mockResolvedValue(true);
     innerLoopMocks.buildPrompt.mockResolvedValue("0123456789");
