@@ -31,7 +31,8 @@
 // extension from the bare cache's `origin/<sourceBranch>` as last fetched, the
 // rule stack-source.ts applies to the gate stack (#186): a branch that edits
 // its standards file is graded by the landed version, never by its own. An
-// absent file means built-in only. The implementer keeps its `@path` into its
+// absent file means built-in only; a directory at the path is an error that
+// says so (`readFileAtRef`). The implementer keeps its `@path` into its
 // own worktree (prompt.ts); this module is the quality roles' copy.
 
 import type { PromptExtension } from "./config.js";

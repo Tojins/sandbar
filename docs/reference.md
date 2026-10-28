@@ -262,7 +262,8 @@ reviewer runs on; the verifier's code review uses `reviewer*` and
 ### Coding standards
 
 The quality roles grade by sandbar's built-in coding standards plus
-`promptExtensions.reviewerQuality`. A `{ path }` is read from
+`promptExtensions.reviewerQuality`. A `{ path }`, relative to the repository
+root and without `..`, is read from
 `origin/<sourceBranch>` as last fetched at the start of each quality pass,
 never from the branch under review, so a branch that edits its standards file
 is graded by the landed version. A file the source branch lacks means

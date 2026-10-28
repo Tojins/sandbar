@@ -1395,6 +1395,12 @@ describe("readFileAtRef", () => {
     expect(await readFileAtRef(bare, "refs/heads/main", "docs/MISSING.md")).toBeNull();
   });
 
+  it("names a directory at the path rather than failing as a bad object", async () => {
+    const read = readFileAtRef(bare, "refs/heads/main", "docs");
+    await expect(read).rejects.toThrow(SandbarError);
+    await expect(read).rejects.toThrow("cannot read docs at refs/heads/main: it is a tree, not a file.");
+  });
+
   it("throws for a ref that does not resolve", async () => {
     await expect(readFileAtRef(bare, "refs/remotes/origin/main", "docs/STANDARDS.md"))
       .rejects.toThrow(SandbarError);

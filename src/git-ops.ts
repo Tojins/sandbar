@@ -308,14 +308,21 @@ export const revParse = async (cwd: string, ref: string): Promise<string> =>
 
 // `<path>` as `<ref>` has it, read in `repoDir` (a bare cache works); null
 // when the ref has no such path. A ref that does not resolve is an error, not
-// an absent file.
+// an absent file, and so is a directory at the path, named as one rather than
+// failing as a bad object (as stack-source.ts does).
 export async function readFileAtRef(
   repoDir: string,
   ref: string,
   path: string,
 ): Promise<string | null> {
-  const blob = await revParseOrNull(repoDir, `${ref}:${path}`);
-  if (blob !== null) return await gitStdout(repoDir, ["cat-file", "blob", blob]);
+  const object = await revParseOrNull(repoDir, `${ref}:${path}`);
+  if (object !== null) {
+    const type = (await gitStdout(repoDir, ["cat-file", "-t", object])).trim();
+    if (type !== "blob") {
+      throw new SandbarError(`cannot read ${path} at ${ref}: it is a ${type}, not a file.`);
+    }
+    return await gitStdout(repoDir, ["cat-file", "blob", object]);
+  }
   if (await revParseOrNull(repoDir, `${ref}^{commit}`) === null) {
     throw new SandbarError(`cannot read ${path} at ${ref}: ${ref} does not resolve in ${repoDir}.`);
   }
