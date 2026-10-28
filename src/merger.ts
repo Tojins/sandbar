@@ -282,6 +282,12 @@
 // the resource lifetime is held. Once the agent exec has been captured, that
 // result remains authoritative; reaping, measurement and removal failures are
 // cleanup complaints rather than landing decisions.
+// Behind an egress allowlist (#202, `RealAdapterDeps.egress`) each attempt's
+// container runs on its own internal network (`resolve-<n>`) with its own
+// proxy as its only DNS, started before the container and stopped, with its
+// `egress` record, after the removal; that stop failing is one more cleanup
+// complaint. A proxy that will not start throws, like any other attempt that
+// captured nothing.
 // `captureAgentRun` keeps both raw streams for the byte-verbatim attempt log,
 // then `parseCapturedAgentRun` puts only parsed agent speech in the output
 // register that the resolve promise parser may read. It answers with the exit

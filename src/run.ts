@@ -143,6 +143,10 @@
 // lease release and run-end. A rate limit it meets sets planning's hold.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
+// An egress allowlist (#202) builds the proxy image once at startup and hands
+// every sandbox, gate stack and resolve attempt the same `EgressContext`, its
+// proxies logging under `<runDir>/egress/`. Preflight warns, first, when
+// `databaseCopies` is configured beside open or report-mode egress.
 // Every gate-1 and gate-2 call passes through one run-wide FIFO semaphore
 // (#142). `maxConcurrentGates` bounds its permits; absence is unlimited, and
 // queue time is evidence on the gate event rather than a scheduling decision.

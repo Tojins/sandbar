@@ -75,8 +75,9 @@ export type GateResult = {
   // an exit code (#26), and writing the bound would launder a step that died
   // early into one that ran to its deadline.
   readonly steps: readonly GateStepTiming[];
-  // Labelled log tails for every container in the stack, on a red gate (#24 D9).
-  // Empty on green.
+  // Labelled log tails for every container in the stack, on a red gate (#24 D9),
+  // led behind an egress allowlist by every destination the stack's proxy
+  // refused during the run (#202). Empty on green.
   //
   // A SEPARATE field, not appended to stderr, and that separation is what makes
   // it safe: `summarizeGateFailure` collapses a repeated-signature timeout

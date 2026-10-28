@@ -20,6 +20,16 @@
 // checked up front by ensure-images.ts). The per-issue `--disable-dns` network
 // (#18) stays underneath the pod; the pod carries explicit public `--dns`.
 //
+// Behind an egress allowlist (#202, `StackOptions.egress`) that network is
+// also `--internal`, so it routes nowhere, and the pod's `--dns` is the
+// stack's own proxy instead (egress.ts): network, then proxy, then pod, and at
+// teardown pod, then proxy, then network; a fresh-stack retry recreates all
+// three. The proxy's liveness is re-checked with the `issue` containers before
+// every gate run, and it is drained after every run, a red run's container
+// logs leading with what it refused. A `--keep` stack keeps its proxy, and a
+// pod adopted under reuse (#45) gets its replacement at the address its
+// resolv.conf already names: a pod's resolver cannot be changed.
+//
 // No anonymous volumes (#50): every container gets `--image-volume=ignore`.
 // Podman's default provisions an anonymous volume per builtin `VOLUME`
 // directive, and each one permanently consumes a lock from the host-wide SHM
@@ -686,7 +696,9 @@ export function healthCheckArgs(c: ResolvedStackContainer): string[] {
 // healthcheck run`), so a joiner needs no host port any more than a pod member
 // does. And the `--dns` servers above exist to survive this module's
 // `--disable-dns` network (#18), while the agent container sits on podman's
-// default one with its resolver intact — the joiners inherit that.
+// default one with its resolver intact — the joiners inherit that, and behind
+// an egress allowlist they inherit the anchor's internal network and its
+// proxy's `--dns` the same way (#202).
 export type ContainerAttachment =
   | { readonly kind: "pod"; readonly podName: string }
   | { readonly kind: "netns"; readonly anchorContainerName: string };

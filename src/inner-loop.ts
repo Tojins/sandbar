@@ -18,6 +18,17 @@
 // sandbox entry via `beforeSandboxReady`: they attach to the agent
 // container's netns, so it must exist first, and they must be up before a
 // consumer's `onSandboxReady` hook runs.
+// Behind an egress allowlist (#202, `config.egress`) the sandbox entry first
+// starts the sandbox's own proxy on its own internal network, which the agent
+// container then joins with the proxy as its only DNS and Claude Code's
+// nonessential traffic off; its siblings inherit both. The gate stack gets
+// its own proxy (gate-stack.ts). Every agent invocation ends at a checkpoint
+// (`withEgressCheckpoints`) that records the proxy's first-sighted refusals;
+// a failed one whose proxy died raises `EgressProxyDiedError` instead, which
+// even the reviewer's failure classification passes through, so a dead proxy
+// is a HARD-ERROR rather than a role's failure. The proxy stops after the
+// sandbox closes and records its `egress` summary. The implementer is told
+// about the allowlist only when it is enforced.
 // The step-running gate containers' declared mounts and env are attached to
 // the agent sandbox too (#166). Stack resolution has already flattened and
 // validated them; this layer only roots relative sources in the issue worktree

@@ -39,6 +39,18 @@
 // there is no long-lived `podman logs -f`; a record arrives late, which is
 // fine for a record that is never a decision input (#82).
 //
+// THE OWNERS (#223). With `config.egress` an allowlist, run.ts builds the image
+// at startup and hands every owner an `EgressContext` (logs in
+// `<runDir>/egress/`): the inner loop starts the sandbox's (`sbx-<issue>`) and
+// drains it after every agent invocation; gate-stack.ts starts each stack's
+// between its `--internal` network and its pod and drains it after every gate
+// run; merger.ts brackets each resolve attempt (`resolve-<n>`). The gate stack
+// gets an `OwnerEgress` whose `start` closes over the context, because this
+// module imports gate-stack.ts's podman helpers. `egressReport` is where the
+// records go: each drain's first sightings as `egress-refused` events, the
+// teardown summary as `egress`. Open egress starts nothing, and every argv
+// stays what it was.
+//
 // Decision 8's private ranges are the proxy's to enforce (egress-policy.ts).
 // RESIDUAL RISK (Decision 9), recorded rather than closed: an allowed host is
 // an exfiltration channel — GitHub with whatever token the owner holds, the

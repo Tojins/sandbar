@@ -92,9 +92,13 @@ With `config.deployWatch`, polls and landings also kick the deploy watch
 - **Isolation**: per-issue hardlink clones, scoped resource names
   (`naming.ts`, `containers.ts`); `reclaimIssueClone` in `agent-sandbox.ts` is
   the one way to remove a clone. Branch shapes are owned by `naming.ts`.
-  Egress (#202): `egress-policy.ts` (pure allowlist and log fold),
-  `egress-proxy-server.ts` (the DNS-sink, SNI/Host-splicing proxy program),
-  `egress.ts` (its image, one proxy per network owner); not yet wired.
+  Egress (#202): `config.egress` resolves the allowlist (`config.ts`,
+  provider hosts in `agent-providers.ts`); `egress-policy.ts` (pure allowlist
+  and log fold), `egress-proxy-server.ts` (the DNS-sink, SNI/Host-splicing
+  proxy program), `egress.ts` (its image, one proxy per network owner, the
+  `egress-refused`/`egress` records). Every sandbox (siblings included),
+  gate stack and resolve attempt then sits on its own `--internal` network
+  behind its own proxy; without it nothing changes.
 - **Origin owns issue and chunk branches** (`git-ops.ts`, `chunks.ts`).
 - **Locks**: per-workdir `lock.ts` (#32), repo-wide origin lease
   `origin-lock.ts` (#139), host wake lock `keepawake.ts` (#117).
@@ -123,7 +127,7 @@ With `config.deployWatch`, polls and landings also kick the deploy watch
   (shared by every branch role; incl. 10 commit subjects and
   `background-tasks.md`); implementer attempt slot 6.2k (2.3k of it
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
-  configured); quality lister 5.0k, verify 5.3k, fixer 4.8k; verifier
+  configured, +0.2k an enforced egress allowlist); quality lister 5.0k, verify 5.3k, fixer 4.8k; verifier
   white-box 4.1k; adjudicator 1.1k + the report; UI check 1.6k and partition
   check 1.5k + the issue anchor; resolve 1.2k + anchor + paths/trace; reflect
   tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser

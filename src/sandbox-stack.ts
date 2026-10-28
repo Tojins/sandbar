@@ -14,6 +14,15 @@
 // whose behavior forms the verdict. A gate-derived runtime socket may provide
 // control-plane access (#166); it does not merge the namespaces or verdicts.
 //
+// Egress (#202): with an allowlist the anchor sits on its own internal network
+// behind its own proxy (inner-loop.ts), and the siblings, sharing its netns,
+// are covered without any work here. The flip side is that whatever a sibling
+// must reach live, every process in the namespace can: outdoor's adfinity
+// recording proxy (Tojins/outdoor#785) needs its live host allowlisted, which
+// the agent can then reach too, and what protects adfinity is that only the
+// sibling holds its credentials. A sibling's own `127.0.0.1` traffic never
+// touches the proxy.
+//
 // Ordering. Up: worktree → `onWorktreeReady` → anchor → siblings →
 // `onSandboxReady` — siblings BEFORE the sandbox-ready hooks, because those
 // hooks are where a consumer runs the migration or seed that wants the

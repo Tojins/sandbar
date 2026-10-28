@@ -156,6 +156,9 @@
 // public (`containerName`) and its removal is `--depend`-aware. It publishes
 // no host ports on their behalf (#43). An anchor chain, not a pod, because a
 // pod cannot carry keep-id and the agent CLI refuses to run as root.
+// Behind an egress allowlist (#202) the podman provider is handed the anchor's
+// internal network and its proxy's `--dns` (`PodmanOptions.dnsArgs`); without
+// one the argv carries neither.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort hygiene action whose result is unrelated to the current run
