@@ -406,6 +406,34 @@ export function rootIssueFromChunkBranch(branch: string): number | null {
 }
 
 // ---------------------------------------------------------------------------
+// The issue merge subject (#198)
+//
+// `Merge sandbar/issue-<n>: <title>` is the subject the merger gives every
+// issue-branch merge it authors, and the deploy watch attributes a deploy run
+// to issues by parsing exactly that subject out of the run's git range. It is
+// authored by sandbar alone — a chunk is merged as `Merge sandbar/chunk-…`, an
+// origin sync as `Merge origin/…` — so building and parsing it are one
+// invariant and live together. Current prefix only: no legacy-named merge is
+// recent enough to sit in a deploy window.
+// ---------------------------------------------------------------------------
+
+const ISSUE_MERGE_SUBJECT_PREFIX = `Merge ${BRANCH_PREFIX}${ISSUE_BRANCH_INFIX}`;
+
+export function issueMergeSubject(issue: number, title: string): string {
+  return `${ISSUE_MERGE_SUBJECT_PREFIX}${issue}: ${title}`;
+}
+
+export function parseIssueMergeSubject(
+  subject: string,
+): { readonly issue: number; readonly title: string } | null {
+  if (!subject.startsWith(ISSUE_MERGE_SUBJECT_PREFIX)) return null;
+  const m = subject.slice(ISSUE_MERGE_SUBJECT_PREFIX.length).match(/^(\d+): (.*)$/);
+  return m && m[1] !== undefined && m[2] !== undefined
+    ? { issue: Number(m[1]), title: m[2] }
+    : null;
+}
+
+// ---------------------------------------------------------------------------
 // Per-branch image tags (#37)
 //
 // An image that bakes dependencies from a lockfile is a function of the branch,

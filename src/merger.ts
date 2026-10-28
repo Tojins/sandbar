@@ -417,6 +417,7 @@ import {
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
   memberBranchName,
   issueBranchName,
+  issueMergeSubject,
   issueNumberFromBranch,
   type RunScope,
   scopedResourcePrefix,
@@ -2736,9 +2737,10 @@ type CapturedAgentRun = Omit<ResolveAgentRun, "output" | "usage" | "toolCalls" |
 
 // The default merge subject, and it names an ISSUE — which is why anything
 // that is not one issue's branch (a chunk, #64) carries its own
-// `MergeUnit.mergeMessage` instead of being described as one.
+// `MergeUnit.mergeMessage` instead of being described as one. The deploy watch
+// parses it back (`naming.ts`, #198).
 function mergeMessageFor(issue: MergeUnit): string {
-  return `Merge sandbar/issue-${issueNumberOf(issue)}: ${issue.title}`;
+  return issueMergeSubject(issueNumberOf(issue), issue.title);
 }
 
 function gitAuthorEnv(deps: RealAdapterDeps): NodeJS.ProcessEnv {
