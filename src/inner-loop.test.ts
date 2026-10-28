@@ -305,6 +305,14 @@ describe("runAnchorCondense (#217)", () => {
     expect(await cached()).toEqual({ kind: "miss", problem: null });
   });
 
+  it("propagates an error that is not an agent invocation's, recording nothing", async () => {
+    const { ctx, events } = context(async () => { throw new TypeError("bug"); });
+    await expect(runAnchorCondense({ kind: "run-anchor-condense" }, ctx))
+      .rejects.toThrow("bug");
+    expect(events).toEqual([]);
+    expect(await cached()).toEqual({ kind: "miss", problem: null });
+  });
+
   it("records a closed provider for the run and never calls it again", async () => {
     const { ctx, sandbox, providerState, fetched } = context(async () => {
       throw new AgentQuotaError("claude", { status: "rejected", window: "five_hour" });

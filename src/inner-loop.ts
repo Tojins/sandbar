@@ -1638,8 +1638,10 @@ export async function runAnchorCondense(
   const before = await snapshotReadOnlyAgent(sandbox.worktreePath, issue.branch);
   const timer = startTimer();
   const transcript = ctx.invocationSequence.filename({ role: "anchor-condense", invocation: 1 });
-  const [settled] = await Promise.allSettled([
-    runWithProviderState(opts.providerState, config.condenserAgent, () => sandbox.run({
+  let run: Awaited<ReturnType<Sandbox["run"]>> | null = null;
+  let failure: unknown = null;
+  try {
+    run = await runWithProviderState(opts.providerState, config.condenserAgent, () => sandbox.run({
       name: `anchor-condense-${issue.id}`,
       model: config.condenserModelId,
       agent: buildAgentProvider(config.condenserAgent, config.condenserModelId, {
@@ -1648,10 +1650,14 @@ export async function runAnchorCondense(
       prompt: buildCondenserPrompt(issue.id, anchor.json),
       completionSignal: [],
       ...invocationLog(opts.attemptLogger, transcript),
-    })),
-  ]);
-  const run = settled.status === "fulfilled" ? settled.value : null;
-  const failure: unknown = settled.status === "rejected" ? settled.reason : null;
+    }));
+  } catch (err) {
+    // A run that ended without an answer; anything else is the host's.
+    if (!(err instanceof AgentError || err instanceof AgentIdleTimeoutError ||
+      err instanceof AgentQuotaError || err instanceof AgentCredentialError ||
+      err instanceof AgentInputTooLargeError)) throw err;
+    failure = err;
+  }
   const wrote = await enforceReadOnlyAgentSnapshot(
     sandbox,
     before,
