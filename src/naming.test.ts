@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   gateScope,
+  reflectScope,
   isScopedResourceName,
   networkNameFor,
   podNameFor,
@@ -442,5 +443,17 @@ describe("gate scope (#45)", () => {
   // `--keep` stack the next invocation cannot find.
   it("is a pure hash, so the caller must canonicalise", () => {
     expect(gateScope("/repo/./")).not.toBe(gateScope("/repo"));
+  });
+});
+
+// #182 Decision 8 — reflect's sandbox scope.
+describe("reflect scope (#182)", () => {
+  it("is stable for a workspace and disjoint from a run's and a gate's scope of the same path", () => {
+    expect(reflectScope("/repo/.sandbar/reflect/ws-7")).toBe(reflectScope("/repo/.sandbar/reflect/ws-7"));
+    for (const p of ["/repo", "/repo/.sandbar", "/repo/.sandbar/reflect/ws-7"]) {
+      expect(reflectScope(p)).not.toBe(runScope(p));
+      expect(reflectScope(p)).not.toBe(gateScope(p));
+    }
+    expect(reflectScope("/repo")).toMatch(/^w[0-9a-f]{8}$/);
   });
 });

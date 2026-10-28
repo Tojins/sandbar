@@ -130,6 +130,15 @@ export function gateScope(canonicalWorktreePath: string): RunScope {
   return runScope(`/sandbar-gate/${canonicalWorktreePath}`);
 }
 
+// The scope of `npm run reflect`'s agent sandbox (#182 Decision 8), by
+// `gateScope`'s argument: reflect holds no run lock, so a daemon's sweep must
+// never see its container, and the literal prefix keeps it off both a run's
+// scope and a gate's. The identity is reflect's throwaway workspace,
+// canonical, which is per process (`ws-<pid>`): nothing is reused.
+export function reflectScope(canonicalWorkspacePath: string): RunScope {
+  return runScope(`/sandbar-reflect/${canonicalWorkspacePath}`);
+}
+
 // Everything this run creates starts with this, and the sweeper's name filters
 // key on exactly this. `sandbar-w1a2b3c4d-`.
 export function scopedResourcePrefix(scope: RunScope): string {
