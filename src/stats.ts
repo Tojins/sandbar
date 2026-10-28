@@ -254,7 +254,9 @@ const byRole = <T>(value: (role: Role) => T): Record<Role, T> =>
 const byOutcome = <T>(value: (outcome: Outcome) => T): Record<Outcome, T> =>
   Object.fromEntries(OUTCOMES.map((outcome) => [outcome, value(outcome)])) as Record<Outcome, T>;
 
-type Row = { -readonly [K in keyof InvocationRow]: InvocationRow[K] };
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+type Row = Mutable<InvocationRow>;
 
 type Cycle = {
   readonly issue: number;
@@ -333,8 +335,6 @@ function invocationRow(
 }
 
 const VERDICTS: ReadonlySet<string> = new Set(["APPROVED", "CHANGES-REQUESTED"]);
-
-type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 const count = (tally: Mutable<PassCount>, rejected: boolean): void => {
   tally.runs += 1;

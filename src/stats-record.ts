@@ -194,17 +194,15 @@ async function readStatsRun(dir: string, run: string, withProse: boolean): Promi
     return { kind: "skipped", skipped: { run, reason } };
   }
   const { schemaVersion } = parsed;
-  if (typeof schemaVersion !== "number") {
+  const normalize = typeof schemaVersion === "number" ? STATS_SCHEMAS[schemaVersion] : undefined;
+  if (typeof schemaVersion !== "number" || normalize === undefined) {
     return {
       kind: "skipped",
-      skipped: { run, reason: `unsupported event schema ${String(schemaVersion)}` },
-    };
-  }
-  const normalize = STATS_SCHEMAS[schemaVersion];
-  if (normalize === undefined) {
-    return {
-      kind: "skipped",
-      skipped: { run, reason: `unsupported event schema ${schemaVersion}`, schemaVersion },
+      skipped: {
+        run,
+        reason: `unsupported event schema ${String(schemaVersion)}`,
+        ...(typeof schemaVersion === "number" ? { schemaVersion } : {}),
+      },
     };
   }
   const { events, ignoredKinds } = normalize(parsed.events);
