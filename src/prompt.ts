@@ -29,9 +29,10 @@
 // The UI and partition checkers (#126/#158) are intentionally smaller: issue
 // anchor plus their own decision contracts, with no project standards, diff or
 // prior-round history. The anchor condenser (#217) is smaller still: its
-// contract and the thread to classify, with no anchor layer at all. The partition check is gated on the context budget: a split is
-// asked for only when the whole issue plausibly exceeds it and names outcomes
-// that land alone; the per-piece estimates it renders are for the human.
+// contract and the thread to classify, with no anchor layer at all. The
+// partition check is gated on the context budget: a split is asked for only
+// when the whole issue plausibly exceeds it and names outcomes that land
+// alone; the per-piece estimates it renders are for the human.
 //
 // The issue anchor uses `--json`, NOT the human-readable `--comments` form —
 // that one is TTY-sensitive and, when piped, omits the body. A fetch failure

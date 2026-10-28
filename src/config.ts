@@ -2576,12 +2576,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       modelField: "adjudicatorModelId",
     },
   );
+  // Inherited, the agent brings the quality model the quality pass's own
+  // assertion has already required; only a split agent can arrive unnamed.
   if (condenseAboveChars !== null) {
-    assertRoleModelIdNamed("condenser", condenserAgent, condenserModelId, {
-      agentField:
-        config.condenserAgent === undefined ? "reviewerQualityAgent" : "condenserAgent",
-      modelField: "condenserModelId",
-    });
+    assertRoleModelIdNamed("condenser", condenserAgent, condenserModelId);
   }
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   const reflectTaggerAgent = parseAgentProviderName(
