@@ -140,6 +140,7 @@ import {
   runVerifier,
   runGate,
   runImplementer,
+  InnerLoopAbortedError,
   runInnerLoop,
   runPartitionCheck,
   runQualityFix,
@@ -188,8 +189,11 @@ import {
 // event and prompt subjects from it.
 const issueCtx = (issue: { readonly id: string; readonly title: string; readonly branch: string }) => ({
   issue,
-  subject: { issue: Number(issue.id), title: issue.title },
-  promptSubject: { kind: "issue" as const, id: issue.id, title: issue.title },
+  subject: {
+    event: { issue: Number(issue.id), title: issue.title },
+    prompt: { kind: "issue" as const, id: issue.id, title: issue.title },
+    logDir: `issue-${issue.id}`,
+  },
 });
 
 const deferred = <T,>() => {
@@ -3714,6 +3718,107 @@ describe("runInnerLoop context terminals (#158)", () => {
         expect.stringMatching(/^reviewer-/),
       ]);
       expect(stack.runGate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // #205: an idle janitor task runs the same loop under its name.
+  describe("for a janitor subject (#205)", () => {
+    const task = "tidy";
+    const janitorIssue = {
+      id: "janitor-tidy",
+      title: "Idle task: tidy",
+      branch: "sandbar/janitor-tidy",
+    };
+    const janitor = {
+      task,
+      base: { ref: "0123456789abcdef0123456789abcdef01234567", chunkBranch: null },
+      anchor: "# Idle task anchor\n\nTidy `src/a.ts`.",
+    };
+    const routine: Sandbox["run"] = async (options) =>
+      /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : completeRun;
+
+    beforeEach(() => {
+      innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(`refs/heads/${janitorIssue.branch}`);
+      innerLoopMocks.createScenarioWriterTask.mockReset();
+      innerLoopMocks.fetchIssueAnchor.mockClear();
+      innerLoopMocks.issueSource.mockClear();
+    });
+
+    it("runs the full loop with no seed, no tracker read, no pre-attempt check and no issue-keyed event", async () => {
+      const { opts, events } = harness(routine, {
+        partitionCheck: true,
+        uiPrototypeCheck: true,
+        scenarioWriter: true,
+      } as never);
+
+      await expect(runInnerLoop(janitorIssue, { ...opts, janitor }))
+        .resolves.toMatchObject({ type: "DONE" });
+
+      expect(innerLoopMocks.ensureIssueBranch).not.toHaveBeenCalled();
+      expect(innerLoopMocks.issueSource).not.toHaveBeenCalled();
+      expect(innerLoopMocks.fetchIssueAnchor).not.toHaveBeenCalled();
+      expect(innerLoopMocks.buildPartitionCheckPrompt).not.toHaveBeenCalled();
+      expect(innerLoopMocks.buildUiCheckPrompt).not.toHaveBeenCalled();
+      expect(innerLoopMocks.createScenarioWriterTask).not.toHaveBeenCalled();
+      const subject = { kind: "janitor", task, anchor: janitor.anchor };
+      expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ subject, branch: janitorIssue.branch, base: janitor.base }),
+        expect.anything(),
+      );
+      expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ subject, base: janitor.base }),
+      );
+      expect(innerLoopMocks.buildCorrectnessPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ subject, base: janitor.base }),
+      );
+      expect(events.filter((event) => "issue" in event)).toEqual([]);
+      expect(events.map((event) => event.kind)).not.toEqual(expect.arrayContaining(["admitted"]));
+      for (const kind of ["setup", "phase", "implementer", "quality-review", "gate", "review-pass", "review-round"]) {
+        expect(events).toContainEqual(expect.objectContaining({ kind, janitor: task }));
+      }
+      expect(events.flatMap((event) => event.kind === "phase" ? [event.phases] : [])).toEqual([
+        ["anchor"], ["implementer"], ["quality"], ["gate-1"], ["review"], [],
+      ]);
+    });
+
+    it("tears the cycle down once on an abort mid-implementer and rejects unretried", async () => {
+      const controller = new AbortController();
+      let removed: (err: Error) => void = () => undefined;
+      const { sandbox, stack, opts, events } = harness(async (options) => {
+        if (!(options.name ?? "").startsWith("implementer-")) return routine(options);
+        const running = new Promise<never>((_resolve, reject) => {
+          removed = reject;
+        });
+        controller.abort();
+        return await running;
+      });
+      // Removing the agent container is what ends the in-flight run.
+      sandbox.close = vi.fn(async () => {
+        removed(new AgentError("container removed"));
+      });
+
+      const loop = runInnerLoop(janitorIssue, { ...opts, janitor, signal: controller.signal });
+
+      await expect(loop).rejects.toBeInstanceOf(InnerLoopAbortedError);
+      await expect(loop).rejects.toMatchObject({ cause: expect.any(AgentError) });
+      expect(stack.stop).toHaveBeenCalledOnce();
+      expect(sandbox.close).toHaveBeenCalledOnce();
+      expect(sandbox.deferWorktreeReclaim).toHaveBeenCalledOnce();
+      expect(vi.mocked(sandbox.run)).toHaveBeenCalledOnce();
+      expect(events).not.toContainEqual(expect.objectContaining({ kind: "hard-error" }));
+      expect(events).not.toContainEqual(expect.objectContaining({ kind: "complaint" }));
+    });
+
+    it("rejects before setup when the signal is already aborted", async () => {
+      const { sandbox, opts } = harness(routine);
+
+      await expect(runInnerLoop(janitorIssue, {
+        ...opts,
+        janitor,
+        signal: AbortSignal.abort(),
+      })).rejects.toBeInstanceOf(InnerLoopAbortedError);
+      expect(innerLoopMocks.prepareWorktree).not.toHaveBeenCalled();
+      expect(vi.mocked(sandbox.run)).not.toHaveBeenCalled();
     });
   });
 });

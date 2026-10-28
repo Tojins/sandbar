@@ -33,7 +33,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { sourceBranchBase } from "./git-ops.js";
 import { ghIssueSource } from "./issue-anchor.js";
@@ -276,6 +276,31 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     expect(prompt).toContain("branch `sandbar/issue-1-t`");
     expect(prompt).toContain("seeded from `origin/main`");
     expect(prompt).not.toContain("## Prior review rounds");
+  });
+
+  it("reads a janitor task's anchor as given and asks the tracker nothing (#205)", async () => {
+    const issueSource = vi.fn(async () => {
+      throw new Error("a janitor run has no issue to fetch");
+    });
+    const prompt = await buildAdjudicatorPrompt({
+      subject: { kind: "janitor", task: "tidy", anchor: "# Idle task anchor\n\nTidy src/a.ts." },
+      branch: "sandbar/janitor-tidy",
+      issueSource,
+      repo: CONFIGURED,
+      repoDir: target,
+      anchorCacheDir: join(target, "anchor-cache"),
+      worktreePath: launchedFrom,
+      sourceBranch: "main",
+      base: { ref: "0123456789abcdef0123456789abcdef01234567", chunkBranch: null },
+      claudeMdPath: "CLAUDE.md",
+      pass: "correctness",
+      head: "reviewed-head-123",
+      report: "One blocking finding.",
+    });
+
+    expect(issueSource).not.toHaveBeenCalled();
+    expect(prompt).toContain("---\n\n# Idle task anchor\n\nTidy src/a.ts.\n\n---");
+    expect(prompt).not.toContain("# Issue anchor");
   });
 
   // The @refs the agent resolves inside its sandbox stay repo-relative; it is

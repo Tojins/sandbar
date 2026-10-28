@@ -802,20 +802,28 @@ const throwIfAborted = (signal: AbortSignal | undefined): void => {
   if (signal?.aborted) throw new InnerLoopAbortedError();
 };
 
-// Whom the loop's events and its roles' prompts are about.
-const eventSubjectOf = (
-  issue: IssueRef,
-  janitor: InnerLoopOptions["janitor"],
-): EventSubject => janitor === undefined
-  ? { issue: Number(issue.id), title: issue.title }
-  : { janitor: janitor.task, title: issue.title };
+// Whom a loop is about (#205), in the shape each of its consumers names it:
+// its events, its roles' prompts and its log directory.
+type LoopSubject = {
+  readonly event: EventSubject;
+  readonly prompt: PromptSubject;
+  readonly logDir: string;
+};
 
-const promptSubjectOf = (
+const loopSubjectOf = (
   issue: IssueRef,
   janitor: InnerLoopOptions["janitor"],
-): PromptSubject => janitor === undefined
-  ? { kind: "issue", id: issue.id, title: issue.title }
-  : { kind: "janitor", task: janitor.task, anchor: janitor.anchor };
+): LoopSubject => janitor === undefined
+  ? {
+      event: { issue: Number(issue.id), title: issue.title },
+      prompt: { kind: "issue", id: issue.id, title: issue.title },
+      logDir: issueLogDirName(issue.id),
+    }
+  : {
+      event: { janitor: janitor.task, title: issue.title },
+      prompt: { kind: "janitor", task: janitor.task, anchor: janitor.anchor },
+      logDir: janitorLogDirName(janitor.task),
+    };
 
 // The `gate-stack` record for one sandbox cycle (#186): the spec in effect at
 // setup, and again each time a gate-1 finds a different one.
@@ -878,7 +886,7 @@ export async function runInnerLoop(
   let retriesUsed = 0;
   const specGaps: SpecGap[] = [];
   let admitted = false;
-  const subject = eventSubjectOf(issue, opts.janitor);
+  const subject = loopSubjectOf(issue, opts.janitor).event;
   // A janitor task (#205) has no issue to split, prototype or write hidden
   // scenarios for.
   const config: InnerLoopConfig = opts.janitor === undefined
@@ -1116,8 +1124,8 @@ async function runSandboxCycle(
   let sandboxStack: SandboxStack | null = null;
   let stack: BoundStack | null = null;
   let egress: OwnerProxy | null = null;
-  const subject = eventSubjectOf(issue, opts.janitor);
-  const promptSubject = promptSubjectOf(issue, opts.janitor);
+  const loopSubject = loopSubjectOf(issue, opts.janitor);
+  const subject = loopSubject.event;
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
   const priorReviewRounds: PriorReviewRound[] = [];
@@ -1232,7 +1240,7 @@ async function runSandboxCycle(
     const sbxContainers = sandboxContainers(setupStack.stack);
     const sandboxLogDir = join(
       opts.sandboxLogBaseDir ?? config.layout.logsDir,
-      opts.janitor === undefined ? issueLogDirName(issue.id) : janitorLogDirName(opts.janitor.task),
+      loopSubject.logDir,
       "sandbox-logs",
     );
     // Before the sandbox container, not after: the directory is a bind-mount
@@ -1485,7 +1493,7 @@ async function runSandboxCycle(
     const branchAhead = await branchIsAheadOfSeed(worktreePath, base.ref);
     if (branchAhead) {
       const admissionPrompt = await buildPrompt({
-        subject: promptSubject,
+        subject: loopSubject.prompt,
         branch: issue.branch,
         attempt: 1,
         worktreePath,
@@ -1539,8 +1547,7 @@ async function runSandboxCycle(
     while (action.kind !== "terminate") {
       const event = await executeAction(action, {
         issue,
-        subject,
-        promptSubject,
+        subject: loopSubject,
         sandbox: loopSandbox,
         opts,
         config,
@@ -1717,8 +1724,7 @@ export function withEgressCheckpoints(sandbox: Sandbox, egress: OwnerProxy): San
 
 type ExecuteActionCtx = {
   readonly issue: IssueRef;
-  readonly subject: EventSubject;
-  readonly promptSubject: PromptSubject;
+  readonly subject: LoopSubject;
   readonly sandbox: Sandbox;
   readonly opts: InnerLoopOptions;
   readonly config: InnerLoopConfig;
@@ -1870,7 +1876,7 @@ export async function runAnchorCondense(
 ): Promise<Extract<LoopEvent, { kind: "anchor-ready" | "anchor-condenser-wrote" }>> {
   const { issue, sandbox, opts, config } = ctx;
   const ready = { kind: "anchor-ready" } as const;
-  if (ctx.promptSubject.kind === "janitor") return ready;
+  if (ctx.subject.prompt.kind === "janitor") return ready;
   const anchor = await fetchIssueAnchor(
     issue.id,
     config.issueSource,
@@ -2258,7 +2264,7 @@ export const issueAnchorOptionsOf = (
 
 // The anchors and branch range every branch-reading cold role is built from.
 const branchRoleInputs = (ctx: ExecuteActionCtx): ReviewerPromptInputs => ({
-  subject: ctx.promptSubject,
+  subject: ctx.subject.prompt,
   branch: ctx.issue.branch,
   ...issueAnchorOptionsOf(ctx.config),
   repoDir: ctx.config.layout.repoDir,
@@ -2353,7 +2359,7 @@ export async function runQualityReview(
     ),
     record: (r) => opts.onEvent({
       kind: "quality-review",
-      ...ctx.subject,
+      ...ctx.subject.event,
       attempt: action.attempt,
       round: action.attempt,
       invocation: r.invocation,
@@ -2454,7 +2460,7 @@ export async function runQualityFix(
       const usage = usageFields(m, m.rateLimit, measuredContextChars);
       await opts.onEvent({
         kind: "quality-pass",
-        ...ctx.subject,
+        ...ctx.subject.event,
         attempt: action.attempt,
         round: action.attempt,
         provider: config.reviewerQualityAgent,
@@ -2563,7 +2569,7 @@ export async function runImplementer(
   const qualityCommits = ctx.quality.sinceImplementer.splice(0);
   const prompt = await buildPrompt(
     {
-      subject: ctx.promptSubject,
+      subject: ctx.subject.prompt,
       branch: issue.branch,
       attempt: action.attempt,
       worktreePath: sandbox.worktreePath,
@@ -2633,7 +2639,7 @@ export async function runImplementer(
       : (prior?.commits.length ?? 0) + failedCommits;
     await opts.onEvent({
       kind: "implementer",
-      ...ctx.subject,
+      ...ctx.subject.event,
       attempt: action.attempt,
       signal: err instanceof AgentQuotaError
         ? "QUOTA"
@@ -2761,7 +2767,7 @@ export async function runImplementer(
     });
     await opts.onEvent({
       kind: "repair",
-      ...ctx.subject,
+      ...ctx.subject.event,
       attempt: action.attempt,
       action: "promise-nudge",
       detail: `signal=${signal.kind} durationMs=${nudge.durationMs} maxGapMs=${nudge.maxGapMs} endedBy=${nudge.endedBy}`,
@@ -2838,7 +2844,7 @@ export async function runImplementer(
     offBranch = null;
     await opts.onEvent({
       kind: "repair",
-      ...ctx.subject,
+      ...ctx.subject.event,
       attempt: action.attempt,
       action: "fast-forward",
       detail: `from=${fastForwarded.fromSha} to=${fastForwarded.toSha}`,
@@ -2856,7 +2862,7 @@ export async function runImplementer(
   );
   await opts.onEvent({
     kind: "implementer",
-    ...ctx.subject,
+    ...ctx.subject.event,
     attempt: action.attempt,
     signal: signal.kind,
     commits: attemptCommits,
@@ -2958,7 +2964,7 @@ export async function runGate(
   );
   await opts.onEvent({
     kind: "gate",
-    ...ctx.subject,
+    ...ctx.subject.event,
     attempt: action.attempt,
     gate: "gate-1",
     ok: gate1.ok,
@@ -3179,7 +3185,7 @@ export async function runAdjudicator(
       await opts.onEvent({
         kind: "adjudication",
         pass: action.pass,
-        ...ctx.subject,
+        ...ctx.subject.event,
         attempt: action.attempt,
         round: rejection.round,
         head: rejection.head,
@@ -3289,7 +3295,7 @@ export async function runVerifier(
     // spent it, and both are per-call config a stats reader cannot recover.
     record: (r) => opts.onEvent({
       kind: "review-pass",
-      ...ctx.subject,
+      ...ctx.subject.event,
       attempt: action.attempt,
       round: action.attempt,
       invocation: r.invocation,

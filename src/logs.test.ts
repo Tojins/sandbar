@@ -129,6 +129,22 @@ describe("raw transcript tree", () => {
       .toContain("implementer speech");
   });
 
+  it("logs a janitor task under its own directory, one sequence across its runs (#205)", async () => {
+    const tree = await makeRun();
+    const first = await tree.janitor("tidy");
+    expect(first.dir).toBe(join(tree.runDir, "janitor-tidy"));
+    expect(await tree.janitor("tidy")).toBe(first);
+    // The task name never aliases an issue's directory.
+    expect((await tree.issue("tidy")).dir).toBe(join(tree.runDir, "issue-tidy"));
+
+    expect(first.startInvocationCycle().filename({ role: "implementer", attempt: 1, nudge: false }))
+      .toBe("attempt-1.log");
+    const nextRun = await tree.janitor("tidy");
+    expect(nextRun.startInvocationCycle().filename({ role: "implementer", attempt: 1, nudge: false }))
+      .toBe("attempt-2.log");
+    expect((await readdir(tree.runDir)).sort()).toEqual(["issue-tidy", "janitor-tidy"]);
+  });
+
   it("files every gate-1 result beside the attempt that produced it (#153)", async () => {
     const tree = await makeRun();
     const issue = await tree.issue("153");

@@ -115,6 +115,19 @@ describe("normalisers (#194)", () => {
     ])).toEqual({ events: [runStart(6)], ignoredKinds: { "scenario-runner": 2 } });
   });
 
+  it("counts a janitor run's events apart and drops them (#205)", () => {
+    const issueRun = event({ kind: "implementer", issue: 7 });
+    expect(normalizeV6([
+      runStart(6),
+      issueRun,
+      { seq: 3, ts: "x", kind: "implementer", janitor: "tidy" },
+      { seq: 4, ts: "x", kind: "phase", janitor: "tidy" },
+    ])).toEqual({
+      events: [runStart(6), issueRun],
+      ignoredKinds: { "janitor implementer": 1, "janitor phase": 1 },
+    });
+  });
+
   it("passes a schema-6 event through", () => {
     const review = event({ kind: "quality-review", mode: "list", verdict: "APPROVED" });
     expect(normalizeV6([runStart(6), review]).events).toEqual([runStart(6), review]);

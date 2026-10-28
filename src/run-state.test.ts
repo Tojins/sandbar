@@ -64,6 +64,53 @@ describe("run event reducer", () => {
 
   // A drain can take an hour, and a reader who cannot see the request would
   // see only a pool that stopped admitting (#146).
+  it("shows a janitor run as one header row and its feed lines, never as an issue (#205)", () => {
+    const janitor = { janitor: "tidy", title: "Idle task: tidy" };
+    const events = [
+      at(1, "2026-10-28T08:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 2, pid: 1,
+      }),
+      at(2, "2026-10-28T08:01:00Z", { kind: "setup", ...janitor, durationMs: 5 }),
+      at(3, "2026-10-28T08:02:00Z", { kind: "phase", ...janitor, attempt: 1, phases: ["implementer"] }),
+      at(4, "2026-10-28T08:03:00Z", {
+        kind: "implementer", ...janitor, attempt: 1, signal: "COMPLETE", commits: 1,
+        provider: "claude", model: "m", effort: null, durationMs: 9,
+      }),
+      at(5, "2026-10-28T08:04:00Z", { kind: "hard-error", ...janitor, retry: 1, max: 2, reason: "podman" }),
+      at(6, "2026-10-28T08:05:00Z", { kind: "phase", ...janitor, attempt: 1, phases: ["quality"] }),
+      at(7, "2026-10-28T08:06:00Z", {
+        kind: "review-round", ...janitor, attempt: 1, round: 1, head: "h", quality: "APPROVED",
+        qualityRounds: 1, gateOk: true, correctness: "APPROVED", rejectingPass: null,
+        gateFailures: 0, correctnessFailures: 0, durationMs: 4,
+      }),
+    ];
+    const live = reduceRunEvents(events, { now: new Date("2026-10-28T08:07:00Z"), pidAlive: true });
+
+    expect(live.run.janitor).toEqual({
+      task: "tidy", title: "Idle task: tidy", phase: "quality", phaseSince: "2026-10-28T08:05:00Z",
+    });
+    expect(live.pool).toEqual([]);
+    expect(live.finished).toEqual([]);
+    expect(live.run.slots.used).toBe(0);
+    expect(live.events.slice(0, 3).map(({ issue, janitor: task, text }) => ({ issue, task, text }))).toEqual([
+      { issue: null, task: "tidy", text: "round 1 · approved" },
+      { issue: null, task: "tidy", text: "phase · quality" },
+      { issue: null, task: "tidy", text: "hard error · retry 1/2 · podman" },
+    ]);
+
+    const afterHardError = reduceRunEvents(events.slice(0, 5), {
+      now: new Date("2026-10-28T08:07:00Z"), pidAlive: true,
+    });
+    expect(afterHardError.run.janitor).toMatchObject({ phase: "setup", phaseSince: "2026-10-28T08:04:00Z" });
+
+    const finished = reduceRunEvents([
+      ...events,
+      at(8, "2026-10-28T08:08:00Z", { kind: "phase", ...janitor, attempt: 1, phases: [] }),
+    ], { now: new Date("2026-10-28T08:09:00Z"), pidAlive: true });
+    expect(finished.run.janitor).toBeNull();
+  });
+
   it("keeps a pending restart visible for the whole drain", () => {
     const events = [
       at(1, "2026-09-11T09:00:00Z", {
