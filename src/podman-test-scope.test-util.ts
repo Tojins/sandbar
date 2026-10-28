@@ -201,13 +201,21 @@ import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { TestContext } from "vitest";
 
-import { cleanupOrphanContainers } from "./containers.js";
+import { type RuntimeExec, cleanupOrphanContainers } from "./containers.js";
 import { isExitCode } from "./errors.js";
 import { reconcileImages } from "./image-lifecycle.js";
 import { type RunScope, runScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 
 const exec = promisify(execFile);
+
+// The image reconciler's own 30s bound is sized for a daemon's startup, not for
+// the end of a full podman suite, where `images -a` queues behind the storage
+// lock other workers' builds and removals hold and is killed with no stderr.
+// Cleanup is not what a test asserts, so each call waits up to just under the
+// 120s every file gives its cleanup `afterAll`, which stays the outer bound.
+const reconcileExec: RuntimeExec = (args) =>
+  exec(RUNTIME, [...args], { timeout: 100_000 });
 
 export type FinishedHook = TestContext["onTestFinished"];
 
@@ -405,7 +413,7 @@ export function podmanTestScope(label: string): PodmanTestScope {
     }
     for (const s of [scope, otherScope]) {
       const [images] = await Promise.allSettled([
-        reconcileImages({ scope: s, liveTags: new Set() }),
+        reconcileImages({ scope: s, liveTags: new Set(), run: reconcileExec }),
       ]);
       if (images?.status === "rejected") failures.push(images.reason);
     }

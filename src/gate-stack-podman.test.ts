@@ -360,7 +360,20 @@ describe.runIf(available)("gate stack against real podman", () => {
         }),
       );
 
-      const red = await stack.runGate();
+      // A red `boom` that wrote `nope` cannot have an empty stderr, yet under a
+      // loaded remote podman `exec` still occasionally returns none (the drain
+      // sleep above did not cure it). Re-run only that impossible observation,
+      // as the standalone tee test does; `runner` is attempt-scoped, so each
+      // run starts it afresh.
+      let red = await stack.runGate();
+      for (
+        let attempt = 1;
+        attempt < 5 && red.failedStep === "boom" && red.exitCode === 3 &&
+        !red.stderr.includes("nope");
+        attempt += 1
+      ) {
+        red = await stack.runGate();
+      }
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe("boom");
       expect(red.exitCode).toBe(3);
