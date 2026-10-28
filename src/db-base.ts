@@ -18,6 +18,11 @@
 //   bases/<id>.json      its meta, written only after a clean shutdown
 //   current              symlink to `bases/<id>`, swapped by rename
 //
+// THE DAEMON ONLY READS (`createDbBaseWatch`): at every recompute it reads the
+// status and the drop's stat, records each new attempt once as a `db-base`
+// event and raises `dbBaseComplaints` once per key per run, so the run header
+// shows a missing or stale dump and a failed import.
+//
 // The daemon owns `copies/` (#201 part 2) and never deletes a base. A base dir
 // without meta is an import that never finished; a superseded base is deleted
 // by the first job run at least SUPERSEDED_GRACE_MS later (`basesToSweep`).
@@ -68,6 +73,8 @@ import {
   BASE_ID_RE,
   baseIdAt,
   basesToSweep,
+  dbBaseComplaints,
+  dbBaseEventOf,
   importNeeded,
   importSpaceNeeded,
   sanitizeImportError,
@@ -75,6 +82,7 @@ import {
 } from "./db-copy-policy.js";
 import { freeBytes } from "./disk-space.js";
 import { isErrno, SandbarError } from "./errors.js";
+import type { EventInput } from "./events.js";
 import {
   CONTAINER_RM_ARGS,
   CONTROL_TIMEOUT_MS,
@@ -163,6 +171,43 @@ async function currentBaseId(layout: DbBaseLayout): Promise<string | null> {
     if (!isErrno(err, "ENOENT")) throw err;
     return null;
   }
+}
+
+export type DbBaseWatch = {
+  // Reads the job's outcome and the drop, and reports what is new.
+  readonly observe: () => Promise<void>;
+};
+
+export function createDbBaseWatch(opts: {
+  readonly cfg: DatabaseCopiesSettings;
+  readonly emit: (event: Extract<EventInput, { kind: "db-base" | "complaint" }>) => Promise<unknown>;
+  readonly now?: () => number;
+}): DbBaseWatch {
+  const { cfg } = opts;
+  const layout = dbBaseLayout(cfg.root);
+  let lastAttempt: string | null = null;
+  const complained = new Set<string>();
+  return {
+    observe: async () => {
+      const status = await readImportStatus(layout);
+      if (status !== null && status.attempt !== lastAttempt) {
+        lastAttempt = status.attempt;
+        await opts.emit(dbBaseEventOf(status));
+      }
+      const complaints = dbBaseComplaints({
+        status,
+        drop: await statDump(cfg.dump),
+        dumpPath: cfg.dump,
+        now: (opts.now ?? Date.now)(),
+        staleAfterMs: cfg.staleAfterMs,
+      });
+      for (const { key, message } of complaints) {
+        if (complained.has(key)) continue;
+        complained.add(key);
+        await opts.emit({ kind: "complaint", severity: "warning", message });
+      }
+    },
+  };
 }
 
 // The target in the stack on disk: the inline stack, or the stack file in the

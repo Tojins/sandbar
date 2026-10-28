@@ -82,6 +82,8 @@ Daemon polling and the six exits (`stuck`, `quota`, `credential`, `storage`,
 holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 With `config.deployWatch`, polls and landings also kick the deploy watch
 (`deploy-watch.ts`, #198), which never blocks the loop.
+With `config.databaseCopies`, every recompute reads the base import's outcome
+(`createDbBaseWatch`, #201) into `db-base` events and stale/failed complaints.
 
 ## Invariants — where they live
 

@@ -15,13 +15,15 @@ import { assertDatabaseCopiesTarget, resolveDatabaseCopies, resolveGateStack } f
 import {
   type DbBaseJobOptions,
   type UsernsRun,
+  createDbBaseWatch,
   dbBaseLayout,
   publishBase,
   readImportStatus,
   runDbBaseJob,
   sweepBases,
 } from "./db-base.js";
-import { type BaseMeta, SUPERSEDED_GRACE_MS } from "./db-copy-policy.js";
+import { type BaseMeta, type ImportStatus, SUPERSEDED_GRACE_MS } from "./db-copy-policy.js";
+import type { EventInput } from "./events.js";
 
 const exec = promisify(execFile);
 const plainFs: UsernsRun = async ([command, ...args]) => (await exec(command!, args)).stdout;
@@ -182,5 +184,64 @@ describe("runDbBaseJob before any container", () => {
   it("does nothing while the drop is empty", async () => {
     await expect(job().result).resolves.toBe("no-dump");
     expect(await readImportStatus(layout)).toBeNull();
+  });
+});
+
+describe("createDbBaseWatch, the daemon's read of the job", () => {
+  const dumpPath = () => join(root, "drop/app-latest.sql.gz");
+  const failed = (attempt: string): ImportStatus => ({
+    attempt,
+    outcome: "import-failed",
+    detail: "ERROR 1062 at dump line 3",
+    dump: { name: "app-latest.sql.gz", size: 1, mtimeMs: 1, ino: 1 },
+    specToken: "t",
+    durationMs: 1,
+    finishedAt: "2026-10-28T03:00:00.000Z",
+  });
+  const watch = (now: number) => {
+    const events: EventInput[] = [];
+    const w = createDbBaseWatch({
+      cfg: resolveDatabaseCopies({
+        dump: dumpPath(),
+        root,
+        container: "db",
+        database: "app",
+        staleAfterMs: 60_000,
+      })!,
+      emit: async (event) => {
+        events.push(event);
+      },
+      now: () => now,
+    });
+    return { events, observe: w.observe };
+  };
+
+  it("records each attempt once and complains once per key", async () => {
+    await mkdir(join(root, "drop"));
+    await writeFile(dumpPath(), "x");
+    const { events, observe } = watch(Date.now() + 120_000);
+    await writeFile(layout.status, JSON.stringify(failed("b20261028T030000000Z")));
+    await observe();
+    await observe();
+    expect(events).toEqual([
+      expect.objectContaining({ kind: "db-base", action: "import-failed", attempt: "b20261028T030000000Z" }),
+      { kind: "complaint", severity: "warning", message: expect.stringMatching(/^Database copies: the dump at .* older than 0h/) },
+      { kind: "complaint", severity: "warning", message: expect.stringMatching(/importing app-latest\.sql\.gz as b20261028T030000000Z failed \(ERROR 1062 at dump line 3\)/) },
+    ]);
+
+    await writeFile(layout.status, JSON.stringify(failed("b20261029T030000000Z")));
+    await observe();
+    expect(events.slice(3)).toEqual([
+      expect.objectContaining({ kind: "db-base", attempt: "b20261029T030000000Z" }),
+      { kind: "complaint", severity: "warning", message: expect.stringContaining("as b20261029T030000000Z failed") },
+    ]);
+  });
+
+  it("says only that the dump is missing before any attempt", async () => {
+    const { events, observe } = watch(Date.now());
+    await observe();
+    expect(events).toEqual([
+      { kind: "complaint", severity: "warning", message: `Database copies: no dump at ${dumpPath()}, so no base can be imported.` },
+    ]);
   });
 });
