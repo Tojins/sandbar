@@ -17,6 +17,9 @@
 // concurrent run's in-flight branches map to issues that are still open and
 // still `ready-for-agent` — the label flips happen in Phase 4 — so they read as
 // `resumable`, not as a spurious `unmerged` refusal.)
+// It also removes `snapshotsDir` whole before anything else (#203): a seed
+// snapshot belongs to one run's issue, so under the workdir lock every one
+// left there is a dead run's.
 //
 // Since #38 every command here runs in `layout.repoDir`, the bare cache — not
 // in the operator's checkout. That is the sharpest edge of the whole change and
@@ -1640,6 +1643,7 @@ export type PreflightResult = {
 export async function runPreflightAfterReachability(
   cfg: PreflightConfig,
 ): Promise<PreflightResult> {
+  await rm(cfg.layout.snapshotsDir, { recursive: true, force: true });
   const refresh = await fetchOriginRefs(cfg.layout.repoDir, cfg.sourceBranch);
   const fetchFailures = [...refresh.failures];
   // A stack file is read from the ref just fetched (#186). Nothing below can

@@ -320,6 +320,18 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     ).resolves.toBeDefined();
   });
 
+  it("removes a stale snapshots directory whole, even on a refused run (#203)", async () => {
+    const layout = layoutAt(target);
+    const stale = join(layout.snapshotsDir, "issue-7-seed");
+    await mkdir(stale, { recursive: true });
+    await writeFile(join(stale, "a.txt"), "seed\n");
+    await git(target, "remote", "set-url", "origin", join(target, "missing-origin"));
+
+    await expect(runPreflight(cfg(layout), localReachability))
+      .rejects.toBeInstanceOf(PreflightError);
+    expect(existsSync(layout.snapshotsDir)).toBe(false);
+  });
+
   it("reports a failed origin refresh with git's error", async () => {
     await git(target, "remote", "set-url", "origin", join(target, "missing-origin"));
 
