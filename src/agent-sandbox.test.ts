@@ -4108,6 +4108,34 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
     }
   });
 
+  // #201: the database copy hook runs after setup, on demand, and a failure
+  // is an answer the caller reports rather than a throw.
+  it("runs hooks in the worktree, in order, stopping at the first failure or timeout", async () => {
+    await git(["branch", "sandbar/issue-221-hooks"], dir);
+    const sandbox = await createSandbox({
+      env: {},
+      branch: "sandbar/issue-221-hooks",
+      sandbox: makeLocalProvider(),
+      layout: layoutFor(dir),
+    });
+    try {
+      expect(await sandbox.runHooks([
+        { command: "basename \"$PWD\"" },
+        { command: "echo migrated >&2" },
+      ])).toEqual({ ok: true, output: "sandbar-issue-221-hooks\nmigrated\n" });
+      expect(await sandbox.runHooks([
+        { command: "echo first; exit 3" },
+        { command: "echo never" },
+      ])).toEqual({ ok: false, output: "first\n\n[sandbar] 'echo first; exit 3' exited 3\n" });
+      expect(await sandbox.runHooks([{ command: "exec sleep 5", timeoutMs: 50 }])).toEqual({
+        ok: false,
+        output: "\n[sandbar] 'exec sleep 5' timed out after 50ms\n",
+      });
+    } finally {
+      await sandbox.close();
+    }
+  });
+
   // The container is created by then and only this module has a handle to it,
   // so a throw that escaped without closing it would leak a container per
   // issue — and the outer catch below knows about the worktree, not the

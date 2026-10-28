@@ -619,10 +619,13 @@ export type DeployWatchConfig = {
   readonly timeoutMs?: number;
 };
 
-// Per-agent database copies (#201), of which this release has the nightly base
-// (`db-base.ts`): `sandbar db-base`, run by a systemd timer beside the daemon,
-// imports each new dump into a base datadir under `root` and swaps
-// `<root>/current` to it; the daemon only reads the outcome. The base is built
+// Per-agent database copies (#201). The nightly base (`db-base.ts`):
+// `sandbar db-base`, run by a systemd timer beside the daemon, imports each
+// new dump into a base datadir under `root` and swaps `<root>/current` to
+// it; the daemon reads the outcome. A copy (`db-copy.ts`) is a reflink of the
+// current base run beside the sandbox sibling it replaces, after which
+// `sandboxHooks.sandbox.onDbCopyReady` runs in the agent container; that hook
+// is refused without this key. The base is built
 // by the stack's own `container`, the sandbox sibling a copy will replace, so
 // its image and args are what the base is made with — there is no separate
 // image key. `assertDatabaseCopiesTarget` says what that container must be.
@@ -2698,6 +2701,12 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const databaseCopies = resolveDatabaseCopies(config.databaseCopies);
   if (databaseCopies !== null && gateStack.kind === "inline") {
     assertDatabaseCopiesTarget(gateStack.stack, databaseCopies);
+  }
+  if (databaseCopies === null && config.sandboxHooks.sandbox?.onDbCopyReady !== undefined) {
+    throw new SandbarError(
+      "config.sandboxHooks.sandbox.onDbCopyReady needs config.databaseCopies: " +
+        "without it there is no copy for the hook to prepare.",
+    );
   }
   const images = resolveImages(config.images, config.sandboxImage);
   // Resolved to absolute HERE, not left as the host wrote it (#34). Since every

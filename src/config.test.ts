@@ -1631,6 +1631,17 @@ describe("resolveConfig — databaseCopies (#201)", () => {
     })).toThrow(/cannot be used while a container is named 'db-dbcopy'/);
   });
 
+  it("refuses onDbCopyReady without databaseCopies, and takes it with them", () => {
+    const sandboxHooks = { sandbox: { onDbCopyReady: [{ command: "scripts/prepare.sh db-copy" }] } };
+    expect(() => resolveConfig({ ...minimal, sandboxHooks })).toThrow(
+      new SandbarError(
+        "config.sandboxHooks.sandbox.onDbCopyReady needs config.databaseCopies: " +
+          "without it there is no copy for the hook to prepare.",
+      ),
+    );
+    expect(resolveConfig({ ...valid, sandboxHooks }).sandboxHooks).toEqual(sandboxHooks);
+  });
+
   // A stack file states its containers only at the tip: the stack source asks.
   it("does not ask the target of a stack file at load", () => {
     expect(resolveConfig({ ...valid, gateStack: { path: "gate/stack.json" } }).databaseCopies)
