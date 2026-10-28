@@ -1490,6 +1490,19 @@ async function runSandboxCycle(
       specGaps,
     };
   } finally {
+    // Never mask the verdict with a teardown failure, but never hide it
+    // either — it means leaked podman resources or a leaked clone.
+    const tearDown = async (step: () => Promise<unknown>, what = ""): Promise<void> => {
+      try {
+        await step();
+      } catch (err) {
+        await opts.onEvent({
+          kind: "complaint",
+          severity: "error",
+          message: `${what}${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    };
     // Stack first: its containers bind-mount the worktree read-write, and
     // `sandbox.close()` ends in `git worktree remove --force`. Tearing the
     // sandbox down first leaves a still-running attempt container (an app
@@ -1498,19 +1511,7 @@ async function runSandboxCycle(
     // uncommitted-changes check, so the worktree is PRESERVED instead and
     // leaks for the rest of the run. run.ts:466 already orders the merge
     // phase this way, with the same reasoning.
-    if (stack) {
-      try {
-        await stack.stop();
-      } catch (err) {
-        // Never mask the verdict with a teardown failure, but never hide it
-        // either — it means leaked podman resources.
-        await opts.onEvent({
-          kind: "complaint",
-          severity: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    if (stack) await tearDown(stack.stop);
     // Then the sandbox's own siblings, and BEFORE `sandbox.close()` (#44). They
     // are attached to the agent container's network namespace, and podman
     // refuses to remove a container others depend on — so the reverse order
@@ -1519,42 +1520,17 @@ async function runSandboxCycle(
     // cannot cover, but the ordering is what makes the ordinary path clean.)
     // They also write into the worktree, so the same argument that puts the
     // gate stack ahead of the worktree removal applies to them.
-    if (sandboxStack) {
-      try {
-        await sandboxStack.stop();
-      } catch (err) {
-        await opts.onEvent({
-          kind: "complaint",
-          severity: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    if (sandbox) {
-      try {
-        sandbox.deferWorktreeReclaim();
-        await sandbox.close();
-      } catch (err) {
-        await opts.onEvent({
-          kind: "complaint",
-          severity: "error",
-          message: `Failed to close agent sandbox: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
+    if (sandboxStack) await tearDown(sandboxStack.stop);
+    const closing = sandbox;
+    if (closing) {
+      await tearDown(() => {
+        closing.deferWorktreeReclaim();
+        return closing.close();
+      }, "Failed to close agent sandbox: ");
     }
     // Last: the sandbox and its siblings were the proxy's only clients, and
     // its network goes with it.
-    if (egress) {
-      try {
-        await egress.stop();
-      } catch (err) {
-        await opts.onEvent({
-          kind: "complaint",
-          severity: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    if (egress) await tearDown(egress.stop);
   }
 }
 
