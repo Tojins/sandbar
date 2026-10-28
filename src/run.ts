@@ -82,7 +82,7 @@
 //                              chunk's `land` request out of the pass (not a
 //                              `land-hotfix` one) and holds a DONE auto-lane
 //                              issue in the pool until it opens.
-//   Finalise:                 Per-issue branch lifecycle — push/delete the
+//   Finalise:                  Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
 //                              finalises the agent terminals BEFORE the merge
@@ -2580,12 +2580,13 @@ export async function run(
           landDeferrals.set(request.branch, deferredLandReason(deferral.members));
         } else if (closedUntil !== null && waitsForLandingWindow(request)) {
           landDeferrals.set(request.branch, `landing window closed · lands after ${closedUntil}`);
-          if (toldLandingWindow.has(request.pullRequest)) continue;
-          await chunkRequestWrites.commentOnPullRequest(
-            request.pullRequest,
-            CHUNK_LAND_WINDOW_PR_COMMENT({ sourceBranch: config.sourceBranch, closedUntil }),
-          );
-          toldLandingWindow.add(request.pullRequest);
+          if (!toldLandingWindow.has(request.pullRequest)) {
+            await chunkRequestWrites.commentOnPullRequest(
+              request.pullRequest,
+              CHUNK_LAND_WINDOW_PR_COMMENT({ sourceBranch: config.sourceBranch, closedUntil }),
+            );
+            toldLandingWindow.add(request.pullRequest);
+          }
         }
       }
       const landRequests = selectedLandRequests.filter(
