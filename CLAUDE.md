@@ -75,6 +75,9 @@ holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 - **Locks**: per-workdir `lock.ts` (#32), repo-wide origin lease
   `origin-lock.ts` (#139), host wake lock `keepawake.ts` (#117).
 - **Signals and exit** only via `cleanup.ts` (#35).
+- **Issue creation** only in `deploy-watch.ts` (#198): a red consumer deploy
+  run files one `ready-for-human` bug, deduped by forge markers, no state on
+  disk (`issue-create-site.test.ts`).
 - **Runtime is podman** (`runtime.ts`); no podman argv ever carries an env
   value — `withRuntimeEnv` writes a 0600 env file (#154).
 - **Images**: `image-inputs.ts`, `ensure-images.ts`, `agent-tools.ts` (driver

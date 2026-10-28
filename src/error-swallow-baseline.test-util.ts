@@ -22,6 +22,10 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "cleanup.ts": 1,
   "cli.ts": 2,
   "containers.ts": 1,
+  // The deploy watcher's tick (#198) classifies a rate limit, an unanswered
+  // request, a forge answer and a lease lost to cleanup; anything else is
+  // rethrown.
+  "deploy-watch.ts": 1,
   "agent-tools.ts": 4,
   "ensure-images.ts": 2,
   "finalize.ts": 4,
