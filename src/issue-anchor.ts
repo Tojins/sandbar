@@ -336,6 +336,9 @@ export type CondenseCacheRead =
   | { readonly kind: "hit"; readonly answer: CondenseAnswer }
   | { readonly kind: "miss"; readonly problem: string | null };
 
+// No entry for this thread: nothing to log.
+const NO_ENTRY: CondenseCacheRead = { kind: "miss", problem: null };
+
 const cachePath = (cacheDir: string, issueId: string): string =>
   join(cacheDir, `${issueId}.json`);
 
@@ -366,9 +369,8 @@ export async function readCondenseCache(
   try {
     text = await readFile(path, "utf8");
   } catch (err) {
-    if (isErrno(err, "ENOENT")) return { kind: "miss", problem: null };
     if (!isSystemError(err)) throw err;
-    return miss(`is unreadable: ${err.message}`);
+    return isErrno(err, "ENOENT") ? NO_ENTRY : miss(`is unreadable: ${err.message}`);
   }
   let entry: Partial<Record<keyof CondenseCacheEntry, unknown>>;
   try {
@@ -377,9 +379,7 @@ export async function readCondenseCache(
     if (!(err instanceof SyntaxError)) throw err;
     return miss("is not JSON");
   }
-  if (entry.v !== CONDENSE_CONTRACT_VERSION || entry.key !== key) {
-    return { kind: "miss", problem: null };
-  }
+  if (entry.v !== CONDENSE_CONTRACT_VERSION || entry.key !== key) return NO_ENTRY;
   const answer = entry.answer;
   if (!Array.isArray(answer) || !answer.every(isDecision)) {
     return miss("holds no condenser answer");
