@@ -99,6 +99,11 @@ type Settlement =
   | { readonly outcome: ScenarioWriterOutcome }
   | { readonly error: unknown };
 
+const ABORTED: ScenarioWriterOutcome = {
+  kind: "failed",
+  detail: "aborted: the admission ended before the join",
+};
+
 const SNAPSHOT_KEPT =
   "the scenario writer changed its read-only seed snapshot; kept for human inspection";
 
@@ -158,7 +163,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
     // Closing the container is how an abort ends the run.
     if (aborted) {
       await record(invocation, "aborted", fields);
-      return failed("aborted: the admission ended before the join");
+      return ABORTED;
     }
     if (!endedWithoutAnswer(err)) throw err;
     const wrote = await snapshotWrote(open, invocation, fields);
@@ -203,7 +208,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
     for (let invocation = 1; invocation <= 2; invocation += 1) {
       if (aborted) {
         await record(invocation, "aborted", {});
-        return failed("aborted: the admission ended before the join");
+        return ABORTED;
       }
       const transcript = sequence.filename({ role: "scenario-writer", invocation });
       const timer = startTimer();
