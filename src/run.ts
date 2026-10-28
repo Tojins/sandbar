@@ -470,6 +470,11 @@ export type IssueEnding =
   | Terminal
   | { readonly type: "REJECTED"; readonly reason: string };
 
+export const rejectedEnding = (err: unknown): IssueEnding => ({
+  type: "REJECTED",
+  reason: err instanceof Error ? err.message : String(err),
+});
+
 // The `terminal` event of one issue: its prose reason, and the machine's typed
 // cause and spec-gap count beside it (#194). `run()` and replay (#195) both
 // record it through here, so the two record shapes cannot drift.
@@ -491,6 +496,12 @@ export function terminalEventOf(
     durationMs,
   };
 }
+
+// What every sandbox is handed of `config.env`. CODEX_AUTH_JSON is a driver
+// input now, not a process credential: the shared credential file is the only
+// copy containers need (#134). Replay strips the forge's keys from this (#195).
+export const sandboxEnvOf = (config: ResolvedConfig): Record<string, string> =>
+  Object.fromEntries(Object.entries(config.env).filter(([key]) => key !== "CODEX_AUTH_JSON"));
 
 // The inner loop's configuration for one admission (#195): `run()` and replay
 // build it from the same resolved config, and differ only in what they pass
@@ -1387,11 +1398,7 @@ export async function run(
 
   const silentNoopAttemptsByIssue = new Map<string, number>();
   const providerState = createRunProviderState();
-  // CODEX_AUTH_JSON is a driver input now, not a process credential. The
-  // shared file above is the only copy containers need (#134).
-  const sandboxEnv = Object.fromEntries(
-    Object.entries(config.env).filter(([key]) => key !== "CODEX_AUTH_JSON"),
-  );
+  const sandboxEnv = sandboxEnvOf(config);
   // The one stop this run ends on (#70). Every break out of the loop below
   // assigns it what `announceExit` has already emitted, and the process exit
   // code comes off it at the bottom of the function — so "did this stop
@@ -2528,10 +2535,7 @@ export async function run(
             await runRecord.emit(terminalEventOf(issue, terminal, issueTimer()));
             return terminal;
           } catch (err) {
-            const reason = err instanceof Error ? err.message : String(err);
-            await runRecord.emit(
-              terminalEventOf(issue, { type: "REJECTED", reason }, issueTimer()),
-            );
+            await runRecord.emit(terminalEventOf(issue, rejectedEnding(err), issueTimer()));
             throw err;
           }
         })();

@@ -578,6 +578,29 @@ export async function ensureImages(
   return baseFingerprints;
 }
 
+// The base fingerprints `ensureImages` would return under
+// `rebuildInPlace: false`, for a caller that may build no declared image at
+// all: replay (#195), whose declared tags are the daemon's, host-global, and
+// would be swapped under it by a rebuild. Every declared tag must exist; a
+// missing one is refused by name rather than built.
+export async function existingBaseFingerprints(
+  images: readonly BuiltImage[],
+): Promise<ReadonlyMap<string, string>> {
+  const present = await Promise.all(images.map((image) => imageExists(image.tag)));
+  const missing = images.filter((_, i) => !present[i]).map((image) => image.tag);
+  if (missing.length > 0) {
+    throw new SandbarError(
+      `Declared image(s) missing in ${RUNTIME}: ${missing.join(", ")}. Replay builds ` +
+        "no declared image; start the daemon once, or build them, first.",
+    );
+  }
+  const participating = images.filter((image) => (image.rebuildOn ?? []).length > 0);
+  return new Map(await Promise.all(participating.map(async (image) => [
+    image.tag,
+    (await readExistingInputsLabel(image.tag)) ?? UNKNOWN_PROVENANCE,
+  ] as const)));
+}
+
 // ---------------------------------------------------------------------------
 // Per-branch images (#37)
 // ---------------------------------------------------------------------------

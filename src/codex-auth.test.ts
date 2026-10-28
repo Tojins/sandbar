@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   CODEX_AUTH_FILE_NAME,
+  existingCodexAuth,
   prepareCodexAuth,
 } from "./codex-auth.js";
 
@@ -86,5 +87,23 @@ describe("prepareCodexAuth (#134)", () => {
       configuredJson: auth("2026-09-02T00:00:00Z", "configured"),
       codexHome: ".codex",
     })).rejects.toThrow(/CODEX_HOME must be absolute/);
+  });
+});
+
+describe("existingCodexAuth (#195)", () => {
+  it("mounts the daemon's file as it is, and refuses when there is none", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "sandbar-codex-existing-"));
+    try {
+      expect(() => existingCodexAuth(stateDir, undefined)).toThrow(/does not exist/);
+      const held = auth("2026-10-01T00:00:00Z", "daemon");
+      await writeFile(join(stateDir, CODEX_AUTH_FILE_NAME), held);
+      expect(existingCodexAuth(stateDir, "/codex")).toEqual({
+        hostPath: join(stateDir, CODEX_AUTH_FILE_NAME),
+        sandboxPath: "/codex/auth.json",
+      });
+      expect(await readFile(join(stateDir, CODEX_AUTH_FILE_NAME), "utf8")).toBe(held);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
   });
 });
