@@ -133,6 +133,10 @@
 // a human push or this process latches an image-input refresh; the next
 // healthy storage measurement performs it, while a low-space drain keeps it
 // pending without starting another build.
+// Each successful poll refresh and each landing pass that landed work kick the
+// deploy watch (#198, `deploy-watch.ts`) unless tracker reads are held: one
+// tick in flight at most, never awaited, and stopped by cleanup ahead of the
+// lease release and run-end. A rate limit it meets sets planning's hold.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
 // Every gate-1 and gate-2 call passes through one run-wide FIFO semaphore
@@ -214,6 +218,7 @@ import {
   graphRootSpaceIsLow,
   podmanGraphRoot,
 } from "./disk-space.js";
+import { createDeployWatcher, realDeployWatchAdapter } from "./deploy-watch.js";
 import {
   SandbarError,
   faultDetail,
@@ -1879,6 +1884,34 @@ export async function run(
   // (`forge-rate-limit.ts`); null when they are not.
   let trackerHeldUntil: number | null = null;
 
+  // The deploy watch (#198), when configured. Cleanup stops it first, so no
+  // write follows the lease's release and no event follows run-end.
+  const { deployWatch } = config;
+  const deployWatcher = deployWatch === null ? null : createDeployWatcher({
+    adapter: realDeployWatchAdapter({
+      repo,
+      repoDir: layout.repoDir,
+      sourceBranch: config.sourceBranch,
+      workflow: deployWatch.workflow,
+      label: deployWatch.label,
+      beforeOriginWrite: renewOriginLease,
+    }),
+    settings: deployWatch,
+    emit: (event) => runRecord.emit(event),
+    onRateLimited: async () => {
+      trackerHeldUntil = await fetchRateLimitResumeAt(Date.now());
+      await runRecord.emit({
+        kind: "notice",
+        message: "Deploy watch hit GitHub's rate limit; holding tracker reads until " +
+          `${new Date(trackerHeldUntil).toISOString()}`,
+      });
+    },
+  });
+  if (deployWatcher !== null) onCleanup(() => deployWatcher.stop());
+  const kickDeployWatch = (): void => {
+    if (trackerHeldUntil === null) deployWatcher?.kick();
+  };
+
   const recoverFromRefRefreshFailure = async (
     boundary: "Poll refresh" | "Planning ref refresh" | "Tracker read",
     failures: readonly string[],
@@ -1985,6 +2018,7 @@ export async function run(
         // refs that planning and branch sync consume. A failed refresh is not
         // a poll boundary and must not spend that guard.
         pool.beginPoll();
+        kickDeployWatch();
         sourceChangedOnPoll = refresh.sourceChanged;
         // A pending restart admits nothing more, so rebuilding this run's
         // images for a source that just moved is minutes the deploy waits on
@@ -3089,6 +3123,7 @@ export async function run(
       if (sourceLandings > 0) {
         pendingSourceImageRefresh ??= "landing";
       }
+      if (landedNow > 0) kickDeployWatch();
       if (postRefreshFailure) {
         await drainPreservingLandingFailure(postRefreshFailure.error);
       }
