@@ -40,7 +40,8 @@ sandbar_installations:
     # can reach prod. `push_from` (prod's egress address) is optional.
     dump_drop:
       user: outdoor-dump
-      push_key: ""
+      push_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP5ZXg/jgTvbF3zr5Sg4FYh5BEdLSbSEWK9TMyfwFD1B outdoor-prod-push"
+      push_from: 188.65.218.62
   - user: outdoorpub
     project: outdoorpub
     subid_slot: 2
