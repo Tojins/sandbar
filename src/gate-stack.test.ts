@@ -25,6 +25,7 @@ import {
   withImages,
   containerState,
   formatHealthLog,
+  gateStackOf,
   healthCheckArgs,
   lastProbeText,
   mountSpec,
@@ -53,6 +54,9 @@ const container = (
   mounts: [],
   mountWorktree: null,
   servesWorktree: false,
+  inSandbox: false,
+  inGate: true,
+  secretEnv: [],
   hold: false,
   readiness: null,
   readinessTimeoutMs: 60_000,
@@ -1157,6 +1161,109 @@ describe("resolveGateStack validation", () => {
         ],
       }),
     ).toThrow(/duplicate step name/);
+  });
+
+  // ---------------------------------------------------------------------
+  // inGate / secretEnv (#241)
+  // ---------------------------------------------------------------------
+
+  const proxy = (over: Partial<GateStackConfig["containers"][number]> = {}) => ({
+    name: "proxy",
+    image: "localhost/proxy",
+    inSandbox: true,
+    inGate: false,
+    secretEnv: ["ADFINITY_TOKEN"],
+    ...over,
+  });
+  const withProxy = (over: Partial<GateStackConfig["containers"][number]> = {}) =>
+    ({ ...ok, containers: [...ok.containers, proxy(over)] });
+
+  it("defaults inGate to true and secretEnv to none", () => {
+    expect(resolveGateStack(ok).containers.map((c) => [c.inGate, c.secretEnv]))
+      .toEqual([[true, []], [true, []]]);
+  });
+
+  it("accepts a sandbox-only container holding a secret", () => {
+    const proxyResolved = resolveGateStack(withProxy()).containers[2];
+    expect(proxyResolved).toMatchObject({
+      inGate: false,
+      inSandbox: true,
+      secretEnv: ["ADFINITY_TOKEN"],
+    });
+  });
+
+  it("refuses inGate: false without inSandbox, which would run nowhere", () => {
+    expect(() => resolveGateStack(withProxy({ inSandbox: false, secretEnv: [] })))
+      .toThrow(/'inGate: false' without 'inSandbox: true'/);
+  });
+
+  it("refuses a step that runs in an inGate: false container", () => {
+    expect(() => resolveGateStack({
+      ...withProxy({ secretEnv: [] }),
+      steps: [...ok.steps, { name: "probe", in: "proxy", command: ["true"] }],
+    })).toThrow(/step 'probe' runs in 'proxy', which sets 'inGate: false'/);
+  });
+
+  it("refuses servesWorktree on an inGate: false container", () => {
+    expect(() => resolveGateStack(withProxy({
+      secretEnv: [],
+      mountWorktree: "/app",
+      servesWorktree: true,
+    }))).toThrow(/'servesWorktree' with 'inGate: false'/);
+  });
+
+  // The gate's worktree rules ask what the GATE runs: a sandbox-only mount
+  // must not satisfy them.
+  it("does not count an inGate: false container's worktree mount for the gate", () => {
+    expect(() => resolveGateStack({
+      containers: [
+        { name: "runner", image: "r", hold: true },
+        { name: "app", image: "app", mountWorktree: "/app", inSandbox: true, inGate: false },
+      ],
+      steps: [{ name: "test", in: "runner", command: ["true"] }],
+    })).toThrow(/no container declares `mountWorktree`/);
+  });
+
+  it("refuses secretEnv on a container that runs in the gate", () => {
+    expect(() => resolveGateStack(withProxy({ inGate: true })))
+      .toThrow(/sets 'secretEnv' but runs in the gate/);
+  });
+
+  it.each([
+    ["mountWorktree", { mountWorktree: "/app" }, /'secretEnv' and 'mountWorktree'/],
+    [
+      "a worktree-relative mount",
+      { mounts: [{ hostPath: "fixtures", containerPath: "/f" }] },
+      /'secretEnv' and worktree-relative mounts \(fixtures\)/,
+    ],
+  ])("refuses secretEnv with %s, which the agent could change", (_, over, message) => {
+    expect(() => resolveGateStack(withProxy(over))).toThrow(message);
+  });
+
+  it("accepts secretEnv with an absolute host mount", () => {
+    expect(() => resolveGateStack(withProxy({
+      mounts: [{ hostPath: "/srv/mocks", containerPath: "/mocks" }],
+    }))).not.toThrow();
+  });
+
+  it.each([
+    ["a key that is not an env name", ["1TOKEN"], /not an env name/],
+    ["a key listed twice", ["T", "T"], /lists secretEnv key 'T' twice/],
+    ["the reserved CI key", ["CI"], /secretEnv key 'CI', which is reserved/],
+  ])("refuses %s", (_, secretEnv, message) => {
+    expect(() => resolveGateStack(withProxy({ secretEnv }))).toThrow(message);
+  });
+
+  it("refuses a secretEnv key the container also sets in env", () => {
+    expect(() => resolveGateStack(withProxy({ env: { ADFINITY_TOKEN: "x" } })))
+      .toThrow(/secretEnv key 'ADFINITY_TOKEN', which it also sets in 'env'/);
+  });
+
+  it("drops inGate: false containers from the stack the gate runs", () => {
+    const spec = resolveGateStack(withProxy());
+    expect(gateStackOf(spec).containers.map((c) => c.name)).toEqual(["db", "app"]);
+    const plain = resolveGateStack(ok);
+    expect(gateStackOf(plain)).toBe(plain);
   });
 
   // ---------------------------------------------------------------------

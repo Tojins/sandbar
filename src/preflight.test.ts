@@ -592,6 +592,8 @@ const container = (
   mountWorktree: "/workspace",
   servesWorktree: false,
   inSandbox: false,
+  inGate: true,
+  secretEnv: [],
   hold: false,
   readiness: null,
   readinessTimeoutMs: 60_000,

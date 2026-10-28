@@ -60,6 +60,18 @@
 // D1's corollary (write only into gitignored paths) extends to sandbox
 // siblings, which write continuously; a compiled-cache race over one directory
 // is the consumer's to resolve with per-environment cache paths.
+//
+// Secrets (#241): a sibling's `secretEnv` keys are valued from the DAEMON's
+// environment (`daemonEnv`, the installation env) at bringup, laid over its
+// `env` and carried like any env — in `withRuntimeEnv`'s file, never an argv
+// (#154). config.ts keeps such a container out of the gate and off the
+// worktree. A key that resolves to nothing (unset or empty) fails that
+// sibling's bringup exactly as a missed readiness does — `issue` throws,
+// `attempt` comes up degraded — before `podman run`. The values are masked
+// in every bringup error this stack raises, since that text reaches the
+// prompt and the event record. Not in the followed log file: what a sibling
+// itself prints is its image's, and a proxy that logs its credential is
+// leaking it to the agent by any route.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
@@ -158,6 +170,9 @@ export type SandboxStackOptions = {
   // anchor has mounted at SANDBOX_LOG_MOUNT — created by `prepareSandboxLogDir`
   // BEFORE the anchor, because a bind-mount source is read at container start.
   readonly logDir: string;
+  // Where `secretEnv` values are read from. Default: this process's own
+  // environment, which on the installation is its env file (#241).
+  readonly daemonEnv?: Readonly<Record<string, string | undefined>>;
   readonly onNotice?: (message: string) => void | Promise<void>;
   readonly onContainerTeardown?: (
     record: ContainerTeardown,
@@ -197,6 +212,59 @@ export const realSandboxStackDeps: SandboxStackDeps = {
   measure: (containerName) =>
     readContainerResources(containerName, systemContainerResourceDeps(boundedPodman)),
 };
+
+// A sibling with its `secretEnv` valued from `daemonEnv`, or the keys that
+// resolve to nothing. A value podman's env file cannot carry counts as nothing
+// too: refused here it is that sibling's failed bringup, where
+// `formatEnvFile`'s throw would be a HARD-ERROR for an `attempt` one.
+export function resolveSecretEnv(
+  c: ResolvedStackContainer,
+  daemonEnv: Readonly<Record<string, string | undefined>>,
+):
+  | { readonly kind: "ok"; readonly container: ResolvedStackContainer; readonly values: readonly string[] }
+  | { readonly kind: "missing"; readonly keys: readonly string[] } {
+  if (c.secretEnv.length === 0) return { kind: "ok", container: c, values: [] };
+  const missing: string[] = [];
+  const env: Record<string, string> = { ...c.env };
+  for (const key of c.secretEnv) {
+    const value = daemonEnv[key];
+    if (value === undefined || value === "" || /[\n\r\0]/.test(value)) {
+      missing.push(key);
+    } else {
+      env[key] = value;
+    }
+  }
+  if (missing.length > 0) return { kind: "missing", keys: missing };
+  return {
+    kind: "ok",
+    container: { ...c, env },
+    values: c.secretEnv.map((key) => env[key]!),
+  };
+}
+
+// `text` with every secret value masked. Longest first, so a value that
+// contains another is masked whole.
+export function maskSecrets(text: string, values: readonly string[]): string {
+  let masked = text;
+  for (const value of [...values].sort((a, b) => b.length - a.length)) {
+    masked = masked.split(value).join("<secret>");
+  }
+  return masked;
+}
+
+function maskedError(err: unknown, values: readonly string[]): unknown {
+  if (values.length === 0) return err;
+  if (err instanceof ContainerBringupError) {
+    return new ContainerBringupError(
+      err.containerName,
+      maskSecrets(err.reason, values),
+      maskSecrets(err.logTail, values),
+      maskSecrets(err.healthLog, values),
+    );
+  }
+  if (err instanceof Error) err.message = maskSecrets(err.message, values);
+  return err;
+}
 
 // Create the log directory before the anchor is created. Separate from
 // `startSandboxStack` for a sequencing reason rather than a stylistic one: the
@@ -330,6 +398,35 @@ export async function startSandboxStack(
     nameOf,
   };
 
+  // Every secret value resolved so far, so a later group's error masks an
+  // earlier group's too.
+  const daemonEnv = opts.daemonEnv ?? process.env;
+  const secretValues: string[] = [];
+  const bringUp = async (
+    group: readonly ResolvedStackContainer[],
+  ): Promise<void> => {
+    const resolved = group.map((c) => {
+      const r = resolveSecretEnv(c, daemonEnv);
+      if (r.kind === "missing") {
+        throw new ContainerBringupError(
+          nameOf(c),
+          `${SANDBOX_LABEL}: container '${c.name}' (${c.image}) was not ` +
+            `started: its secretEnv key(s) ${r.keys.join(", ")} resolve to ` +
+            "nothing in the daemon's environment (unset, empty, or holding a " +
+            "newline). Set them in the installation env.",
+          "(not started)",
+        );
+      }
+      secretValues.push(...r.values);
+      return r.container;
+    });
+    try {
+      await deps.bringUp(resolved, ctx);
+    } catch (err) {
+      throw maskedError(err, secretValues);
+    }
+  };
+
   const record = (
     c: ResolvedStackContainer,
     failure: string | null,
@@ -365,7 +462,7 @@ export async function startSandboxStack(
       claim(issueContainers);
       // As a group, and a throw here is infra: these depend only on image and
       // env, so a fresh sandbox is exactly the right response.
-      await deps.bringUp(issueContainers, ctx);
+      await bringUp(issueContainers);
     }
 
     // One at a time, so one broken app server does not take the database's
@@ -373,7 +470,7 @@ export async function startSandboxStack(
     for (const c of containers.filter((c) => c.lifecycle === "attempt")) {
       claim([c]);
       try {
-        await deps.bringUp([c], ctx);
+        await bringUp([c]);
       } catch (err) {
         if (!(err instanceof ContainerBringupError)) throw err;
         failed.set(c.name, err.message);

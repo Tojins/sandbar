@@ -276,6 +276,11 @@ describe("resolveStackFile (#186)", () => {
       /has 'lifecycle' that is not "issue" or "attempt"/,
     ],
     [
+      "a secretEnv that is not a list of strings",
+      JSON.stringify({ ...stack, containers: [{ ...stack.containers[0], secretEnv: "TOKEN" }] }),
+      /containers\[0\] has 'secretEnv' that is not a list of strings/,
+    ],
+    [
       "a rule resolveGateStack enforces",
       JSON.stringify({ ...stack, containers: [...stack.containers, stack.containers[0]] }),
       /^gate\/stack\.json at origin\/main: duplicate container name 'db'/,

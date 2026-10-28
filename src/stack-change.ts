@@ -5,7 +5,9 @@
 // branch's Containerfiles are part of the work under test. A branch that could
 // edit its grader could widen its own mounts or privileges, or weaken a check
 // until it passes. The one exception is container `env`: an env value widens
-// nothing, and outdoor#576 needed exactly that (`TZ` on its database).
+// nothing, and outdoor#576 needed exactly that (`TZ` on its database) — except
+// on a container that holds a `secretEnv` credential (#241), where an env
+// value can redirect it, so an env edit there is non-env.
 //
 // So a branch's stack file is classified against the source tip's, over
 // RESOLVED stacks, so key order and a spelled-out default are not changes:
@@ -153,6 +155,14 @@ export function classifyStackChange(
       branch.stack.steps,
       new Set(),
     ),
+    // Laid over a container that holds a secret, a branch's env (an upstream
+    // URL, a proxy variable) could send that secret somewhere (#241).
+    ...tip.containers
+      .filter((c, i) =>
+        c.secretEnv.length > 0 &&
+        branch.stack.containers[i]?.name === c.name &&
+        !equal(c.env, branch.stack.containers[i]?.env))
+      .map((c) => ({ where: `container '${c.name}'`, what: "env (holds secretEnv)" })),
   ];
   if (differences.length > 0) return { kind: "non-env", path, differences };
   const containers = tip.containers

@@ -380,7 +380,8 @@ describe("stackSpecToken", () => {
   const spec = (env: Record<string, string>): ResolvedGateStack => ({
     containers: [{
       name: "db", image: "i", lifecycle: "issue", env, args: [], mounts: [],
-      mountWorktree: null, servesWorktree: false, inSandbox: false, hold: false,
+      mountWorktree: null, servesWorktree: false, inSandbox: false, inGate: true,
+      secretEnv: [], hold: false,
       readiness: null, readinessTimeoutMs: 1, postReadyCommands: [],
     }],
     steps: [],
