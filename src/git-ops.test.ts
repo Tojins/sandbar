@@ -15,6 +15,7 @@ import {
   ensureIssueBranch,
   fastForwardOffBranchHead,
   headMismatch,
+  readFileAtRef,
   settleQualityResidue,
   symbolicHeadRef,
 } from "./git-ops.js";
@@ -1358,5 +1359,44 @@ describe("ensureIssueBranch — origin's copy of the branch (#112)", () => {
 
     expect(base.originSync).toMatchObject({ kind: "origin-unreadable" });
     expect(await tip(cache, `refs/heads/${B}`)).toBe(await tip(cache, "origin/main"));
+  });
+});
+
+// One file as a ref has it, read without a worktree (#204), in a bare repo
+// as the cache is.
+describe("readFileAtRef", () => {
+  let root: string;
+  let bare: string;
+
+  const git = (cwd: string, ...args: string[]) =>
+    exec("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd });
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sandbar-readfile-"));
+    const work = join(root, "work");
+    bare = join(root, "bare.git");
+    await mkdir(join(work, "docs"), { recursive: true });
+    await git(root, "init", "-q", "-b", "main", work);
+    await writeFile(join(work, "docs", "STANDARDS.md"), "## Tests\n\nx\n");
+    await git(work, "add", "-A");
+    await git(work, "commit", "-qm", "init");
+    await git(root, "clone", "-q", "--bare", work, bare);
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("returns the file's content at the ref", async () => {
+    expect(await readFileAtRef(bare, "refs/heads/main", "docs/STANDARDS.md")).toBe("## Tests\n\nx\n");
+  });
+
+  it("is null for a path the ref does not have", async () => {
+    expect(await readFileAtRef(bare, "refs/heads/main", "docs/MISSING.md")).toBeNull();
+  });
+
+  it("throws for a ref that does not resolve", async () => {
+    await expect(readFileAtRef(bare, "refs/remotes/origin/main", "docs/STANDARDS.md"))
+      .rejects.toThrow(SandbarError);
   });
 });

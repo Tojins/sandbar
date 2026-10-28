@@ -8,9 +8,9 @@ copies only `origin/*` for the source repository, so the bare local name
 
 Issue #{{issueId}}: {{issueTitle}}
 
-{{chunkBase}}{{commits}}{{diffStat}}{{priorRounds}}{{changedSince}}{{qualityMode}}{{codingStandards}}
+{{chunkBase}}{{commits}}{{diffStat}}{{priorRounds}}{{changedSince}}{{qualityMode}}{{standards}}
 
-{{projectStandards}}## Review process
+## Review process
 
 You are the read-only half of the quality pass. A fixer receives your report
 and commits the changes; gate-1 and the verifier follow. Review these two

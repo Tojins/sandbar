@@ -53,6 +53,37 @@ export type LabelConfig = {
   readonly agentStuck: string;
 };
 
+// ---------------------------------------------------------------------------
+// promptExtensions (#91, #204)
+//
+// One optional `{ text }` or `{ path }` per role. Every role but the quality
+// pass gets it as written: text inlined, a path as an @ref only when the path
+// exists in the worktree that role reads (prompt.ts).
+//
+// `reviewerQuality` is a STANDARDS FILE, the grader of the quality pass, so it
+// follows the rule the gate stack does (#186): a path is read from the bare
+// cache's `origin/<sourceBranch>` at the start of each quality pass, never
+// from the branch under review, and handed to the quality roles inline. A file
+// the tip lacks means the built-in standards alone. The implementer's own
+// extension still points into its worktree.
+//
+// A standards file is split into rule groups (standards-groups.ts owns the
+// parser):
+// - each `## <name>` outside a code fence opens a group; `###` and deeper are
+//   its body;
+// - `## Leave alone` (any case) is reserved, goes to every group, and several
+//   are joined;
+// - text before the first `##` is a preamble every group gets; over 600 chars
+//   is a warning;
+// - a heading may end in a flag list, `## Tests {janitor}`: `janitor` exposes
+//   the group to the idle janitor (#205), any other flag is a warning and is
+//   dropped;
+// - a file with no other `##` is one group, `project`;
+// - more than 5 groups in total, the built-in one included, is a warning.
+// Parse problems are logged once per version of the file and never refuse a
+// run.
+// ---------------------------------------------------------------------------
+
 export type PromptRole =
   | "implementer"
   | "reviewer"
@@ -831,7 +862,9 @@ export type RunConfig = {
 
   // Optional additions to each role's shipped prompt (#91). `{ text }` is
   // inlined verbatim; `{ path }` becomes an @ref only when that path exists in
-  // the worktree the role will inspect. No role has a default extension.
+  // the worktree the role will inspect. `reviewerQuality` is the exception: a
+  // standards file of rule groups, read at the source tip and inlined (see
+  // "promptExtensions" above, #204). No role has a default extension.
   readonly promptExtensions?: PromptExtensions;
 
   // The credentials, as a VALUE rather than a path (#38). Sandbar names no

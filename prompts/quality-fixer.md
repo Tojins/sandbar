@@ -13,9 +13,9 @@ them by changing the code and committing, never by reporting. A cold reviewer
 then checks your commit against this report; gate-1 runs on the head you leave,
 and the verifier reads the branch after a green gate there.
 
-{{chunkBase}}{{commits}}{{diffStat}}{{codingStandards}}
+{{chunkBase}}{{commits}}{{diffStat}}{{standards}}
 
-{{projectStandards}}## Quality report
+## Quality report
 
 {{report}}
 

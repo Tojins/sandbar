@@ -31,7 +31,7 @@ polishing it.
 6. **Non-atomic orchestration.** Multi-step state updates that can leave
    partial state on failure; independent async work serialized for no reason.
 
-### Not violations
+## Leave alone
 
 - Pure taste or naming you can't tie to a rule above.
 - "Could be nicer" with no concrete simpler form in hand.

@@ -99,7 +99,7 @@ defaults.
 | `labels` | `needs-info`, `agent-stuck` | Rename the tracker labels. |
 | `copyToWorktree` | `[]` | Host-only files copied into each issue worktree. |
 | `claudeMdPath`, `contextMdPath`, `adrDir` | `CLAUDE.md`, `CONTEXT.md`, `docs/adr` | Anchor docs. |
-| `promptExtensions` | `{}` | Per-role `{ text }` or `{ path }` additions. |
+| `promptExtensions` | `{}` | Per-role `{ text }` or `{ path }` additions. `reviewerQuality` is a [standards file](#coding-standards). |
 | `coauthorTrailer` | from bot name/email | `Co-authored-by` line. |
 | `requiresSandbar` | none | Oldest driver version this config needs. |
 
@@ -250,12 +250,59 @@ Each round after the implementer reports done:
    dispute a rejection; an adjudicator rules.
 
 Red tests and rejections go back to the implementer. Quality findings never
-do. The implementer doesn't see the coding standards; the quality roles do.
+do. The implementer reads the same coding standards as guidance, from its own
+branch; the quality roles grade by them as the source branch has them (see
+[Coding standards](#coding-standards)).
 
 Role routing: the quality roles use `reviewerQuality*` and
 `promptExtensions.reviewerQuality`, defaulting to claude whatever the
 reviewer runs on; the verifier's code review uses `reviewer*` and
 `promptExtensions.reviewer`, and the adjudicator defaults to that routing.
+
+### Coding standards
+
+The quality roles grade by sandbar's built-in coding standards plus
+`promptExtensions.reviewerQuality`. A `{ path }` is read from
+`origin/<sourceBranch>` as last fetched at the start of each quality pass,
+never from the branch under review, so a branch that edits its standards file
+is graded by the landed version. A file the source branch lacks means
+built-in only. The quality roles get the text inline. The implementer still
+gets an `@path` into its own worktree.
+
+A standards file is split into **rule groups** by its `##` headings:
+
+- Each `## <name>` outside a code fence starts a group. `###` and deeper
+  headings stay inside it.
+- `## Leave alone` (any case) is reserved for what no group may raise. It goes
+  to every group, and several such sections are joined.
+- Text before the first `##` is a preamble shared by every group. Keep it
+  short: above 600 chars sandbar warns, because rules belong under a group.
+- A heading may end in a flag list. `## Tests {janitor}` exposes the group to
+  the idle janitor. Sandbar does not judge whether a flagged group's fixes are
+  safe; that is your call. An unknown flag is warned about and ignored.
+- A file with no `##` other than Leave alone is one group, as before.
+- The built-in standards are one group, never janitor-flagged.
+- Above 5 groups in total, the built-in one included, sandbar warns: each group
+  costs a quality lister's fixed overhead.
+
+Problems in the file are warnings in the run's log, once per version of the
+file, and never stop a run.
+
+```md
+Shared context for every group.
+
+## Tests {janitor}
+
+- Every new branch of logic has a test.
+
+## Naming
+
+- No abbreviations in exported names.
+
+## Leave alone
+
+- Formatting the linter already owns.
+```
 
 ### Budgets
 
