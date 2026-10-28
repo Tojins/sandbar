@@ -99,6 +99,17 @@ holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 - **Tokens**: literal-only scanning in `token-scan.ts` (#113); prompt prose in
   `prompts/*.md`, structure in `prompt.ts`/`prompts.ts`. No prompt embeds a
   diff body; ranges anchor at the seed ref (#40, #61).
+  **Prompt size** is a budget kept by hand, never enforced or truncated.
+  Fixed chars per role (rendered with empty data, #216): project anchor ~1.1k
+  (shared by every branch role; incl. 10 commit subjects and
+  `background-tasks.md`); implementer attempt slot 6.2k (2.3k of it
+  `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
+  configured); quality lister 5.0k, verify 5.3k, fixer 4.8k; verifier
+  white-box 4.1k; adjudicator 1.1k + the report; UI check 1.6k and partition
+  check 1.5k + the issue anchor; resolve 1.2k + anchor + paths/trace. The
+  issue anchor (median 5.6k, max 41k measured, #197) has sandbar's traces and
+  quoted reviewer prose dropped by `issue-anchor.ts`. Look before you add a
+  paragraph to any of these.
 - **Event record** `events.ts` is the source of truth (#70/#132); the UI
   (`run-state.ts`, `ui-server.ts`) is a pure projection of it.
 - **Timing/usage** are reports, never decision inputs, and absent ≠ 0 (#82):

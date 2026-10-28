@@ -24,6 +24,7 @@ import {
   finalizeOne as finalizeOneImpl,
   issueNumberOf,
 } from "./finalize.js";
+import { dropSandbarTraces } from "./issue-anchor.js";
 import type { IssueRef } from "./merger.js";
 import type { PushResult } from "./push-result.js";
 
@@ -1469,6 +1470,11 @@ describe("finalizeOne", () => {
     ]);
     expect(calls.comments[0]!.body).toContain("inspect the preserved clone");
     expect(calls.comments[0]!.body).toContain("read-only reviewer");
+    // The prose is fenced, so no role reads it back from the thread (#197).
+    const anchored = dropSandbarTraces(calls.comments[0]!.body);
+    expect(anchored).not.toContain("Reviewer changed git state");
+    expect(anchored).toContain("_(quoted review omitted.)_");
+    expect(anchored).toContain("Action:");
     expect(calls.labelEdits).toEqual([
       { n: 45, remove: [READY_FOR_AGENT], add: [AGENT_STUCK] },
     ]);

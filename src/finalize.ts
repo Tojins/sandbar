@@ -27,6 +27,9 @@
 // Human-facing parking comments use the same three-part contract throughout:
 // one stop line, the variable payload (with diagnostics collapsed), and one
 // final action line naming the branch and label transition (#170).
+// Diagnostics go in `<details>` and quoted reviewer prose between
+// QUOTED_OPEN/QUOTED_CLOSE, because those are the two shapes issue-anchor.ts
+// drops before any role reads the thread (#197).
 //
 // A SERVER-REFUSED PUSH is the other deliberate local park (#163), for every
 // terminal that publishes an issue branch. The shared classifier reads Git's
@@ -127,6 +130,15 @@ const exec = promisify(execFile);
 export const READY_FOR_AGENT_LABEL = "ready-for-agent";
 
 export const BOT_COMMENT_PREFIX = "**Sandbar:**";
+
+// Fences around reviewer prose a comment quotes (#197). GitHub does not render
+// them; `dropSandbarTraces` (issue-anchor.ts) cuts what they enclose, so no
+// agent reads an earlier round's verdict back as part of its specification.
+export const QUOTED_OPEN = "<!-- sandbar:quoted -->";
+export const QUOTED_CLOSE = "<!-- /sandbar:quoted -->";
+
+const quoted = (leadIn: string, prose: string): string =>
+  `${QUOTED_OPEN}\n\n${leadIn}\n\n${prose}\n\n${QUOTED_CLOSE}`;
 
 export const PUSH_REFUSED_COMMENT_TEMPLATE = (args: {
   readonly branch: string;
@@ -285,7 +297,7 @@ const needsHumanGateExplanation = (
 ): string =>
   (latestReviewerProse === null
     ? ""
-    : `Latest verifier report (an earlier round):\n\n${latestReviewerProse}\n\n`) +
+    : `${quoted("Latest verifier report (an earlier round):", latestReviewerProse)}\n\n`) +
   `<details><summary>Gate trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
@@ -487,8 +499,10 @@ const needsHumanReviewerHarnessExplanation = (
 ): string =>
   (latestReviewerProse === null
     ? ""
-    : `Earlier-round reviewer report (not a verdict on the current commits):\n\n` +
-      `${latestReviewerProse}\n\n`) +
+    : `${quoted(
+        "Earlier-round reviewer report (not a verdict on the current commits):",
+        latestReviewerProse,
+      )}\n\n`) +
   `<details><summary>Reviewer-harness trace</summary>\n\n` +
   `\`\`\`\n${failureTrace}\n\`\`\`\n\n</details>`;
 
@@ -508,7 +522,7 @@ export const NEEDS_HUMAN_REVIEWER_HARNESS_COMMENT_TEMPLATE = (
   handoffAction(branch, stuckLabel, readyLabel, "review the branch or repair the harness");
 
 const reviewBudgetExhaustedExplanation = (latestReviewerProse: string): string =>
-  `Latest verifier report:\n\n${latestReviewerProse}`;
+  quoted("Latest verifier report:", latestReviewerProse);
 
 export const REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE = (
   branch: string,
@@ -962,7 +976,7 @@ const readOnlyAgentWroteExplanation = (
   pushFailure?: string,
 ): string =>
   `Preserved clone: \`${reclaim.worktreePath}\`.\n\n` +
-  `Read-only ${input.actor} output:\n\n${input.latestReviewerProse}` +
+  quoted(`Read-only ${input.actor} output:`, input.latestReviewerProse) +
   (pushFailure === undefined
     ? ""
     : `\n\nPush failed: ${pushFailure}. Inspect the preserved clone.`);

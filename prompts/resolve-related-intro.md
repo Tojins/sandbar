@@ -5,4 +5,6 @@ source branch; others are queued behind this one. Read them to understand
 whether the conflict or failure is a real integration bug, stale work, or a case
 where two intents genuinely contradict and one should lose.
 
-{{blocks}}
+{{issues}}
+
+Read any of them with `gh issue view N --repo {{repoSlug}} --json title,body`.

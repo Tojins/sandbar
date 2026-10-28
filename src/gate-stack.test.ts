@@ -1993,8 +1993,9 @@ describe("pollUntilHealthy", () => {
       podmanSaid({ exitCode: 1 }),
       podmanSaid({}),
     ]);
-    // Three probes at the 500ms poll interval need a budget past 1000ms.
-    const c = probed({ readinessTimeoutMs: 1_200 });
+    // Three probes at the 500ms poll interval need a budget past 1000ms; one
+    // far past it, so a loaded gate run cannot spend it before the third.
+    const c = probed({ readinessTimeoutMs: 60_000 });
     expect((await pollUntilHealthy("c", c, probe)).verdict).toBe("healthy");
     expect(calls.filter((k) => k === "healthcheck").length).toBe(3);
     // `throwIfDead` between probes, exactly as bringup does it: a container
@@ -2045,9 +2046,17 @@ describe("pollUntilHealthy", () => {
       podmanSaid({ exitCode: 1 }),
       podmanSaid({ exitCode: 125 }),
     ]);
-    expect((await pollUntilHealthy("c", probed(), probe)).verdict).toBe(
-      "abandoned",
-    );
+    // A budget the poll cannot spend: with the default 600ms, a loaded gate run
+    // can pass the deadline in the 500ms sleep and never reach the error.
+    expect(
+      (
+        await pollUntilHealthy(
+          "c",
+          probed({ readinessTimeoutMs: 60_000 }),
+          probe,
+        )
+      ).verdict,
+    ).toBe("abandoned");
   });
 
   // Sandbar's OWN deadline expiring is not podman failing. Each probe is bounded

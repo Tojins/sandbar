@@ -332,6 +332,7 @@ import {
   runPreflightAfterReachability,
 } from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
+import { repoSlug } from "./repo-ref.js";
 import {
   ensureRepoCache,
   ensureSourceWorktree,
@@ -2708,6 +2709,7 @@ export async function run(
               agentStuckLabel: config.labels.agentStuck,
               ongoingIssues: pool.ongoingIssues(),
               projectAnchor,
+              repoSlug: repoSlug(repo),
               promptExtension: config.promptExtensions.merger,
               // #67: every resolve attempt's stdout and stderr, beside the
               // gate artefact it was prompted from. The writer answers with

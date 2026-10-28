@@ -71,6 +71,15 @@ const available = podmanTestsEnabled({
   image: BASE,
 });
 
+// Every podman build this file spawns runs without Buildah's layer cache. With
+// the cache on, each step scans EVERY image in the shared store, and an image
+// any other process removes mid-scan fails the build with "getting top layer
+// info: layer not known". No recipe content can opt out of that scan: a build
+// with private bytes failed 7 of 63 times beside a loop that built and removed
+// unrelated images, and 0 of 95 with BUILDAH_LAYERS=false, which the podman
+// client reads as its `--layers` default. Nothing here asserts on cache hits.
+process.env.BUILDAH_LAYERS = "false";
+
 const sha256 = async (path: string): Promise<string> =>
   createHash("sha256").update(await readFile(path)).digest("hex");
 
@@ -679,10 +688,9 @@ describe.runIf(available)("ensureImages against real podman", () => {
     600_000,
   );
 
-  // Reconciliation removes intermediate image records. Buildah may hand one
-  // of those records to a concurrent build as a cache hit before the removal,
-  // then fail that build with "layer not known" when it follows the hit. Keep
-  // this destructive case behind this file's concurrent build cases.
+  // Reconciliation removes image records — the removal that fails a cached
+  // build mid-scan (see BUILDAH_LAYERS above). Keep this destructive case
+  // behind this file's concurrent build cases.
   it(
     "reconciles untagged predecessors and stopped tags without touching another scope",
     async ({ expect, task, onTestFinished }) => {
@@ -705,15 +713,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
           `FROM ${BASE}\n` +
           "COPY --from=intermediate /payload /payload\n",
       );
-      // Gate runners share one remote Buildah cache. Give this destructive
-      // fixture process-private layer bytes so another runner's cleanup cannot
-      // remove a cache image after this build selected it but before it read
-      // the top layer ("layer not known"). The builds within this test still
-      // share their own cache, which is the lifecycle behavior under test.
-      await writeFile(
-        join(root, "package-lock.json"),
-        `${JSON.stringify({ scope: ownScope, v: 1 })}\n`,
-      );
+      await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
 
       // Reconciliation must reach same-tag predecessors and tags the current
       // config stopped naming while remaining blind to another scope's live
@@ -732,10 +732,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       await buildImage({ ...image, tag: sibling }, {
         scope: isolated.otherScope, root, capture: true,
       });
-      await writeFile(
-        join(root, "package-lock.json"),
-        `${JSON.stringify({ scope: ownScope, v: 99 })}\n`,
-      );
+      await writeFile(join(root, "package-lock.json"), '{"v":99}\n');
       await ensureImages([image], root, { scope: ownScope });
       const currentId = await imageId(TAG);
       expect(currentId).not.toBe(predecessorId);

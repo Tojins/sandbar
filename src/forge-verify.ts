@@ -732,6 +732,7 @@ export type VerifiedLandingOptions = {
   // Every issue in the cycle, for the resolve loop's cross-branch context.
   readonly cycleIssues: readonly IssueRef[];
   readonly projectAnchor: string;
+  readonly repoSlug: string;
   readonly promptExtension?: PromptExtension;
   readonly maxRounds?: number;
   // Where a forge-red round's resolve attempts are captured (#67). A FUNCTION
@@ -758,7 +759,7 @@ export function verifiedLandingOptionsFrom(
   sourceBranch: string,
 ): Omit<
   VerifiedLandingOptions,
-  "mergedIssues" | "cycleIssues" | "projectAnchor"
+  "mergedIssues" | "cycleIssues" | "projectAnchor" | "repoSlug"
 > {
   if (mode.integrationBranch === sourceBranch) {
     throw new SandbarError(
@@ -1031,6 +1032,7 @@ export async function runVerifiedLanding(
       deps.resolve,
       {
         projectAnchor: opts.projectAnchor,
+        repoSlug: opts.repoSlug,
         promptExtension: opts.promptExtension,
         preMergeSha: sha,
         ...(attemptSink ? { onAttempt: attemptSink } : {}),

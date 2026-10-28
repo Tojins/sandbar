@@ -1,7 +1,9 @@
 A `git merge --no-ff` of this branch into {{target}} is in progress and has hit
 a conflict.
 
-{{digest}}
+{{paths}}
+
+Run `git status` and `git diff` yourself to see the conflict markers.
 
 Resolve every conflict, `git add` the files, and `git commit --no-edit` to
 complete the merge. The orchestrator will then run the project's gate steps
