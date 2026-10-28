@@ -440,7 +440,7 @@ export const memberProseKey = (member: Pick<Member, "run" | "issue" | "transcrip
 
 // Injective, and a plain file name for any key.
 export const evidencePath = (key: string): string =>
-  `evidence/${key.replace(/[^\w.:-]/g, (char) => `%${char.charCodeAt(0).toString(16)}`)}.md`;
+  `evidence/${key.replace(/[^\w.:-]/g, (char) => `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`)}.md`;
 
 // `evidence/clusters.md`, and the capped raw prose of each cluster with any.
 export function evidenceFiles(evidence: Evidence): Map<string, string> {
