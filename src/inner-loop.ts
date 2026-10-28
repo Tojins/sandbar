@@ -1553,7 +1553,7 @@ async function runSandboxCycle(
 // invocation whose proxy is dead raises that death instead — infrastructure,
 // so HARD-ERROR and a fresh sandbox, where the agent's error would have
 // charged the role with a network that no longer exists.
-function withEgressCheckpoints(
+export function withEgressCheckpoints(
   sandbox: Sandbox,
   egress: EgressHandle,
   report: EgressReport,

@@ -31,6 +31,7 @@ import {
   mountSpec,
   parseHealthLog,
   parsePodLabel,
+  parsePodDnsServer,
   podCreateArgs,
   type PodmanProbe,
   pollUntilReady,
@@ -114,6 +115,21 @@ describe("mountSpec", () => {
   });
 });
 
+// #202: a reused pod's resolv.conf names its proxy; anything else means the
+// pod is recreated rather than adopted.
+describe("parsePodDnsServer", () => {
+  it.each([
+    ["one IPv4 resolver", '["10.89.0.2"]\n', "10.89.0.2"],
+    ["the public pair", '["1.1.1.1","8.8.8.8"]', null],
+    ["no resolver", "null", null],
+    ["an empty list", "[]", null],
+    ["a non-address", '["proxy"]', null],
+    ["garbage", "Error: no such pod", null],
+  ])("reads %s", (_, json, expected) => {
+    expect(parsePodDnsServer(json)).toBe(expected);
+  });
+});
+
 describe("podCreateArgs", () => {
   it("attaches the pod to the per-stack network and carries the resolvers", () => {
     const args = podCreateArgs({
@@ -134,6 +150,20 @@ describe("podCreateArgs", () => {
     expect(args).toContain("--dns");
     expect(args).toContain("1.1.1.1");
     expect(args).toContain("8.8.8.8");
+  });
+
+  // #202: behind an allowlist the stack's network is internal and its proxy is
+  // the pod's only resolver; the public ones would be unreachable anyway.
+  it("takes the egress proxy as its only resolver when given one", () => {
+    const args = podCreateArgs({
+      podName: "p",
+      networkName: "n",
+      dnsArgs: ["--dns", "10.89.0.2", "--dns-search", "."],
+    });
+    expect(args).toEqual([
+      "pod", "create", "--name", "p", "--network", "n",
+      "--dns", "10.89.0.2", "--dns-search", ".",
+    ]);
   });
 
   // Unconditional since #43: `tcp` readiness was the only thing that ever put

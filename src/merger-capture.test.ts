@@ -486,6 +486,30 @@ describe("resolve provider invocation (#74)", () => {
     ]);
   });
 
+  // #202: an allowlisted attempt sits on its own internal network behind its
+  // proxy, with Claude Code's nonessential traffic off.
+  it("puts an allowlisted resolve container on its egress network", () => {
+    const { argv, env } = buildResolveRunArgv({
+      container: "resolve-1",
+      cwd: "/worktree",
+      extraMounts: [],
+      image: "sandbox-image",
+      credentials: {},
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      egress: {
+        network: "sandbar-w1-net-resolve-1",
+        dnsArgs: ["--dns", "10.89.0.2", "--dns-search", "."],
+      },
+    });
+    const at = argv.indexOf("--network");
+    expect(argv.slice(at, at + 6)).toEqual([
+      "--network", "sandbar-w1-net-resolve-1", "--dns", "10.89.0.2", "--dns-search", ".",
+    ]);
+    expect(at).toBeLessThan(argv.indexOf("sandbox-image"));
+    expect(env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]).toBe("1");
+  });
+
   it("mounts the shared Codex credential read-write without putting it in env", () => {
     const { argv, env } = buildResolveRunArgv({
       container: "resolve-1",
