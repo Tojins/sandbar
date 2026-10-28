@@ -155,7 +155,6 @@ import { dirname } from "node:path";
 import {
   type ResolvedConfig,
   type RunConfig,
-  checkRebuildOnIsUsed,
   resolveConfig,
 } from "./config.js";
 import {
@@ -1085,18 +1084,12 @@ export async function run(
         repoDir: layout.repoDir,
         sourceBranch: config.sourceBranch,
         configEnv: config.env,
+        images: config.images,
+        sandboxImage: config.sandboxImage,
         hostChecks: (stack) => checkStackOnHost(stack, config.images, hostUid),
         onEvent: (event) => runRecord.emit(event).then(() => undefined),
       }),
     }));
-    // Asked of the inline stack at load; a stack file is first read here.
-    if (config.gateStack.kind === "file") {
-      checkRebuildOnIsUsed(
-        config.images,
-        stackSource.accepted().stack,
-        config.sandboxImage,
-      );
-    }
     const configuredCodexAuth = agentProviders.includes("codex")
       ? env("CODEX_AUTH_JSON")
       : undefined;

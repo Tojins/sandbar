@@ -1225,18 +1225,24 @@ const isNumber = (v: unknown): boolean => typeof v === "number";
 
 // A field's JSON shape, and how a message names it.
 type FieldShape = readonly [(v: unknown) => boolean, string];
-type FieldShapes = Readonly<Record<string, FieldShape>>;
+// Tables are keyed by the type's own keys, so a field added to `StackContainer`
+// or `GateStep` fails compilation until its shape is stated here.
+type RequiredKeys<T> = { [K in keyof T]-?: {} extends Pick<T, K> ? never : K }[keyof T];
+type FieldShapes<T, Required extends boolean> = Readonly<Record<
+  Required extends true ? RequiredKeys<T> & string : Exclude<keyof T, RequiredKeys<T>> & string,
+  FieldShape
+>>;
 
 // The JSON types `resolveGateStack` assumes. An inline stack is a program the
 // operator wrote and runs as it stands; a stack file is text read at gate time,
 // and a wrong type in it has to be a validation message the stack source can
 // complain with, not a TypeError out of the middle of a check. Unknown keys are
 // ignored, as they are inline.
-const CONTAINER_REQUIRED: FieldShapes = {
+const CONTAINER_REQUIRED: FieldShapes<StackContainer, true> = {
   name: [isString, "a string"],
   image: [isString, "a string"],
 };
-const CONTAINER_OPTIONAL: FieldShapes = {
+const CONTAINER_OPTIONAL: FieldShapes<StackContainer, false> = {
   lifecycle: [(v) => v === "issue" || v === "attempt", '"issue" or "attempt"'],
   env: [(v) => isRecord(v) && Object.values(v).every(isString), "an object of strings"],
   args: [isStrings, "a list of strings"],
@@ -1264,12 +1270,12 @@ const CONTAINER_OPTIONAL: FieldShapes = {
     "a list of argv lists",
   ],
 };
-const STEP_REQUIRED: FieldShapes = {
+const STEP_REQUIRED: FieldShapes<GateStep, true> = {
   name: [isString, "a string"],
   in: [isString, "a string"],
   command: [isStrings, "a list of strings"],
 };
-const STEP_OPTIONAL: FieldShapes = {
+const STEP_OPTIONAL: FieldShapes<GateStep, false> = {
   timeoutMs: [isNumber, "a number"],
 };
 
@@ -1277,8 +1283,8 @@ function checkFieldShapes(
   label: string,
   where: string,
   value: unknown,
-  required: FieldShapes,
-  optional: FieldShapes,
+  required: Readonly<Record<string, FieldShape>>,
+  optional: Readonly<Record<string, FieldShape>>,
 ): void {
   if (!isRecord(value)) {
     throw new SandbarError(`${label}: ${where} must be an object.`);
@@ -2257,11 +2263,6 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const env = resolveEnv(config.env);
   const gateStack = resolveStackSource(config.gateStack, env);
   const images = resolveImages(config.images, config.sandboxImage);
-  // A stack file is not read at load; the run asks this of the stack it
-  // starts on instead.
-  if (gateStack.kind === "inline") {
-    checkRebuildOnIsUsed(images, gateStack.stack, config.sandboxImage);
-  }
   // Resolved to absolute HERE, not left as the host wrote it (#34). Since every
   // git call now runs with `cwd` as its process cwd, a RELATIVE `cwd` is
   // double-rooted the moment a path derived from it is passed as an argument:

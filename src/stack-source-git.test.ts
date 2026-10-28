@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GateStackConfig, ResolvedGateStack } from "./config.js";
+import type { BuiltImage, GateStackConfig, ResolvedGateStack } from "./config.js";
 import { SandbarError } from "./errors.js";
 import type { EventInput } from "./events.js";
 import { openStackSource, readStackFrom, stackSpecToken } from "./stack-source.js";
@@ -31,6 +31,8 @@ const stackWith = (env: Record<string, string>): GateStackConfig => ({
 describe("openStackSource over a stack file", () => {
   let repo: string;
   let events: EventInput[];
+  let stackPath: string;
+  let images: BuiltImage[];
   let hostChecks: ReturnType<typeof vi.fn<(stack: ResolvedGateStack) => Promise<void>>>;
 
   // Commit `text` as gate/stack.json and move origin/main to it.
@@ -43,10 +45,12 @@ describe("openStackSource over a stack file", () => {
   };
   const open = () =>
     openStackSource({
-      source: { kind: "file", path: "gate/stack.json" },
+      source: { kind: "file", path: stackPath },
       repoDir: join(repo, ".git"),
       sourceBranch: "main",
       configEnv: {},
+      images,
+      sandboxImage: "localhost/sandbox",
       hostChecks,
       onEvent: (event) => {
         events.push(event);
@@ -59,6 +63,8 @@ describe("openStackSource over a stack file", () => {
     await git(repo, "init", "-q", "-b", "main");
     await git(repo, "remote", "add", "origin", repo);
     events = [];
+    stackPath = "gate/stack.json";
+    images = [];
     hostChecks = vi.fn(async () => undefined);
   });
 
@@ -113,6 +119,49 @@ describe("openStackSource over a stack file", () => {
     expect(hostChecks).toHaveBeenCalledOnce();
   });
 
+  it("refuses a path that is a directory in the tip", async () => {
+    await land("{}");
+    stackPath = "gate";
+    await expect(open()).rejects.toThrow(/is a tree, not a file/);
+  });
+
+  it("keeps the last accepted stack when the tip's file is removed, complaining once without a blob", async () => {
+    await land(JSON.stringify(stackWith({ TZ: "UTC" })));
+    const source = await open();
+    await git(repo, "rm", "-q", "gate/stack.json");
+    await git(repo, "commit", "-qm", "drop");
+    await git(repo, "fetch", "-q", "origin");
+
+    expect(dbEnv((await source.current()).stack)).toEqual({ TZ: "UTC" });
+    expect(dbEnv((await source.current()).stack)).toEqual({ TZ: "UTC" });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: "complaint",
+      message: expect.stringMatching(/^Gate stack: gate\/stack\.json at origin\/main was not accepted, so gates/),
+    });
+    expect(hostChecks).not.toHaveBeenCalled();
+  });
+
+  it("applies the rebuildOn rule to the first stack and to each new tip", async () => {
+    images = [{ tag: "localhost/app:gate", containerfile: "Containerfile", rebuildOn: ["lock"] }];
+    await land(JSON.stringify(stackWith({ TZ: "UTC" })));
+    const source = await open();
+
+    const other = stackWith({ TZ: "UTC" });
+    await land(JSON.stringify({
+      ...other,
+      containers: other.containers.map((c) => ({ ...c, image: c.image.replace("app:gate", "app:other") })),
+    }));
+    expect(dbEnv((await source.current()).stack)).toEqual({ TZ: "UTC" });
+    expect(events).toEqual([
+      { kind: "complaint", severity: "warning", message: expect.stringMatching(/nothing\s+runs that image/) },
+    ]);
+
+    images = [{ tag: "localhost/unrun", containerfile: "Containerfile", rebuildOn: ["lock"] }];
+    await expect(open()).rejects.toThrow(/nothing\s+runs that image/);
+  });
+
   it("keeps the last accepted stack for an invalid tip and complains once per blob", async () => {
     await land(JSON.stringify(stackWith({ TZ: "UTC" })));
     const source = await open();
@@ -154,6 +203,19 @@ describe("openStackSource over a stack file", () => {
 });
 
 describe("openStackSource over an inline stack", () => {
+  it("applies the rebuildOn rule to the inline stack", async () => {
+    await expect(openStackSource({
+      source: { kind: "inline", stack: { containers: [], steps: [] }, attachments: { env: {}, mounts: [] } },
+      repoDir: "/nonexistent",
+      sourceBranch: "main",
+      configEnv: {},
+      images: [{ tag: "localhost/unrun", containerfile: "Containerfile", rebuildOn: ["lock"] }],
+      sandboxImage: "localhost/sandbox",
+      hostChecks: async () => undefined,
+      onEvent: () => undefined,
+    })).rejects.toThrow(/nothing\s+runs that image/);
+  });
+
   it("hands back the config's stack without reading anything", async () => {
     const inline = {
       kind: "inline" as const,
@@ -165,6 +227,8 @@ describe("openStackSource over an inline stack", () => {
       repoDir: "/nonexistent",
       sourceBranch: "main",
       configEnv: {},
+      images: [],
+      sandboxImage: "localhost/sandbox",
       hostChecks: async () => {
         throw new Error("not asked");
       },

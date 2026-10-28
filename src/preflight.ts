@@ -385,11 +385,12 @@ export type StackHostState = {
 export async function stackHostState(
   stack: ResolvedGateStack,
   images: readonly BuiltImage[],
+  hasContainerRuntime: boolean,
 ): Promise<StackHostState> {
   return {
     // Without the runtime there is nothing to ask, and its own invariant
     // already says so.
-    missingImages: which(RUNTIME)
+    missingImages: hasContainerRuntime
       ? await missingPulledImages(pulledImagesOf(images, stack))
       : [],
     missingMountSources: await findMissingMountSources(
@@ -419,7 +420,7 @@ export async function checkStackOnHost(
   images: readonly BuiltImage[],
   hostUid: number,
 ): Promise<void> {
-  const failures = stackHostFailures(await stackHostState(stack, images));
+  const failures = stackHostFailures(await stackHostState(stack, images, which(RUNTIME)));
   if (failures.length > 0) throw new SandbarError(failures.join("\n\n"));
   await checkWorktreeImageUids(stack, hostUid);
 }
@@ -1725,7 +1726,7 @@ export async function runPreflightAfterReachability(
 
   const results = checkInvariants({
     ...state,
-    ...(await stackHostState(stackSource.accepted().stack, cfg.images)),
+    ...(await stackHostState(stackSource.accepted().stack, cfg.images, state.hasContainerRuntime)),
   });
   const failures = [
     ...results.flatMap((r) => (r.ok ? [] : [r.message])),

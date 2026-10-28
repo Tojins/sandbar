@@ -219,13 +219,13 @@ describe("gateStack file form (#186)", () => {
     })).toThrow(/takes no other keys/);
   });
 
-  // The stack the run starts on is not known at load, so the rule waits for it.
-  it("does not ask the rebuildOn-is-used rule of a stack it has not read", () => {
+  // The rule is the stack source's, asked of every stack it accepts.
+  it("does not ask the rebuildOn-is-used rule at load, of either stack form", () => {
     const images = [
       { tag: "localhost/sandbar:widgets", containerfile: "Containerfile" },
       { tag: "localhost/runner", containerfile: "Containerfile.runner", rebuildOn: ["package-lock.json"] },
     ];
-    expect(() => resolveConfig({ ...minimal, images })).toThrow(/nothing\s+runs that image/);
+    expect(() => resolveConfig({ ...minimal, images })).not.toThrow();
     const r = resolveConfig({ ...minimal, gateStack: { path: "gate/stack.json" }, images });
     expect(r.gateStack.kind).toBe("file");
   });
@@ -462,22 +462,6 @@ describe("resolveConfig: rebuildOn must reach something that runs the image", ()
       ],
     });
     expect(r.images[0]?.rebuildOn).toEqual(["package-lock.json"]);
-  });
-
-  it("still refuses rebuildOn on an image neither the sandbox nor a gate container runs", () => {
-    expect(() =>
-      resolveConfig({
-        ...minimal,
-        images: [
-          { tag: "localhost/sandbar:widgets", containerfile: "Containerfile" },
-          {
-            tag: "localhost/sandbar:unused",
-            containerfile: "Containerfile.unused",
-            rebuildOn: ["package-lock.json"],
-          },
-        ],
-      }),
-    ).toThrow(SandbarError);
   });
 });
 

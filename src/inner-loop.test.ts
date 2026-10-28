@@ -2215,7 +2215,10 @@ describe("runGate admission (#142)", () => {
     };
     const runGateOnBound = vi.fn(async () => gate);
     const ensure = vi.fn(async () => ({ runGate: runGateOnBound }));
-    const current = vi.fn(async () => ({ stack: tipStack }));
+    const laterStack = { containers: [], steps: [{ name: "later", in: "x", command: ["true"] }] };
+    const current = vi.fn()
+      .mockResolvedValueOnce({ stack: tipStack })
+      .mockResolvedValueOnce({ stack: laterStack });
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
     const ctx = {
       issue: { id: "186", title: "stack", branch: "sandbar/issue-186" },
@@ -2241,6 +2244,14 @@ describe("runGate admission (#142)", () => {
     expect(ensure).toHaveBeenCalledExactlyOnceWith(tipStack);
     expect(runGateOnBound).toHaveBeenCalledOnce();
     expect(result.gate.ok).toBe(true);
+
+    // The next gate-1 asks again and hands the bound stack the new spec.
+    await runGate({
+      kind: "run-gate",
+      attempt: 2,
+      quality: { verdict: "APPROVED", rounds: 0 },
+    }, ctx);
+    expect(ensure).toHaveBeenLastCalledWith(laterStack);
   });
 });
 

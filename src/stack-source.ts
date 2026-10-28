@@ -44,9 +44,11 @@ import { promisify } from "node:util";
 
 import { canonicalSha256 } from "./canonical-json.js";
 import {
+  type BuiltImage,
   type ResolvedGateStack,
   type ResolvedStack,
   type ResolvedStackSource,
+  checkRebuildOnIsUsed,
   resolveStackFile,
 } from "./config.js";
 import { SandbarError, isErrno, isExitCode } from "./errors.js";
@@ -70,6 +72,10 @@ export type StackSourceOptions = {
   readonly sourceBranch: string;
   // `config.env`, which a step container's env must not collide with (#166).
   readonly configEnv: Readonly<Record<string, string>>;
+  // What `checkRebuildOnIsUsed` asks of every stack this source accepts, the
+  // inline one included: a stack is not known until it is read.
+  readonly images: readonly BuiltImage[];
+  readonly sandboxImage: string;
   // The host checks a new tip has to pass. Throws a SandbarError saying what
   // fails.
   readonly hostChecks: (stack: ResolvedGateStack) => Promise<void>;
@@ -103,6 +109,8 @@ async function readStackBlob(
   if (blob === null) throw new SandbarError(`${label}: no such file.`);
   const git = (...args: string[]) =>
     exec("git", ["--git-dir", repoDir, "cat-file", ...args]);
+  // The type is asked apart from the read so a directory at the path is named
+  // as one rather than failing as a bad object.
   const type = (await git("-t", blob)).stdout.trim();
   if (type !== "blob") {
     throw new SandbarError(`${label}: is a ${type}, not a file.`);
@@ -116,13 +124,19 @@ export async function openStackSource(
   opts: StackSourceOptions,
 ): Promise<StackSource> {
   const { source } = opts;
+  const checkImages = (resolved: ResolvedStack) =>
+    checkRebuildOnIsUsed(opts.images, resolved.stack, opts.sandboxImage);
   if (source.kind === "inline") {
+    checkImages(source);
     return { current: async () => source, accepted: () => source };
   }
   const ref = `refs/remotes/origin/${opts.sourceBranch}`;
   const label = `${source.path} at origin/${opts.sourceBranch}`;
-  const read = (blob: string | null) =>
-    readStackBlob(opts.repoDir, blob, label, opts.configEnv);
+  const read = async (blob: string | null) => {
+    const resolved = await readStackBlob(opts.repoDir, blob, label, opts.configEnv);
+    checkImages(resolved);
+    return resolved;
+  };
 
   const startBlob = await tipBlob(opts.repoDir, ref, source.path);
   let accepted = { blob: startBlob, resolved: await read(startBlob) };
@@ -202,14 +216,16 @@ export async function bindStack(
   opts: Omit<StackOptions, "spec">,
   spec: ResolvedGateStack,
 ): Promise<BoundStack> {
-  let token = stackSpecToken(spec);
+  let token: string | null = stackSpecToken(spec);
   let stack = await startStack({ ...opts, spec });
   return {
     ensure: async (next) => {
       const nextToken = stackSpecToken(next);
       if (nextToken === token) return stack;
-      // `stop` is idempotent, so a start that throws below leaves a stopped
-      // stack under the old token, and the next `ensure` simply tries again.
+      // The old stack is stopped, so no token describes what is running until
+      // the new start completes: a start that throws leaves `null`, and every
+      // later `ensure` — whichever spec — starts again.
+      token = null;
       await stack.stop();
       stack = await startStack({ ...opts, spec: next });
       token = nextToken;

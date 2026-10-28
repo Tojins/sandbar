@@ -365,6 +365,28 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     ]);
   });
 
+  it("refuses with the stack source's message alone when the refresh succeeded", async () => {
+    const error = await runPreflight(
+      {
+        ...cfg(layoutAt(target)),
+        openStackSource: async () => {
+          throw new SandbarError("gate/stack.json at origin/main: no such file.");
+        },
+      } as Parameters<typeof runPreflight>[0],
+      {
+        lookup: async () => undefined,
+        connect: async () => undefined,
+        wait: async () => undefined,
+        now: () => 0,
+      },
+    ).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(PreflightError);
+    expect((error as PreflightError).failures).toEqual([
+      "gate/stack.json at origin/main: no such file.",
+    ]);
+  });
+
   it("abandons an origin-deleted closed branch through preflight and announces it", async () => {
     await installPassingPreflightShims();
     const origin = await giveTargetBareOrigin();
@@ -1122,7 +1144,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const present = join(target, "a.txt");
       const absent = join(target, "run", "podman.sock");
 
-      const state = await stackHostState(stackMounting([present, absent]), []);
+      const state = await stackHostState(stackMounting([present, absent]), [], true);
 
       expect(state.missingMountSources).toEqual([
         {
@@ -1139,7 +1161,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       const dangling = join(target, "dangling");
       await symlink(join(target, "nothing-here"), dangling);
 
-      const state = await stackHostState(stackMounting([dangling]), []);
+      const state = await stackHostState(stackMounting([dangling]), [], true);
 
       expect(state.missingMountSources).toEqual([
         {
@@ -1151,7 +1173,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     });
 
     it("reports nothing when the stack declares no absolute sources", async () => {
-      const state = await stackHostState(stackMounting(["fixtures/seed.sql"]), []);
+      const state = await stackHostState(stackMounting(["fixtures/seed.sql"]), [], true);
       expect(state.missingMountSources).toEqual([]);
     });
 
