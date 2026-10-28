@@ -19,6 +19,11 @@ sandbar_git_email: demanthomas+sandbar@gmail.com
 sandbar_operator_ssh_keys:
   - "{{ lookup('ansible.builtin.env', 'SANDBAR_OPERATOR_SSH_KEY') }}"
 
+# The Hetzner volume agents' database copies live on (#200). The role formats
+# it XFS with reflink only while it is blank and mounts it at sandbar_db_mount;
+# a rebuilt box with a fresh volume names the new one here.
+sandbar_db_volume: /dev/disk/by-id/scsi-0HC_Volume_107295065
+
 # One entry per daemon: its Linux user, consumer clone, Caddy route, reader port
 # and the directory copied into `~/installation/`. No driver pin — every
 # installation runs the one build of main this box made (roles/sandbar/tasks/
@@ -30,6 +35,12 @@ sandbar_installations:
     clone_url: https://github.com/Tojins/outdoor.git
     reader_port: 7332
     config_src: "{{ playbook_dir }}/installations/outdoor"
+    # Where prod pushes its nightly dump (Tojins/outdoor#781). The key is
+    # prod's public push key, generated on prod; the box holds nothing that
+    # can reach prod. `push_from` (prod's egress address) is optional.
+    dump_drop:
+      user: outdoor-dump
+      push_key: ""
   - user: outdoorpub
     project: outdoorpub
     subid_slot: 2

@@ -78,6 +78,34 @@
       one prefix to multiple readers, prevent readers binding concurrently, or
       let two rootless Podman sessions share one subordinate id range.
 
+# A dump drop is the one way prod reaches this box (#200): its account must be
+# nobody else's, and its key a bare public key, so the forced command and
+# `restrict` written in front of it are the only options it carries.
+- name: Validate every dump drop an installation declares
+  ansible.builtin.assert:
+    that:
+      - sandbar_db_volume | length > 0
+      - item.dump_drop is mapping
+      - (item.dump_drop.user | default('')) is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - (item.dump_drop.user | default('')) != 'root'
+      - item.dump_drop.user not in (sandbar_installations | map(attribute='user') | list)
+      - (sandbar_installations | selectattr('dump_drop', 'defined') | map(attribute='dump_drop.user')
+         | select('equalto', item.dump_drop.user) | list | length) == 1
+      - (item.dump_drop.push_key | default('')) is string
+      - "'\n' not in (item.dump_drop.push_key | default(''))"
+      - (item.dump_drop.push_key | default('')) == ''
+        or (item.dump_drop.push_key is match('^(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh[.]com) [A-Za-z0-9+/]+=*( [ -~]*)?$'))
+      - item.dump_drop.push_from is not defined
+        or (item.dump_drop.push_from | string) is match('^[0-9a-fA-F.:/,]+$')
+    fail_msg: >-
+      A dump_drop needs sandbar_db_volume declared, a safe non-root Linux user
+      that is no installation's user and no other drop's, a push_key that is
+      empty or one bare ed25519/ECDSA public key line with no options, and an
+      optional push_from of addresses or CIDRs only. Invalid entry: {{ item }}
+  loop: "{{ sandbar_installations | selectattr('dump_drop', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.user }}"
+
 - name: Refuse a run UI that would answer on a public interface
   ansible.builtin.assert:
     that:
@@ -130,6 +158,9 @@
 
 - name: Provide swap
   ansible.builtin.import_tasks: swap.yml
+
+- name: Provide the database volume and the dump-drop forced command
+  ansible.builtin.import_tasks: db-volume.yml
 
 - name: Restrict SSH
   ansible.builtin.import_tasks: ssh.yml

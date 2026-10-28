@@ -86,6 +86,20 @@ sandbar_operator_ssh_keys: []
 sandbar_node_major: 24
 sandbar_swap_size_mb: 4096
 
+# The database volume agents copy prod-scale databases on (#200): XFS with
+# reflink, so a per-issue copy is a clone rather than minutes of I/O. Empty
+# means the box has none and tasks/db-volume.yml does nothing; the device path
+# itself is inventory data. `nofail` lets the box boot without it; an option
+# change edits fstab and takes effect at the next boot, never as a remount.
+sandbar_db_volume: ""
+sandbar_db_mount: /srv/sandbar-db
+sandbar_db_label: sandbar-db
+sandbar_db_mount_opts: defaults,discard,nofail
+# The forced command of every dump-drop key, and where those accounts live.
+sandbar_dump_receive: /usr/local/libexec/sandbar-dump-receive
+sandbar_dump_home_root: /var/lib/sandbar-dump
+sandbar_rrsync: /usr/bin/rrsync
+
 # Each installation gets `base + its subid_slot * count`. The slot is inventory
 # data rather than the list index because the range is baked into every file of
 # the user's podman storage (tasks/user.yml); reordering the list must not move it.

@@ -36,7 +36,7 @@
 - name: Refresh the package index before installing from new repositories
   ansible.builtin.meta: flush_handlers
 
-- name: Install rootless podman, netavark, git, gh, Node and unattended-upgrades
+- name: Install rootless podman, netavark, git, gh, Node, unattended-upgrades, rsync and xfsprogs
   ansible.builtin.apt:
     name:
       - podman
@@ -52,6 +52,8 @@
       - nodejs
       - unattended-upgrades
       - openssh-server
+      - rsync
+      - xfsprogs
     state: present
 
 - name: Read the installed Node version

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Forced command for a dump-drop key (#200). Stage via rrsync, then publish
+# each completed file by one rename so a reader sees it whole and readable.
+#
+# The lock is this wrapper's own, held across the clear, the transfer and the
+# publish, so rrsync's lock is off: it would take the same directory. rrsync
+# reads SSH_ORIGINAL_COMMAND, and its exit status is the push's through
+# `set -e`; a failed push publishes nothing and leaves the last file in place.
+set -eu
+drop=$1
+exec 9<"$drop/incoming"
+flock -n 9 || { echo "sandbar-dump-receive: a push is already running" >&2; exit 1; }
+# A killed push's leftovers.
+find "$drop/incoming" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+{{ sandbar_rrsync }} -wo -no-del -no-lock "$drop/incoming"
+for f in "$drop"/incoming/*; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  chmod 0640 "$f"
+  mv -f "$f" "$drop/${f##*/}"
+  logger -t sandbar-dump "published $drop/${f##*/} ($(stat -c %s "$drop/${f##*/}") bytes)"
+done

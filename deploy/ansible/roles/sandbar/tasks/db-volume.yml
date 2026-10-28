@@ -1,0 +1,146 @@
+---
+# The database volume (#200): formatted only while it carries no signature at
+# all, mounted from fstab only while nothing is mounted there, and never
+# remounted -- running database copies live on it. A declared volume that is
+# missing, foreign or without reflink fails the play, so nothing below it lands
+# on the root disk and the cause is named in deploy.json.
+- name: Look for the declared database volume
+  ansible.builtin.stat:
+    path: "{{ sandbar_db_volume }}"
+    follow: false
+  register: sandbar_db_device
+  when: sandbar_db_volume | length > 0
+
+- name: Refuse a declared database volume that is not attached
+  ansible.builtin.assert:
+    that:
+      - sandbar_db_device.stat.exists
+    fail_msg: >-
+      volume {{ sandbar_db_volume }} is not attached; attach it or clear
+      sandbar_db_volume.
+  when: sandbar_db_volume | length > 0
+
+# blkid answers 2 for "no signature", the one state that formats. The probe
+# (-p) reads the device itself, so a bare partition table counts as in use.
+- name: Probe the database volume for any signature
+  ansible.builtin.command: blkid -p -o export {{ sandbar_db_volume }}
+  register: sandbar_db_probe
+  changed_when: false
+  failed_when: sandbar_db_probe.rc not in [0, 2]
+  when: sandbar_db_volume | length > 0
+
+- name: Refuse a database volume that holds anything but XFS
+  ansible.builtin.assert:
+    that:
+      - sandbar_db_probe.rc == 2
+        or ('TYPE=xfs' in sandbar_db_probe.stdout_lines
+            and (sandbar_db_probe.stdout_lines | select('match', '^PTTYPE=') | list | length) == 0)
+    fail_msg: >-
+      {{ sandbar_db_volume }} already carries a signature the role will not
+      reuse or overwrite: {{ sandbar_db_probe.stdout_lines | join(' ') }}.
+      Clear it by hand (wipefs) only if its contents are expendable.
+  when: sandbar_db_volume | length > 0
+
+# No -f: mkfs keeps its own refusal of a device that has a filesystem.
+- name: Format the blank database volume as XFS with reflink
+  ansible.builtin.command: mkfs.xfs -m reflink=1 -L {{ sandbar_db_label }} {{ sandbar_db_volume }}
+  changed_when: true
+  when:
+    - sandbar_db_volume | length > 0
+    - sandbar_db_probe.rc == 2
+
+# Root-owned, so an unmounted volume leaves nowhere an installation or dump
+# user could write on the root disk underneath it.
+- name: Create the database volume mount point
+  ansible.builtin.file:
+    path: "{{ sandbar_db_mount }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: sandbar_db_volume | length > 0
+
+# `present` writes fstab only; `mounted` would remount on an option change.
+- name: Record the database volume in fstab without mounting it
+  ansible.posix.mount:
+    src: "{{ sandbar_db_volume }}"
+    path: "{{ sandbar_db_mount }}"
+    fstype: xfs
+    opts: "{{ sandbar_db_mount_opts }}"
+    state: present
+  when: sandbar_db_volume | length > 0
+
+- name: Read what is mounted at the database volume mount point
+  ansible.builtin.command: findmnt --noheadings --output SOURCE,FSTYPE --mountpoint {{ sandbar_db_mount }}
+  register: sandbar_db_mounted
+  changed_when: false
+  failed_when: sandbar_db_mounted.rc not in [0, 1]
+  when: sandbar_db_volume | length > 0
+
+# The command, not the module: ansible.posix.mount would remount.
+- name: Mount the database volume when nothing is mounted there
+  ansible.builtin.command: mount {{ sandbar_db_mount }}  # noqa: command-instead-of-module
+  changed_when: true
+  when:
+    - sandbar_db_volume | length > 0
+    - sandbar_db_mounted.rc == 1
+
+- name: Read what the database volume mount point now holds
+  ansible.builtin.command: findmnt --noheadings --output SOURCE,FSTYPE --mountpoint {{ sandbar_db_mount }}
+  register: sandbar_db_mount_source
+  changed_when: false
+  when: sandbar_db_volume | length > 0
+
+- name: Read the database volume's filesystem geometry
+  ansible.builtin.command: xfs_info {{ sandbar_db_mount }}
+  register: sandbar_db_xfs_info
+  changed_when: false
+  failed_when: false
+  when: sandbar_db_volume | length > 0
+
+- name: Refuse a mount point that is not the declared volume as XFS with reflink
+  ansible.builtin.assert:
+    that:
+      - sandbar_db_mount_source.stdout.split() | length == 2
+      - sandbar_db_mount_source.stdout.split()[0]
+        == (sandbar_db_device.stat.lnk_source | default(sandbar_db_volume))
+      - sandbar_db_mount_source.stdout.split()[1] == 'xfs'
+      - sandbar_db_xfs_info.rc == 0
+      - "'reflink=1' in sandbar_db_xfs_info.stdout"
+    fail_msg: >-
+      {{ sandbar_db_mount }} holds '{{ sandbar_db_mount_source.stdout }}', not
+      {{ sandbar_db_volume }} as XFS with reflink=1
+      (xfs_info: {{ sandbar_db_xfs_info.stdout | default('') | regex_search('reflink=[0-9]') }}).
+      A per-issue database copy needs reflink, which only mkfs can set.
+  when: sandbar_db_volume | length > 0
+
+- name: Create the volume's per-installation and dump-drop trees
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ sandbar_db_mount }}"
+    - "{{ sandbar_db_mount }}/installations"
+    - "{{ sandbar_db_mount }}/drops"
+  when: sandbar_db_volume | length > 0
+
+- name: Create the directory the dump-drop forced command lives in
+  ansible.builtin.file:
+    path: "{{ sandbar_dump_receive | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: sandbar_db_volume | length > 0
+
+- name: Install the dump-drop forced command
+  ansible.builtin.template:
+    src: sandbar-dump-receive.j2
+    dest: "{{ sandbar_dump_receive }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: sandbar_db_volume | length > 0

@@ -18,7 +18,9 @@
 # migrate DOES do is restart the rootless pause process, which holds the uid
 # map it was created with until it dies; a permitted change (no store) still
 # needs that, or the next podman call would create the new store under the
-# old map (observed on the box on 2026-09-14).
+# old map (observed on the box on 2026-09-14). The installation's directory
+# on the database volume (#200) holds the same kind of files -- a container's
+# datadir is owned inside the range -- so it blocks a change the same way.
 - name: Read the installation user's recorded subordinate id ranges
   ansible.builtin.command: grep -h "^{{ sandbar_user }}:" /etc/subuid /etc/subgid
   register: sandbar_subid_lines
@@ -30,19 +32,31 @@
     path: "{{ sandbar_home }}/.local/share/containers/storage"
   register: sandbar_podman_storage
 
+- name: Check for the installation's files on the database volume
+  ansible.builtin.find:
+    paths: "{{ sandbar_db_mount }}/installations/{{ sandbar_user }}"
+    file_type: any
+    hidden: true
+    recurse: false
+  register: sandbar_db_files
+  when: sandbar_db_volume | length > 0
+
 - name: Refuse to move a subordinate id range under existing podman storage
   ansible.builtin.assert:
     that:
-      - not sandbar_podman_storage.stat.exists
+      - (not sandbar_podman_storage.stat.exists and (sandbar_db_files.matched | default(0)) == 0)
         or (sandbar_subid_lines.stdout_lines | reject('equalto', sandbar_user ~ ':' ~ sandbar_subid_start ~ ':' ~ sandbar_subid_count) | list | length) == 0
     fail_msg: >-
       {{ sandbar_user }}'s subordinate id range is recorded as
       {{ sandbar_subid_lines.stdout_lines | join(' and ') }} but subid_slot now
       asks for {{ sandbar_user }}:{{ sandbar_subid_start }}:{{ sandbar_subid_count }},
-      and {{ sandbar_home }}/.local/share/containers/storage still holds files
+      and {{ sandbar_home }}/.local/share/containers/storage or
+      {{ sandbar_db_mount }}/installations/{{ sandbar_user }} still holds files
       owned inside the recorded range. Either restore the entry's previous
-      subid_slot, or stop the installation's units and remove that storage
-      directory (its images are rebuilt at the next run) before changing it.
+      subid_slot, or stop the installation's units, remove that storage
+      directory (its images are rebuilt at the next run) and, as root,
+      {{ sandbar_db_mount }}/installations/{{ sandbar_user }}/* (rebuilt from
+      the next dump) before changing it.
 
 - name: Give the installation user disjoint subordinate id ranges
   ansible.builtin.lineinfile:

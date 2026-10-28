@@ -1,11 +1,14 @@
-// The per-installation systemd units, the convergence timer, the operator VPN
-// and the host-global role shipped by deploy/ansible (#149, #155, #146). Tests
+// The per-installation systemd units, the convergence timer, the operator VPN,
+// the database volume and dump drops, and the host-global role shipped by
+// deploy/ansible (#149, #155, #146, #200). Tests
 // parse the committed group_vars, render the units, the Caddy site, the index
 // page and the VPN server from the real entries, and inspect bounded Ansible
 // tasks so deleting one loop or include cannot be hidden by a later task with
 // similar text.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +38,11 @@ const caddyTasks = readFileSync(new URL("tasks/caddy.yml", ROLE), "utf8");
 const driverTasks = readFileSync(new URL("tasks/driver.yml", ROLE), "utf8");
 const pullTasks = readFileSync(new URL("tasks/pull.yml", ROLE), "utf8");
 const vpnTasks = readFileSync(new URL("tasks/vpn.yml", ROLE), "utf8");
+const packageTasks = readFileSync(new URL("tasks/packages.yml", ROLE), "utf8");
+const dbVolumeTasks = readFileSync(new URL("tasks/db-volume.yml", ROLE), "utf8");
+const dbInstallationTasks = readFileSync(new URL("tasks/db-installation.yml", ROLE), "utf8");
+const dumpReceiveTemplate = readFileSync(new URL("templates/sandbar-dump-receive.j2", ROLE), "utf8");
+const dumpKeysTemplate = readFileSync(new URL("templates/dump-authorized_keys.j2", ROLE), "utf8");
 const handlers = readFileSync(new URL("handlers/main.yml", ROLE), "utf8");
 const vpnServerTemplate = readFileSync(new URL("templates/openvpn-server.conf.j2", ROLE), "utf8");
 const vpnScriptTemplate = readFileSync(new URL("templates/sandbar-vpn.j2", ROLE), "utf8");
@@ -73,10 +81,16 @@ type InventoryInstallation = {
   readonly reader_port: number;
   readonly subid_slot: number;
   readonly config_src?: string;
+  readonly dump_drop?: {
+    readonly user: string;
+    readonly push_key: string;
+    readonly push_from?: string;
+  };
 };
 
 type GroupVars = {
   readonly sandbar_installations?: readonly InventoryInstallation[];
+  readonly sandbar_db_volume?: string;
 };
 
 function installationsFrom(source: string): readonly InventoryInstallation[] {
@@ -204,6 +218,7 @@ type VpnBox = {
 
 const vpnBoxes: string[] = [];
 const pullBoxes: string[] = [];
+const dumpBoxes: string[] = [];
 
 type PullStatus = {
   readonly converged: string;
@@ -397,6 +412,7 @@ async function renderedDeployText(status: PullStatus): Promise<string> {
 afterAll(() => {
   for (const root of vpnBoxes) rmSync(root, { recursive: true, force: true });
   for (const root of pullBoxes) rmSync(root, { recursive: true, force: true });
+  for (const root of dumpBoxes) rmSync(root, { recursive: true, force: true });
 });
 
 const installations = installationsFrom(groupVarsSource);
@@ -1469,5 +1485,303 @@ describe("committed installation data and configs", () => {
   ])("reads Codex auth only when a %s role routes to Codex", (_name, config) => {
     expect(config).toMatch(/Object\.entries\(routing\)[\s\S]*?field\.endsWith\("Agent"\) && provider === "codex"/);
     expect(config).toMatch(/\.\.\.\(usesCodex[\s\S]*?CODEX_AUTH_JSON:[\s\S]*?: \{\}\)/);
+  });
+});
+
+// Innermost-first `{% if name %}...{% endif %}` with Ansible's trim_blocks: the
+// newline right after a block tag is not output.
+const IF_BLOCK = /\{%\s*if ([A-Za-z_][A-Za-z0-9_]*)\s*%\}\n?((?:(?!\{%)[\s\S])*?)\{%\s*endif\s*%\}\n?/;
+
+function renderConditionals(template: string, vars: Readonly<Record<string, string>>): string {
+  let text = template;
+  for (let match = IF_BLOCK.exec(text); match !== null; match = IF_BLOCK.exec(text)) {
+    const value = vars[match[1]!];
+    if (value === undefined) throw new Error(`unrendered condition ${match[1]}`);
+    text = text.slice(0, match.index) + (value === "" ? "" : match[2]!) + text.slice(match.index + match[0].length);
+  }
+  return render(text, vars);
+}
+
+type DumpBox = {
+  readonly script: string;
+  readonly drop: string;
+  readonly incoming: string;
+  readonly bin: string;
+  readonly log: string;
+};
+
+// The rrsync stub writes a dot-temp file mode 0600 the way rsync does under
+// prod's umask, then renames it into place unless told to fail first.
+const RRSYNC_STUB = `#!/bin/sh
+set -eu
+echo "$*" >>"$DUMP_STUB_LOG"
+for dir in "$@"; do :; done
+printf '%s' "$DUMP_STUB_CONTENT" >"$dir/.outdoor-latest.sql.gz.Xq1"
+chmod 0600 "$dir/.outdoor-latest.sql.gz.Xq1"
+[ -z "\${DUMP_STUB_SYMLINK:-}" ] || ln -s /etc/passwd "$dir/evil"
+[ "\${DUMP_STUB_EXIT:-0}" -eq 0 ] || exit "$DUMP_STUB_EXIT"
+mv "$dir/.outdoor-latest.sql.gz.Xq1" "$dir/outdoor-latest.sql.gz"
+`;
+
+function dumpBox(): DumpBox {
+  const root = mkdtempSync(join(tmpdir(), "sandbar-dump-"));
+  dumpBoxes.push(root);
+  const box: DumpBox = {
+    script: join(root, "sandbar-dump-receive"),
+    drop: join(root, "drop"),
+    incoming: join(root, "drop/incoming"),
+    bin: join(root, "bin"),
+    log: join(root, "stub.log"),
+  };
+  for (const dir of [box.incoming, box.bin]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(box.bin, "rrsync"), RRSYNC_STUB, { mode: 0o755 });
+  writeFileSync(join(box.bin, "logger"), "#!/bin/sh\n", { mode: 0o755 });
+  writeFileSync(box.script, render(dumpReceiveTemplate, { sandbar_rrsync: join(box.bin, "rrsync") }));
+  return box;
+}
+
+function runDump(box: DumpBox, env: Readonly<Record<string, string>> = {}, prefix: readonly string[] = []) {
+  const [command, ...argv] = [...prefix, "/bin/sh", box.script, box.drop];
+  return spawnSync(command!, argv, {
+    encoding: "utf8",
+    env: {
+      PATH: `${box.bin}:${process.env["PATH"] ?? "/usr/bin:/bin"}`,
+      DUMP_STUB_LOG: box.log,
+      DUMP_STUB_CONTENT: "dump-of-today",
+      ...env,
+    },
+  });
+}
+
+const PUSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBk outdoor-prod-push";
+
+function renderDumpKeys(key: string, from = ""): string {
+  return renderConditionals(dumpKeysTemplate, {
+    sandbar_dump_push_key: key,
+    sandbar_dump_push_from: from,
+    sandbar_dump_receive: roleDefault("sandbar_dump_receive"),
+    sandbar_dump_drop: "/srv/sandbar-db/drops/outdoor",
+  });
+}
+
+describe("sandbar-dump-receive, the dump-drop forced command (#200)", () => {
+  it("is a shell program once the role has rendered it", () => {
+    const box = dumpBox();
+    expect(spawnSync("/bin/sh", ["-n", box.script]).status).toBe(0);
+  });
+
+  it("stages through write-only rrsync and publishes the file whole and group-readable", () => {
+    const box = dumpBox();
+    const result = runDump(box);
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(box.log, "utf8")).toBe(`-wo -no-del -no-lock ${box.incoming}\n`);
+    const published = join(box.drop, "outdoor-latest.sql.gz");
+    expect(readFileSync(published, "utf8")).toBe("dump-of-today");
+    expect(statSync(published).mode & 0o777).toBe(0o640);
+    expect(readdirSync(box.incoming)).toEqual([]);
+  });
+
+  it("leaves yesterday's dump byte-identical when a push fails, and exits with its status", () => {
+    const box = dumpBox();
+    const published = join(box.drop, "outdoor-latest.sql.gz");
+    writeFileSync(published, "dump-of-yesterday", { mode: 0o640 });
+    const result = runDump(box, { DUMP_STUB_EXIT: "23" });
+    expect(result.status).toBe(23);
+    expect(readFileSync(published, "utf8")).toBe("dump-of-yesterday");
+  });
+
+  it("clears a killed push's leftovers before the next one", () => {
+    const box = dumpBox();
+    expect(runDump(box, { DUMP_STUB_EXIT: "23" }).status).toBe(23);
+    mkdirSync(join(box.incoming, "stale-dir"));
+    writeFileSync(join(box.incoming, "stale"), "partial");
+    const result = runDump(box);
+    expect(result.status, result.stderr).toBe(0);
+    expect(readdirSync(box.incoming)).toEqual([]);
+    expect(readdirSync(box.drop).sort()).toEqual(["incoming", "outdoor-latest.sql.gz"]);
+  });
+
+  it("refuses a second push while one holds the staging lock, without transferring", () => {
+    const box = dumpBox();
+    const result = runDump(box, {}, ["flock", box.incoming]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("a push is already running");
+    expect(existsSync(box.log)).toBe(false);
+  });
+
+  it("never publishes a symlink", () => {
+    const box = dumpBox();
+    const result = runDump(box, { DUMP_STUB_SYMLINK: "1" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(box.drop, "evil"))).toBe(false);
+    expect(readFileSync(join(box.drop, "outdoor-latest.sql.gz"), "utf8")).toBe("dump-of-today");
+  });
+});
+
+describe("the database volume and dump drops (#200)", () => {
+  const groupVars = parse(groupVarsSource) as unknown as GroupVars;
+
+  it("formats only a volume with no signature, with reflink and without -f", () => {
+    const probe = taskNamed(dbVolumeTasks, "Probe the database volume for any signature");
+    expect(probe).toContain("blkid -p -o export {{ sandbar_db_volume }}");
+    expect(probe).toContain("failed_when: sandbar_db_probe.rc not in [0, 2]");
+    const refusal = taskNamed(dbVolumeTasks, "Refuse a database volume that holds anything but XFS");
+    expect(refusal).toContain("sandbar_db_probe.rc == 2");
+    expect(refusal).toContain("'TYPE=xfs' in sandbar_db_probe.stdout_lines");
+    expect(refusal).toContain("select('match', '^PTTYPE=')");
+    const mkfs = taskNamed(dbVolumeTasks, "Format the blank database volume as XFS with reflink");
+    expect(mkfs).toContain("mkfs.xfs -m reflink=1 -L {{ sandbar_db_label }} {{ sandbar_db_volume }}");
+    expect(mkfs).toContain("- sandbar_db_probe.rc == 2");
+    expect(mkfs).not.toMatch(/\s-f\b/);
+    expect(dbVolumeTasks.match(/command: mkfs/g)).toHaveLength(1);
+    expect(dbVolumeTasks.indexOf("Refuse a database volume that holds anything but XFS"))
+      .toBeLessThan(dbVolumeTasks.indexOf("Format the blank database volume as XFS with reflink"));
+  });
+
+  it("writes fstab without mounting, mounts only an empty mount point and never remounts", () => {
+    const fstab = taskNamed(dbVolumeTasks, "Record the database volume in fstab without mounting it");
+    expect(fstab).toContain("state: present");
+    expect(fstab).toContain("fstype: xfs");
+    expect(fstab).toContain('src: "{{ sandbar_db_volume }}"');
+    expect(String(roleDefaults["sandbar_db_mount_opts"]).split(",")).toEqual(
+      expect.arrayContaining(["discard", "nofail"]),
+    );
+    const mount = taskNamed(dbVolumeTasks, "Mount the database volume when nothing is mounted there");
+    expect(mount).toContain("mount {{ sandbar_db_mount }}");
+    expect(mount).toContain("- sandbar_db_mounted.rc == 1");
+    expect(dbVolumeTasks).not.toMatch(/state:\s*(mounted|remounted)/);
+  });
+
+  it("refuses a mount that is not the declared volume as XFS with reflink", () => {
+    const check = taskNamed(
+      dbVolumeTasks,
+      "Refuse a mount point that is not the declared volume as XFS with reflink",
+    );
+    expect(check).toContain("sandbar_db_device.stat.lnk_source");
+    expect(check).toContain("== 'xfs'");
+    expect(check).toContain("'reflink=1' in sandbar_db_xfs_info.stdout");
+    expect(taskNamed(dbVolumeTasks, "Refuse a declared database volume that is not attached"))
+      .toContain("is not attached; attach it or clear");
+  });
+
+  it("keeps every volume task conditional on a declared volume", () => {
+    const tasks = parse(dbVolumeTasks) as readonly { readonly name: string; readonly when?: unknown }[];
+    for (const task of tasks) {
+      expect([task.when].flat(), task.name).toContain("sandbar_db_volume | length > 0");
+    }
+    expect(roleDefaults["sandbar_db_volume"]).toBe("");
+    expect(taskNamed(accountTasks, "Provide the installation's share of the database volume"))
+      .toContain("when: sandbar_db_volume | length > 0");
+    expect(mainTasks.indexOf("import_tasks: swap.yml"))
+      .toBeLessThan(mainTasks.indexOf("import_tasks: db-volume.yml"));
+    expect(packageTasks).toMatch(/^\s+- rsync$/m);
+    expect(packageTasks).toMatch(/^\s+- xfsprogs$/m);
+  });
+
+  it("names the volume only in inventory, never in the role", () => {
+    expect(groupVars.sandbar_db_volume).toMatch(/^\/dev\/disk\/by-id\//);
+    for (const source of [roleDefaultsSource, mainTasks, dbVolumeTasks, dbInstallationTasks, userTasks]) {
+      expect(source).not.toContain(groupVars.sandbar_db_volume!);
+      expect(source).not.toContain("HC_Volume");
+    }
+  });
+
+  it("keeps the mount point and both trees root-owned, and each installation's dir its own", () => {
+    const point = taskNamed(dbVolumeTasks, "Create the database volume mount point");
+    expect(point).toContain("owner: root");
+    expect(point).toContain('mode: "0755"');
+    const trees = taskNamed(dbVolumeTasks, "Create the volume's per-installation and dump-drop trees");
+    expect(trees).toContain('- "{{ sandbar_db_mount }}/installations"');
+    expect(trees).toContain('- "{{ sandbar_db_mount }}/drops"');
+    expect(trees).toContain("owner: root");
+    expect(dbVolumeTasks.indexOf("Refuse a mount point that is not the declared volume"))
+      .toBeLessThan(dbVolumeTasks.indexOf("Create the volume's per-installation and dump-drop trees"));
+    const own = taskNamed(dbInstallationTasks, "Create the installation's directory on the database volume");
+    expect(own).toContain('path: "{{ sandbar_db_mount }}/installations/{{ sandbar_user }}"');
+    expect(own).toContain('owner: "{{ sandbar_user }}"');
+    expect(own).toContain('mode: "0700"');
+    expect(taskNamed(accountTasks, "Provide the installation's share of the database volume"))
+      .toContain('sandbar_dump_drop: "{{ sandbar_db_mount }}/drops/{{ sandbar_user }}"');
+  });
+
+  it("makes the dump user a system account that cannot change its own key", () => {
+    const account = taskNamed(dbInstallationTasks, "Create the dump-drop account");
+    expect(account).toContain("system: true");
+    expect(account).toContain("shell: /bin/sh");
+    expect(account).toContain('password: "*"');
+    expect(account).toContain("create_home: false");
+    const home = taskNamed(dbInstallationTasks, "Create the dump-drop account's root-owned home and key directory");
+    expect(home).toContain("owner: root");
+    expect(home).toContain("/.ssh");
+    const keys = taskNamed(
+      dbInstallationTasks,
+      "Authorize the prod push key, and nothing else, under the forced command",
+    );
+    expect(keys).toContain("src: dump-authorized_keys.j2");
+    expect(keys).toContain("owner: root");
+    expect(keys).toContain('mode: "0644"');
+    const drop = taskNamed(dbInstallationTasks, "Create the dump drop and its staging directory");
+    expect(drop).toContain('group: "{{ sandbar_user }}"');
+    expect(drop).toContain('mode: "02750"');
+    expect(drop).toContain('mode: "02700"');
+  });
+
+  it("authorizes exactly the push key, forced and restricted, or nothing", () => {
+    expect(renderDumpKeys(PUSH_KEY)).toBe(
+      `command="/usr/local/libexec/sandbar-dump-receive /srv/sandbar-db/drops/outdoor",restrict ${PUSH_KEY}\n`,
+    );
+    expect(renderDumpKeys(PUSH_KEY, "203.0.113.7")).toBe(
+      `command="/usr/local/libexec/sandbar-dump-receive /srv/sandbar-db/drops/outdoor",restrict,from="203.0.113.7" ${PUSH_KEY}\n`,
+    );
+    expect(renderDumpKeys("")).toBe("");
+  });
+
+  it("validates every dump drop before host tasks", () => {
+    const check = taskNamed(mainTasks, "Validate every dump drop an installation declares");
+    expect(check).toContain("- sandbar_db_volume | length > 0");
+    expect(check).toContain("item.dump_drop.user not in (sandbar_installations | map(attribute='user') | list)");
+    expect(check).toContain("(item.dump_drop.user | default('')) != 'root'");
+    expect(check).toContain("select('equalto', item.dump_drop.user) | list | length) == 1");
+    expect(check).toContain("'\\n' not in (item.dump_drop.push_key | default(''))");
+    expect(check).toContain("selectattr('dump_drop', 'defined')");
+    const keyPattern = check.match(/push_key is match\('([^']+)'\)/)?.[1];
+    if (keyPattern === undefined) throw new Error("dump drop validation lacks its key pattern");
+    const key = new RegExp(keyPattern);
+    expect(key.test(PUSH_KEY)).toBe(true);
+    expect(key.test("ecdsa-sha2-nistp256 AAAAE2VjZHNh= prod")).toBe(true);
+    expect(key.test(`command="/bin/sh",no-pty ${PUSH_KEY}`)).toBe(false);
+    expect(key.test(`restrict ${PUSH_KEY}`)).toBe(false);
+    expect(key.test("ssh-rsa AAAAB3NzaC1yc2E prod")).toBe(false);
+    const fromPattern = check.match(/push_from \| string\) is match\('([^']+)'\)/)?.[1];
+    if (fromPattern === undefined) throw new Error("dump drop validation lacks its push_from pattern");
+    const from = new RegExp(fromPattern);
+    expect(from.test("203.0.113.7,2001:db8::/32")).toBe(true);
+    expect(from.test('1.2.3.4",command="x')).toBe(false);
+    expect(mainTasks.indexOf("Validate every dump drop an installation declares"))
+      .toBeLessThan(mainTasks.indexOf("Install host packages"));
+  });
+
+  it("declares outdoor's drop in inventory with a bare key or none", () => {
+    const drops = installations.filter((row) => row.dump_drop !== undefined);
+    expect(drops.map((row) => [row.user, row.dump_drop!.user])).toEqual([["outdoor", "outdoor-dump"]]);
+    const users = new Set(installations.map((row) => row.user));
+    for (const row of drops) {
+      expect(row.dump_drop!.user).toMatch(SAFE_USER);
+      expect(users.has(row.dump_drop!.user)).toBe(false);
+      expect(row.dump_drop!.push_key === "" || /^(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)) /.test(row.dump_drop!.push_key))
+        .toBe(true);
+    }
+  });
+
+  it("refuses a subordinate id range change while the installation's volume dir holds files", () => {
+    const find = taskNamed(userTasks, "Check for the installation's files on the database volume");
+    expect(find).toContain('paths: "{{ sandbar_db_mount }}/installations/{{ sandbar_user }}"');
+    expect(find).toContain("file_type: any");
+    expect(find).toContain("hidden: true");
+    const refusal = taskNamed(userTasks, "Refuse to move a subordinate id range under existing podman storage");
+    expect(refusal).toContain("(sandbar_db_files.matched | default(0)) == 0");
+    expect(refusal).toContain("{{ sandbar_db_mount }}/installations/{{ sandbar_user }}");
+    expect(userTasks.indexOf("Check for the installation's files on the database volume"))
+      .toBeLessThan(userTasks.indexOf("Refuse to move a subordinate id range under existing podman storage"));
   });
 });

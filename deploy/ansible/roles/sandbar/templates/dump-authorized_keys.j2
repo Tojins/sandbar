@@ -1,0 +1,3 @@
+{% if sandbar_dump_push_key %}
+command="{{ sandbar_dump_receive }} {{ sandbar_dump_drop }}",restrict{% if sandbar_dump_push_from %},from="{{ sandbar_dump_push_from }}"{% endif %} {{ sandbar_dump_push_key }}
+{% endif %}

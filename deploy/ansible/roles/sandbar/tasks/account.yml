@@ -4,3 +4,9 @@
 
 - name: Configure rootless podman for the installation user
   ansible.builtin.include_tasks: podman.yml
+
+- name: Provide the installation's share of the database volume
+  ansible.builtin.include_tasks: db-installation.yml
+  vars:
+    sandbar_dump_drop: "{{ sandbar_db_mount }}/drops/{{ sandbar_user }}"
+  when: sandbar_db_volume | length > 0

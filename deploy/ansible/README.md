@@ -40,7 +40,7 @@ The target is Ubuntu 24.04 or 26.04, with Podman 5.7 / Buildah 1.42 or newer
 (agent tools use `ADD --checksum` and `COPY --from=<local image>`). Host-global
 work runs once: packages, Node 24, git, gh, AppArmor's podman/pasta
 interoperability rule, cgroup-v2
-delegation, swap, key-only SSH, unattended security upgrades without automatic
+delegation, swap, the database volume, key-only SSH, unattended security upgrades without automatic
 reboots, the operator VPN, Caddy, the driver build, and the convergence
 timer.
 
@@ -50,7 +50,10 @@ For every `sandbar_installations` entry the role provides:
   its own rootless Podman storage and `podman.socket`;
 - the consumer clone at `/home/<user>/<project>`;
 - `/home/<user>/installation` and the optional `config_src` copy;
-- `sandbar.service` and `sandbar-ui.service` in that user's systemd session.
+- `sandbar.service` and `sandbar-ui.service` in that user's systemd session;
+- when `sandbar_db_volume` is declared, its own directory on the database
+  volume and, with `dump_drop`, the account prod pushes its nightly dump to
+  (see *The database volume and dump drops*).
 
 Unit names can remain identical because systemd user sessions are separate.
 
@@ -260,6 +263,91 @@ sandbar_installations:
 ```
 
 `inventory.yml` holds only the host the bootstrap connects to.
+
+## The database volume and dump drops
+
+Agents work against per-issue copies of a consumer's prod-scale database
+(#200, #201). The root disk is ext4, so a copy there is a full copy; the
+database volume is XFS with reflink, so a copy is a clone. `sandbar_db_volume`
+in `group_vars/all.yml` names the attached block device by its
+`/dev/disk/by-id/` path; with it empty the role provides none of this.
+
+```text
+/srv/sandbar-db/                  root:root 0755  (mount point and fs root)
+  installations/                  root:root 0755
+    <user>/                       <user>:<user> 0700  base and copies (#201)
+  drops/                          root:root 0755
+    <user>/                       <dump user>:<user> 02750  published dumps
+      incoming/                   <dump user>:<user> 02700  staging
+```
+
+The role formats the volume (`mkfs.xfs -m reflink=1 -L sandbar-db`) only when
+`blkid -p` finds no signature at all. An existing XFS is kept, and must report
+`reflink=1`. Any other signature, a bare partition table included, fails the
+play with the probe output. A declared volume that is not attached fails the
+play too, so no subdirectory is created on the root disk in its place. The
+fstab entry (`defaults,discard,nofail`) is written with `state: present`, and
+`mount` runs only when nothing is mounted at `/srv/sandbar-db`: the role never
+remounts, so an option change in a later commit takes effect at the next boot.
+The mount point is root-owned, so when the volume is not mounted (`nofail`, a
+detached volume) no installation or dump user can write underneath it; the
+paths are simply missing and #201 fails loudly.
+
+Under rootless podman, host uid `<user>` is container root and container uid
+N is host `subid_start + N − 1` (MariaDB's 999 is 200998 for outdoor). So
+everything under `installations/<user>/` belongs to the user or its range:
+manage it with `podman unshare` (`cp -a --reflink=always`, `rm -rf`), never as
+the plain user. Those files are why the subid slot rule above also covers this
+directory: the role refuses a slot change while it is non-empty. To change the
+slot anyway, also remove `installations/<user>/*` as root; it is rebuilt from
+the next dump.
+
+### Dump drops
+
+An installation entry with `dump_drop` gets a system account that accepts
+dumps and nothing else:
+
+```yaml
+    dump_drop:
+      user: outdoor-dump
+      push_key: "ssh-ed25519 AAAA... outdoor-prod-push"
+      # push_from: 203.0.113.7
+```
+
+Its home `/var/lib/sandbar-dump/<dump user>`, `.ssh` and `authorized_keys` are
+root-owned, so the account cannot change its own key. `authorized_keys` holds
+exactly the one key, as
+`command="/usr/local/libexec/sandbar-dump-receive <drop>",restrict[,from="<push_from>"]`,
+or nothing. The forced command runs `rrsync -wo -no-del -no-lock` into
+`<drop>/incoming`, then publishes each completed file into `<drop>/` with mode
+`0640` and one rename, so a reader never sees a partial or unreadable file. A
+failed or killed push leaves the published file untouched; the next push clears
+its leftovers, and a push while another is running exits 1. The box keeps
+exactly one dump, `outdoor-latest.sql.gz` (Tojins/outdoor#781): prod pushes
+`rsync <file> sandbar-dump:outdoor-latest.sql.gz`.
+
+**The box holds no credentials for prod:** nothing on it can open a
+connection to prod; prod pushes. To add the prod key:
+
+1. On prod, as the vhost user:
+   `ssh-keygen -t ed25519 -f ~/.ssh/sandbar-dump -N '' -C outdoor-prod-push`.
+   The private key never leaves prod.
+2. Put the `.pub` line in `dump_drop.push_key` and land it. It is a public key,
+   so committing it exposes nothing; it is applied within one pull.
+3. Give prod the box's host key for `known_hosts` from
+   `/etc/ssh/ssh_host_ed25519_key.pub`, and a `Host sandbar-dump` alias with
+   `User outdoor-dump` and `IdentityFile ~/.ssh/sandbar-dump`.
+
+`push_from`, prod's egress address, is recommended but optional, because it
+names prod's address in this public repository. Rotate by changing the line;
+revoke by emptying it, which leaves an empty `authorized_keys`. Removing a
+`dump_drop` entry does not delete the account, so empty the key first.
+
+For #201: the dump is `/srv/sandbar-db/drops/<user>/outdoor-latest.sql.gz`,
+readable by `<user>` through its group and replaced only by rename (watch its
+mtime or inode). Read it on the host and stream it into the import container;
+do not bind-mount it, since its owner is outside the user namespace and would
+show as `nobody`. The disk floor watches `/srv/sandbar-db`.
 
 ## Bootstrapping a fresh box, and secrets
 

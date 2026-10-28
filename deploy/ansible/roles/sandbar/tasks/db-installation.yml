@@ -1,0 +1,69 @@
+---
+# One installation's share of the database volume (#200). Its directory is
+# owned by the installation user, which is container root under rootless
+# podman: everything a container writes below it is owned by that user or its
+# subordinate range, so `podman unshare` can always copy and remove it. The
+# role pre-chowns nothing to a subuid; it does not know the container's user.
+- name: Create the installation's directory on the database volume
+  ansible.builtin.file:
+    path: "{{ sandbar_db_mount }}/installations/{{ sandbar_user }}"
+    state: directory
+    owner: "{{ sandbar_user }}"
+    group: "{{ sandbar_user }}"
+    mode: "0700"
+
+# A separate system account rather than a key on the installation user, so an
+# escape from rrsync can write the drop and nothing else: no GH_TOKEN, no model
+# credentials. `*`, not `!`, so key login never depends on UsePAM; sshd runs the
+# forced command through the shell.
+- name: Create the dump-drop account
+  ansible.builtin.user:
+    name: "{{ sandbar_installation.dump_drop.user }}"
+    system: true
+    shell: /bin/sh
+    password: "*"
+    home: "{{ sandbar_dump_home_root }}/{{ sandbar_installation.dump_drop.user }}"
+    create_home: false
+    state: present
+  when: sandbar_installation.dump_drop is defined
+
+# Root-owned all the way down: the account cannot change its own keys.
+- name: Create the dump-drop account's root-owned home and key directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ sandbar_dump_home_root }}"
+    - "{{ sandbar_dump_home_root }}/{{ sandbar_installation.dump_drop.user }}"
+    - "{{ sandbar_dump_home_root }}/{{ sandbar_installation.dump_drop.user }}/.ssh"
+  when: sandbar_installation.dump_drop is defined
+
+# Written whole: exactly the prod push key, or nothing once it is revoked.
+- name: Authorize the prod push key, and nothing else, under the forced command
+  ansible.builtin.template:
+    src: dump-authorized_keys.j2
+    dest: "{{ sandbar_dump_home_root }}/{{ sandbar_installation.dump_drop.user }}/.ssh/authorized_keys"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    sandbar_dump_push_key: "{{ sandbar_installation.dump_drop.push_key | default('') }}"
+    sandbar_dump_push_from: "{{ sandbar_installation.dump_drop.push_from | default('') }}"
+  when: sandbar_installation.dump_drop is defined
+
+# Group is the installation user, so it reads what is published; setgid on
+# both, so a staged file already has that group when it is renamed out.
+- name: Create the dump drop and its staging directory
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ sandbar_installation.dump_drop.user }}"
+    group: "{{ sandbar_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ sandbar_dump_drop }}", mode: "02750" }
+    - { path: "{{ sandbar_dump_drop }}/incoming", mode: "02700" }
+  when: sandbar_installation.dump_drop is defined
