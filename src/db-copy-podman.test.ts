@@ -150,7 +150,7 @@ describe.runIf(available)("database copies against real podman", () => {
       },
     });
 
-    await expect(slot.align("implementer")).resolves.toMatchObject({ kind: "held", hook: "none" });
+    await expect(slot.align("implementer")).resolves.toMatchObject({ kind: "held" });
     expect(await query("SELECT id, email FROM app.t ORDER BY id")).toBe("1\ta@example.com\n2\tb@example.com\n");
     // The entrypoint found `mysql/` and initialised nothing.
     expect(await query("SHOW DATABASES LIKE 'initdb_marker'")).toBe("");

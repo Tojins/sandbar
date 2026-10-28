@@ -321,6 +321,22 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     ).resolves.toBeDefined();
   });
 
+  it("refuses a database volume that is not mounted (#201)", async () => {
+    const layout = layoutAt(target);
+    const root = join(target, "unmounted-db");
+    const error = await runPreflight(
+      {
+        ...cfg(layout),
+        databaseCopies: { dump: join(target, "app.sql.gz"), root, container: "db", database: "app" },
+      } as Parameters<typeof runPreflight>[0],
+      localReachability,
+    ).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(PreflightError);
+    expect((error as PreflightError).failures).toContainEqual(
+      expect.stringContaining("the database volume is not mounted"),
+    );
+  });
+
   it("removes a stale snapshots directory whole, even on a refused run (#203)", async () => {
     const layout = layoutAt(target);
     const stale = join(layout.snapshotsDir, "issue-7-seed");

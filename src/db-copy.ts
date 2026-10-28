@@ -223,8 +223,6 @@ export type DbCopyStatus =
   | {
       readonly kind: "held";
       readonly holder: DbCopyHolder;
-      readonly dumpDate: string;
-      readonly hook: "ok" | "failed" | "none";
     }
   | { readonly kind: "none" }
   | { readonly kind: "unavailable"; readonly reason: DbCopyUnavailable };
@@ -306,7 +304,7 @@ export function createDbCopySlot(opts: {
       return await fail("bringup-failed");
     }
     const durationMs = elapsed();
-    let hook: Held["status"]["hook"] = "none";
+    let hook: "ok" | "failed" | "none" = "none";
     let hookMs: number | undefined;
     if (opts.hooks.length > 0) {
       const hookElapsed = startTimer();
@@ -319,7 +317,7 @@ export function createDbCopySlot(opts: {
         "utf8",
       );
     }
-    const status = { kind: "held", holder, dumpDate: lease.dumpDate, hook } as const;
+    const status = { kind: "held", holder } as const;
     held = { lease, status };
     await opts.emit({
       kind: "db-copy", ...record, holder, action: "created", durationMs, base: lease.base, hook,

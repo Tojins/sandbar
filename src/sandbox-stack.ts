@@ -617,9 +617,9 @@ export async function startSandboxStack(
       throw new SandbarError(`sandbox stack: '${container.name}' is not a sibling of issue ${opts.issueId}`);
     }
     const name = sandboxDbCopyContainerNameFor(opts.scope, opts.issueId, target.name);
+    await deps.pause(nameOf(target));
     followers.get(nameOf(target))?.stop();
     followers.delete(nameOf(target));
-    await deps.pause(nameOf(target));
     await note(target, `'${target.name}' stopped; db copy ${label} started`);
     dbCopy = { name, target };
     created.push(name);
@@ -627,10 +627,23 @@ export async function startSandboxStack(
     try {
       await bringUp([container], { ...ctx, nameOf: () => name });
     } catch (err) {
-      if (!(err instanceof ContainerBringupError)) throw err;
-      await note(target, `db copy ${label} did not come up.\n\n${err.message}`);
-      await swapDbCopyOut();
-      return false;
+      if (err instanceof ContainerBringupError) {
+        await note(target, `db copy ${label} did not come up.\n\n${err.message}`);
+        await swapDbCopyOut();
+        return false;
+      }
+      // Any other failure still leaves the target stopped and the copy named:
+      // put both back, report a failed restore, and rethrow the original.
+      try {
+        await swapDbCopyOut();
+      } catch (secondary) {
+        await reportCleanupNotice(
+          "cleanup-failure",
+          "Sandbox stack could not restore the target after a database copy failed",
+          secondary,
+        );
+      }
+      throw err;
     }
     followers.set(name, deps.follow(name, logPathOf(target)));
     return true;

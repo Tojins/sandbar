@@ -703,7 +703,10 @@ describe("startSandboxStack (#44 D3)", () => {
     const COPY = `sandbar-${SCOPE}-sbx-44-db-dbcopy`;
     const DB = `sandbar-${SCOPE}-sbx-44-db`;
 
-    const timeline = (fail: (name: string) => ContainerBringupError | null = () => null) => {
+    const timeline = (
+      fail: (name: string) => Error | null = () => null,
+      over: Partial<SandboxStackDeps> = {},
+    ) => {
       const ops: string[] = [];
       const records: ContainerTeardown[] = [];
       const r = recorder();
@@ -734,6 +737,7 @@ describe("startSandboxStack (#44 D3)", () => {
         resume: async (name) => {
           ops.push(`start ${name}`);
         },
+        ...over,
       };
       const start = () => startSandboxStack(
         {
@@ -766,8 +770,8 @@ describe("startSandboxStack (#44 D3)", () => {
       t.ops.length = 0;
       expect(await copyOf(stack)).toBe(true);
       expect(t.ops).toEqual([
-        `unfollow ${DB}`,
         `stop ${DB}`,
+        `unfollow ${DB}`,
         `up ${COPY} --innodb-buffer-pool-size=1`,
         `follow ${COPY}`,
       ]);
@@ -805,6 +809,31 @@ describe("startSandboxStack (#44 D3)", () => {
       expect(await readFile(join(logDir, "db.log"), "utf8")).toContain("did not become ready");
       // The slot is free again.
       expect(await copyOf(stack)).toBe(false);
+    });
+
+    it("restores the target and the slot when the copy fails to come up for another reason, rethrowing that error", async () => {
+      const t = timeline((name) => name === COPY ? new Error("podman went away") : null);
+      const stack = await t.start();
+      t.ops.length = 0;
+      await expect(copyOf(stack)).rejects.toThrow("podman went away");
+      expect(t.ops.slice(-4)).toEqual([`measure ${COPY}`, `rm ${COPY}`, `start ${DB}`, `follow ${DB} since`]);
+      // Nothing is left to remove at stop beyond the siblings.
+      await stack.stop();
+      expect(t.ops.filter((op) => op === `rm ${COPY}`)).toHaveLength(1);
+    });
+
+    it("leaves the target followed when it cannot be stopped", async () => {
+      const t = timeline(() => null, {
+        pause: async () => {
+          throw new Error("stop failed");
+        },
+      });
+      const stack = await t.start();
+      t.ops.length = 0;
+      await expect(copyOf(stack)).rejects.toThrow("stop failed");
+      expect(t.ops).toEqual([]);
+      // No copy was recorded: the slot is free.
+      await expect(stack.swapDbCopyOut()).rejects.toThrow(/runs no database copy/);
     });
 
     it("removes a copy still in at stop, before the siblings", async () => {

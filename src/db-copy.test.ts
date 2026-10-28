@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { runCleanup, setCleanupReporter } from "./cleanup.js";
 
 import {
   type DatabaseCopiesSettings,
@@ -206,6 +207,15 @@ describe("dbVolumeRefusals", () => {
     ]);
   });
 
+  it("refuses a root that is a regular file", async () => {
+    const file = join(root, "a-file");
+    await writeFile(file, "");
+    expect(await dbVolumeRefusals({ ...cfg, root: file })).toEqual([
+      `config.databaseCopies.root ${file}: the database volume is not mounted ` +
+        "or has no reflink support (not a directory).",
+    ]);
+  });
+
   it.runIf(!tmpHasReflink)("refuses a filesystem without reflink, naming cp's reason", async () => {
     const [refusal] = await dbVolumeRefusals(cfg);
     expect(refusal).toMatch(/^config\.databaseCopies\.root .*: the database volume is not mounted or has no reflink support \(cp: failed to clone/);
@@ -266,7 +276,7 @@ describe("createDbCopySlot", () => {
   it("acquires for the implementer, keeps the copy across implementer actions, and drops it at handover", async () => {
     await publish();
     const { slot, ops, events } = slotWith();
-    const held = { kind: "held", holder: "implementer", dumpDate: "2026-10-28", hook: "ok" };
+    const held = { kind: "held", holder: "implementer" };
     expect(await slot.align("implementer")).toEqual(held);
     expect(await slot.align("implementer")).toEqual(held);
     expect(await readdir(layout.copies)).toEqual([dbCopyDirName(SCOPE, "221", 1)]);
@@ -295,7 +305,7 @@ describe("createDbCopySlot", () => {
     const { slot, ops } = slotWith({ hooks: 0 });
     await slot.align("implementer");
     expect(await slot.align("scenario-runner")).toEqual({
-      kind: "held", holder: "scenario-runner", dumpDate: "2026-10-28", hook: "none",
+      kind: "held", holder: "scenario-runner",
     });
     expect(ops).toEqual([expect.stringMatching(/^in .*-1 /), "out", expect.stringMatching(/^in .*-2 /)]);
   });
@@ -303,7 +313,7 @@ describe("createDbCopySlot", () => {
   it("keeps a copy whose hook failed, and says so", async () => {
     await publish();
     const { slot, events } = slotWith({ hookOk: false });
-    expect(await slot.align("implementer")).toMatchObject({ kind: "held", hook: "failed" });
+    expect(await slot.align("implementer")).toMatchObject({ kind: "held" });
     expect(events).toEqual([expect.objectContaining({ action: "created", hook: "failed" })]);
   });
 
@@ -333,5 +343,72 @@ describe("createDbCopySlot", () => {
     await expect(slot.align("implementer")).rejects.toThrow("podman went away");
     expect(await readdir(layout.copies)).toEqual([]);
     expect((await registry.acquire("221", target())).kind).toBe("ok");
+  });
+});
+
+describe("createDbCopySlot when the release fails too", () => {
+  it("reports the failed removal and rethrows the swap's own error", async () => {
+    const notices: Array<[string, string, unknown]> = [];
+    const restore = setCleanupReporter((kind, message, cause) => {
+      notices.push([kind, message, cause]);
+    });
+    try {
+      const releaseFailure = new Error("rm -rf failed");
+      const registry: DbCopies = {
+        cfg,
+        acquire: async () => ({
+          kind: "ok",
+          lease: {
+            hostPath: join(layout.copies, "stuck"),
+            base: BASE,
+            dumpDate: "2026-10-28",
+            release: async () => {
+              throw releaseFailure;
+            },
+          },
+        }),
+      };
+      const slot = createDbCopySlot({
+        copies: registry,
+        target: target(),
+        stack: {
+          swapDbCopyIn: async () => {
+            throw new Error("podman went away");
+          },
+          swapDbCopyOut: async () => {},
+        },
+        sandbox: { runHooks: async () => ({ ok: true, output: "" }) },
+        hooks: [],
+        issue: { id: "221", title: "Copies" },
+        logDir: root,
+        emit: async () => {},
+      });
+      await expect(slot.align("implementer")).rejects.toThrow("podman went away");
+      expect(notices).toEqual([[
+        "cleanup-failure",
+        expect.stringContaining(`${join(layout.copies, "stuck")} for issue 221 could not be removed`),
+        releaseFailure,
+      ]]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+// Last in the file: `runCleanup` latches the registry's drain for the module.
+describe("a lease and the cleanup registry", () => {
+  it("is removed by a cleanup run if never released, and forgotten once released", async () => {
+    await publish();
+    const registry = copies();
+    const unreleased = await registry.acquire("221", target());
+    const released = await registry.acquire("222", target());
+    if (unreleased.kind !== "ok" || released.kind !== "ok") throw new Error("expected copies");
+    await released.lease.release();
+    // A copy put back at the released path shows the registry no longer
+    // holds it: cleanup must leave it alone.
+    await mkdir(released.lease.hostPath);
+    await runCleanup();
+    await expect(readdir(unreleased.lease.hostPath)).rejects.toThrow(/ENOENT/);
+    expect(await readdir(released.lease.hostPath)).toEqual([]);
   });
 });
