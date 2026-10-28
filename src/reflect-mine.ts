@@ -312,6 +312,8 @@ export function parseTags(
   return { tags };
 }
 
+export const tagKey = (source: string, label: string): string => `tag:${source}:${label}`;
+
 // `tag:<source>:<label>` over the tagged findings, two or more issues each.
 export function tagClusters(tagged: readonly TaggedBucket[]): Cluster[] {
   return clusters(tagged.flatMap(({ bucket, tags }) => tags.map((tag) => {
@@ -320,7 +322,7 @@ export function tagClusters(tagged: readonly TaggedBucket[]): Cluster[] {
       throw new Error(`tag ${tag.id} names no finding of bucket ${bucket.source}`);
     }
     return {
-      key: `tag:${bucket.source}:${tag.label}`,
+      key: tagKey(bucket.source, tag.label),
       member: { run: finding.run, issue: finding.issue, transcript: finding.transcript },
     };
   })));

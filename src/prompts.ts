@@ -18,7 +18,7 @@
 // works whether running tests against `src/` or the built package from `dist/`.
 // It is shipped via the `files` array in package.json.
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +31,15 @@ const PROMPTS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts
  */
 export function loadTemplate(name: string): string {
   return readFileSync(join(PROMPTS_DIR, `${name}.md`), "utf8").trimEnd();
+}
+
+/**
+ * Every template file, by file name, as written. `npm run reflect` (#182)
+ * hands its synthesizer the prompts of the running build to propose edits to.
+ */
+export function readPromptFiles(): ReadonlyMap<string, string> {
+  return new Map(readdirSync(PROMPTS_DIR).filter((name) => name.endsWith(".md")).sort()
+    .map((name) => [name, readFileSync(join(PROMPTS_DIR, name), "utf8")]));
 }
 
 /**
