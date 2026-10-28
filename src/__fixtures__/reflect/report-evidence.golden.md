@@ -12,6 +12,7 @@ Typed keys seen in two or more issues.
 | key | issues | count |
 | --- | --- | --- |
 | `gate:gate-1:smoke` | 2 | 3 |
+| `park:NEEDS-INFO:-` | 2 | 2 |
 | `fail:implementer:FAILED` | 2 | 2 |
 
 ### `gate:gate-1:smoke`
@@ -19,6 +20,11 @@ Typed keys seen in two or more issues.
 - acme/app#7 attempt 1: `/srv/app/.sandbar/logs/run-1/issue-7/`
 - acme/app#7 attempt 2: `/srv/app/.sandbar/logs/run-1/issue-7/`
 - acme/app#9 attempt 1: `/srv/app/.sandbar/logs/run-2/issue-9/`
+
+### `park:NEEDS-INFO:-`
+
+- acme/app#8: `/srv/app/.sandbar/logs/run-1/issue-8/`
+- acme/app#9: `/srv/app/.sandbar/logs/run-2/issue-9/`
 
 ### `fail:implementer:FAILED`
 

@@ -33,6 +33,15 @@ const mining: Mining = {
       ],
     },
     {
+      key: "park:NEEDS-INFO:-",
+      issues: [8, 9],
+      count: 2,
+      members: [
+        { run: "run-1", issue: 8 },
+        { run: "run-2", issue: 9 },
+      ],
+    },
+    {
       key: "fail:implementer:FAILED",
       issues: [7, 8],
       count: 2,

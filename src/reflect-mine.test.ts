@@ -39,6 +39,9 @@ const reviewRound = (issue: number, attempt: number, correctness: string): Stats
 const fixer = (issue: number, attempt: number, commits: readonly string[]): StatsEvent =>
   ev({ kind: "quality-pass", issue, attempt, round: attempt, ...agent, result: "completed", commits,
     discarded: {}, transcript: `quality-${attempt}.log` });
+const lister = (issue: number, attempt: number): StatsEvent =>
+  ev({ kind: "quality-review", issue, attempt, round: attempt, invocation: 1, mode: "list", ...agent,
+    result: "completed", verdict: "CHANGES-REQUESTED", transcript: `lister-${attempt}.log` });
 const adjudication = (issue: number, ruling: string): StatsEvent =>
   ev({ kind: "adjudication", issue, pass: "correctness", attempt: 1, round: 1, head: "h", ruling, ...agent,
     transcript: "adjudicator-1.log" });
@@ -119,9 +122,15 @@ describe("mine: structured clusters (#182 Decision 2)", () => {
       admitted(2), adjudication(2, "OVERRULED"),
       admitted(3), adjudication(3, "UPHELD"),
     ]), RULES);
-    expect(structured.map((cluster) => [cluster.key, cluster.issues])).toEqual([
-      ["overruled:correctness", [1, 2]],
-    ]);
+    expect(structured).toEqual([{
+      key: "overruled:correctness",
+      issues: [1, 2],
+      count: 2,
+      members: [
+        { run: "run-1", issue: 1, attempt: 1, transcript: "adjudicator-1.log" },
+        { run: "run-1", issue: 2, attempt: 1, transcript: "adjudicator-1.log" },
+      ],
+    }]);
   });
 
   it("orders clusters by issues, then members, then key", () => {
@@ -176,6 +185,15 @@ describe("mine: buckets", () => {
         findings: [{ id: "F1", run: "run-1", issue: 1, transcript: "adjudicator-1.log", prose: "the reviewer misread" }],
       },
     ]);
+  });
+
+  it("counts the issues a lister or a fixer ran on, once each", () => {
+    const { buckets } = mine(reportOf([
+      admitted(1), lister(1, 1), fixer(1, 1, []),
+      admitted(2), lister(2, 1),
+      admitted(3), fixer(3, 1, []),
+    ]), RULES);
+    expect(buckets[0]?.vocabulary).toMatchObject({ kind: "rules", listerIssues: 3 });
   });
 
   it("keeps the rule bucket when it is empty and drops empty open ones", () => {
