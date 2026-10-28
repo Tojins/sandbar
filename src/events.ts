@@ -361,17 +361,6 @@ export type ChunkLandingEvent = {
   readonly members: readonly number[];
 };
 
-export type JanitorRunEvent = {
-  readonly task: string;
-  readonly branch: string;
-  readonly outcome: JanitorOutcome;
-  readonly cause?: string;
-  readonly commits?: number;
-  readonly pullRequest?: number;
-  readonly scope: readonly string[];
-  readonly durationMs: number;
-};
-
 export type EventInput =
   | {
       readonly kind: "run-start";
@@ -427,7 +416,17 @@ export type EventInput =
       readonly runsToday: number;
       readonly runsPerDay: number;
     }
-  | ({ readonly kind: "janitor-run" } & JanitorRunEvent)
+  | {
+      readonly kind: "janitor-run";
+      readonly task: string;
+      readonly branch: string;
+      readonly outcome: JanitorOutcome;
+      readonly cause?: string;
+      readonly commits?: number;
+      readonly pullRequest?: number;
+      readonly scope: readonly string[];
+      readonly durationMs: number;
+    }
   | DbBaseEvent
   | DbCopyEvent
   | {

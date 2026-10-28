@@ -15,11 +15,12 @@
 //      cache, a driver commit under the bot identity that sits in the run's
 //      base, so the roles see only this run's delta. A conflict holds the
 //      task and says so on its pull request, once per hold key;
-//   4. the previous run's clone is reclaimed (one that must be preserved
+//   4. the scope is picked from the source tip's blobs under the task's
+//      pathspecs; with none, the run is `no-change` and spends nothing;
+//   5. the previous run's clone is reclaimed (one that must be preserved
 //      holds the task, `clone-preserved`) and the local branch set to the
-//      base, which the inner loop is handed as a sha;
-//   5. the scope is picked from the source tip's blobs under the task's
-//      pathspecs, and the rendered task anchor is the loop's spec.
+//      base, which the inner loop is handed as a sha, with the rendered task
+//      anchor as its spec.
 // A hold is a `notice` and the run ends there, with no `janitor-run`.
 //
 // Only a DONE run reaches origin. Right before its push the runner checks the
@@ -158,8 +159,7 @@ function latestOf(listed: unknown): LatestPullRequest | null {
 // ---------------------------------------------------------------------------
 
 export type RollingRefresh =
-  | { readonly kind: "contained"; readonly sha: string }
-  | { readonly kind: "merged"; readonly sha: string }
+  | { readonly kind: "clean"; readonly sha: string }
   | { readonly kind: "conflict" };
 
 // The rolling branch brought level with the source: as it is when it already
@@ -174,7 +174,7 @@ export async function refreshRollingBranch(args: {
   readonly botEmail: string;
 }): Promise<RollingRefresh> {
   const { repoDir, branchTip, sourceTip } = args;
-  if (await isAncestor(repoDir, sourceTip, branchTip)) return { kind: "contained", sha: branchTip };
+  if (await isAncestor(repoDir, sourceTip, branchTip)) return { kind: "clean", sha: branchTip };
   let tree: string;
   try {
     tree = (await gitStdout(repoDir, ["merge-tree", "--write-tree", branchTip, sourceTip])).split("\n")[0]!;
@@ -195,7 +195,7 @@ export async function refreshRollingBranch(args: {
       GIT_COMMITTER_EMAIL: args.botEmail,
     },
   });
-  return { kind: "merged", sha: stdout.trim() };
+  return { kind: "clean", sha: stdout.trim() };
 }
 
 // Every blob at `tip` the pathspecs match, with its size. `ls-tree` takes no
@@ -346,6 +346,26 @@ export async function runJanitor(deps: JanitorRunDeps): Promise<JanitorOutcome |
     base = refreshed.sha;
   }
 
+  const candidates = await listScopeCandidates(repoDir, sourceTip, task.paths);
+  const scope = pickScope({
+    files: candidates,
+    unit: task.unit,
+    visits: ledger.visits,
+    budgetChars: Math.floor(deps.maxContextChars / 4),
+  });
+  if (scope.length === 0) {
+    await deps.onEvent({
+      kind: "janitor-run",
+      task: task.name,
+      branch,
+      outcome: "no-change",
+      cause: "nothing in scope",
+      scope,
+      durationMs: timer(),
+    });
+    return "no-change";
+  }
+
   const clone = worktreePathFor(layout.worktreesDir, branch);
   const reclaim = await reclaimIssueClone(repoDir, clone, branch);
   if (reclaim.kind === "preserved") {
@@ -357,14 +377,6 @@ export async function runJanitor(deps: JanitorRunDeps): Promise<JanitorOutcome |
     return await hold("clone-preserved", `its clone at ${clone} is preserved`);
   }
   await exec("git", ["update-ref", `refs/heads/${branch}`, base], { cwd: repoDir });
-
-  const candidates = await listScopeCandidates(repoDir, sourceTip, task.paths);
-  const scope = pickScope({
-    files: candidates,
-    unit: task.unit,
-    visits: ledger.visits,
-    budgetChars: Math.floor(deps.maxContextChars / 4),
-  });
   await deps.onEvent({
     kind: "janitor-start",
     task: task.name,

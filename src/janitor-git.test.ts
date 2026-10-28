@@ -79,7 +79,7 @@ describe("the janitor's git (#205)", () => {
       const sourceTip = await commit("main", { "README.md": "moved\n" });
       await fetchCache();
       const refreshed = await refresh(branchTip, sourceTip);
-      expect(refreshed.kind).toBe("merged");
+      expect(refreshed.kind).toBe("clean");
       const sha = (refreshed as { sha: string }).sha;
       expect(await git(cache, "log", "-1", "--format=%P|%an <%ae>|%cn|%s", sha))
         .toBe(`${branchTip} ${sourceTip}|sandbar <bot@example.com>|sandbar|Merge main into sandbar/janitor-tidy`);
@@ -92,7 +92,7 @@ describe("the janitor's git (#205)", () => {
       const branchTip = await commit("sandbar/janitor-tidy", { "src/a.ts": "tidied\n" });
       await fetchCache();
       const sourceTip = await git(cache, "rev-parse", "refs/remotes/origin/main");
-      expect(await refresh(branchTip, sourceTip)).toEqual({ kind: "contained", sha: branchTip });
+      expect(await refresh(branchTip, sourceTip)).toEqual({ kind: "clean", sha: branchTip });
     });
 
     it("reports a conflict and writes no commit", async () => {
@@ -188,8 +188,8 @@ describe("the janitor's git (#205)", () => {
         return terminal;
       }) as typeof runInnerLoop;
     const DONE: Terminal = { type: "DONE", commits: [], specGaps: [] };
-    const run = (runLoop: typeof runInnerLoop, signal = new AbortController().signal) => runJanitor({
-      task,
+    const run = (runLoop: typeof runInnerLoop, runTask = task) => runJanitor({
+      task: runTask,
       layout,
       sourceBranch: "main",
       ...BOT,
@@ -202,7 +202,7 @@ describe("the janitor's git (#205)", () => {
       onEvent: async (event) => {
         events.push(event);
       },
-      signal,
+      signal: new AbortController().signal,
       now: () => new Date("2026-10-28T12:00:00.000Z"),
       runLoop,
     });
@@ -338,6 +338,17 @@ describe("the janitor's git (#205)", () => {
       expect(events.some((e) => e.kind === "janitor-run" || e.kind === "janitor-start")).toBe(false);
       const ledger = JSON.parse(await readFile(janitorLedgerPath(layout.stateDir, "tidy"), "utf8"));
       expect(ledger.hold.kind).toBe("conflict");
+    });
+
+    it("spends nothing when the pathspecs match no file", async () => {
+      let ran = false;
+      expect(await run((async () => {
+        ran = true;
+        return DONE;
+      }) as typeof runInnerLoop, { ...task, paths: ["no-such-dir"] })).toBe("no-change");
+      expect(ran).toBe(false);
+      expect(ended()).toMatchObject({ outcome: "no-change", cause: "nothing in scope", scope: [] });
+      expect(events.some((e) => e.kind === "janitor-start")).toBe(false);
     });
 
     it("holds a task whose prompt file the source tip lacks", async () => {
