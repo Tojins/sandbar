@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { configDigest } from "./config-digest.js";
-import { resolveGateStack, resolveImages, type BuiltImage, type GateStackConfig } from "./config.js";
+import {
+  resolveGateStack,
+  resolveImages,
+  sandboxGateAttachmentsOf,
+  type BuiltImage,
+  type GateStackConfig,
+} from "./config.js";
 
 // Each case evaluates a stack.json-shaped document the way an installation
 // config does — `gateStack: { containers, steps }`, `images: [...stack.images,
@@ -38,14 +44,29 @@ const base: StackJson = {
   steps: [{ name: "phpunit", in: "php", command: ["vendor/bin/phpunit"] }],
 };
 
-function evaluate(stack: StackJson) {
-  const gateStack = resolveGateStack({ containers: stack.containers, steps: stack.steps });
-  const images = resolveImages(
+function imagesOf(stack: StackJson) {
+  return resolveImages(
     [...stack.images, { tag: SANDBOX, containerfile: "Containerfile.sandbar" }],
     SANDBOX,
   );
-  return { gateStack, images };
 }
+
+function evaluate(stack: StackJson) {
+  const resolved = resolveGateStack({ containers: stack.containers, steps: stack.steps });
+  return {
+    gateStack: {
+      kind: "inline" as const,
+      stack: resolved,
+      attachments: sandboxGateAttachmentsOf(resolved, {}),
+    },
+    images: imagesOf(stack),
+  };
+}
+
+// The installation form since #186: the stack is read at gate time, so only
+// the path is the daemon's.
+const digestOfFile = (stack: StackJson, path = "gate/stack.json"): string =>
+  configDigest({ gateStack: { kind: "file", path }, images: imagesOf(stack) });
 
 const digestOf = (stack: StackJson): string => configDigest(evaluate(stack));
 
@@ -150,7 +171,28 @@ describe("configDigest", () => {
 
   it("refuses a config member it cannot serialise", () => {
     const { gateStack, images } = evaluate(base);
-    const withFunction = { gateStack: { ...gateStack, extra: () => 1 }, images };
+    const withFunction = {
+      gateStack: { ...gateStack, stack: { ...gateStack.stack, extra: () => 1 } },
+      images,
+    };
     expect(() => configDigest(withFunction as never)).toThrow(/cannot serialise/);
+  });
+
+  describe("for a stack file (#186)", () => {
+    it.each([
+      ["an added container", addedContainer],
+      ["a new pulled tag", newPulledTag],
+    ])("is unchanged by %s in the file", (_label, stack) => {
+      expect(digestOfFile(stack)).toBe(digestOfFile(base));
+    });
+
+    it("changes for a renamed image tag, which config.images carries", () => {
+      expect(digestOfFile(renamedTag)).not.toBe(digestOfFile(base));
+    });
+
+    it("changes for another path, and differs from the same stack inline", () => {
+      expect(digestOfFile(base, "gate/other.json")).not.toBe(digestOfFile(base));
+      expect(digestOfFile(base)).not.toBe(digestOf(base));
+    });
   });
 });

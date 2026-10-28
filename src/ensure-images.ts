@@ -103,13 +103,14 @@ export const DEFAULT_BUILD_TIMEOUT_MS = 45 * 60_000;
 // silent network work, and a `podman pull` behind the run's lock turns a config
 // error into a slow one. Lives here rather than beside either caller because
 // since #45 there are two of them (`run.ts`'s preflight and `gate-run.ts`'s),
-// and "which images sandbar builds" is one rule.
-export function pulledImagesOf(config: {
-  readonly images: readonly BuiltImage[];
-  readonly gateStack: ResolvedGateStack;
-}): readonly string[] {
-  const built = new Set(config.images.map((i) => i.tag));
-  const referenced = new Set(config.gateStack.containers.map((c) => c.image));
+// and "which images sandbar builds" is one rule. The stack is an argument
+// rather than a config field because a stack file is read from a tree (#186).
+export function pulledImagesOf(
+  images: readonly BuiltImage[],
+  gateStack: ResolvedGateStack,
+): readonly string[] {
+  const built = new Set(images.map((i) => i.tag));
+  const referenced = new Set(gateStack.containers.map((c) => c.image));
   return [...referenced].filter((i) => !built.has(i));
 }
 
@@ -586,8 +587,9 @@ export type BranchImagesOptions = {
   // Declared tags behind a worktree-mounting container, and the host uid they
   // must run as. A freshly-built variant is re-probed against the D3 rule
   // before it is handed to a container (see `checkVariantUid`); an empty set
-  // skips it entirely.
-  readonly worktreeMountingTags?: ReadonlySet<string>;
+  // skips it entirely. A getter, asked at each build, because the stack a run
+  // gates with follows the source tip (#186).
+  readonly worktreeMountingTags?: () => ReadonlySet<string>;
   readonly hostUid?: number;
   readonly probeUid?: UidProbe;
 };
@@ -596,7 +598,7 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
   const build = opts.build ?? buildImage;
   const inputsLabel = opts.inputsLabel ?? readInputsLabel;
   const log = opts.log ?? ((line: string) => console.log(line));
-  const worktreeMountingTags = opts.worktreeMountingTags ?? new Set<string>();
+  const worktreeMountingTags = opts.worktreeMountingTags ?? (() => new Set<string>());
   const probeUid = opts.probeUid ?? effectiveUid;
   const participating = opts.images.filter((i) =>
     opts.baseFingerprints.has(i.tag),
@@ -660,7 +662,7 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
             // one failure D3 exists to convert into a refusal. Asked only for a
             // tag that will actually be mounted onto, and only when it was just
             // built: a reused one was probed when it was.
-            if (worktreeMountingTags.has(image.tag)) {
+            if (worktreeMountingTags().has(image.tag)) {
               await checkVariantUid(tag, image.tag, opts.hostUid ?? 0, probeUid);
             }
             await opts.onImage?.({

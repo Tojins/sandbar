@@ -2,6 +2,11 @@
 // ordered list of steps that run in them, producing one verdict about one
 // commit.
 //
+// The boundary of what a branch controls (#186): the stack DEFINITION —
+// containers, env, mounts, steps — comes from the source branch, while images
+// built from the branch's Containerfiles are part of the work under test. This
+// module runs whatever spec it is handed; stack-source.ts decides which.
+//
 // Topology: every container joins one podman POD sharing a netns (addresses
 // itself as `127.0.0.1`, publishes nothing, so parallel gates and the
 // operator's dev stack cannot collide). The sandbox stack (#44) runs the same

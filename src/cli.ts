@@ -50,6 +50,7 @@ import { pulledImagesOf } from "./ensure-images.js";
 import { GATE_EXIT_NO_VERDICT, runGateCommand } from "./gate-run.js";
 import { run } from "./run.js";
 import { repoLayout } from "./repo-cache.js";
+import { readStackFrom } from "./stack-source.js";
 import { startUiServer } from "./ui-server.js";
 import { sandbarVersion } from "./version.js";
 
@@ -74,10 +75,11 @@ const UI_SUBCOMMAND = "ui";
 // This prints them, one per line, for a host's provisioning to pull; the
 // deployment role in deploy/ansible is that host here.
 const PULLED_IMAGES_SUBCOMMAND = "pulled-images";
-// A daemon fixes its gate stack and images when it imports its config, so a
-// consumer change to them needs a restart the daemon cannot ask for itself
-// (#190). This prints a stable sha256 of exactly those two evaluated fields
-// (config-digest.ts); the deployment role compares it with the digest it
+// A daemon fixes its images, and an inline gate stack, when it imports its
+// config, so a consumer change to them needs a restart the daemon cannot ask
+// for itself (#190). This prints a stable sha256 of exactly those evaluated
+// fields (config-digest.ts); a stack file is read at gate time and only its
+// path is hashed (#186). The deployment role compares it with the digest it
 // recorded and writes the restart request when it moved.
 const CONFIG_DIGEST_SUBCOMMAND = "config-digest";
 
@@ -98,13 +100,15 @@ const USAGE = `Usage: sandbar [--config <path>]
 record for post-mortem browsing; \`--port\` overrides uiPort for this standalone
 host only. \`sandbar gate\` runs config.gateStack
 against one worktree and nothing else — no tracker, no agents, no lock — and
-exits 0 green, 1 red, 2 if it could not reach a verdict. It is what a laptop and
+exits 0 green, 1 red, 2 if it could not reach a verdict; a stack file
+(\`gateStack: { path }\`) is read from that worktree. It is what a laptop and
 a CI job run, so the gate has one implementation. \`sandbar pulled-images\`
-prints, one per line, the images config.gateStack runs that config.images does
-not build — the ones a run refuses to start without and never pulls itself.
-\`sandbar config-digest\` prints a sha256 of the evaluated config.gateStack and
-config.images, independent of key order: it changes exactly when what a daemon
-would build and run changes.
+prints, one per line, the images the gate stack runs that config.images does
+not build — the ones a run refuses to start without and never pulls itself; a
+stack file is read from the config's cwd. \`sandbar config-digest\` prints a
+sha256 of the evaluated config.images and the inline config.gateStack (only
+the path of a stack file, which a run reads at every gate), independent of key
+order: it changes exactly when what a daemon fixes at startup changes.
 
   --worktree <path> The tree to gate. Default: the current directory.
   --keep            Leave the stack up afterwards, to inspect a red gate. The
@@ -299,7 +303,9 @@ export async function main(
     const config = resolveConfig(
       withDefaultCwd(await loadConfig(configPath), configPath),
     );
-    for (const image of pulledImagesOf(config)) console.log(image);
+    // A stack file is read from the clone, which the play has just updated.
+    const { stack } = await readStackFrom(config.gateStack, config.cwd, config.env);
+    for (const image of pulledImagesOf(config.images, stack)) console.log(image);
     return 0;
   }
   if (parsed.kind === "config-digest") {

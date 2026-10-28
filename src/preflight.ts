@@ -108,6 +108,11 @@
 // `/run/user/<uid>/podman/podman.sock`, which exists only while that user's
 // `podman.socket` unit is active.
 //
+// Both are asked of a STACK (`stackHostState`): the one the run starts on,
+// which preflight opens right after its fetch because a stack file is read
+// from `origin/<sourceBranch>` (#186), and inside the run every new
+// source-tip stack, before stack-source.ts accepts it.
+//
 // Two limits on it, both deliberate and both stated here so neither reads as an
 // oversight:
 //   - Only ABSOLUTE `hostPath`s are checked. A relative one resolves against
@@ -223,9 +228,15 @@ import {
   billingPrecedenceWarnings,
   PROVIDER_CREDENTIALS,
 } from "./agent-providers.js";
-import type { ResolvedStackContainer } from "./config.js";
+import type {
+  BuiltImage,
+  ResolvedGateStack,
+  ResolvedStackContainer,
+} from "./config.js";
+import { pulledImagesOf } from "./ensure-images.js";
 import type { EnvReader } from "./env.js";
-import { hasExitCode, isErrno, isExitStatus } from "./errors.js";
+import { SandbarError, hasExitCode, isErrno, isExitStatus } from "./errors.js";
+import { LOG_READ_TIMEOUT_MS, boundedOk, boundedPodman } from "./gate-stack.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
@@ -245,6 +256,7 @@ import {
   syncIssueBranchWithOrigin,
 } from "./git-ops.js";
 import { RUNTIME } from "./runtime.js";
+import type { StackSource } from "./stack-source.js";
 import {
   type ReadyLabelPolicy,
   fetchCandidates,
@@ -283,17 +295,14 @@ export type PreflightConfig = {
   // which is the point: sandbar names no file.
   readonly env: EnvReader;
   readonly sourceBranch: string;
-  // Every image the gate stack references that sandbar does NOT build itself
-  // (#24 D7). Preflight verifies each is already pulled and REFUSES rather than
-  // pulling: a run must not do silent network work at startup, and a missing
-  // image discovered mid-cycle fails a container bringup that then has to be
-  // triaged as infra-or-branch.
-  readonly pulledImages: readonly string[];
-  // Every ABSOLUTE `mounts[].hostPath` the gate stack declares, paired with the
-  // container that declares it (#51). Built by `absoluteMountSources` below —
-  // `run.ts` calls it rather than deriving the list itself, so the rule about
-  // which paths are checkable lives beside the check that depends on it.
-  readonly mountSources: readonly DeclaredMount[];
+  // Opens the gate stack the run starts on (#186). Called right after the
+  // fetch, because a stack file is read from `origin/<sourceBranch>`; a
+  // SandbarError from it refuses the run. The stack's host state
+  // (`stackHostState`) is asked of what it returns.
+  readonly openStackSource: () => Promise<StackSource>;
+  // `config.images`, which says what sandbar builds — every other image the
+  // stack references must already be pulled.
+  readonly images: readonly BuiltImage[];
   // Every agent provider this run will invoke (#72, #126), from
   // `requiredAgentProviders`. Preflight checks a credential for each, so a
   // role routed away from claude refuses HERE rather than as an implementer
@@ -359,19 +368,93 @@ export function absoluteMountSources(
   return out;
 }
 
+// The host state a gate stack depends on (#24 D7, #51). Apart from the rest
+// of `RepoState` because it is asked of a STACK: here, of the one the run
+// starts on, and inside the run, of every new source-tip stack before it is
+// accepted (stack-source.ts, #186).
+export type StackHostState = {
+  // Referenced-but-not-built images absent from the local store. Refused
+  // rather than pulled: a run must not do silent network work, and a missing
+  // image discovered mid-cycle fails a container bringup that then has to be
+  // triaged as infra-or-branch.
+  readonly missingImages: readonly string[];
+  // Declared mount sources podman will not be able to resolve.
+  readonly missingMountSources: readonly MissingMountSource[];
+};
+
+export async function stackHostState(
+  stack: ResolvedGateStack,
+  images: readonly BuiltImage[],
+): Promise<StackHostState> {
+  return {
+    // Without the runtime there is nothing to ask, and its own invariant
+    // already says so.
+    missingImages: which(RUNTIME)
+      ? await missingPulledImages(pulledImagesOf(images, stack))
+      : [],
+    missingMountSources: await findMissingMountSources(
+      absoluteMountSources(stack.containers),
+    ),
+  };
+}
+
+// Every image podman does not have. Shared with `sandbar gate`, which makes
+// the same refusal without a preflight (#45).
+export async function missingPulledImages(
+  images: readonly string[],
+): Promise<readonly string[]> {
+  const missing: string[] = [];
+  for (const image of images) {
+    const r = await boundedPodman(["image", "exists", image], LOG_READ_TIMEOUT_MS);
+    if (!boundedOk(r)) missing.push(image);
+  }
+  return missing;
+}
+
+export function stackHostFailures(s: StackHostState): readonly string[] {
+  const out: string[] = [];
+  if (s.missingImages.length > 0) {
+    const list = s.missingImages
+      .map((i) => `  ${RUNTIME} pull ${i}`)
+      .join("\n");
+    out.push(
+      `${s.missingImages.length} gate-stack image(s) referenced by ` +
+        `the gate stack are missing in ${RUNTIME}. Sandbar builds only what ` +
+        `config.images lists and refuses to pull the rest, so pull them:\n${list}`,
+    );
+  }
+  // Refused for the same reason as the images (#51): left to bringup, a mount
+  // source podman cannot resolve fails an `attempt`-lifecycle container,
+  // which #24 D5 reports as a gate RED. The implementer is then asked to fix
+  // host state it cannot see from inside its sandbox, on every attempt, for
+  // every issue in the cycle.
+  if (s.missingMountSources.length > 0) {
+    const list = s.missingMountSources
+      .map((m) => `  ${m.hostPath}  (container '${m.container}': ${m.detail})`)
+      .join("\n");
+    out.push(
+      `${s.missingMountSources.length} gate-stack mount source(s) declared ` +
+        "by the gate stack cannot be read on this host:\n" +
+        list +
+        "\nEach is a `-v` source podman resolves when the container starts, " +
+        "and a bringup failure there is charged to the branch under test " +
+        "rather than to the host — so left to the gate this arrives as a red " +
+        "no agent can act on. Create the path, or correct it in " +
+        "`config.gateStack` or the stack file it names.",
+    );
+  }
+  return out;
+}
+
 export type SandbarBranch = {
   readonly name: string;
   readonly mergedIntoMain: boolean;
 };
 
-export type RepoState = {
+export type RepoState = StackHostState & {
   readonly hasGit: boolean;
   readonly hasGh: boolean;
   readonly hasContainerRuntime: boolean;
-  // Referenced-but-not-built images absent from the local store.
-  readonly missingImages: readonly string[];
-  // Declared gate-stack mount sources podman will not be able to resolve (#51).
-  readonly missingMountSources: readonly MissingMountSource[];
   readonly ghAuthOk: boolean;
   readonly sandboxGhTokenOk: boolean;
   // Providers this run will invoke that have no credential declared for them
@@ -431,40 +514,7 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
       message: `\`${RUNTIME}\` is not on PATH. Sandbar uses ${RUNTIME} for the agent sandbox and the gate stack. Install it.`,
     });
   }
-  if (s.missingImages.length > 0) {
-    const list = s.missingImages
-      .map((i) => `  ${RUNTIME} pull ${i}`)
-      .join("\n");
-    out.push({
-      ok: false,
-      message:
-        `${s.missingImages.length} gate-stack image(s) referenced by ` +
-        `config.gateStack are missing in ${RUNTIME}. Sandbar builds only what ` +
-        `config.images lists and refuses to pull the rest, so pull them:\n${list}`,
-    });
-  }
-  // Host state, exactly like the image check above, and refused for the same
-  // reason (#51): left to bringup, a mount source podman cannot resolve fails
-  // an `attempt`-lifecycle container, which #24 D5 reports as a gate RED. The
-  // implementer is then asked to fix host state it cannot see from inside its
-  // sandbox, on every attempt, for every issue in the cycle.
-  if (s.missingMountSources.length > 0) {
-    const list = s.missingMountSources
-      .map((m) => `  ${m.hostPath}  (container '${m.container}': ${m.detail})`)
-      .join("\n");
-    out.push({
-      ok: false,
-      message:
-        `${s.missingMountSources.length} gate-stack mount source(s) declared ` +
-        "by config.gateStack cannot be read on this host:\n" +
-        list +
-        "\nEach is a `-v` source podman resolves when the container starts, " +
-        "and a bringup failure there is charged to the branch under test " +
-        "rather than to the host — so left to the gate this arrives as a red " +
-        "no agent can act on. Create the path, or correct it in " +
-        "`config.gateStack`.",
-    });
-  }
+  for (const message of stackHostFailures(s)) out.push({ ok: false, message });
   if (!s.ghAuthOk) {
     out.push({
       ok: false,
@@ -698,23 +748,12 @@ export async function gatherState(
   // — `runPreflight`, which needs the same set for the delete pass — pays for
   // the query once instead of twice; omitted, it is fetched here.
   knownChunkMemberIssues?: ReadonlySet<number>,
-): Promise<RepoState> {
+): Promise<Omit<RepoState, keyof StackHostState>> {
   const repoDir = cfg.layout.repoDir;
   const env = cfg.env;
   const hasGit = which("git");
   const { hasGh, ghAuthOk } = trackerPrerequisites;
   const hasContainerRuntime = which(RUNTIME);
-
-  const missingImages: string[] = [];
-  if (hasContainerRuntime) {
-    for (const image of cfg.pulledImages) {
-      if (!(await runOk(repoDir, RUNTIME, ["image", "exists", image]))) {
-        missingImages.push(image);
-      }
-    }
-  }
-
-  const missingMountSources = await findMissingMountSources(cfg.mountSources);
 
   const sandboxGhTokenOk = hasGh
     ? await checkSandboxGhToken(repoDir, env)
@@ -764,8 +803,6 @@ export async function gatherState(
     hasGit,
     hasGh,
     hasContainerRuntime,
-    missingImages,
-    missingMountSources,
     ghAuthOk,
     sandboxGhTokenOk,
     uncredentialledProviders,
@@ -1470,7 +1507,7 @@ export async function fetchPlanningRefs(
 }
 
 export async function checkForgeReachabilityForPreflight(
-  cfg: PreflightConfig,
+  cfg: Pick<PreflightConfig, "layout" | "onEvent">,
   reachabilityAdapter: ForgeReachabilityAdapter = forgeReachabilityAdapter,
 ): Promise<void> {
   const originUrl = await readOriginUrl(cfg.layout.repoDir);
@@ -1494,14 +1531,31 @@ export async function checkForgeReachabilityForPreflight(
   }
 }
 
+// What a passing preflight hands the run: the queue policy every planner
+// recompute uses, and the gate stack the run starts on.
+export type PreflightResult = {
+  readonly readyLabelPolicy: ReadyLabelPolicy;
+  readonly stackSource: StackSource;
+};
+
 // Every operation after the reachability gate runs under the origin lease
 // (#139). Kept separate from the public composition below so run.ts can place
 // the lease between the read-only probe and the first fetch/cleanup.
 export async function runPreflightAfterReachability(
   cfg: PreflightConfig,
-): Promise<ReadyLabelPolicy> {
+): Promise<PreflightResult> {
   const refresh = await fetchOriginRefs(cfg.layout.repoDir, cfg.sourceBranch);
   const fetchFailures = [...refresh.failures];
+  // A stack file is read from the ref just fetched (#186). Nothing below can
+  // be judged without the stack, so a tip with no valid one refuses here,
+  // beside any fetch failure that explains it.
+  let stackSource: StackSource;
+  try {
+    stackSource = await cfg.openStackSource();
+  } catch (err) {
+    if (!(err instanceof SandbarError)) throw err;
+    throw new PreflightError([...fetchFailures, err.message]);
+  }
   // Fetch before the cleanup pass so that merged-on-origin branches can be
   // reaped even when the cache has not seen origin recently. Into the CACHE:
   // sandbar never fetches into the operator's checkout, so a run can neither
@@ -1656,7 +1710,10 @@ export async function runPreflightAfterReachability(
     await cfg.onEvent({ kind: "complaint", severity: "warning", message: warning });
   }
 
-  const results = checkInvariants(state);
+  const results = checkInvariants({
+    ...state,
+    ...(await stackHostState(stackSource.accepted().stack, cfg.images)),
+  });
   const failures = [
     ...results.flatMap((r) => (r.ok ? [] : [r.message])),
     ...fetchFailures,
@@ -1690,7 +1747,7 @@ export async function runPreflightAfterReachability(
   if (readyLabelPolicy === null) {
     throw new Error("preflight passed without an authenticated gh viewer");
   }
-  return readyLabelPolicy;
+  return { readyLabelPolicy, stackSource };
 }
 
 // The complete preflight remains one call for tests and programmatic users of
@@ -1699,7 +1756,7 @@ export async function runPreflightAfterReachability(
 export async function runPreflight(
   cfg: PreflightConfig,
   reachabilityAdapter: ForgeReachabilityAdapter = forgeReachabilityAdapter,
-): Promise<ReadyLabelPolicy> {
+): Promise<PreflightResult> {
   await checkForgeReachabilityForPreflight(cfg, reachabilityAdapter);
   return await runPreflightAfterReachability(cfg);
 }

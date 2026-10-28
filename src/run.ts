@@ -99,6 +99,11 @@
 // Container-backed events retain cgroup peak-memory and OOMKilled evidence;
 // merger-stack lifecycle records are emitted after teardown (#141).
 //
+// The gate stack is a `StackSource` that preflight opens after its fetch
+// (#186): with `gateStack: { path }`, every inner-loop gate-1 and every
+// landing reads the stack from `origin/<sourceBranch>` as last fetched, so a
+// landed stack change takes effect at the next gate without a restart.
+//
 // The locks are the record boundary (#70, #139). Refused config, missing
 // GH_TOKEN, forge-unreachable-before-origin-lock and either refused lock remain
 // stderr-only because no run owns both scopes yet. The winner immediately emits
@@ -147,7 +152,12 @@ import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 
-import { type ResolvedConfig, type RunConfig, resolveConfig } from "./config.js";
+import {
+  type ResolvedConfig,
+  type RunConfig,
+  checkRebuildOnIsUsed,
+  resolveConfig,
+} from "./config.js";
 import {
   AgentCredentialError,
   AgentQuotaError,
@@ -193,7 +203,6 @@ import {
   createBranchImages,
   ensureImages,
   formatImageRecord,
-  pulledImagesOf,
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { reconcileImages } from "./image-lifecycle.js";
@@ -314,12 +323,13 @@ import {
   type SettledIssue,
 } from "./scheduler.js";
 import {
-  absoluteMountSources,
   checkForgeReachabilityForPreflight,
   fetchOriginRefs,
   fetchPlanningRefs,
   PreflightError,
   runPreflightAfterReachability,
+  stackHostFailures,
+  stackHostState,
 } from "./preflight.js";
 import { buildProjectAnchor } from "./prompt.js";
 import {
@@ -328,6 +338,7 @@ import {
   repoLayout,
   worktreePathFor,
 } from "./repo-cache.js";
+import { type StackSource, openStackSource } from "./stack-source.js";
 import { startUiServer, UiPortInUseError } from "./ui-server.js";
 
 
@@ -694,8 +705,7 @@ export async function run(
     sourceBranch: config.sourceBranch,
     repo,
     developers: config.developers,
-    pulledImages: pulledImagesOf(config),
-    mountSources: absoluteMountSources(config.gateStack.containers),
+    images: config.images,
     agentProviders,
   };
   const stopBeforeOriginLock = async (
@@ -1056,6 +1066,8 @@ export async function run(
 
   let codexAuthMount: CodexAuthMount | undefined;
   let readyLabelPolicy: ReadyLabelPolicy;
+  let stackSource: StackSource;
+  const hostUid = process.getuid?.() ?? 0;
 
   // Preflight is still ahead of the sweep and every container operation below,
   // which is the dependency that matters: those assume a working container
@@ -1066,10 +1078,32 @@ export async function run(
       action: "started",
       detail: "Preflight started",
     });
-    readyLabelPolicy = await runPreflightAfterReachability({
+    ({ readyLabelPolicy, stackSource } = await runPreflightAfterReachability({
       ...preflightBase,
       onEvent: (event) => runRecord.emit(event).then(() => undefined),
-    });
+      openStackSource: () => openStackSource({
+        source: config.gateStack,
+        repoDir: layout.repoDir,
+        sourceBranch: config.sourceBranch,
+        configEnv: config.env,
+        // The checks the startup stack passes in preflight and after the
+        // image builds, asked of every new tip before it is accepted (#186).
+        hostChecks: async (stack) => {
+          const failures = stackHostFailures(await stackHostState(stack, config.images));
+          if (failures.length > 0) throw new SandbarError(failures.join("\n\n"));
+          await checkWorktreeImageUids(stack, hostUid);
+        },
+        onEvent: (event) => runRecord.emit(event).then(() => undefined),
+      }),
+    }));
+    // Asked of the inline stack at load; a stack file is first read here.
+    if (config.gateStack.kind === "file") {
+      checkRebuildOnIsUsed(
+        config.images,
+        stackSource.accepted().stack,
+        config.sandboxImage,
+      );
+    }
     const configuredCodexAuth = agentProviders.includes("codex")
       ? env("CODEX_AUTH_JSON")
       : undefined;
@@ -1251,8 +1285,8 @@ export async function run(
       baseFingerprints: fingerprints,
       onImage: recordImage,
       log: () => undefined,
-      worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
-      hostUid: process.getuid?.() ?? 0,
+      worktreeMountingTags: () => worktreeMountingTagsOf(stackSource.accepted().stack),
+      hostUid,
     });
   const initialBranchImages = makeBranchImages(initialBaseFingerprints);
   let currentImages: RunImages = {
@@ -1270,7 +1304,7 @@ export async function run(
   // just built, and reports a bad uid as a gate red, because the recipe that
   // changed the uid came from the branch.
   try {
-    await checkWorktreeImageUids(config.gateStack, process.getuid?.() ?? 0);
+    await checkWorktreeImageUids(stackSource.accepted().stack, hostUid);
   } catch (err) {
     return await stopAtStartup("image-uid-check-failed", err);
   }
@@ -1414,8 +1448,6 @@ export async function run(
     sandboxImage: config.sandboxImage,
     ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
     scope,
-    gateStack: config.gateStack,
-    sandboxGateAttachments: config.sandboxGateAttachments,
     claudeMdPath: config.claudeMdPath,
     contextMdPath: config.contextMdPath,
     adrDir: config.adrDir,
@@ -2438,6 +2470,7 @@ export async function run(
               hooks: config.sandboxHooks,
               copyToWorktree: config.copyToWorktree,
               branchImages: admissionImages.branchImages,
+              stackSource,
               // Sandbox-sibling logs land beside this issue's attempt
               // transcripts (#44 D4), so the offline artefact of what the
               // agent's stack was doing sits next to the transcript of what the
@@ -2581,7 +2614,9 @@ export async function run(
           mergerStack = await startStack({
             stackId: MERGER_STACK_ID,
             scope,
-            spec: config.gateStack,
+            // Once per landing: the tip moves with every merge in it, and
+            // the next landing reads the stack again.
+            spec: (await stackSource.current()).stack,
             worktreePath: mergerWorktree.path,
             hideWorktreeGit: true,
             onNotice: (message) => runRecord.emit({

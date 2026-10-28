@@ -1,6 +1,6 @@
 // The outdoor daemon's installation-owned config (#149), the only sandbar
 // config outdoor has since Tojins/outdoor#259 removed the checkout-owned copy:
-// an explicit `cwd`, the gate stack read from the clone, and the Claude Code
+// an explicit `cwd`, the gate stack named by path, and the Claude Code
 // settings file supplied from this directory instead of a host hook.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -10,10 +10,13 @@ import { readEnvFile, splitRoleRouting } from "sandbar";
 const cwd = "/home/outdoor/outdoor";
 const sandboxImage = "localhost/sandbar:outdoor";
 
-// gate/stack.json is already written in sandbar's gateStack schema, so this is
-// a read rather than a translation: scripts/gate.sh, CI and sandbar cannot end
-// up checking different things. The keys sandbar has no concept of --
-// "anchor", "half", "comment" -- are ignored by its validator.
+// gate/stack.json is written in sandbar's gateStack schema, so scripts/gate.sh,
+// CI and sandbar cannot end up checking different things. The daemon reads its
+// containers and steps from origin/main at every gate (Tojins/sandbar#186), so
+// a landed stack change reaches the next gate without a restart; the keys
+// sandbar has no concept of -- "anchor", "half", "comment" -- are ignored. Its
+// `images` are read from the clone here, at import: the image graph is fixed
+// at startup, and the play restarts the daemon when it moves.
 const stack = JSON.parse(readFileSync(join(cwd, "gate/stack.json"), "utf8"));
 
 // sandbar.env carries credentials and this installation's role routing as
@@ -34,9 +37,9 @@ export default {
   // on this private repo may queue an issue.
   developers: "anyone",
 
-  // 0.41.14 is the first tagged release with #147's mapped copyToWorktree
-  // entries, which `copyToWorktree` below uses.
-  requiresSandbar: "0.41.14",
+  // 0.53.0 is the first release that reads `gateStack: { path }` from the
+  // source tip (#186), which `gateStack` below uses.
+  requiresSandbar: "0.53.0",
   botName: "sandbar",
   botEmail: "sandbar@sda.be",
   uiPort: 7331,
@@ -47,7 +50,7 @@ export default {
   maxConcurrentGates: 1,
 
   sandboxImage,
-  gateStack: { containers: stack.containers, steps: stack.steps },
+  gateStack: { path: "gate/stack.json" },
 
   // The gate images from stack.json, plus the agent's own. The sandbox image
   // is built FROM the php and runner gate images, and the list builds in

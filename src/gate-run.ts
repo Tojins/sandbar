@@ -18,6 +18,10 @@
 //   - NO `sandboxHooks`: `onWorktreeReady` here would reinstall dependencies
 //     in the operator's own checkout every invocation. A CI job starting from
 //     a bare checkout runs its own install line before `npx sandbar gate`.
+//   - NO SOURCE TIP: a stack file (`gateStack: { path }`, #186) is read from
+//     the gated worktree on disk, so a PR grades itself in CI exactly as
+//     `scripts/gate.sh` did. The grader boundary is a run's, not this
+//     command's.
 //
 // Step timings and final lifecycle-container lines include any cgroup peak and
 // OOMKilled evidence collected at their teardown boundary (#141).
@@ -75,8 +79,10 @@ import {
   startStack,
 } from "./gate-stack.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
+import { missingPulledImages } from "./preflight.js";
 import { type RunScope, gateScope } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
+import { readStackFrom } from "./stack-source.js";
 import { sandbarVersion } from "./version.js";
 import { formatContainerResources } from "./container-resources.js";
 
@@ -139,11 +145,13 @@ export type GateCommandOptions = {
 // covers and a hash is not self-describing. It covers exactly the inputs a
 // reused container's creation depended on:
 //
-//   - the `issue` containers' resolved specs. Their image, env, args, mounts,
-//     hold, readiness and `postReadyCommands` are what `containerRunArgs` and
-//     `bringUpContainers` consumed; change any of them and the container still
-//     up is one an older config described. `postReadyCommands` matter most
-//     here, since a reused container deliberately does NOT re-run them.
+//   - the `issue` containers' resolved specs, from the stack this invocation
+//     gates with — an edited stack file changes them too (#186). Their image,
+//     env, args, mounts, hold, readiness and `postReadyCommands` are what
+//     `containerRunArgs` and `bringUpContainers` consumed; change any of them
+//     and the container still up is one an older config described.
+//     `postReadyCommands` matter most here, since a reused container
+//     deliberately does NOT re-run them.
 //   - the worktree path, because every relative `mounts` entry resolves against
 //     it, so the same spec over a different tree is a different container.
 //   - sandbar's own version, because `containerRunArgs` is sandbar's and an
@@ -201,31 +209,16 @@ export function gateReuseToken(
 // not build. This repo cannot notice, because its own config gives one image
 // both roles.
 //
-// `pulledImagesOf` is unaffected and still takes the whole config: the entries
+// `pulledImagesOf` is unaffected and still takes every image: the entries
 // dropped here are precisely the ones no container references, so they are
 // absent from its `referenced` set too and can never be reported as needing a
 // pull.
-export function gateStackImagesOf(config: {
-  readonly images: readonly BuiltImage[];
-  readonly gateStack: ResolvedGateStack;
-}): readonly BuiltImage[] {
-  const run = new Set(config.gateStack.containers.map((c) => c.image));
-  return config.images.filter((i) => run.has(i.tag));
-}
-
-// Every referenced image sandbar does not build, that podman does not have.
-// The same refusal preflight makes for a run (#24 D7): naming them with the
-// `podman pull` line beats a bringup failure minutes later, and pulling on the
-// operator's behalf would make a config error into silent network work.
-async function missingPulledImages(
-  images: readonly string[],
-): Promise<readonly string[]> {
-  const missing: string[] = [];
-  for (const image of images) {
-    const r = await boundedPodman(["image", "exists", image], LOG_READ_TIMEOUT_MS);
-    if (!boundedOk(r)) missing.push(image);
-  }
-  return missing;
+export function gateStackImagesOf(
+  images: readonly BuiltImage[],
+  gateStack: ResolvedGateStack,
+): readonly BuiltImage[] {
+  const run = new Set(gateStack.containers.map((c) => c.image));
+  return images.filter((i) => run.has(i.tag));
 }
 
 // Run the gate stack once over one worktree and return the process exit code.
@@ -463,6 +456,9 @@ async function gate(
   },
 ): Promise<number> {
   const { worktreePath, scope, out, err, progress } = ctx;
+  // A stack file is read from the tree being gated (#186): no cache, a human
+  // at the keyboard, and in CI a PR grading itself as `scripts/gate.sh` does.
+  const spec = (await readStackFrom(config.gateStack, worktreePath, config.env)).stack;
 
   // First, because everything below is a podman call and the failure otherwise
   // arrives as a raw `spawn podman ENOENT` stack out of whichever call got
@@ -482,10 +478,13 @@ async function gate(
     );
   }
 
-  const missing = await missingPulledImages(pulledImagesOf(config));
+  // The same refusal preflight makes for a run (#24 D7): naming them with the
+  // `podman pull` line beats a bringup failure minutes later, and pulling on
+  // the operator's behalf would make a config error into silent network work.
+  const missing = await missingPulledImages(pulledImagesOf(config.images, spec));
   if (missing.length > 0) {
     throw new SandbarError(
-      `${missing.length} gate-stack image(s) referenced by config.gateStack ` +
+      `${missing.length} gate-stack image(s) referenced by the gate stack ` +
         `are missing in ${RUNTIME}. Sandbar builds only what config.images ` +
         `lists and refuses to pull the rest, so pull them:\n` +
         missing.map((i) => `  ${RUNTIME} pull ${i}`).join("\n"),
@@ -499,7 +498,7 @@ async function gate(
   //
   // Over the images this stack RUNS, never `config.images` whole — see
   // `gateStackImagesOf`.
-  const gateImages = gateStackImagesOf(config);
+  const gateImages = gateStackImagesOf(config.images, spec);
   let baseFingerprints: ReadonlyMap<string, string>;
   try {
     baseFingerprints = await ensureImages(gateImages, worktreePath, {
@@ -544,12 +543,12 @@ async function gate(
     images: gateImages,
     scope,
     baseFingerprints,
-    worktreeMountingTags: worktreeMountingTagsOf(config.gateStack),
+    worktreeMountingTags: () => worktreeMountingTagsOf(spec),
     hostUid,
   });
   progress.builtTags = branchImages.builtTags;
 
-  await checkWorktreeImageUids(config.gateStack, hostUid);
+  await checkWorktreeImageUids(spec, hostUid);
 
   // Reported, not refused (see `StackOptions.allowDirtyWorktree`).
   //
@@ -579,12 +578,12 @@ async function gate(
   const stack: Stack = await startStack({
     stackId: GATE_STACK_ID,
     scope,
-    spec: config.gateStack,
+    spec,
     worktreePath,
     hideWorktreeGit: shouldHideWorktreeGit(worktreePath),
     images: (only) => branchImages.resolve(worktreePath, only),
     reuseToken: gateReuseToken(
-      config.gateStack,
+      spec,
       worktreePath,
       sandbarVersion(),
     ),

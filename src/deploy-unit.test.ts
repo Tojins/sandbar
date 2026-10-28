@@ -1407,6 +1407,8 @@ describe("committed installation data and configs", () => {
     expect(outdoorConfig).toContain('import { readEnvFile, splitRoleRouting } from "sandbar";');
     expect(outdoorConfig).toContain('const cwd = "/home/outdoor/outdoor";');
     expect(outdoorConfig).toContain('readFileSync(join(cwd, "gate/stack.json"), "utf8")');
+    // #186: the stack itself is read from the source tip, not from the clone.
+    expect(outdoorConfig).toContain('gateStack: { path: "gate/stack.json" },');
     expect(outdoorConfig).toMatch(/copyToWorktree:[\s\S]*?from:[\s\S]*?to:/);
     expect(outdoorConfig).toContain('const sandboxImage = "localhost/sandbar:outdoor";');
     expect(outdoorConfig).toContain('containerfile: "Containerfile.sandbar"');

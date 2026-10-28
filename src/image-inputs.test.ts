@@ -446,7 +446,7 @@ describe("createBranchImages", () => {
         inputsLabel: async () => null,
         build: async () => {},
         log: () => {},
-        worktreeMountingTags: new Set(["app"]),
+        worktreeMountingTags: () => new Set(["app"]),
         hostUid: 1000,
         probeUid: async () => uid,
       });
@@ -470,7 +470,7 @@ describe("createBranchImages", () => {
       inputsLabel: async () => null,
       build: async () => {},
       log: () => {},
-      worktreeMountingTags: new Set(["something-else"]),
+      worktreeMountingTags: () => new Set(["something-else"]),
       hostUid: 1000,
       probeUid: async () => {
         probed += 1;

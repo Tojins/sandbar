@@ -72,7 +72,7 @@ defaults.
 | `sandboxImage` | Image the implementer and resolve agents run in. |
 | `botName`, `botEmail` | Commit author. |
 | `sandboxHooks` | Per-sandbox setup commands, e.g. `onWorktreeReady: npm ci`. |
-| `gateStack` | Containers and steps that decide whether a commit is green. See [Gate stack](#gate-stack). |
+| `gateStack` | Containers and steps that decide whether a commit is green, or `{ path }` naming a JSON file of them in the repository. See [Gate stack](#gate-stack). |
 
 ### Optional fields
 
@@ -321,6 +321,18 @@ Rules:
 All containers join one podman pod, reach each other on `127.0.0.1`, and
 publish no ports. Steps run in order and stop at the first failure.
 
+### Stack file
+
+`gateStack: { path: "gate/stack.json" }` keeps the stack in the repository: a
+JSON object whose `containers` and `steps` have the shapes below (other
+top-level keys are ignored). A run reads it from `origin/<sourceBranch>` each
+time it starts a gate, so a landed change takes effect at the next gate without
+a restart. A new version that does not validate, or names an image that is not
+pulled or a mount source that does not exist, is not taken: the run keeps the
+last stack it accepted and logs a warning. At startup there is nothing to fall
+back to, so the run refuses to start. `sandbar gate` reads the file from the
+tree it gates.
+
 ### Containers
 
 | Key | Meaning |
@@ -411,6 +423,7 @@ npx sandbar gate --keep               # leave the stack up
 Differences from the gate inside a run:
 
 - It tests the working tree even if it is dirty, and says so.
+- A stack file is read from that tree, not from `origin`.
 - Steps stream to the terminal.
 - `--keep` leaves the stack up, and the next run on the same tree reuses its
   `issue` containers unless their config, the tree or sandbar's version

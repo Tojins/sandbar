@@ -176,8 +176,11 @@ vi.mock("./repo-cache.js", async (importOriginal) => ({
 vi.mock("./preflight.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./preflight.js")>(),
   checkForgeReachabilityForPreflight: vi.fn(async () => undefined),
-  runPreflightAfterReachability: vi.fn(async () => "anyone" as const),
-  absoluteMountSources: vi.fn(() => []),
+  // The config's inline stack opens without git, so the real source is used.
+  runPreflightAfterReachability: vi.fn(async (cfg: { openStackSource: () => Promise<StackSource> }) => ({
+    readyLabelPolicy: "anyone" as const,
+    stackSource: await cfg.openStackSource(),
+  })),
   fetchOriginRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
   fetchPlanningRefs: vi.fn(async () => ({ sourceChanged: false, failures: [] })),
 }));
@@ -189,7 +192,7 @@ vi.mock("./ensure-images.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./ensure-images.js")>(),
   ensureImages: vi.fn(async () => new Map()),
   createBranchImages: vi.fn(() => ({ resolve: vi.fn(async () => new Map()), builtTags: () => [] })),
-  checkWorktreeImageUids: vi.fn(), pulledImagesOf: vi.fn(() => []),
+  checkWorktreeImageUids: vi.fn(),
   worktreeMountingTagsOf: vi.fn(() => new Set()), formatImageRecord: vi.fn(() => "image"),
 }));
 vi.mock("./image-lifecycle.js", async (importOriginal) => ({
@@ -300,6 +303,7 @@ import { ensureRepoCache } from "./repo-cache.js";
 import { startEventRecord } from "./events.js";
 import { beginCleanup } from "./cleanup.js";
 import { RESTART_REQUEST_FILE } from "./restart-request.js";
+import type { StackSource } from "./stack-source.js";
 
 const config: RunConfig = {
   ghOwner: "o", ghRepo: "r", developers: "anyone", cwd: "/tmp", workDir: "sandbar-run-quota-test",

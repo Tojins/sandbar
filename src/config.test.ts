@@ -32,7 +32,10 @@ import {
   DEFAULT_LABELS,
   resolveCopyToWorktree,
   resolveConfig,
+  resolveStackFile,
   type CopyToWorktreeEntry,
+  type GateStackConfig,
+  type ResolvedConfig,
   type RunConfig,
 } from "./config.js";
 import { sandbarVersion } from "./version.js";
@@ -75,6 +78,13 @@ const minimal: RunConfig = {
     ],
   },
 };
+
+// The inline stack a resolved config carries, which every case built on
+// `minimal` has.
+function inlineStack(r: ResolvedConfig) {
+  if (r.gateStack.kind !== "inline") throw new Error("expected an inline stack");
+  return r.gateStack;
+}
 
 describe("sandbox gate attachments (#166)", () => {
   const twoRunners = (overrides?: {
@@ -136,7 +146,7 @@ describe("sandbox gate attachments (#166)", () => {
       }),
     });
 
-    expect(resolved.sandboxGateAttachments).toEqual({
+    expect(inlineStack(resolved).attachments).toEqual({
       env: {
         CONTAINER_HOST: "unix:///run/podman.sock",
         FIRST: "yes",
@@ -184,6 +194,104 @@ describe("sandbox gate attachments (#166)", () => {
         secondMount: { hostPath: "/tmp", containerPath: "/shared", mode: "rw" },
       }),
     })).toThrow(/'first'.*'second'.*disagree on mount destination '\/shared'/);
+  });
+});
+
+describe("gateStack file form (#186)", () => {
+  it("keeps a repository-relative path, normalised, and reads nothing at load", () => {
+    const r = resolveConfig({ ...minimal, gateStack: { path: "./gate//stack.json" } });
+    expect(r.gateStack).toEqual({ kind: "file", path: "gate/stack.json" });
+  });
+
+  it.each([
+    ["an absolute path", "/srv/gate/stack.json", /must be relative.*must not contain '\.\.'/],
+    ["a '..' segment", "gate/../../stack.json", /must be relative.*must not contain '\.\.'/],
+    ["an empty path", " ", /non-empty, repository-relative path/],
+  ])("refuses %s", (_label, path, message) => {
+    expect(() => resolveConfig({ ...minimal, gateStack: { path } }))
+      .toThrow(message);
+  });
+
+  it("refuses containers or steps beside the path", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      gateStack: { path: "gate/stack.json", steps: [] } as never,
+    })).toThrow(/takes no other keys/);
+  });
+
+  // The stack the run starts on is not known at load, so the rule waits for it.
+  it("does not ask the rebuildOn-is-used rule of a stack it has not read", () => {
+    const images = [
+      { tag: "localhost/sandbar:widgets", containerfile: "Containerfile" },
+      { tag: "localhost/runner", containerfile: "Containerfile.runner", rebuildOn: ["package-lock.json"] },
+    ];
+    expect(() => resolveConfig({ ...minimal, images })).toThrow(/nothing\s+runs that image/);
+    const r = resolveConfig({ ...minimal, gateStack: { path: "gate/stack.json" }, images });
+    expect(r.gateStack.kind).toBe("file");
+  });
+});
+
+describe("resolveStackFile (#186)", () => {
+  const LABEL = "gate/stack.json at origin/main";
+  const stack = minimal.gateStack as GateStackConfig;
+
+  it("reads containers and steps and ignores every other top-level key", () => {
+    const text = JSON.stringify({
+      anchor: "gate/README.md",
+      half: "backend",
+      comment: "the gate",
+      images: [{ tag: "localhost/runner", containerfile: "gate/Containerfile" }],
+      ...stack,
+    });
+    const inline = inlineStack(resolveConfig(minimal));
+    expect(resolveStackFile(text, LABEL, {})).toEqual({
+      stack: inline.stack,
+      attachments: inline.attachments,
+    });
+  });
+
+  it.each<[string, string, RegExp]>([
+    ["text that is not JSON", "{ containers: [", /^gate\/stack\.json at origin\/main: not valid JSON/],
+    ["a JSON array", "[]", /^gate\/stack\.json at origin\/main: must be a JSON object/],
+    ["no steps", JSON.stringify({ containers: stack.containers }), /needs 'containers' and 'steps' as lists/],
+    [
+      "a container image that is not a string",
+      JSON.stringify({ ...stack, containers: [{ ...stack.containers[0], image: 3 }] }),
+      /^gate\/stack\.json at origin\/main: containers\[0\] needs 'image' as a string/,
+    ],
+    [
+      "an env value that is not a string",
+      JSON.stringify({ ...stack, containers: [{ ...stack.containers[0], env: { PORT: 3306 } }] }),
+      /containers\[0\] has 'env' that is not an object of strings/,
+    ],
+    [
+      "a step command that is a string",
+      JSON.stringify({ ...stack, steps: [{ name: "t", in: "app", command: "npm test" }] }),
+      /steps\[0\] needs 'command' as a list of strings/,
+    ],
+    [
+      "an unknown lifecycle",
+      JSON.stringify({ ...stack, containers: [{ ...stack.containers[0], lifecycle: "run" }] }),
+      /has 'lifecycle' that is not "issue" or "attempt"/,
+    ],
+    [
+      "a rule resolveGateStack enforces",
+      JSON.stringify({ ...stack, containers: [...stack.containers, stack.containers[0]] }),
+      /^gate\/stack\.json at origin\/main: duplicate container name 'db'/,
+    ],
+  ])("refuses %s, naming the label", (_label, text, message) => {
+    expect(() => resolveStackFile(text, LABEL, {})).toThrow(SandbarError);
+    expect(() => resolveStackFile(text, LABEL, {})).toThrow(message);
+  });
+
+  it("refuses a step-container env key that collides with config.env, naming the label", () => {
+    const text = JSON.stringify({
+      ...stack,
+      containers: stack.containers.map((c) =>
+        c.name === "app" ? { ...c, env: { GH_TOKEN: "x" } } : c),
+    });
+    expect(() => resolveStackFile(text, LABEL, { GH_TOKEN: "" }))
+      .toThrow(/^gate\/stack\.json at origin\/main: step container 'app' sets env key 'GH_TOKEN'/);
   });
 });
 
@@ -945,7 +1053,7 @@ describe("resolveConfig", () => {
 
   it("fills each stack container's defaultable fields (#24)", () => {
     const r = resolveConfig(minimal);
-    const db = r.gateStack.containers[0]!;
+    const db = inlineStack(r).stack.containers[0]!;
     expect(db.readinessTimeoutMs).toBe(DEFAULT_READINESS_TIMEOUT_MS);
     expect(db.env).toEqual({ MYSQL_ALLOW_EMPTY_PASSWORD: "yes", MYSQL_DATABASE: "widgets" });
     expect(db.args).toEqual([]);
@@ -960,8 +1068,8 @@ describe("resolveConfig", () => {
   // earlier attempt.
   it("defaults lifecycle to attempt, not issue", () => {
     const r = resolveConfig(minimal);
-    expect(r.gateStack.containers[1]!.lifecycle).toBe("attempt");
-    expect(r.gateStack.containers[0]!.lifecycle).toBe("issue");
+    expect(inlineStack(r).stack.containers[1]!.lifecycle).toBe("attempt");
+    expect(inlineStack(r).stack.containers[0]!.lifecycle).toBe("issue");
   });
 });
 

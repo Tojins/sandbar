@@ -219,10 +219,10 @@ describe("gateStackImagesOf", () => {
 
   it("keeps the entries a gateStack container runs", () => {
     expect(
-      gateStackImagesOf({
-        images: [img("localhost/app:gate"), img("docker.io/library/mariadb:10.11")],
-        gateStack: stack(),
-      }).map((i) => i.tag),
+      gateStackImagesOf(
+        [img("localhost/app:gate"), img("docker.io/library/mariadb:10.11")],
+        stack(),
+      ).map((i) => i.tag),
     ).toEqual(["localhost/app:gate", "docker.io/library/mariadb:10.11"]);
   });
 
@@ -233,13 +233,13 @@ describe("gateStackImagesOf", () => {
   // all, for an image the verdict does not depend on.
   it("drops an entry no gateStack container runs — the agent sandbox image", () => {
     expect(
-      gateStackImagesOf({
-        images: [
+      gateStackImagesOf(
+        [
           img("localhost/app:gate"),
           { ...img("localhost/app:sandbar"), rebuildOn: ["package-lock.json"] },
         ],
-        gateStack: stack(),
-      }).map((i) => i.tag),
+        stack(),
+      ).map((i) => i.tag),
     ).toEqual(["localhost/app:gate"]);
   });
 
@@ -248,10 +248,10 @@ describe("gateStackImagesOf", () => {
   // what the entry is "for".
   it("keeps an entry that is both the sandbox image and a stack container's", () => {
     expect(
-      gateStackImagesOf({
-        images: [img("localhost/app:gate")],
-        gateStack: stack(),
-      }).map((i) => i.tag),
+      gateStackImagesOf(
+        [img("localhost/app:gate")],
+        stack(),
+      ).map((i) => i.tag),
     ).toEqual(["localhost/app:gate"]);
   });
 });
