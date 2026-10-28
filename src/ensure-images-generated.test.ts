@@ -1,14 +1,32 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildGeneratedImage } from "./ensure-images.js";
 import { gateScope } from "./naming.js";
 
+const disposable = vi.hoisted(() => ({
+  withdraw: undefined as unknown as ReturnType<typeof import("vitest").vi.fn>,
+  registered: 0,
+}));
+
+vi.mock("./cleanup.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./cleanup.js")>(),
+  registerDisposable: () => {
+    disposable.registered++;
+    return disposable.withdraw;
+  },
+}));
+
 const scope = gateScope("/generated-image-test");
 
 describe("buildGeneratedImage", () => {
+  beforeEach(() => {
+    disposable.withdraw = vi.fn();
+    disposable.registered = 0;
+  });
+
   const run = (build: (contextRoot: string) => Promise<void>) => {
     let root = "";
     const result = buildGeneratedImage({
@@ -36,6 +54,8 @@ describe("buildGeneratedImage", () => {
     await result;
     expect(seen).toEqual({ text: "FROM x\n", blob: [0, 255, 1] });
     expect(existsSync(root())).toBe(false);
+    expect(disposable.registered).toBe(1);
+    expect(disposable.withdraw).toHaveBeenCalledTimes(1);
   });
 
   it("removes the context when the build rejects", async () => {
@@ -44,5 +64,7 @@ describe("buildGeneratedImage", () => {
     });
     await expect(result).rejects.toThrow("build failed");
     expect(existsSync(root())).toBe(false);
+    expect(disposable.registered).toBe(1);
+    expect(disposable.withdraw).toHaveBeenCalledTimes(1);
   });
 });
