@@ -204,7 +204,11 @@ const replay = async (
 const sessionOf = (label: string): string => join(replayLayout(config()).stateDir, "sessions", label);
 const manifestOf = async (label: string) => JSON.parse(await readFile(join(sessionOf(label), "replay.json"), "utf8"));
 
-describe("replay run (#195)", () => {
+// Each session drives real git through preflight, the cache and every run's
+// records: ~1.5s idle, past vitest's 5s default on a loaded gate host.
+const SESSION_TIMEOUT = 30_000;
+
+describe("replay run (#195)", { timeout: SESSION_TIMEOUT }, () => {
   it("records every case × repeat into a session the scorecard reads", async () => {
     process.env.GH_TOKEN = "secret";
 
@@ -340,7 +344,7 @@ describe("replay run (#195)", () => {
   });
 });
 
-describe("replay report (#195)", () => {
+describe("replay report (#195)", { timeout: SESSION_TIMEOUT }, () => {
   // A case file whose #7 names an earlier session's first run as its original.
   async function casesWithOriginal(): Promise<string> {
     await expect(replay("orig", 1)).resolves.toBe(0);
