@@ -471,6 +471,10 @@ export type BuildAgentProviderOptions = {
   // one — `claude --continue`, `codex exec resume --last`. Sound only inside an
   // agent sandbox; see the option's own note on each provider.
   readonly continueSession?: boolean;
+  // Resume the conversation an earlier run named (`SandboxRunResult.
+  // sessionId`) — `claude --resume <id>`, `codex exec resume <id>`. Sound
+  // where another agent shares the sandbox, as the verifier's do (#238).
+  readonly resumeSession?: string | undefined;
   // Reasoning effort for this call (#130), spelled by the provider — `claude
   // --effort`, `codex -c model_reasoning_effort=` — and omitted when unset so
   // the CLI's own default applies. Not validated here: the level set is
@@ -495,11 +499,14 @@ export function buildAgentProvider(
   options: BuildAgentProviderOptions = {},
 ): AgentProvider {
   const continueSession = options.continueSession === true;
-  const effort = options.effort;
+  const { effort, resumeSession } = options;
+  if (continueSession && resumeSession !== undefined) {
+    throw new Error("an agent run either continues the latest session or resumes a named one");
+  }
   switch (name) {
     case "claude":
-      return claudeCode(modelId, { continueSession, effort });
+      return claudeCode(modelId, { continueSession, resumeSession, effort });
     case "codex":
-      return codex(modelId, { continueSession, effort });
+      return codex(modelId, { continueSession, resumeSession, effort });
   }
 }

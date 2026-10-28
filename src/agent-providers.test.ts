@@ -446,6 +446,15 @@ describe("buildAgentProvider", () => {
     ).toContain("resume --last");
   });
 
+  it("routes resumeSession to each provider's resume of that session, never beside continueSession (#238)", () => {
+    expect(buildAgentProvider("claude", "opus", { resumeSession: "s-1" })
+      .buildPrintCommand({ prompt: "p" }).command).toContain("--resume 's-1'");
+    expect(buildAgentProvider("codex", "m", { resumeSession: "t-1" })
+      .buildPrintCommand({ prompt: "p" }).command).toContain("resume 't-1'");
+    expect(() => buildAgentProvider("claude", "opus", { continueSession: true, resumeSession: "s-1" }))
+      .toThrow(/either continues the latest session or resumes a named one/);
+  });
+
   // The third per-call knob (#130): one option, each provider's own spelling.
   it("routes effort to each provider's own flag", () => {
     expect(
