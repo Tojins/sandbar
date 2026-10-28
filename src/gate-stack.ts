@@ -1924,7 +1924,7 @@ async function throwIfDead(
   );
 }
 
-async function logTail(
+export async function logTail(
   containerName: string,
   lines = CONTAINER_LOG_TAIL,
   podman: PodmanProbe = boundedPodman,

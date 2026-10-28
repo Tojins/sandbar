@@ -213,6 +213,7 @@ import {
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { reconcileImages } from "./image-lifecycle.js";
+import { currentEgressImageTag } from "./egress.js";
 import { makeEnvReader } from "./env.js";
 import { startTimer } from "./timing.js";
 import {
@@ -1243,6 +1244,9 @@ export async function run(
   const scope = runScope(realpathSync(lockPaths.workDir));
   let graphRoot!: string;
   let startupSpace!: GraphRootSpace;
+  // The egress proxy image this driver builds (#202): live whether or not this
+  // installation runs proxies, exactly as the tools pins are.
+  let egressImageTag!: string;
 
   // THE STARTUP INVENTORY IN ONE `try`, because both reconcilers throw on a
   // failed list and graphroot discovery is part of the same Podman snapshot.
@@ -1268,11 +1272,13 @@ export async function run(
     }
     await reportSweepFailures(orphans, (event) => runRecord.emit(event), "startup");
 
+    egressImageTag = await currentEgressImageTag(scope);
     const staleImages = await reconcileImages({
       scope,
       liveTags: new Set([
         ...config.images.map((image) => image.tag),
         ...agentToolsImageTags(scope, agentProviders),
+        egressImageTag,
       ]),
     });
     if (staleImages.removed.length > 0) {
@@ -2156,6 +2162,7 @@ export async function run(
             ...config.images.map((image) => image.tag),
             ...currentImages.agentImages.liveTags(),
             ...currentImages.branchImages.builtTags(),
+            egressImageTag,
           ]),
         });
         if (cycleImages.removed.length > 0) {

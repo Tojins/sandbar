@@ -34,9 +34,6 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -45,7 +42,6 @@ import {
   type AgentProviderName,
   type AgentProviderPackage,
 } from "./agent-providers.js";
-import { registerDisposable } from "./cleanup.js";
 import type { BuiltImage } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
@@ -53,6 +49,7 @@ import {
   type BranchImages,
   type BuildOptions,
   type ImageRecorder,
+  buildGeneratedImage,
   buildImage,
   readInputsLabel,
 } from "./ensure-images.js";
@@ -453,30 +450,20 @@ export async function createAgentImages(opts: {
   const toolsUsed = new Set<string>();
   const order: string[] = [];
 
-  const buildGenerated = async (
+  const buildGenerated = (
     tag: string,
     containerfile: string,
     fingerprint: string,
     identity: string,
-  ): Promise<void> => {
-    const contextRoot = await mkdtemp(join(tmpdir(), "sandbar-agent-context-"));
-    const withdrawContextCleanup = registerDisposable(
-      () => rm(contextRoot, { recursive: true, force: true }),
-    );
-    try {
-      await writeFile(
-        join(contextRoot, "Containerfile"),
-        containerfile,
-      );
-      await build(
-        { tag, containerfile: identity },
-        { scope: opts.scope, root: "", contextRoot, fingerprint, capture: true },
-      );
-    } finally {
-      await rm(contextRoot, { recursive: true, force: true });
-      withdrawContextCleanup();
-    }
-  };
+  ): Promise<void> =>
+    buildGeneratedImage({
+      tag,
+      identity,
+      files: { Containerfile: containerfile },
+      fingerprint,
+      scope: opts.scope,
+      build,
+    });
 
   const toolsImage = (libc: "glibc" | "musl"): Promise<string> => {
     let promise = toolsPending.get(libc);

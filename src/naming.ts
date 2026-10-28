@@ -219,6 +219,32 @@ export function sandboxContainerNameFor(
 }
 
 // ---------------------------------------------------------------------------
+// Egress resource names (#202)
+//
+//   proxy             sandbar-<scope>-egress-<owner>
+//   sandbox network   sandbar-<scope>-net-sbx-<issueId>
+//   resolve network   sandbar-<scope>-net-resolve-<n>
+//
+// One proxy per network owner; `owner` is `sbx-<issueId>`, a gate stackId, or
+// `resolve-<n>`. The `egress-` segment cannot alias a gate container, whose
+// stackId is an issue number or `merger`, and the `sbx-` and `resolve-`
+// network ids cannot alias a gate network for the same reason. All of them sit
+// under the scoped prefix, so the orphan sweep in containers.ts reaps them.
+// ---------------------------------------------------------------------------
+
+export function egressProxyNameFor(scope: RunScope, owner: string): string {
+  return `${scopedResourcePrefix(scope)}egress-${owner}`;
+}
+
+export function sandboxNetworkNameFor(scope: RunScope, issueId: string): string {
+  return networkNameFor(scope, `sbx-${issueId}`);
+}
+
+export function resolveNetworkNameFor(scope: RunScope, n: number): string {
+  return networkNameFor(scope, `resolve-${n}`);
+}
+
+// ---------------------------------------------------------------------------
 // Branch names (#58)
 //
 // Sandbar owns three ref SHAPES under the same prefix:
@@ -505,6 +531,19 @@ export function toolsImageTag(
   fingerprint: string,
 ): string {
   return `${AGENT_TOOLS_IMAGE_REPOSITORY}:sb-tools-${scope}-${libc}-${
+    fingerprint.slice(0, IMAGE_FINGERPRINT_CHARS)
+  }`;
+}
+
+// The egress proxy's image (#202) persists like the tools image, content-
+// addressed on its base pin and the two program files it carries:
+//
+//   localhost/sandbar-egress:sb-egress-w1a2b3c4d-9f2e1d70
+
+const EGRESS_IMAGE_REPOSITORY = "localhost/sandbar-egress";
+
+export function egressImageTag(scope: RunScope, fingerprint: string): string {
+  return `${EGRESS_IMAGE_REPOSITORY}:sb-egress-${scope}-${
     fingerprint.slice(0, IMAGE_FINGERPRINT_CHARS)
   }`;
 }

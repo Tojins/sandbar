@@ -55,11 +55,13 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
 
-import { onCleanup } from "./cleanup.js";
+import { onCleanup, registerDisposable } from "./cleanup.js";
 import {
   type BuiltImage,
   type ResolvedGateStack,
@@ -329,6 +331,43 @@ export async function buildImage(
     ) {
       throw result.error;
     }
+  }
+}
+
+// A driver-generated image (the agent tools, the egress proxy): its context is
+// a temporary directory holding `files`, one of them `Containerfile`, removed
+// after the build and on a signal during it. `identity` stands in for the
+// containerfile path a declared image would have.
+export async function buildGeneratedImage(opts: {
+  readonly tag: string;
+  readonly identity: string;
+  readonly files: Readonly<Record<string, string | Uint8Array>>;
+  readonly fingerprint: string;
+  readonly scope: RunScope;
+  readonly build?: (image: BuiltImage, opts: BuildOptions) => Promise<unknown>;
+}): Promise<void> {
+  const build = opts.build ?? buildImage;
+  const contextRoot = await mkdtemp(join(tmpdir(), "sandbar-generated-context-"));
+  const withdrawContextCleanup = registerDisposable(
+    () => rm(contextRoot, { recursive: true, force: true }),
+  );
+  try {
+    await Promise.all(Object.entries(opts.files).map(([name, contents]) =>
+      writeFile(join(contextRoot, name), contents)
+    ));
+    await build(
+      { tag: opts.tag, containerfile: opts.identity },
+      {
+        scope: opts.scope,
+        root: "",
+        contextRoot,
+        fingerprint: opts.fingerprint,
+        capture: true,
+      },
+    );
+  } finally {
+    await rm(contextRoot, { recursive: true, force: true });
+    withdrawContextCleanup();
   }
 }
 

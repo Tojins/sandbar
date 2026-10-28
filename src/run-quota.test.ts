@@ -215,6 +215,10 @@ vi.mock("./image-lifecycle.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./image-lifecycle.js")>(),
   reconcileImages: vi.fn(async () => ({ removed: [] })),
 }));
+vi.mock("./egress.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./egress.js")>(),
+  currentEgressImageTag: vi.fn(async () => "egress"),
+}));
 vi.mock("./forge-rate-limit.js", () => ({
   fetchRateLimitResumeAt: vi.fn(async (nowMs: number) => nowMs),
 }));
@@ -1808,15 +1812,16 @@ describe("run quota orchestration (#109)", () => {
       liveTags: new Set([
         "image",
         ...agentToolsImageTags(scope, initialAgentOptions.providers),
+        "egress",
       ]),
     });
     expect(vi.mocked(reconcileImages).mock.calls.map(([args]) => args)).toContainEqual({
       scope,
-      liveTags: new Set(["image", "tools-old", "agent-old", "branch-old"]),
+      liveTags: new Set(["image", "tools-old", "agent-old", "branch-old", "egress"]),
     });
     expect(vi.mocked(reconcileImages).mock.calls.at(-1)?.[0]).toEqual({
       scope,
-      liveTags: new Set(["image", "tools-new", "agent-new", "branch-new"]),
+      liveTags: new Set(["image", "tools-new", "agent-new", "branch-new", "egress"]),
     });
     expect(eventsOf("preflight")).toContainEqual(expect.objectContaining({
       action: "origin-refreshed",
