@@ -634,13 +634,12 @@ export async function startSandboxStack(
       }
       // Any other failure still leaves the target stopped and the copy named:
       // put both back, report a failed restore, and rethrow the original.
-      try {
-        await swapDbCopyOut();
-      } catch (secondary) {
+      const [restored] = await Promise.allSettled([swapDbCopyOut()]);
+      if (restored?.status === "rejected") {
         await reportCleanupNotice(
           "cleanup-failure",
           "Sandbox stack could not restore the target after a database copy failed",
-          secondary,
+          restored.reason,
         );
       }
       throw err;

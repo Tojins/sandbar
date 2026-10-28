@@ -68,7 +68,9 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // is recorded as a complaint and a halted exit, and cleanup releases the
   // origin lease — none of which happens if it escapes `run()` instead.
   "run.ts": 11,
-  "sandbox-stack.ts": 2,
+  // A database copy's swap-in (#201) classifies a sibling that did not come up
+  // into a false return; any other failure restores the target and rethrows.
+  "sandbox-stack.ts": 3,
   // The HTTP request boundary maps record/reducer failures to a 500 response
   // for the polling page (#132).
   "ui-server.ts": 1,
