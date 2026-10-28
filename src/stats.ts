@@ -81,7 +81,7 @@ const ROLE_KEYS = {
   condenser: true, resolve: true,
 } as const;
 export type Role = keyof typeof ROLE_KEYS;
-const ROLES = Object.keys(ROLE_KEYS) as readonly Role[];
+export const ROLES = Object.keys(ROLE_KEYS) as readonly Role[];
 
 type TerminalKind = Extract<StatsEvent, { kind: "terminal" }>["terminal"];
 export type Outcome = TerminalKind | "interrupted";
@@ -629,10 +629,10 @@ const tally = (keys: readonly string[]): Record<string, number> => {
   return counts;
 };
 
-type Cell = string | number | boolean | null | undefined;
+export type Cell = string | number | boolean | null | undefined;
 
 // One aligned text table; an absent value renders `-`.
-function table(title: string, head: readonly string[], rows: readonly (readonly Cell[])[]): string {
+export function table(title: string, head: readonly string[], rows: readonly (readonly Cell[])[]): string {
   const cells = [head, ...rows.map((row) => row.map((value) => value == null ? "-" : String(value)))];
   const widths = head.map((_, column) =>
     Math.max(...cells.map((row) => row[column]?.length ?? 0)));

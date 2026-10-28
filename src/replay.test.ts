@@ -2,15 +2,23 @@ import { describe, expect, it } from "vitest";
 
 import {
   type ReplayCase,
+  type ReplayResult,
+  type ReplaySession,
+  type SessionRecords,
   caseCacheRefUpdates,
   commentsAtCutoff,
+  compareReplay,
   lastDoneAdmission,
   parseNumstat,
   parseReplayCases,
   planReplay,
   renderReplayPlan,
+  renderReplayReport,
+  spread,
   stripForgeCredentials,
 } from "./replay.js";
+import { type StatsReport, computeStats } from "./stats.js";
+import type { StatsEvent } from "./stats-record.js";
 
 const SEED = "a".repeat(40);
 
@@ -243,6 +251,284 @@ describe("renderReplayPlan (#195)", () => {
       "  implementer  claude opus (effort high)",
       "  adjudicator  codex gpt-5.6",
       "Every run spends real tokens from the same model quota as any sandbar daemon on this account.",
+    ].join("\n"));
+  });
+});
+
+// A one-run report from the events after its run-start.
+let seq = 0;
+const ev = (fields: Record<string, unknown>): StatsEvent =>
+  ({ seq: ++seq, ts: "2026-10-01T10:00:00Z", ...fields }) as unknown as StatsEvent;
+const statsOf = (run: string, events: readonly Record<string, unknown>[]): StatsReport => computeStats({
+  window: { runs: [run] },
+  withProse: false,
+  runs: [{
+    run,
+    schemaVersion: 6,
+    driver: "sandbar test",
+    events: [
+      ev({ kind: "run-start", schemaVersion: 6, driver: "sandbar test", configPath: null, workdir: "/w", maxParallelIssues: 1, pid: 1 }),
+      ...events.map(ev),
+    ],
+    prose: new Map(),
+  }],
+  skipped: [],
+  ignoredKinds: {},
+});
+const admittedEvent = (issue: number) =>
+  ({ kind: "admitted", issue, title: `Issue ${issue}`, branch: `b-${issue}`, chunk: null, seedRef: "origin/main" });
+const implementerEvent = (issue: number, attempt: number, usage: Record<string, unknown> | null) => ({
+  kind: "implementer", issue, attempt, signal: "COMPLETE", commits: 1, provider: "claude", model: "m",
+  effort: null, durationMs: 1, ...(usage === null ? {} : { usage }),
+});
+const gateEvent = (issue: number, attempt: number, ok: boolean) =>
+  ({ kind: "gate", issue, attempt, gate: "gate-1", ok, durationMs: 1 });
+const terminalEvent = (issue: number, outcome: string) =>
+  ({ kind: "terminal", issue, title: `Issue ${issue}`, terminal: outcome, reason: null, durationMs: 1 });
+
+// An issue's cycle of `attempts` implementer attempts, each with its usage.
+const cycleOf = (issue: number, usages: readonly (Record<string, unknown> | null)[], outcome = "DONE") => [
+  admittedEvent(issue),
+  ...usages.map((usage, i) => implementerEvent(issue, i + 1, usage)),
+  gateEvent(issue, usages.length, true),
+  terminalEvent(issue, outcome),
+];
+
+const usage = (input: number, first: number, peak: number) =>
+  ({ inputTokens: input, cachedInputTokens: 10, outputTokens: 5, firstContext: first, peakContext: peak });
+
+const ran = (repeat: number, issue: number, extra: Partial<ReplayResult> = {}): ReplayResult => ({
+  repeat,
+  run: `run-r${repeat}`,
+  issue,
+  seedSha: SEED,
+  branch: `b-${issue}`,
+  status: "ran",
+  terminal: "DONE",
+  tip: "d".repeat(40),
+  lastGateOk: true,
+  diff: { files: repeat, insertions: 10 * repeat, deletions: 0 },
+  ...extra,
+} as ReplayResult);
+
+const sessionOf = (label: string, results: readonly ReplayResult[]): ReplaySession => ({
+  replaySession: 1,
+  label,
+  driver: `sandbar ${label}`,
+  casesFile: "/cases.json",
+  casesSha256: "f".repeat(64),
+  repeats: Math.max(...results.map((result) => result.repeat)),
+  parallel: 1,
+  routing: { implementer: { agent: "claude", model: label, effort: null } },
+  budgets: { maxQualityRounds: 2, maxGateRounds: 3, maxReviewRounds: 2 },
+  results,
+});
+
+const records = (session: ReplaySession, runs: Record<string, StatsReport>): SessionRecords =>
+  ({ session, runs: new Map(Object.entries(runs)) });
+
+describe("spread (#195, #82)", () => {
+  it("is min, median and max of the measured values, over every run", () => {
+    expect(spread([3, null, 1, 2])).toEqual({ of: 4, n: 3, min: 1, median: 2, max: 3 });
+    expect(spread([null])).toEqual({ of: 1, n: 0, min: null, median: null, max: null });
+    expect(spread([])).toEqual({ of: 0, n: 0, min: null, median: null, max: null });
+  });
+});
+
+describe("compareReplay (#195)", () => {
+  const original = statsOf("run-orig", [
+    admittedEvent(1),
+    implementerEvent(1, 1, usage(100, 1000, 3000)),
+    gateEvent(1, 1, false),
+    implementerEvent(1, 2, usage(50, 2000, 4000)),
+    gateEvent(1, 2, true),
+    terminalEvent(1, "DONE"),
+  ]);
+
+  it("columns the original first, then each session in the order given", () => {
+    const report = compareReplay({
+      cases: [replayCase(1)],
+      originals: new Map([[1, original]]),
+      sessions: [
+        records(sessionOf("base", [ran(1, 1)]), { "run-r1": statsOf("run-r1", cycleOf(1, [usage(1, 1, 1)])) }),
+        records(sessionOf("cand", [ran(1, 1)]), { "run-r1": statsOf("run-r1", cycleOf(1, [usage(1, 1, 1)])) }),
+      ],
+    });
+    expect(report.replayReport).toBe(1);
+    expect(report.sessions.map((session) => session.label)).toEqual(["base", "cand"]);
+    expect(report.sessions[0]).not.toHaveProperty("results");
+    expect(report.cases.map((c) => [c.issue, c.title, c.columns.map((col) => col.label)]))
+      .toEqual([[1, "Issue 1", ["original", "base", "cand"]]]);
+  });
+
+  it("reads the original's outcome and last gate-1 from its record and its diff from the landing", () => {
+    const [col] = compareReplay({ cases: [replayCase(1)], originals: new Map([[1, original]]), sessions: [] })
+      .cases[0]!.columns;
+    expect(col).toEqual({
+      label: "original",
+      runs: 1,
+      outcomes: { DONE: 1 },
+      attempts: { of: 1, n: 1, min: 2, median: 2, max: 2 },
+      rounds: {
+        gate: { of: 1, n: 1, min: 2, median: 2, max: 2 },
+        quality: { of: 1, n: 1, min: 0, median: 0, max: 0 },
+        review: { of: 1, n: 1, min: 0, median: 0, max: 0 },
+      },
+      roles: {
+        implementer: {
+          input: { of: 1, n: 1, min: 150, median: 150, max: 150 },
+          cached: { of: 1, n: 1, min: 20, median: 20, max: 20 },
+          output: { of: 1, n: 1, min: 10, median: 10, max: 10 },
+          firstContext: { of: 1, n: 1, min: 1000, median: 1000, max: 1000 },
+          peakContext: { of: 1, n: 1, min: 4000, median: 4000, max: 4000 },
+        },
+      },
+      gate: { green: 1, red: 0, unknown: 0 },
+      diff: {
+        files: { of: 1, n: 1, min: 1, median: 1, max: 1 },
+        insertions: { of: 1, n: 1, min: 2, median: 2, max: 2 },
+        deletions: { of: 1, n: 1, min: 0, median: 0, max: 0 },
+      },
+    });
+  });
+
+  it("spreads a session's k repeats, each read from its own run", () => {
+    const session = sessionOf("base", [ran(1, 1), ran(2, 1, { terminal: "NEEDS-HUMAN", lastGateOk: false }), ran(3, 1)]);
+    const [, col] = compareReplay({
+      cases: [replayCase(1)],
+      originals: new Map(),
+      sessions: [records(session, {
+        "run-r1": statsOf("run-r1", cycleOf(1, [usage(10, 100, 100)])),
+        "run-r2": statsOf("run-r2", cycleOf(1, [usage(10, 300, 300), usage(10, 900, 900)], "NEEDS-HUMAN")),
+        "run-r3": statsOf("run-r3", cycleOf(1, [usage(10, 200, 200), usage(10, 50, 250), usage(10, 1, 1)])),
+      })],
+    }).cases[0]!.columns;
+    expect(col!.runs).toBe(3);
+    expect(col!.outcomes).toEqual({ DONE: 2, "NEEDS-HUMAN": 1 });
+    expect(col!.attempts).toEqual({ of: 3, n: 3, min: 1, median: 2, max: 3 });
+    expect(col!.roles.implementer?.input).toEqual({ of: 3, n: 3, min: 10, median: 20, max: 30 });
+    expect(col!.roles.implementer?.firstContext).toEqual({ of: 3, n: 3, min: 100, median: 200, max: 300 });
+    expect(col!.roles.implementer?.peakContext).toEqual({ of: 3, n: 3, min: 100, median: 250, max: 900 });
+    expect(col!.gate).toEqual({ green: 2, red: 1, unknown: 0 });
+    expect(col!.diff.files).toEqual({ of: 3, n: 3, min: 1, median: 2, max: 3 });
+  });
+
+  it("counts an unmeasured value in of but not n, and a not-run result as a run with nothing measured", () => {
+    const session = sessionOf("base", [
+      ran(1, 1),
+      ran(2, 1, { lastGateOk: null }),
+      { repeat: 3, run: null, issue: 1, seedSha: SEED, branch: "b-1", status: "not-run", reason: "QUOTA: out" },
+    ]);
+    const [, col] = compareReplay({
+      cases: [replayCase(1)],
+      originals: new Map(),
+      sessions: [records(session, {
+        "run-r1": statsOf("run-r1", cycleOf(1, [usage(10, 100, 100)])),
+        "run-r2": statsOf("run-r2", cycleOf(1, [null])),
+      })],
+    }).cases[0]!.columns;
+    expect(col!.runs).toBe(3);
+    expect(col!.outcomes).toEqual({ DONE: 2, "not-run": 1 });
+    expect(col!.attempts).toEqual({ of: 3, n: 2, min: 1, median: 1, max: 1 });
+    expect(col!.roles.implementer?.input).toEqual({ of: 3, n: 1, min: 10, median: 10, max: 10 });
+    expect(col!.gate).toEqual({ green: 1, red: 0, unknown: 2 });
+    expect(col!.diff.files).toEqual({ of: 3, n: 2, min: 1, median: 1, max: 2 });
+  });
+
+  it("leaves outcome and record metrics absent where a run's record has no cycle of the issue", () => {
+    const [orig, col] = compareReplay({
+      cases: [replayCase(1)],
+      originals: new Map([[1, statsOf("run-orig", [])]]),
+      sessions: [records(sessionOf("base", [ran(1, 1)]), { "run-r1": statsOf("run-r1", []) })],
+    }).cases[0]!.columns;
+    expect([orig!.outcomes, orig!.attempts, orig!.roles, orig!.gate]).toEqual([
+      {}, { of: 1, n: 0, min: null, median: null, max: null }, {}, { green: 0, red: 0, unknown: 1 },
+    ]);
+    expect([col!.outcomes, col!.attempts.n, col!.gate.green, col!.diff.files.n]).toEqual([{ DONE: 1 }, 0, 1, 1]);
+  });
+
+  it("gives a case with no original run an original column of no runs", () => {
+    const [orig] = compareReplay({
+      cases: [replayCase(1, { original: null, landed: null })],
+      originals: new Map(),
+      sessions: [],
+    }).cases[0]!.columns;
+    expect(orig).toEqual({
+      label: "original",
+      runs: 0,
+      outcomes: {},
+      attempts: spread([]),
+      rounds: { gate: spread([]), quality: spread([]), review: spread([]) },
+      roles: {},
+      gate: { green: 0, red: 0, unknown: 0 },
+      diff: { files: spread([]), insertions: spread([]), deletions: spread([]) },
+    });
+  });
+});
+
+describe("renderReplayReport (#195)", () => {
+  it("tables the sessions, their routing and each case side by side", () => {
+    const base = sessionOf("base", [
+      ran(1, 1),
+      ran(1, 2, { terminal: "NEEDS-HUMAN", lastGateOk: false }),
+      ran(2, 1),
+      { repeat: 2, run: "run-r2", issue: 2, seedSha: SEED, branch: "b-2", status: "not-run", reason: "QUOTA: out" },
+    ]);
+    const report = compareReplay({
+      cases: [replayCase(1), replayCase(2, { original: null, landed: null })],
+      originals: new Map([[1, statsOf("run-orig", cycleOf(1, [usage(100, 1000, 3000)]))]]),
+      sessions: [records(base, {
+        "run-r1": statsOf("run-r1", [...cycleOf(1, [usage(10, 100, 200)]), ...cycleOf(2, [null], "NEEDS-HUMAN")]),
+        "run-r2": statsOf("run-r2", cycleOf(1, [usage(30, 300, 400), usage(10, 500, 900)])),
+      })],
+    });
+    expect(renderReplayReport(report)).toBe([
+      "# Replay: original / base",
+      "",
+      "## Sessions",
+      "session  driver        repeats  parallel  quality  gate  review  cases sha256",
+      "base     sandbar base  2        1         2        3     2       ffffffffffff",
+      "",
+      "## Routing",
+      "role         base",
+      "implementer  claude base",
+      "",
+      "## #1 Issue 1",
+      "metric                    original  base",
+      "runs                      1         2",
+      "outcomes                  DONE 1    DONE 2",
+      "attempts                  1         1 [1..2]",
+      "gate rounds               1         1",
+      "quality rounds            0         0",
+      "review rounds             0         0",
+      "gate-1 on head            green 1   green 2",
+      "diff files                1         1 [1..2]",
+      "diff insertions           2         10 [10..20]",
+      "diff deletions            0         0",
+      "implementer input         100       10 [10..40]",
+      "implementer cached        10        10 [10..20]",
+      "implementer output        5         5 [5..10]",
+      "implementer firstContext  1000      100 [100..300]",
+      "implementer peakContext   3000      200 [200..900]",
+      "",
+      "## #2 Issue 2",
+      "metric                    original  base",
+      "runs                      0         2",
+      "outcomes                  -         NEEDS-HUMAN 1, not-run 1",
+      "attempts                  -         1 (1/2)",
+      "gate rounds               -         1 (1/2)",
+      "quality rounds            -         0 (1/2)",
+      "review rounds             -         0 (1/2)",
+      "gate-1 on head            -         red 1, unknown 1",
+      "diff files                -         1 (1/2)",
+      "diff insertions           -         10 (1/2)",
+      "diff deletions            -         0 (1/2)",
+      "implementer input         -         -",
+      "implementer cached        -         -",
+      "implementer output        -         -",
+      "implementer firstContext  -         -",
+      "implementer peakContext   -         -",
+      "",
     ].join("\n"));
   });
 });
