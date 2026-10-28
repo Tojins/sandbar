@@ -164,6 +164,22 @@ describe("renderAttemptSlot — the stack file (#186)", () => {
   });
 });
 
+// #202: an enforced allowlist is stated once; report mode refuses nothing.
+describe("renderAttemptSlot — the egress allowlist (#202)", () => {
+  it("states the allowlist when it is enforced", () => {
+    expect(renderAttemptSlot({ ...implementerInputs, egressEnforced: true })).toContain(
+      "Outbound network is an allowlist. A host that does not resolve is refused by " +
+        "design and recorded; do not work around it or retry it.",
+    );
+  });
+
+  it("says nothing in report mode or with open egress", () => {
+    for (const inputs of [implementerInputs, { ...implementerInputs, egressEnforced: false }]) {
+      expect(renderAttemptSlot(inputs)).not.toContain("Outbound network");
+    }
+  });
+});
+
 describe("adjudication prompt contracts (#167)", () => {
   it("tells an unchanged implementer attempt how to dispute a false finding", () => {
     const slot = renderAttemptSlot({

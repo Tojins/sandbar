@@ -77,6 +77,13 @@
 // covered within the deadline has null `runId` and `attempt`, and `sha` is
 // its merge commit. A new kind, so no bump.
 //
+// `egress-refused` and `egress` (#202) record a network owner's egress
+// proxy: its `stack` is the agent sandbox (siblings included), a gate stack
+// or the merger's resolve container. `egress-refused` is the first sighting of
+// one refused destination per proxy — `enforced` is false in report mode,
+// where it was let through — and `egress` the proxy's teardown summary, its
+// counts per destination being reports only (#82). New kinds, so no bump.
+//
 // `db-base` (#201, `db-base.ts`) is one attempt of the nightly base import,
 // recorded once per run when the daemon first reads it from
 // `import-status.json`: imported with the base's size, or failed with a
@@ -121,6 +128,7 @@ import type { RestartDueReason } from "./scheduler.js";
 import type { StackClassification } from "./stack-change.js";
 import type { AgentRunEndedBy } from "./agent-sandbox.js";
 import type { ContainerResources } from "./container-resources.js";
+import type { EgressCounts, EgressMode, EgressRefusal } from "./egress-policy.js";
 import {
   createTranscriptTree,
   type TranscriptTree,
@@ -289,6 +297,22 @@ export type QualityReviewEvent = {
   readonly prose: string;
 };
 
+// Which network owner an egress proxy served (#202). A gate stack's `issue`
+// is absent for the merger's gate-2 stack, as a resolve container's is.
+export type EgressSubject = {
+  readonly stack: "sandbox" | "gate" | "resolve";
+  readonly issue?: number;
+  readonly title?: string;
+};
+
+export type EgressSummaryEvent = ContainerResources & {
+  readonly mode: EgressMode;
+  readonly allowed: EgressCounts;
+  readonly refused: EgressCounts;
+  readonly upstreamErrors: EgressCounts;
+  readonly durationMs: number;
+};
+
 export type LandRequestStatus =
   | {
       readonly kind: "landing";
@@ -384,6 +408,8 @@ export type EventInput =
   | (EventIssue & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "adjudication"; readonly pass: "quality" | "correctness"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields })
+  | (EgressSubject & EgressRefusal & { readonly kind: "egress-refused" })
+  | (EgressSubject & EgressSummaryEvent & { readonly kind: "egress" })
   | (ContainerResources & { readonly kind: "container"; readonly stack: "gate" | "sandbox"; readonly name: string; readonly container: string; readonly lifecycle: "issue" | "attempt"; readonly durationMs: number; readonly issue?: number; readonly title?: string })
   | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly quality: QualityOutcome["verdict"]; readonly qualityRounds: number; readonly gateOk: boolean; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "correctness" | null; readonly gateFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
   | (EventIssue & { readonly kind: "repair"; readonly attempt: number; readonly action: "fast-forward" | "re-prompt" | "promise-nudge"; readonly detail: string })

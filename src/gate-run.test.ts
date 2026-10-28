@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   type BuiltImage,
   type GateStackConfig,
+  type ResolvedEgress,
   type ResolvedGateStack,
   resolveGateStack,
 } from "./config.js";
@@ -22,6 +23,7 @@ import {
   gateDirtyWorktreePaths,
   gateReuseToken,
   gateStackImagesOf,
+  printedEgressReport,
   shouldHideWorktreeGit,
 } from "./gate-run.js";
 
@@ -78,10 +80,23 @@ const stack = (over: Partial<GateStackConfig> = {}): ResolvedGateStack =>
     ...over,
   });
 
-const token = (s: ResolvedGateStack, wt = WT, v = V): string =>
-  gateReuseToken(s, wt, v);
+const token = (
+  s: ResolvedGateStack,
+  wt = WT,
+  v = V,
+  egress: ResolvedEgress = { kind: "open" },
+): string => gateReuseToken(s, wt, v, egress);
 
 describe("gateReuseToken", () => {
+  // #202: a kept pod sits on its allowlist's network behind its proxy.
+  it("changes with the egress allowlist's digest", () => {
+    const allowlist = (digest: string): ResolvedEgress =>
+      ({ kind: "allowlist", policy: { mode: "enforce", entries: [] }, digest });
+    expect(token(stack(), WT, V, allowlist("a"))).not.toBe(token(stack()));
+    expect(token(stack(), WT, V, allowlist("a"))).not.toBe(token(stack(), WT, V, allowlist("b")));
+    expect(token(stack(), WT, V, allowlist("a"))).toBe(token(stack(), WT, V, allowlist("a")));
+  });
+
   it("is stable for the same spec, tree and version", () => {
     expect(token(stack())).toBe(token(stack()));
     expect(token(stack())).toMatch(/^[0-9a-f]{64}$/);
@@ -253,5 +268,32 @@ describe("gateStackImagesOf", () => {
         stack(),
       ).map((i) => i.tag),
     ).toEqual(["localhost/app:gate"]);
+  });
+});
+
+describe("printedEgressReport", () => {
+  const enforced = { host: "evil.example", port: 443, via: "tls", enforced: true } as const;
+  const reportOnly = { host: null, port: null, via: "dns", enforced: false } as const;
+
+  it("prints an enforced refusal as refused, and a report-mode one as would refuse", async () => {
+    const printed: string[] = [];
+    await printedEgressReport((t) => printed.push(t)).refusals([enforced, reportOnly]);
+    expect(printed).toEqual([
+      "egress refused evil.example:443 (tls)\n",
+      "egress would refuse (no host) (dns)\n",
+    ]);
+  });
+
+  it("prints the summary's first refusals when the proxy stops", async () => {
+    const printed: string[] = [];
+    await printedEgressReport((t) => printed.push(t)).stopped({
+      mode: "enforce",
+      allowed: {},
+      refused: {},
+      upstreamErrors: {},
+      firstRefusals: [enforced],
+      durationMs: 1,
+    } as never);
+    expect(printed).toEqual(["egress refused evil.example:443 (tls)\n"]);
   });
 });

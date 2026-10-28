@@ -26,6 +26,11 @@
 // Step timings and final lifecycle-container lines include any cgroup peak and
 // OOMKilled evidence collected at their teardown boundary (#141).
 //
+// An egress allowlist (#202) applies here as in a run: the stack's network is
+// internal and its proxy the pod's resolver. Its log goes under the temp
+// directory rather than `<workDir>`, its refusals are printed as they are
+// drained, and `--keep` keeps it with the pod.
+//
 // Residuals: `cleanup.ts`'s traps still `process.exit` on
 // `uncaughtException`/`unhandledRejection` (#35) — the one place this
 // command's "returns rather than exits" contract does not reach an embedding
@@ -45,12 +50,14 @@
 
 import { realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import { installCleanupTraps, registerDisposable } from "./cleanup.js";
 import {
   type BuiltImage,
   type ResolvedConfig,
+  type ResolvedEgress,
   type ResolvedGateStack,
   type ResolvedStackContainer,
   type RunConfig,
@@ -66,6 +73,8 @@ import {
   removeBranchImages,
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
+import { type EgressReport, ensureEgressImage, ownerEgress } from "./egress.js";
+import { type EgressRefusal, egressDestination } from "./egress-policy.js";
 import { SandbarError, faultDetail, isExitCode } from "./errors.js";
 import { formatGateSteps, summarizeGateFailure } from "./gate.js";
 import { durationField } from "./timing.js";
@@ -81,7 +90,7 @@ import {
 } from "./gate-stack.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
 import { missingPulledImages } from "./preflight.js";
-import { type RunScope, gateScope } from "./naming.js";
+import { type RunScope, gateScope, scopedResourcePrefix } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 import { readStackFrom } from "./stack-source.js";
 import { sandbarVersion } from "./version.js";
@@ -158,6 +167,10 @@ export type GateCommandOptions = {
 //   - sandbar's own version, because `containerRunArgs` is sandbar's and an
 //     upgrade that changes a flag would otherwise silently adopt a container
 //     built the old way. The cost is one full rebuild per upgrade.
+//   - the egress allowlist's digest (#202), because a pod is created on its
+//     network and with its proxy as resolver, and an allowlist changed since
+//     must not be gated behind the old one. Open egress adds nothing, so its
+//     token is what it was before #202.
 //
 // What it deliberately does NOT cover: the `attempt` containers and the steps.
 // Attempt containers are recreated on every gate run by definition, and a step
@@ -172,6 +185,7 @@ export function gateReuseToken(
   spec: ResolvedGateStack,
   worktreePath: string,
   version: string,
+  egress: ResolvedEgress,
 ): string {
   const issueContainers = gateStackOf(spec).containers.filter(
     (c: ResolvedStackContainer) => c.lifecycle === "issue",
@@ -183,6 +197,7 @@ export function gateReuseToken(
         version,
         worktreePath,
         containers: issueContainers,
+        ...(egress.kind === "open" ? {} : { egress: egress.digest }),
       }),
     )
     .digest("hex");
@@ -549,6 +564,17 @@ async function gate(
   });
   progress.builtTags = branchImages.builtTags;
 
+  // The stack's proxy (#202), on the stack's own image and under this
+  // command's scope. Its log goes to a per-worktree temp directory, because
+  // nothing here writes under `<workDir>`, and there is no run record for its
+  // refusals: they are printed as they are drained.
+  const egress = config.egress.kind === "open" ? undefined : ownerEgress({
+    scope,
+    image: await ensureEgressImage(scope),
+    policy: config.egress.policy,
+    logDir: join(tmpdir(), `${scopedResourcePrefix(scope)}egress`),
+  }, printedEgressReport(err));
+
   await checkWorktreeImageUids(spec, hostUid);
 
   // Reported, not refused (see `StackOptions.allowDirtyWorktree`).
@@ -587,7 +613,9 @@ async function gate(
       spec,
       worktreePath,
       sandbarVersion(),
+      config.egress,
     ),
+    ...(egress === undefined ? {} : { egress }),
     keepAlive: opts.keep,
     allowDirtyWorktree: true,
     onStepOutput: out,
@@ -648,6 +676,18 @@ async function gate(
   if (opts.keep) out(keptStackNotice(stack));
 
   return result.ok ? GATE_EXIT_GREEN : GATE_EXIT_RED;
+}
+
+export function printedEgressReport(err: (text: string) => void): EgressReport {
+  const refusals = async (found: readonly EgressRefusal[]): Promise<void> => {
+    for (const r of found) {
+      err(
+        `egress ${r.enforced ? "refused" : "would refuse"} ` +
+          `${egressDestination(r.host, r.port)} (${r.via})\n`,
+      );
+    }
+  };
+  return { refusals, stopped: (summary) => refusals(summary.firstRefusals) };
 }
 
 // What `--keep` left behind, and how to get rid of it. One function because

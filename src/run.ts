@@ -149,6 +149,10 @@
 // the orphan containers, and again at each quiescent sweep.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
+// An egress allowlist (#202) builds the proxy image once at startup and hands
+// every sandbox, gate stack and resolve attempt the same `EgressContext`, its
+// proxies logging under `<runDir>/egress/`. Preflight warns, first, when
+// `databaseCopies` is configured beside open or report-mode egress.
 // Every gate-1 and gate-2 call passes through one run-wide FIFO semaphore
 // (#142). `maxConcurrentGates` bounds its permits; absence is unlimited, and
 // queue time is evidence on the gate event rather than a scheduling decision.
@@ -166,11 +170,12 @@
 
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   type ResolvedConfig,
   type RunConfig,
+  egressStartupWarning,
   resolveConfig,
 } from "./config.js";
 import {
@@ -221,7 +226,14 @@ import {
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { reconcileImages } from "./image-lifecycle.js";
-import { currentEgressImageTag } from "./egress.js";
+import {
+  type EgressContext,
+  type OwnerEgress,
+  currentEgressImageTag,
+  egressReport,
+  ensureEgressImage,
+  ownerEgress,
+} from "./egress.js";
 import { makeEnvReader } from "./env.js";
 import { startTimer } from "./timing.js";
 import {
@@ -538,6 +550,7 @@ export function innerLoopConfigOf(
     readonly env: Record<string, string>;
     readonly codexAuthMount: CodexAuthMount | undefined;
     readonly agentImages: AgentImages;
+    readonly egress: EgressContext | null;
   },
 ): InnerLoopConfig {
   const { codexAuthMount, ...rest } = parts;
@@ -583,6 +596,17 @@ export function innerLoopConfigOf(
     botName: config.botName,
     botEmail: config.botEmail,
   };
+}
+
+// The `egress` option of a gate stack or the resolve adapter (#202): theirs to
+// start a proxy with, its records going to the run record. Nothing with open
+// egress.
+export function egressOf(
+  context: EgressContext | null,
+  emit: Parameters<typeof egressReport>[0],
+  stack: "gate" | "resolve",
+): { readonly egress?: OwnerEgress } {
+  return context === null ? {} : { egress: ownerEgress(context, egressReport(emit, { stack })) };
 }
 
 export async function verifyFinalizedTrackerState(
@@ -1226,6 +1250,11 @@ export async function run(
       action: "started",
       detail: "Preflight started",
     });
+    // Before the checks, so a run that fails preflight still says it (#202).
+    const egressWarning = egressStartupWarning(config);
+    if (egressWarning !== null) {
+      await runRecord.emit({ kind: "complaint", severity: "warning", message: egressWarning });
+    }
     ({ readyLabelPolicy, stackSource } = await runPreflightAfterReachability({
       ...preflightBase,
       onEvent: (event) => runRecord.emit(event).then(() => undefined),
@@ -1406,6 +1435,10 @@ export async function run(
   let initialSourceWorktree: string;
   let initialBaseFingerprints: ReadonlyMap<string, string>;
   let initialAgentImages: AgentImages;
+  // What every sandbox, gate stack and resolve container gets with an egress
+  // allowlist (#202): the proxy image, the policy, and the run's own log
+  // directory for the proxies' decisions. Null keeps open egress.
+  let egressContext: EgressContext | null = null;
   try {
     initialSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
     initialBaseFingerprints = await ensureImages(config.images, initialSourceWorktree, {
@@ -1424,6 +1457,14 @@ export async function run(
       onImage: recordImage,
       log: () => undefined,
     });
+    if (config.egress.kind === "allowlist") {
+      egressContext = {
+        scope,
+        image: await ensureEgressImage(scope, recordImage),
+        policy: config.egress.policy,
+        logDir: join(runRecord.runDir, "egress"),
+      };
+    }
   } catch (err) {
     return await stopAtStartup("image-build-failed", err);
   }
@@ -2668,6 +2709,7 @@ export async function run(
         env: sandboxEnv,
         codexAuthMount,
         agentImages: admissionImages.agentImages,
+        egress: egressContext,
       });
       for (const issue of executionIssues) {
         const issueLogger = await runRecord.issue(issue.id);
@@ -2819,6 +2861,7 @@ export async function run(
               stack: "gate",
               ...record,
             }).then(() => undefined),
+            ...egressOf(egressContext, runRecord.emit, "gate"),
             // gate-2 needs this as much as gate-1 does (#37): the merge result
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
@@ -2852,6 +2895,7 @@ export async function run(
             },
             stackChange: async () => stackChangeOf((await headStack()).classification),
             beforeOriginWrite: renewOriginLease,
+            ...egressOf(egressContext, runRecord.emit, "resolve"),
           });
 
           // The only site that supplies the probe tree by hand — the two

@@ -3,7 +3,7 @@
 Fix issue #{{issueId}}: {{issueTitle}}
 Branch: {{branch}}
 
-{{chunkBase}}{{workDone}}{{qualityCommits}}{{sandboxStack}}{{stackFile}}{{gateFailure}}{{reviewerFeedback}}{{orchestratorNote}}{{escalation}}If you realise mid-implementation that you are inventing non-trivial visible UI
+{{chunkBase}}{{workDone}}{{qualityCommits}}{{sandboxStack}}{{stackFile}}{{egress}}{{gateFailure}}{{reviewerFeedback}}{{orchestratorNote}}{{escalation}}If you realise mid-implementation that you are inventing non-trivial visible UI
 the initial check did not cover, commit what you have, then stop and emit
 `<promise>NEEDS-UI-PROTOTYPE</promise>` followed by a `<ui-impact>` block. A
 late escalation is better than a merged guess.

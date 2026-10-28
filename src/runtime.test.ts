@@ -74,6 +74,7 @@ const BUILDERS: ReadonlyArray<readonly [string, () => RuntimeInvocation]> = [
         containerUid: 1000,
         containerGid: 1000,
         networks: ["sandbar-w0011223-net-1"],
+        dnsArgs: [],
         groups: [],
         devices: [],
         cpus: undefined,

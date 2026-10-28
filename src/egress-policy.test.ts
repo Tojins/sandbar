@@ -150,6 +150,26 @@ describe("foldEgressLog", () => {
     });
   });
 
+  // A gate run's trace names what it was refused even when an earlier run
+  // sighted it first (#202, gate-stack.ts).
+  it("names every destination refused in the lines it read, first sighting or not", () => {
+    const first = foldEgressLog([
+      line({ t: "refuse", via: "dns", host: "evil.test", port: null }),
+    ], EMPTY_EGRESS_TALLY);
+    expect(first.refused).toEqual(["evil.test"]);
+    const second = foldEgressLog([
+      line({ t: "refuse", via: "dns", host: "evil.test", port: null }),
+      line({ t: "would-refuse", via: "tls", host: "x.test", port: 443 }),
+      line({ t: "refuse", via: "dns", host: "evil.test", port: null }),
+      line({ t: "allow", via: "tls", host: "api.anthropic.com", port: 443 }),
+    ], first.tally);
+    expect(second.firstRefusals).toEqual([
+      { host: "x.test", port: 443, via: "tls", enforced: false },
+    ]);
+    expect(second.refused).toEqual(["evil.test", "x.test:443"]);
+    expect(foldEgressLog([], second.tally).refused).toEqual([]);
+  });
+
   it("reports a report-mode refusal as not enforced", () => {
     const { firstRefusals } = foldEgressLog(
       [line({ t: "would-refuse", via: "private", host: "a.test", port: 443 })],
@@ -196,6 +216,20 @@ describe("egress podman argv", () => {
       "-v", "/run/egress/sbx-7.jsonl:/egress/log.jsonl:rw,z",
       "localhost/sandbar-egress:x",
     ]);
+  });
+
+  it("pins the proxy's address on the owner's network when given one", () => {
+    const args = egressProxyRunArgs({
+      name: "p",
+      internalNet: "sandbar-w1-net-7",
+      image: "i",
+      logHostPath: "/l",
+      policyHostPath: "/p",
+      ip: "10.89.4.2",
+    });
+    expect(args).toEqual(expect.arrayContaining([
+      "--network", "sandbar-w1-net-7:ip=10.89.4.2", "--network", "podman",
+    ]));
   });
 
   it("reads the proxy's address on one network", () => {

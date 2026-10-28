@@ -158,6 +158,14 @@ export default {
   // label (or `label`) and `ready-for-human` must already exist.
   // deployWatch: { workflow: "deploy.yml", notifyLogin: "your-login" },
 
+  // Allow sandboxes, gates and resolve containers to reach only GitHub, the
+  // model APIs of the providers in use and these hosts; every refused host is
+  // recorded as an `egress-refused` event. Entries: a preset ("npm",
+  // "packagist"), "host", "*.suffix", "host:port", or
+  // { host, ports, private: true } for a name that resolves to a private
+  // address. Start in "report" mode to discover the list from the run record.
+  // egress: { mode: "report", allow: ["npm", "packagist"] },
+
   // Import a nightly prod dump into a base datadir for agents' database copies.
   // `sandbar db-base`, run from a timer beside the daemon, imports each new
   // dump with the gate stack's `container` (an inSandbox server with a

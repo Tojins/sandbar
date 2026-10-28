@@ -1013,3 +1013,31 @@ describe("run event reducer", () => {
     });
   });
 });
+
+// #202: a refusal is a warning in the feed, never a header complaint.
+describe("egress feed rows (#202)", () => {
+  it("shows each refusal and a proxy's summary, and complains about neither", () => {
+    const rows = [
+      { kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "d", configPath: null,
+        workdir: "/w", maxParallelIssues: 1, pid: 1 },
+      { kind: "egress-refused", stack: "sandbox", issue: 7, title: "Seven",
+        host: "evil.example", port: 443, via: "tls", enforced: true },
+      { kind: "egress-refused", stack: "gate", host: "cdn.example", port: null,
+        via: "dns", enforced: false },
+      { kind: "egress", stack: "sandbox", issue: 7, title: "Seven", mode: "enforce",
+        allowed: { "api.anthropic.com:443": 3 }, refused: { "evil.example:443": 2 },
+        upstreamErrors: {}, durationMs: 5, peakMemoryBytes: 1000 },
+    ];
+    const state = reduceRunEvents(
+      rows.map((row, i) => at(i + 1, `2026-10-28T09:0${i}:00Z`, row)),
+      { now: new Date("2026-10-28T10:00:00Z"), pidAlive: false },
+    );
+    expect(state.events.map((e) => [e.issue, e.text, e.tone, e.peakMemoryBytes])).toEqual([
+      [7, "sandbox egress proxy stopped · 1 destination refused", "dim", 1000],
+      [null, "gate egress would refuse cdn.example (dns)", "warn", undefined],
+      [7, "sandbox egress refused evil.example:443 (tls)", "warn", undefined],
+      [null, "run started", "dim", undefined],
+    ]);
+    expect(state.run.complaints).toEqual([]);
+  });
+});

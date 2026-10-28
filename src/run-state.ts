@@ -29,6 +29,10 @@
 // the round's `scenarios` step, a review span like the others.
 // A `deploy` verdict (#198) is a feed line; a red one this process filed is
 // also a header complaint, because the bug issue waits on a human.
+// An `egress-refused` event (#202) is a warning feed line, never a complaint:
+// a refusal is as likely an injection attempt as a missing allowlist entry, so
+// it is the run record's to show, not the header's to escalate. A proxy's
+// `egress` summary is a dim line beside the containers'.
 
 import type {
   GateStepEvent,
@@ -40,6 +44,7 @@ import type {
   WaitingReason,
 } from "./events.js";
 import type { ContainerResources } from "./container-resources.js";
+import { egressDestination } from "./egress-policy.js";
 import type { RestartDueReason } from "./scheduler.js";
 
 export type TimelineSpan = {
@@ -323,6 +328,19 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = `${event.stack} container ${event.name} stopped`;
       tone = event.oomKilled === true ? "bad" : "dim";
       break;
+    case "egress-refused":
+      text = `${event.stack} egress ${event.enforced ? "refused" : "would refuse"} ` +
+        `${egressDestination(event.host, event.port)} (${event.via})`;
+      tone = "warn";
+      break;
+    case "egress": {
+      const refused = Object.keys(event.refused).length;
+      text = `${event.stack} egress proxy stopped · ${refused} destination${
+        refused === 1 ? "" : "s"
+      } refused`;
+      tone = "dim";
+      break;
+    }
     case "review-round":
       text = `round ${event.round} · ${
         !event.gateOk

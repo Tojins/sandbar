@@ -17,17 +17,24 @@ import { promisify } from "node:util";
 
 import { afterAll, beforeAll, describe, it } from "vitest";
 
+import { resolveGateStack } from "./config.js";
 import {
   EGRESS_BASE_IMAGE,
   type EgressHandle,
   currentEgressImageTag,
+  egressReport,
   ensureEgressImage,
+  ownerEgress,
   startEgress,
 } from "./egress.js";
+import type { EventInput } from "./events.js";
+import { type Stack, startStack } from "./gate-stack.js";
 import { type EgressPolicy, internalNetworkCreateArgs, proxyIpInspectArgs } from "./egress-policy.js";
 import type { ImageBuildRecord } from "./ensure-images.js";
 import {
   egressProxyNameFor,
+  networkNameFor,
+  podNameFor,
   sandboxNetworkNameFor,
   stackContainerNameFor,
 } from "./naming.js";
@@ -118,6 +125,13 @@ const ENFORCE: EgressPolicy = {
   ],
 };
 
+// The fixture names, mapped to the upstream in a running proxy's /etc/hosts.
+const mapFixtureHosts = async (proxyName: string): Promise<void> => {
+  const hosts = ["allowed.test", "blocked.test", "internal.test"]
+    .map((name) => `${upstreamIp} ${name}`).join("\n");
+  await exec(RUNTIME, ["exec", proxyName, "sh", "-c", `echo '${hosts}' >> /etc/hosts`]);
+};
+
 // A proxy on its own internal network, its /etc/hosts mapping the fixture
 // names to the upstream.
 async function proxyFor(token: string, policy: EgressPolicy): Promise<EgressHandle> {
@@ -130,13 +144,43 @@ async function proxyFor(token: string, policy: EgressPolicy): Promise<EgressHand
     policy,
     logDir: join(fixtureDir, "egress"),
   });
-  const hosts = ["allowed.test", "blocked.test", "internal.test"]
-    .map((name) => `${upstreamIp} ${name}`).join("\n");
-  await exec(RUNTIME, [
-    "exec", egressProxyNameFor(SCOPE, `sbx-${token}`), "sh", "-c", `echo '${hosts}' >> /etc/hosts`,
-  ]);
+  await mapFixtureHosts(egressProxyNameFor(SCOPE, `sbx-${token}`));
   return handle;
 }
+
+// A one-container gate stack (#223) over the fixture directory, whose one step
+// probes through the stack's proxy and then fails, so the run is red.
+const gateStackBehind = (
+  stackId: string,
+  events: EventInput[],
+  standalone: { readonly reuseToken?: string; readonly keepAlive?: boolean } = {},
+): Promise<Stack> => startStack({
+  stackId,
+  scope: SCOPE,
+  worktreePath: fixtureDir,
+  hideWorktreeGit: false,
+  allowDirtyWorktree: true,
+  spec: resolveGateStack({
+    containers: [{
+      name: "app", image: EGRESS_BASE_IMAGE, lifecycle: "issue", hold: true, mountWorktree: "/fixture",
+    }],
+    steps: [{
+      name: "probe",
+      in: "app",
+      command: ["sh", "-c", "node /fixture/client.mjs resolve blocked.test; exit 1"],
+    }],
+  }),
+  egress: ownerEgress(
+    { scope: SCOPE, image, policy: ENFORCE, logDir: join(fixtureDir, "egress") },
+    egressReport((event) => {
+      events.push(event);
+    }, { stack: "gate" }),
+  ),
+  ...standalone,
+});
+
+const podDns = async (pod: string): Promise<string> =>
+  (await exec(RUNTIME, ["pod", "inspect", "--format", "{{json .InfraConfig.DNSServer}}", pod])).stdout.trim();
 
 const probe = async (container: string, ...args: string[]): Promise<string> =>
   (await exec(RUNTIME, ["exec", container, "node", "/fixture/client.mjs", ...args])).stdout.trim();
@@ -232,6 +276,66 @@ describe.runIf(available)("egress proxy against real podman", () => {
       await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", pod]);
       await proxy.stop();
       expect(await exists("network", sandboxNetworkNameFor(SCOPE, token))).toBe(false);
+    },
+    300_000,
+  );
+
+  it.concurrent(
+    "puts a gate stack behind its own proxy, names a red run's refusals and tears down all three",
+    async ({ expect, task }) => {
+      const stackId = podmanTestStackId("egress-gate", task.id);
+      const events: EventInput[] = [];
+      const stack = await gateStackBehind(stackId, events);
+      const proxyName = egressProxyNameFor(SCOPE, stackId);
+      await mapFixtureHosts(proxyName);
+      const proxyIp = (await exec(RUNTIME, proxyIpInspectArgs(proxyName, networkNameFor(SCOPE, stackId)))).stdout.trim();
+      expect(await podDns(podNameFor(SCOPE, stackId))).toBe(JSON.stringify([proxyIp]));
+      const app = stackContainerNameFor(SCOPE, stackId, "app");
+      expect(await probe(app, "get", "https://allowed.test/")).toBe("200 upstream https allowed.test");
+      expect(await probe(app, "connect", "1.1.1.1", "443")).toMatch(/^ERROR (ENETUNREACH|EHOSTUNREACH)$/);
+
+      const red = await stack.runGate();
+      expect(red.ok).toBe(false);
+      expect(red.containerLogs).toMatch(/^\negress refused during this run: blocked\.test\n/);
+      // A refusal an earlier run sighted first is still named in this one's trace.
+      expect((await stack.runGate()).containerLogs).toMatch(/^\negress refused during this run: blocked\.test\n/);
+      expect(events.filter((e) => e.kind === "egress-refused")).toEqual([
+        { kind: "egress-refused", stack: "gate", host: "blocked.test", port: null, via: "dns", enforced: true },
+      ]);
+
+      await stack.stop();
+      expect(events.at(-1)).toMatchObject({
+        kind: "egress", stack: "gate", mode: "enforce", allowed: { "allowed.test:443": 1 },
+      });
+      expect(await exists("container", proxyName)).toBe(false);
+      expect(await exists("network", networkNameFor(SCOPE, stackId))).toBe(false);
+    },
+    300_000,
+  );
+
+  it.concurrent(
+    "gives a kept stack's adopted pod a proxy at the address its resolv.conf names",
+    async ({ expect, task }) => {
+      const stackId = podmanTestStackId("egress-keep", task.id);
+      const events: EventInput[] = [];
+      const standalone = { reuseToken: `token-${stackId}`, keepAlive: true };
+      const first = await gateStackBehind(stackId, events, standalone);
+      const pod = podNameFor(SCOPE, stackId);
+      const resolver = await podDns(pod);
+      await first.stop();
+      expect(await exists("container", egressProxyNameFor(SCOPE, stackId))).toBe(true);
+
+      const second = await gateStackBehind(stackId, events, standalone);
+      expect(second.reused).toEqual(["app"]);
+      const proxyName = egressProxyNameFor(SCOPE, stackId);
+      const proxyIp = (await exec(RUNTIME, proxyIpInspectArgs(proxyName, networkNameFor(SCOPE, stackId)))).stdout.trim();
+      expect(JSON.stringify([proxyIp])).toBe(resolver);
+      await mapFixtureHosts(proxyName);
+      expect(await probe(stackContainerNameFor(SCOPE, stackId, "app"), "get", "https://allowed.test/"))
+        .toBe("200 upstream https allowed.test");
+
+      await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", pod]);
+      await exec(RUNTIME, ["network", "rm", "-f", networkNameFor(SCOPE, stackId)]);
     },
     300_000,
   );

@@ -1,0 +1,1 @@
+Outbound network is an allowlist. A host that does not resolve is refused by design and recorded; do not work around it or retry it. If the issue needs a host that is not on the list, say so in your report.

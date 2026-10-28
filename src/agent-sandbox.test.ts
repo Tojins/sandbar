@@ -4345,6 +4345,7 @@ describe("sandboxRunArgs (#42)", () => {
     containerUid: 1000,
     containerGid: 1000,
     networks: [],
+    dnsArgs: [],
     groups: [],
     devices: [],
     cpus: undefined,
@@ -4412,6 +4413,23 @@ describe("sandboxRunArgs (#42)", () => {
     // The env is the invocation's, not the argv's (#154).
     expect(env).toEqual({ HOME: "/home/agent", GH_TOKEN: "t" });
     expect(args.join(" ")).not.toContain("GH_TOKEN");
+  });
+
+  // #202: an allowlisted sandbox sits on its internal network with the egress
+  // proxy as its only resolver. Open egress passes neither, which "emits no
+  // empty optional flags" below pins byte for byte.
+  it("puts the sandbox on its egress network with the proxy as its DNS", () => {
+    const { argv: args } = sandboxRunArgs({
+      ...base,
+      networks: ["sandbar-w0011223-net-sbx-7"],
+      dnsArgs: ["--dns", "10.89.0.2", "--dns-search", "."],
+    });
+    const at = args.indexOf("--network");
+    expect(args.slice(at, at + 6)).toEqual([
+      "--network", "sandbar-w0011223-net-sbx-7",
+      "--dns", "10.89.0.2", "--dns-search", ".",
+    ]);
+    expect(at).toBeLessThan(args.indexOf(base.imageName));
   });
 
   it("omits --userns when the provider was configured without one", () => {

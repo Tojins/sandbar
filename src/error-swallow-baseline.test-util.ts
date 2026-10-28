@@ -48,10 +48,11 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // The UI-check invocation (#126) classifies a failed read-only agent write
   // before rethrowing the original invocation error, mirroring the reviewer.
   // The tenth is the quality fixer (#185): an agent exit or timeout is the
-  // named end of its pass, and every other failure is rethrown. The eleventh
-  // reports a scenario writer that failed while its admission ended (#203),
-  // after the terminal is already decided.
-  "inner-loop.ts": 11,
+  // named end of its pass, and every other failure is rethrown. The sandbox
+  // cycle's teardowns report through one helper since #223, which added the
+  // egress proxy's as a fourth. The last reports a scenario writer that failed
+  // while its admission ended (#203), after the terminal is already decided.
+  "inner-loop.ts": 9,
   "keepawake.ts": 1,
   "lock.ts": 4,
   "merger.ts": 11,

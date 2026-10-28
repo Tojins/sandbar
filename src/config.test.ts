@@ -34,6 +34,7 @@ import {
   DEFAULT_SOURCE_BRANCH,
   DEFAULT_WORK_DIR,
   DEFAULT_LABELS,
+  egressStartupWarning,
   resolveCopyToWorktree,
   resolveConfig,
   resolveStackFile,
@@ -1602,28 +1603,121 @@ describe("resolveConfig — deployWatch (#198)", () => {
   });
 });
 
-describe("resolveConfig — databaseCopies (#201)", () => {
-  const dbc = {
-    dump: "/srv/sandbar-db/drops/widgets/widgets-latest.sql.gz",
-    root: "/srv/sandbar-db/installations/widgets",
-    container: "db",
-    database: "widgets",
+describe("resolveConfig — egress (#202)", () => {
+  const defaults = (ports = [443, 80]) => [
+    "*.githubusercontent.com",
+    "api.anthropic.com",
+    "api.github.com",
+    "codeload.github.com",
+    "github.com",
+  ].map((host) => ({ host, ports, private: false }));
+  const allowlist = (egress: RunConfig["egress"], extra: Partial<RunConfig> = {}) => {
+    const resolved = resolveConfig({ ...minimal, ...extra, egress }).egress;
+    if (resolved.kind !== "allowlist") throw new Error("expected an allowlist");
+    return resolved;
   };
-  // `minimal`'s db, made a sandbox sibling so it can take a copy.
+
+  it("is open without the key", () => {
+    expect(resolveConfig(minimal).egress).toEqual({ kind: "open" });
+  });
+
+  it("enforces GitHub and the claude API by default", () => {
+    const { policy } = allowlist({ allow: [] });
+    expect(policy.mode).toBe("enforce");
+    expect(policy.entries).toEqual(defaults());
+  });
+
+  it("adds the hosts of every provider the run invokes", () => {
+    const hosts = allowlist(
+      { allow: [] },
+      { mergerAgent: "codex", mergerModelId: "gpt-5.6-sol" },
+    ).policy.entries.map((e) => e.host);
+    expect(hosts).toEqual(expect.arrayContaining(["api.openai.com", "chatgpt.com", "auth.openai.com"]));
+    expect(allowlist({ allow: [] }).policy.entries.map((e) => e.host)).not.toContain("api.openai.com");
+  });
+
+  it.each([
+    ["a preset", "packagist", [
+      { host: "packagist.org", ports: [443, 80], private: false },
+      { host: "repo.packagist.org", ports: [443, 80], private: false },
+    ]],
+    ["a host, normalized", "Mews.Example.COM.", [{ host: "mews.example.com", ports: [443, 80], private: false }]],
+    ["a suffix", "*.example.com", [{ host: "*.example.com", ports: [443, 80], private: false }]],
+    ["a host:port", "proxy.example.com:8443", [{ host: "proxy.example.com", ports: [8443], private: false }]],
+    ["an object", { host: "rec.example.com", ports: [9000], private: true }, [
+      { host: "rec.example.com", ports: [9000], private: true },
+    ]],
+    ["an object with defaults", { host: "rec.example.com" }, [
+      { host: "rec.example.com", ports: [443, 80], private: false },
+    ]],
+  ])("resolves %s", (_, entry, expected) => {
+    const entries = allowlist({ allow: [entry] }).policy.entries;
+    expect(entries).toEqual(expect.arrayContaining(expected));
+    expect(entries).toHaveLength(defaults().length + expected.length);
+  });
+
+  it("deduplicates an entry the defaults already hold", () => {
+    expect(allowlist({ allow: ["github.com", "GitHub.com."] }).policy.entries).toEqual(defaults());
+  });
+
+  it("keeps report mode", () => {
+    expect(allowlist({ mode: "report", allow: [] }).policy.mode).toBe("report");
+  });
+
+  it("digests the mode and the entries, not their order", () => {
+    const a = allowlist({ allow: ["npm", "x.example.com"] }).digest;
+    expect(allowlist({ allow: ["x.example.com", "npm"] }).digest).toBe(a);
+    expect(allowlist({ mode: "report", allow: ["npm", "x.example.com"] }).digest).not.toBe(a);
+    expect(allowlist({ allow: ["npm"] }).digest).not.toBe(a);
+  });
+
+  it.each([
+    ["a non-object", ["npm"], /config\.egress must be/],
+    ["a missing allow", {}, /config\.egress must be/],
+    ["an unknown mode", { mode: "audit", allow: [] }, /config\.egress\.mode/],
+    ["an IPv4 literal", { allow: ["10.0.0.1"] }, /IP literal/],
+    ["an IPv4 literal with a port", { allow: ["1.1.1.1:443"] }, /IP literal/],
+    ["an IPv6 literal", { allow: ["::1"] }, /IP literal/],
+    ["an unknown bare word", { allow: ["npmjs"] }, /allow\[0\] must be a preset/],
+    ["an empty host", { allow: [""] }, /must name a host/],
+    ["an empty object host", { allow: [{ host: " " }] }, /allow\[0\]\.host must name a host/],
+    ["port zero", { allow: ["a.example.com:0"] }, /port/],
+    ["a port above 65535", { allow: ["a.example.com:65536"] }, /port/],
+    ["a non-numeric port", { allow: ["a.example.com:https"] }, /port/],
+    ["an empty port list", { allow: [{ host: "a.example.com", ports: [] }] }, /ports must be/],
+    ["a fractional port", { allow: [{ host: "a.example.com", ports: [44.3] }] }, /port/],
+    ["a non-boolean private", { allow: [{ host: "a.example.com", private: "yes" }] }, /private/],
+    ["a number entry", { allow: [443] }, /must be a string or/],
+  ])("refuses %s", (_, egress, message) => {
+    expect(() => resolveConfig({ ...minimal, egress: egress as never })).toThrow(message);
+    expect(() => resolveConfig({ ...minimal, egress: egress as never })).toThrow(SandbarError);
+  });
+});
+
+const dbc = {
+  dump: "/srv/sandbar-db/drops/widgets/widgets-latest.sql.gz",
+  root: "/srv/sandbar-db/installations/widgets",
+  container: "db",
+  database: "widgets",
+};
+// `minimal`'s db, made a sandbox sibling so it can take a copy.
+const withDb = (db: Partial<StackContainer>): GateStackConfig => {
   const stack = minimal.gateStack as GateStackConfig;
-  const withDb = (db: Partial<StackContainer>): GateStackConfig => ({
+  return {
     ...stack,
     containers: stack.containers.map((c) =>
       c.name === "db" ? { ...c, inSandbox: true, ...db } : c),
-  });
-  const valid = { ...minimal, gateStack: withDb({}), databaseCopies: dbc };
+  };
+};
+const withDbCopies = { ...minimal, gateStack: withDb({}), databaseCopies: dbc };
 
+describe("resolveConfig — databaseCopies (#201)", () => {
   it("is off by default", () => {
     expect(resolveConfig(minimal).databaseCopies).toBeNull();
   });
 
   it("applies every default", () => {
-    expect(resolveConfig(valid).databaseCopies).toEqual({
+    expect(resolveConfig(withDbCopies).databaseCopies).toEqual({
       ...dbc,
       datadir: "/var/lib/mysql",
       bufferPoolBytes: 256 * 1024 * 1024,
@@ -1635,7 +1729,7 @@ describe("resolveConfig — databaseCopies (#201)", () => {
 
   it("keeps what the config names, with its paths normalised", () => {
     const r = resolveConfig({
-      ...valid,
+      ...withDbCopies,
       databaseCopies: {
         ...dbc,
         root: "/srv/db//widgets/",
@@ -1672,7 +1766,7 @@ describe("resolveConfig — databaseCopies (#201)", () => {
     ["a NaN import timeout", { ...dbc, importTimeoutMs: Number.NaN }, /databaseCopies\.importTimeoutMs/],
     ["a zero stale threshold", { ...dbc, staleAfterMs: 0 }, /databaseCopies\.staleAfterMs/],
   ])("refuses %s", (_, databaseCopies, message) => {
-    const resolve = () => resolveConfig({ ...valid, databaseCopies: databaseCopies as never });
+    const resolve = () => resolveConfig({ ...withDbCopies, databaseCopies: databaseCopies as never });
     expect(resolve).toThrow(message);
     expect(resolve).toThrow(SandbarError);
   });
@@ -1708,12 +1802,37 @@ describe("resolveConfig — databaseCopies (#201)", () => {
           "without it there is no copy for the hook to prepare.",
       ),
     );
-    expect(resolveConfig({ ...valid, sandboxHooks }).sandboxHooks).toEqual(sandboxHooks);
+    expect(resolveConfig({ ...withDbCopies, sandboxHooks }).sandboxHooks).toEqual(sandboxHooks);
   });
 
   // A stack file states its containers only at the tip: the stack source asks.
   it("does not ask the target of a stack file at load", () => {
-    expect(resolveConfig({ ...valid, gateStack: { path: "gate/stack.json" } }).databaseCopies)
+    expect(resolveConfig({ ...withDbCopies, gateStack: { path: "gate/stack.json" } }).databaseCopies)
       .not.toBeNull();
+  });
+});
+
+describe("egressStartupWarning (#202)", () => {
+  it("says nothing without databaseCopies", () => {
+    expect(egressStartupWarning(resolveConfig(minimal))).toBeNull();
+  });
+
+  it("warns about open egress beside databaseCopies", () => {
+    expect(egressStartupWarning(resolveConfig(withDbCopies)))
+      .toMatch(/^egress is open while databaseCopies is configured: prod data can leave the sandbox/);
+  });
+
+  it("warns about report mode beside databaseCopies", () => {
+    expect(egressStartupWarning(resolveConfig({
+      ...withDbCopies,
+      egress: { mode: "report", allow: [] },
+    }))).toMatch(/report mode while databaseCopies is configured/);
+  });
+
+  it("is quiet when an allowlist is enforced", () => {
+    expect(egressStartupWarning(resolveConfig({
+      ...withDbCopies,
+      egress: { allow: [] },
+    }))).toBeNull();
   });
 });

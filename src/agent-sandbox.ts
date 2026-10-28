@@ -172,6 +172,9 @@
 // public (`containerName`) and its removal is `--depend`-aware. It publishes
 // no host ports on their behalf (#43). An anchor chain, not a pod, because a
 // pod cannot carry keep-id and the agent CLI refuses to run as root.
+// Behind an egress allowlist (#202) the podman provider is handed the anchor's
+// internal network and its proxy's `--dns` (`PodmanOptions.dnsArgs`); without
+// one the argv carries neither.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort hygiene action whose result is unrelated to the current run
@@ -506,6 +509,9 @@ export type PodmanOptions = {
   containerUid?: number;
   containerGid?: number;
   network?: string | string[];
+  // The egress proxy's `--dns`/`--dns-search` (#202, `EgressHandle.dnsArgs`),
+  // beside the internal network `network` names. Absent with open egress.
+  dnsArgs?: readonly string[];
   maxOutputTailChars?: number;
   cpus?: number;
   groups?: Array<string | number>;
@@ -2086,6 +2092,7 @@ export function sandboxRunArgs(opts: {
   readonly containerUid: number;
   readonly containerGid: number;
   readonly networks: readonly string[];
+  readonly dnsArgs: readonly string[];
   readonly groups: ReadonlyArray<string | number>;
   readonly devices: readonly string[];
   readonly cpus: number | undefined;
@@ -2110,6 +2117,7 @@ export function sandboxRunArgs(opts: {
     // consumed lock out of the host's 2048. See gate-stack.ts's header.
     "--image-volume=ignore",
     ...opts.networks.flatMap((n) => ["--network", n]),
+    ...opts.dnsArgs,
     ...opts.groups.flatMap((g) => ["--group-add", String(g)]),
     ...opts.devices.flatMap((d) => ["--device", d]),
     ...(opts.cpus !== undefined ? ["--cpus", String(opts.cpus)] : []),
@@ -2199,6 +2207,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         containerUid,
         containerGid,
         networks,
+        dnsArgs: options?.dnsArgs ?? [],
         groups: options?.groups ?? [],
         devices: options?.devices ?? [],
         cpus: options?.cpus,

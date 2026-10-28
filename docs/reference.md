@@ -85,6 +85,7 @@ defaults.
 | `images` | sandbox image from `./Containerfile` | See [Images](#images). |
 | `defaultLane` | `auto` | `auto` lands after the gate; `review` lands on a chunk branch with a draft PR. |
 | `mergeMode` | `{ kind: "direct" }` | `{ kind: "verified", requiredChecks: [...] }` also waits for forge CI. |
+| `egress` | open | `{ mode?, allow: [...] }`: sandboxes, gates and resolve containers reach only GitHub, the model APIs in use and the listed hosts (presets `npm`, `packagist`; `host`, `*.suffix`, `host:port`, or `{ host, ports, private }`). Each refused host is an `egress-refused` event. `mode: "report"` refuses nothing and records what it would refuse. |
 | `maxParallelIssues` | `3` | Issues worked at once. |
 | `maxConcurrentGates` | unlimited | Gate runs at once. |
 | `pollIntervalMs` | `60000` | Idle poll interval. |
