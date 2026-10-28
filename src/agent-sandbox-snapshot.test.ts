@@ -3,11 +3,12 @@
 // idempotence and a leftover snapshot's replacement. No container runs, so
 // none of this needs the host-podman gate.
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -20,6 +21,56 @@ import {
 import { type RepoLayout, repoLayout } from "./repo-cache.js";
 
 const exec = promisify(execFile);
+const SRC_DIR = fileURLToPath(new URL(".", import.meta.url));
+
+// Plain `node` strips the types but does not map `./x.js` to `x.ts`; this hook
+// does (as cleanup-signal.test.ts's does), so the child runs the source.
+const RESOLVE_HOOK = `
+import { registerHooks } from "node:module";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith(".") && specifier.endsWith(".js")) {
+      const asTs = specifier.slice(0, -3) + ".ts";
+      if (existsSync(fileURLToPath(new URL(asTs, context.parentURL)))) {
+        return nextResolve(asTs, context);
+      }
+    }
+    return nextResolve(specifier, context);
+  },
+});
+`;
+
+// Opens a snapshot sandbox on a stub provider, closes it first only when the
+// third argument says so, then exits.
+const EXIT_CHILD = `
+import { createSeedSnapshotSandbox } from ${JSON.stringify(join(SRC_DIR, "agent-sandbox.ts"))};
+import { repoLayout } from ${JSON.stringify(join(SRC_DIR, "repo-cache.ts"))};
+const [root, seedSha, closeFirst] = process.argv.slice(2);
+const sandbox = await createSeedSnapshotSandbox({
+  layout: repoLayout(root, ".sandbar"),
+  issueId: "401",
+  seedSha,
+  sandbox: {
+    tag: "bind-mount",
+    name: "stub",
+    env: {},
+    sandboxHomedir: "/home/agent",
+    create: async () => ({
+      worktreePath: "/home/agent/workspace",
+      containerName: "stub-container",
+      exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      close: async () => {},
+    }),
+  },
+  env: {},
+  extraMounts: [],
+  onNotice: () => {},
+});
+if (closeFirst === "close") await sandbox.close({ preserve: "kept" });
+process.exit(0);
+`;
 
 describe("createSeedSnapshotSandbox with a stub provider (#203)", () => {
   let root: string;
@@ -143,4 +194,34 @@ describe("createSeedSnapshotSandbox with a stub provider (#203)", () => {
       await second.close();
     }
   });
+
+  // The child's exit hook cannot await, so only the registration's
+  // synchronous fallback can remove the directory.
+  const exitChild = async (closeFirst: "close" | "open"): Promise<void> => {
+    const hook = join(root, "resolve-hook.mjs");
+    const script = join(root, "exit-child.mjs");
+    await writeFile(hook, RESOLVE_HOOK);
+    await writeFile(script, EXIT_CHILD);
+    const child = spawn(process.execPath, ["--import", hook, script, root, seedSha, closeFirst], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let err = "";
+    child.stderr.on("data", (c: Buffer) => (err += c.toString()));
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("exit", resolve);
+    });
+    expect(err).toBe("");
+    expect(code).toBe(0);
+  };
+
+  it("removes an unclosed snapshot when the process exits", async () => {
+    await exitChild("open");
+    expect(existsSync(snapshotPath("401"))).toBe(false);
+  }, 30_000);
+
+  it("leaves a closed, preserved snapshot alone at exit: close withdraws the registration", async () => {
+    await exitChild("close");
+    expect(existsSync(snapshotPath("401"))).toBe(true);
+  }, 30_000);
 });
