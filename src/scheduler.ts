@@ -99,7 +99,11 @@
 // and reading `#completed` on the same tick would miss the event that woke
 // us. The settled events move to `#pendingTerminals` here and nowhere else, so
 // "in `#active`", "completed but unobserved" and "observed, awaiting a landing"
-// are three disjoint places and an issue is in at most one of them. The pool
+// are three disjoint places and an issue is in at most one of them. A fourth,
+// `#held`, is a pending terminal the caller may not land yet — a DONE
+// auto-lane issue while the landing window is closed (#244,
+// `landing-window.ts`). It stays ongoing but is not pending, so it neither
+// wakes a landing pass nor joins one until `releaseHeldTerminals`. The pool
 // keeps one removable completion waiter; a poll winner withdraws it, so a hung
 // issue cannot retain one callback for every interval it survives.
 //
@@ -273,6 +277,7 @@ export class ContinuousPool<T, R> {
   readonly #completed: SettledIssue<T, R>[] = [];
   #completionWaiter: (() => void) | null = null;
   readonly #pendingTerminals: SettledIssue<T, R>[] = [];
+  readonly #held: SettledIssue<T, R>[] = [];
   readonly #ongoing = new Map<string, T>();
   readonly #started = new Set<string>();
   readonly #untilPoll = new Set<string>();
@@ -386,6 +391,25 @@ export class ContinuousPool<T, R> {
       return "slot-freed";
     }
     return wake;
+  }
+
+  // Moves the pending terminals `holds` selects out of the landing path, and
+  // returns them: only those newly held, so a caller reports each once.
+  holdTerminals(
+    holds: (event: SettledIssue<T, R>) => boolean,
+  ): readonly SettledIssue<T, R>[] {
+    const held = this.#pendingTerminals.filter(holds);
+    this.#pendingTerminals.splice(
+      0,
+      this.#pendingTerminals.length,
+      ...this.#pendingTerminals.filter((event) => !holds(event)),
+    );
+    this.#held.push(...held);
+    return held;
+  }
+
+  releaseHeldTerminals(): void {
+    this.#pendingTerminals.push(...this.#held.splice(0));
   }
 
   takeLandingBatch(): readonly SettledIssue<T, R>[] {

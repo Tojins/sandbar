@@ -719,6 +719,27 @@ export type DeployWatchConfig = {
   readonly timeoutMs?: number;
 };
 
+// The landing window (#244, `landing-window.ts`): one weekly span, in one IANA
+// zone, during which sandbar lands nothing on the source branch. Each end is a
+// weekday and a 24-hour wall-clock time, e.g. `"Fri 12:00"`; `closedFrom` is
+// inclusive, `closedUntil` exclusive, and the span may wrap the week.
+export type LandingWindowConfig = {
+  readonly timeZone: string;
+  readonly closedFrom: string;
+  readonly closedUntil: string;
+};
+
+export const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
+
+// A weekly wall-clock time: as written, and as minutes since Monday 00:00.
+export type WeekTime = { readonly text: string; readonly minuteOfWeek: number };
+
+export type LandingWindowSettings = {
+  readonly timeZone: string;
+  readonly closedFrom: WeekTime;
+  readonly closedUntil: WeekTime;
+};
+
 // One `egress.allow` entry (#202). A string is a preset name (`"npm"`,
 // `"packagist"`), a `host`, a `*.suffix` (subdomains only, never the apex) or a
 // `host:port`; the object form names its ports and may reach addresses in the
@@ -1114,6 +1135,14 @@ export type RunConfig = {
   // Default: unset, no watch.
   readonly deployWatch?: DeployWatchConfig;
 
+  // Weekly hours during which nothing lands on the source branch (#244), e.g.
+  // `{ timeZone: "Europe/Brussels", closedFrom: "Fri 12:00", closedUntil:
+  // "Mon 08:00" }`. While it is closed a chunk's `land` request and a DONE
+  // auto-lane issue wait for it to open; `land-hotfix` on a chunk's pull
+  // request lands regardless. That label must exist in the repo to be used,
+  // like `land`. Default: unset, always open.
+  readonly landingWindow?: LandingWindowConfig;
+
   // An outbound allowlist for every agent sandbox, its siblings, the gate
   // stacks and the merger's resolve container (#202, `egress.ts`). GitHub and
   // the model API of every provider the run invokes are always on it; package
@@ -1196,8 +1225,8 @@ export type RunConfig = {
 // merely `Required<>`d because resolution changes their TYPE, not just their
 // presence: `labels` widens from Partial to the fully-populated vocabulary,
 // `gateStack` and `mergeMode` become their resolved-and-validated forms,
-// `deployWatch` and `databaseCopies` are null when they are off, and `egress`
-// is `open` without an allowlist.
+// `deployWatch`, `landingWindow` and `databaseCopies` are null when they are
+// off, and `egress` is `open` without an allowlist.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
@@ -1205,6 +1234,7 @@ export type ResolvedConfig = Required<
     | "gateStack"
     | "mergeMode"
     | "deployWatch"
+    | "landingWindow"
     | "databaseCopies"
     | "requiresSandbar"
     | "implementerEffort"
@@ -1243,6 +1273,7 @@ export type ResolvedConfig = Required<
   readonly gateStack: ResolvedStackSource;
   readonly mergeMode: ResolvedMergeMode;
   readonly deployWatch: DeployWatchSettings | null;
+  readonly landingWindow: LandingWindowSettings | null;
   readonly egress: ResolvedEgress;
   readonly databaseCopies: DatabaseCopiesSettings | null;
 };
@@ -1553,6 +1584,64 @@ export function resolveDeployWatch(
       "deployWatch.timeoutMs",
       watch.timeoutMs ?? DEFAULT_DEPLOY_WATCH_TIMEOUT_MS,
     ),
+  };
+}
+
+// `.mjs` is type-checked by nothing, so every field is checked here. The zone
+// is whatever `Intl` accepts, so a misspelt one refuses the run rather than
+// silently comparing against some other clock.
+export function resolveLandingWindow(
+  window: LandingWindowConfig | undefined,
+): LandingWindowSettings | null {
+  if (window === undefined) return null;
+  if (!isRecord(window)) {
+    throw new SandbarError(
+      "config.landingWindow must be { timeZone, closedFrom, closedUntil }.",
+    );
+  }
+  const { timeZone } = window;
+  if (typeof timeZone !== "string" || !isTimeZone(timeZone)) {
+    throw new SandbarError(
+      "config.landingWindow.timeZone must be an IANA time zone, e.g. " +
+        `"Europe/Brussels" (got ${JSON.stringify(timeZone)}).`,
+    );
+  }
+  const closedFrom = weekTime("landingWindow.closedFrom", window.closedFrom);
+  const closedUntil = weekTime("landingWindow.closedUntil", window.closedUntil);
+  if (closedFrom.minuteOfWeek === closedUntil.minuteOfWeek) {
+    throw new SandbarError(
+      "config.landingWindow.closedFrom and closedUntil must differ " +
+        `(both are ${JSON.stringify(closedFrom.text)}).`,
+    );
+  }
+  return { timeZone, closedFrom, closedUntil };
+}
+
+function isTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return true;
+  } catch (err) {
+    if (err instanceof RangeError) return false;
+    throw err;
+  }
+}
+
+function weekTime(field: string, raw: unknown): WeekTime {
+  const match = typeof raw === "string"
+    ? /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([01]\d|2[0-3]):([0-5]\d)$/.exec(raw)
+    : null;
+  if (match === null) {
+    throw new SandbarError(
+      `config.${field} must be a weekday and a 24-hour time, e.g. "Fri 12:00" ` +
+        `(got ${JSON.stringify(raw)}).`,
+    );
+  }
+  const [text, day, hour, minute] = match;
+  const dayIndex = WEEKDAYS.findIndex((weekday) => weekday === day);
+  return {
+    text,
+    minuteOfWeek: dayIndex * 24 * 60 + Number(hour) * 60 + Number(minute),
   };
 }
 
@@ -3312,6 +3401,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
     deployWatch: resolveDeployWatch(config.deployWatch),
+    landingWindow: resolveLandingWindow(config.landingWindow),
     egress: resolveEgress(config.egress, requiredAgentProviders({
       uiPrototypeCheck,
       condenseAboveChars,

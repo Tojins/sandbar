@@ -77,6 +77,11 @@
 //                              Since that work exists only for a future
 //                              admission, every admission-closing drain leaves
 //                              it for the next run.
+//                              While `config.landingWindow` is closed (#244,
+//                              `landing-window.ts`), each recompute keeps a
+//                              chunk's `land` request out of the pass (not a
+//                              `land-hotfix` one) and holds a DONE auto-lane
+//                              issue in the pool until it opens.
 //   Finalise:                  Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
@@ -334,10 +339,9 @@ import {
   CHUNK_ISSUE_BRANCHES_KEPT_BANNER,
   CHUNK_LANDED_UNNAMED_BANNER,
   CHUNK_RESIDUE_KEPT_BANNER,
+  CHUNK_LAND_WINDOW_PR_COMMENT,
   CHUNK_RESIDUE_RETIRED_BANNER,
-  LAND_LABEL,
   type ChunkLandTarget,
-  type ChunkLandDeferral,
   chunkLandDeferral,
   chunkForgeWrites,
   chunkResidue,
@@ -349,6 +353,7 @@ import {
   fetchLandRequestPullRequests,
   reconcileLandedChunks,
 } from "./chunk-reconcile.js";
+import { landingClosedUntil, waitsForLandingWindow } from "./landing-window.js";
 import { postLaneOverrideNotices } from "./lanes.js";
 import {
   type PlanResolution,
@@ -1645,6 +1650,9 @@ export async function run(
   // first poll.
   let chunkSettle: ChunkSettleMemory = UNSETTLED;
   let deferredChunksForRecompute: string[] = [];
+  // Pull requests already told their `land` waits for the landing window
+  // (#244), cleared whenever it is open so each closure tells them once.
+  const toldLandingWindow = new Set<number>();
   let landingNumber = 0;
   let iteration = 0;
   let lastPlanDiagnostics: string | null = null;
@@ -1673,7 +1681,7 @@ export async function run(
   const emitObservedLandRequests = async (
     observed: readonly ChunkLandTarget[],
     runnable: readonly ChunkLandTarget[],
-    deferrals: ReadonlyMap<string, ChunkLandDeferral>,
+    deferrals: ReadonlyMap<string, string>,
   ): Promise<void> => {
     const runnableIndex = new Map(
       runnable.map((request, index) => [request.branch, index] as const),
@@ -1681,10 +1689,7 @@ export async function run(
     for (const request of observed) {
       const deferral = deferrals.get(request.branch);
       if (deferral !== undefined) {
-        await runRecord.emit(landRequestEvent(request, {
-          kind: "deferred",
-          reason: deferredLandReason(deferral.members),
-        }));
+        await runRecord.emit(landRequestEvent(request, { kind: "deferred", reason: deferral }));
         continue;
       }
       const index = runnableIndex.get(request.branch);
@@ -2550,7 +2555,7 @@ export async function run(
       // (its branch is gone by then, which the merger would park on, but
       // asking in this order means it never gets there).
       const landRequestSelection = selectLandRequests(
-        await fetchLandRequestPullRequests(repo, LAND_LABEL),
+        await fetchLandRequestPullRequests(repo),
         resolution.landedChunks,
         resolution.chunkNameDrifts,
       );
@@ -2569,12 +2574,26 @@ export async function run(
         title: issue.title,
         chunkBranch: issue.chunk?.branch ?? null,
       }));
-      const landDeferrals = new Map(
-        selectedLandRequests.flatMap((request) => {
-          const deferral = chunkLandDeferral(request, ongoingForChunkLanding);
-          return deferral === null ? [] : [[request.branch, deferral] as const];
-        }),
-      );
+      // A closed landing window (#244) holds every source-branch landing but a
+      // `land-hotfix` one; `landing-window.ts` owns what waits and how.
+      const closedUntil = landingClosedUntil(config.landingWindow, new Date());
+      if (closedUntil === null) toldLandingWindow.clear();
+      const landDeferrals = new Map<string, string>();
+      for (const request of selectedLandRequests) {
+        const deferral = chunkLandDeferral(request, ongoingForChunkLanding);
+        if (deferral !== null) {
+          landDeferrals.set(request.branch, deferredLandReason(deferral.members));
+        } else if (closedUntil !== null && waitsForLandingWindow(request)) {
+          landDeferrals.set(request.branch, `landing window closed · lands after ${closedUntil}`);
+          if (!toldLandingWindow.has(request.pullRequest)) {
+            await chunkRequestWrites.commentOnPullRequest(
+              request.pullRequest,
+              CHUNK_LAND_WINDOW_PR_COMMENT({ sourceBranch: config.sourceBranch, closedUntil }),
+            );
+            toldLandingWindow.add(request.pullRequest);
+          }
+        }
+      }
       const landRequests = selectedLandRequests.filter(
         (request) => !landDeferrals.has(request.branch),
       );
@@ -2616,6 +2635,20 @@ export async function run(
           describeChunkBranchDrift(drift)
         );
 
+      // A DONE auto-lane issue is the window's other source-branch landing.
+      if (closedUntil === null) pool.releaseHeldTerminals();
+      const heldForLandingWindow = closedUntil === null ? [] : pool.holdTerminals(
+        (event) => event.status === "fulfilled" && event.value.type === "DONE" &&
+          event.issue.chunk === null,
+      );
+      for (const event of heldForLandingWindow) {
+        await runRecord.emit({
+          kind: "notice",
+          message: `#${event.issue.id} is done and waits for the landing window: ` +
+            `nothing lands on ${config.sourceBranch} until ${closedUntil}.`,
+        });
+      }
+
       const providerClosed = providerExitPending !== null || agentProviders.some(
         (provider) => providerState.get(provider) !== undefined,
       );
@@ -2647,6 +2680,7 @@ export async function run(
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
         landRequestSelection.refusals.length > 0 ||
+        heldForLandingWindow.length > 0 ||
         chunkRefreshes.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
       const pollIsReportable = pollDidWork || resolution.waiting.some(

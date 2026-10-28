@@ -158,6 +158,12 @@ export default {
   // label (or `label`) and `ready-for-human` must already exist.
   // deployWatch: { workflow: "deploy.yml", notifyLogin: "your-login" },
 
+  // Weekly hours in which nothing lands on the source branch: a chunk's
+  // `land` and a DONE auto-lane issue wait for the window to open, while
+  // `land-hotfix` on a chunk's pull request lands regardless (create that
+  // label to use it). Ends are "<Mon..Sun> HH:MM" in `timeZone`.
+  // landingWindow: { timeZone: "Europe/Brussels", closedFrom: "Fri 12:00", closedUntil: "Mon 08:00" },
+
   // Allow sandboxes, gates and resolve containers to reach only GitHub, the
   // model APIs of the providers in use and these hosts; every refused host is
   // recorded as an `egress-refused` event. Entries: a preset ("npm",

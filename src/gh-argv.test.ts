@@ -462,16 +462,18 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
   // repo here is SILENT: it answers "nothing to land, nothing to reconcile" and
   // the run simply never does either.
   describe("chunk discovery", () => {
-    it("lists the land-labelled pull requests of the configured repo", async () => {
-      await fetchLandRequestPullRequests(REPO, "land");
+    it("lists the land- and land-hotfix-labelled pull requests of the configured repo", async () => {
+      await fetchLandRequestPullRequests(REPO);
 
-      const [argv] = await calls();
-      expect(argv?.slice(0, 2)).toEqual(["pr", "list"]);
-      expect(repoFlagOf(argv ?? [])).toBe("acme/app");
-      const label = (argv ?? []).indexOf("--label");
-      expect(argv?.[label + 1]).toBe("land");
-      const state = (argv ?? []).indexOf("--state");
-      expect(argv?.[state + 1]).toBe("open");
+      const recorded = await calls();
+      expect(recorded.map((argv) => argv[argv.indexOf("--label") + 1]))
+        .toEqual(["land", "land-hotfix"]);
+      for (const argv of recorded) {
+        expect(argv.slice(0, 2)).toEqual(["pr", "list"]);
+        expect(repoFlagOf(argv)).toBe("acme/app");
+        expect(argv[argv.indexOf("--state") + 1]).toBe("open");
+        expect(argv[argv.indexOf("--json") + 1]).toBe("number,headRefName,title,state,labels");
+      }
     });
 
     it("asks per branch for a chunk branch's pull request, in the configured repo", async () => {
@@ -492,7 +494,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         expect(argv.slice(argv.indexOf("--state"), argv.indexOf("--state") + 2))
           .toEqual(["--state", "all"]);
         expect(argv.slice(argv.indexOf("--json"), argv.indexOf("--json") + 2))
-          .toEqual(["--json", "number,headRefName,title,state"]);
+          .toEqual(["--json", "number,headRefName,title,state,labels"]);
       }
     });
   });
@@ -531,54 +533,82 @@ describe("the forge readers fail soft (#64)", () => {
     await rm(shimBin, { recursive: true, force: true });
   });
 
+  const LAND = [{ name: "land" }];
+
   it("answers 'no requests' when gh cannot be run at all", async () => {
     await shimAnswering(null);
-    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([]);
+    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
     expect(
       await fetchPullRequestsForBranches(REPO_REF, ["sandbar/chunk-42-c"]),
     ).toEqual([]);
   });
 
+  it("answers 'no requests' when only one of the two land listings fails", async () => {
+    await writeFile(
+      join(shimBin, "gh"),
+      `#!/bin/sh\ncase "$*" in *land-hotfix*) exit 1;; esac\ncat <<'SANDBAR_EOF'\n${JSON.stringify([
+        { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42", state: "OPEN", labels: LAND },
+      ])}\nSANDBAR_EOF\n`,
+      { mode: 0o755 },
+    );
+    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
+  });
+
   it("answers 'no requests' on output that is not JSON at all", async () => {
     await shimAnswering("gh: could not resolve to a Repository");
-    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([]);
+    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
   });
 
   it("drops the unreadable entries and keeps the rest", async () => {
     // One good, one missing `number`, one whose `headRefName` is the wrong
-    // type. The good one must survive: dropping a whole list over one bad
-    // element would strand a chunk a human labelled.
+    // type, one whose `labels` cannot be read. The good one must survive:
+    // dropping a whole list over one bad element would strand a chunk a human
+    // labelled.
     await shimAnswering(
       JSON.stringify([
-        { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42", state: "OPEN" },
-        { headRefName: "sandbar/chunk-77-c", title: "no number", state: "OPEN" },
-        { number: 11, headRefName: 404, title: "wrong type", state: "OPEN" },
+        { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42", state: "OPEN", labels: LAND },
+        { headRefName: "sandbar/chunk-77-c", title: "no number", state: "OPEN", labels: LAND },
+        { number: 11, headRefName: 404, title: "wrong type", state: "OPEN", labels: LAND },
+        { number: 12, headRefName: "sandbar/chunk-88-c", title: "bad labels", state: "OPEN", labels: ["land"] },
       ]),
     );
-    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([
-      { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42" },
+    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42", labels: ["land"] },
+    ]);
+  });
+
+  it("lists a pull request carrying both land labels once", async () => {
+    await shimAnswering(JSON.stringify([{
+      number: 9,
+      headRefName: "sandbar/chunk-42-c",
+      title: "chunk 42",
+      state: "OPEN",
+      labels: [{ name: "land" }, { name: "land-hotfix" }],
+    }]));
+    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42", labels: ["land", "land-hotfix"] },
     ]);
   });
 
   it("tolerates a missing title, which is only ever prose", async () => {
     await shimAnswering(
-      JSON.stringify([{ number: 9, headRefName: "sandbar/chunk-42-c", state: "OPEN" }]),
+      JSON.stringify([{ number: 9, headRefName: "sandbar/chunk-42-c", state: "OPEN", labels: LAND }]),
     );
-    expect(await fetchLandRequestPullRequests(REPO_REF, "land")).toEqual([
-      { number: 9, headRefName: "sandbar/chunk-42-c", title: "" },
+    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "", labels: ["land"] },
     ]);
   });
 
   it("keeps merged reconciliation PRs and ignores merely closed ones", async () => {
     await shimAnswering(JSON.stringify([
-      { number: 9, headRefName: "sandbar/chunk-42-c", title: "merged", state: "MERGED" },
-      { number: 8, headRefName: "sandbar/chunk-42-c", title: "closed", state: "CLOSED" },
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "merged", state: "MERGED", labels: [] },
+      { number: 8, headRefName: "sandbar/chunk-42-c", title: "closed", state: "CLOSED", labels: [] },
     ]));
 
     expect(
       await fetchPullRequestsForBranches(REPO_REF, ["sandbar/chunk-42-c"]),
     ).toEqual([
-      { number: 9, headRefName: "sandbar/chunk-42-c", title: "merged" },
+      { number: 9, headRefName: "sandbar/chunk-42-c", title: "merged", labels: [] },
     ]);
   });
 });

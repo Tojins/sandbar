@@ -193,6 +193,13 @@ export const NEEDS_REVIEW_LABEL = "needs-review";
 // uses to address sandbar, not a host's handoff vocabulary.
 export const LAND_LABEL = "land";
 
+// `land`, but past a closed landing window (#244, `landing-window.ts`): a
+// hotfix a human wants on the source branch now. Otherwise it is `land` in
+// every respect, and both are taken off together.
+export const LAND_HOTFIX_LABEL = "land-hotfix";
+
+export const LAND_REQUEST_LABELS: readonly string[] = [LAND_LABEL, LAND_HOTFIX_LABEL];
+
 // An issue named as part of a chunk, in the one form the review surface needs
 // it: a number and the title a human reads next to it (#62).
 export type ChunkMember = {

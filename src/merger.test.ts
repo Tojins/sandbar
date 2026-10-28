@@ -6,6 +6,7 @@ import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
 import type { ChunkRefLookup, MergerGateOutput } from "./merger.js";
 import {
   CHUNK_LAND_STACK_CHANGE_PR_COMMENT,
+  LAND_HOTFIX_LABEL,
   LAND_LABEL,
   type ChunkLandTarget,
 } from "./chunk-land.js";
@@ -2850,6 +2851,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
       .map((n) => ({ number: n, title: `t-${n}` })),
     rework: [],
     pullRequest: 500 + root,
+    landLabels: [LAND_LABEL],
   });
 
   const landing = (
@@ -3595,7 +3597,7 @@ describe("runMergerWithAdapter — a merge result that changes the gate stack be
     expect(calls.resets).toEqual([{ sha: "pre-sha" }]);
   });
 
-  it("parks a reviewed chunk and takes `land` off its pull request", async () => {
+  it("parks a reviewed chunk and takes `land` and `land-hotfix` off its pull request", async () => {
     const request: ChunkLandTarget = {
       root: 42,
       branch: "sandbar/chunk-42-c",
@@ -3604,6 +3606,7 @@ describe("runMergerWithAdapter — a merge result that changes the gate stack be
       closeOrder: [{ number: 42, title: "t-42" }],
       rework: [],
       pullRequest: 542,
+      landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL],
     };
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
@@ -3627,7 +3630,10 @@ describe("runMergerWithAdapter — a merge result that changes the gate stack be
         stackChange: change,
       }),
     }]);
-    expect(calls.prLabelRemovals).toEqual([{ pr: 542, label: LAND_LABEL }]);
+    expect(calls.prLabelRemovals).toEqual([
+      { pr: 542, label: LAND_LABEL },
+      { pr: 542, label: LAND_HOTFIX_LABEL },
+    ]);
   });
 
   it("parks a chunk refresh's dependents with the differences", async () => {

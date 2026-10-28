@@ -379,6 +379,7 @@ import {
   type PullRequestCloseOutcome,
   chunkLandDeferral,
   chunkForgeWrites,
+  removeLandLabels,
   wrapUpLandedChunk,
 } from "./chunk-land.js";
 import { chunkMembersOnBranch, chunkPullRequestContent } from "./chunk-pr.js";
@@ -2210,7 +2211,7 @@ export async function runMergerWithAdapter(
     await opts.observations.onOutcome({ kind: "chunk-parked", skipped, durationMs });
     if (request.pullRequest > 0) {
       await adapter.commentOnPullRequest(request.pullRequest, comment);
-      await adapter.removePullRequestLabel(request.pullRequest, LAND_LABEL);
+      await removeLandLabels(adapter, request);
     }
     await emit(`chunk ${request.branch}: not landed (${reason})`);
   };

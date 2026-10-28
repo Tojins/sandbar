@@ -397,7 +397,7 @@ describe("buildPlan loads git-derived members into the candidate graph (#93, #94
     expect(result.landedChunks[0]?.members).toEqual([{ number: 60, title: "Root" }]);
     expect(result.landedChunks[0]?.branch).toBe("sandbar/chunk-60-root");
     const [landing] = selectLandRequests(
-      [{ number: 7, headRefName: "sandbar/chunk-60-root", title: "Root" }],
+      [{ number: 7, headRefName: "sandbar/chunk-60-root", title: "Root", labels: ["land"] }],
       result.landedChunks,
     ).requests;
     expect(landing?.rework).toEqual([{ number: 60, title: "Root" }]);
