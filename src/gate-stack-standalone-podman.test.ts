@@ -308,7 +308,22 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
         allowDirtyWorktree: true,
         onStepOutput: (c) => chunks.push(c),
       });
-      const result = await stack.runGate();
+      // A green step that wrote both lines cannot have an empty capture, yet
+      // under a loaded remote podman `exec` still occasionally returns none
+      // (the drain sleep above did not cure it). Re-run only that impossible
+      // observation; the tee is then judged on the run podman delivered.
+      let result = await stack.runGate();
+      for (
+        let attempt = 1;
+        attempt < 5 &&
+        result.ok &&
+        !(result.stdout.includes("out-line") &&
+          result.stderr.includes("err-line"));
+        attempt += 1
+      ) {
+        chunks.length = 0;
+        result = await stack.runGate();
+      }
       await stack.stop();
 
       expect(result.ok).toBe(true);

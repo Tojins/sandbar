@@ -14,6 +14,10 @@
 // surface, plus every quality report an adjudicator overruled with its
 // ruling; its fixer gets the latest CHANGES-REQUESTED report (and an upheld
 // ruling); its verify gets that report and a stat of what the fixer changed.
+// All three grade by the standards inline, every rule group at once, as the
+// runner read them at the source tip (standards-groups.ts, #204), never an
+// @ref into the branch they grade; the implementer keeps the built-in text
+// plus its extension's @ref into its own worktree.
 // The verifier's white-box review (#180): diff stat + commits plus every
 // earlier white-box round (#88), a defect a round raised counting as addressed
 // only once it is gone from every site (#181); the lister's overrule history
@@ -76,6 +80,7 @@ import {
 import { loadTemplate, render } from "./prompts.js";
 import type { RepoRef } from "./repo-ref.js";
 import type { SandboxContainerStatus } from "./sandbox-stack.js";
+import { type QualityStandards, renderStandards } from "./standards-groups.js";
 import { type ParsedVerdict, stripVerdictTokens } from "./verdict-parser.js";
 
 const exec = promisify(execFile);
@@ -293,9 +298,10 @@ export type ReviewerPromptInputs = {
   //
   // The doc-existence probes are the opposite case and are derived from
   // `worktreePath`: they decide whether to emit an `@ref` the reviewer will
-  // resolve inside its sandbox, against exactly that worktree. Being a function
-  // of the branch is the POINT there — a branch that adds
-  // `CODING_STANDARDS.md` must be reviewed against it.
+  // resolve inside its sandbox, against exactly that worktree. The quality
+  // roles' standards are NOT such a probe: they arrive as text read at the
+  // source tip (`standards`, #204), so a branch that edits
+  // `CODING_STANDARDS.md` is graded by the landed version.
   readonly issueSource: IssueSource;
   readonly repo: RepoRef;
   readonly repoDir: string;
@@ -308,14 +314,13 @@ export type ReviewerPromptInputs = {
   // What the branch was seeded from, and what the commit list and diff below
   // are measured against (#61). Same value the implementer was given.
   readonly base: IssueBranchBase;
-  // This role's host addition (`promptExtensions.reviewer` for the verifier,
-  // `promptExtensions.reviewerQuality` for the three quality roles).
-  readonly promptExtension?: PromptExtension;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
 };
 
 export type CorrectnessPromptInputs = ReviewerPromptInputs & {
+  // `promptExtensions.reviewer`, probed in the worktree.
+  readonly promptExtension?: PromptExtension;
   // Earlier white-box verdicts in this sandbox cycle (#88). A harness
   // failure adds no entry and consumes no round, so a retry reuses its number
   // and the history remains contiguous. The runner owns this history: it is
@@ -351,11 +356,17 @@ export type QualityReviewMode =
       readonly report: string;
     };
 
-export type QualityReviewPromptInputs = ReviewerPromptInputs & {
+// What every quality role grades by: the built-in standards plus
+// `promptExtensions.reviewerQuality` as the source tip has it, inline (#204).
+export type QualityPromptInputs = ReviewerPromptInputs & {
+  readonly standards: QualityStandards;
+};
+
+export type QualityReviewPromptInputs = QualityPromptInputs & {
   readonly mode: QualityReviewMode;
 };
 
-export type QualityFixPromptInputs = ReviewerPromptInputs & {
+export type QualityFixPromptInputs = QualityPromptInputs & {
   // The latest CHANGES-REQUESTED quality report, and an upheld adjudication's
   // reasoning when the previous fixer disputed it (#187).
   readonly report: string;
@@ -532,12 +543,7 @@ export async function buildQualityReviewPrompt(
   return [
     projectAnchor,
     issueAnchor,
-    renderQualityReviewSlot({
-      ...inputs,
-      ...picture,
-      changedSinceStat,
-      promptExtension: resolvePromptExtension(inputs.worktreePath, inputs.promptExtension),
-    }),
+    renderQualityReviewSlot({ ...inputs, ...picture, changedSinceStat }),
   ].join("\n\n---\n\n");
 }
 
@@ -553,15 +559,11 @@ export async function buildQualityFixPrompt(
   return [
     projectAnchor,
     issueAnchor,
-    renderQualityFixSlot({
-      ...inputs,
-      ...picture,
-      promptExtension: resolvePromptExtension(inputs.worktreePath, inputs.promptExtension),
-    }),
+    renderQualityFixSlot({ ...inputs, ...picture }),
   ].join("\n\n---\n\n");
 }
 
-export type AdjudicatorPromptInputs = Omit<ReviewerPromptInputs, "promptExtension"> & {
+export type AdjudicatorPromptInputs = ReviewerPromptInputs & {
   readonly pass: ReviewPass;
   readonly head: string;
   readonly report: string;
@@ -919,6 +921,7 @@ type BranchSlotRender = Omit<ReviewerPromptInputs, "issueSource" | "repo" | "rep
 };
 
 export type ReviewerSlotRender = BranchSlotRender & {
+  readonly promptExtension?: PromptExtension;
   readonly priorRounds: readonly PriorReviewRound[];
   readonly scope: ReviewScope;
   // As for a quality review, anchored at the scope's head.
@@ -926,6 +929,7 @@ export type ReviewerSlotRender = BranchSlotRender & {
 };
 
 export type QualityReviewSlotRender = BranchSlotRender & {
+  readonly standards: QualityStandards;
   readonly mode: QualityReviewMode;
   // `git diff --stat <anchor>..HEAD`; null exactly when the mode has no
   // anchor (`qualityReviewAnchor`). "" means git said nothing changed, never
@@ -947,6 +951,7 @@ function renderChangedSince(anchor: string | null, stat: string | null): string 
 }
 
 export type QualityFixSlotRender = BranchSlotRender & {
+  readonly standards: QualityStandards;
   readonly report: string;
   readonly ruling: string | null;
 };
@@ -961,6 +966,7 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
   const anchor = scopeAnchor(inputs.scope);
   return render(REVIEWER_TPL, {
     ...branchSlotVars(inputs),
+    projectStandards: promptExtensionSlot(inputs.promptExtension),
     changedSince: section(renderChangedSince(anchor, inputs.changedSinceStat)),
     priorRounds: section(priorRounds),
     reviewSurface: anchor === null
@@ -995,6 +1001,7 @@ export function renderQualityReviewSlot(inputs: QualityReviewSlotRender): string
       }) + `\n\n${REVIEWER_QUALITY_OVERRULES_TPL}`;
   return render(REVIEWER_QUALITY_TPL, {
     ...branchSlotVars(inputs),
+    standards: renderStandards(inputs.standards, { kind: "all" }),
     priorRounds: section(priorRounds),
     changedSince: section(changedSince),
     qualityMode: section(qualityMode),
@@ -1004,6 +1011,7 @@ export function renderQualityReviewSlot(inputs: QualityReviewSlotRender): string
 export function renderQualityFixSlot(inputs: QualityFixSlotRender): string {
   return render(QUALITY_FIXER_TPL, {
     ...branchSlotVars(inputs),
+    standards: renderStandards(inputs.standards, { kind: "all" }),
     report: reportProse(inputs.report),
     ruling: inputs.ruling === null
       ? ""
@@ -1023,8 +1031,7 @@ function renderQualityOverrule(overrule: QualityOverrule): string {
 }
 
 function branchSlotVars(inputs: BranchSlotRender): Record<string, string> {
-  const { issue, base, sourceBranch, promptExtension, claudeMdPath, contextMdPath, commits, stat } =
-    inputs;
+  const { issue, base, sourceBranch, claudeMdPath, contextMdPath, commits, stat } = inputs;
 
   // Same slot as the implementer's, aimed at the other half of the mistake: an
   // uninformed reader would go looking for the chunk's earlier work in this
@@ -1057,8 +1064,6 @@ function branchSlotVars(inputs: BranchSlotRender): Record<string, string> {
     issueTitle: issue.title,
     commits: section(commitsBlock),
     diffStat: section(diffStatBlock),
-    codingStandards: CODING_STANDARDS,
-    projectStandards: promptExtensionSlot(promptExtension),
     conventionsRef: conventionsRef(claudeMdPath, contextMdPath),
   };
 }

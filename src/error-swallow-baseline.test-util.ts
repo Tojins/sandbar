@@ -17,11 +17,17 @@
 // no file may grow, and the entries above zero are the remainder #99 designates
 // as the todo list.
 export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
-  "agent-sandbox.ts": 15,
+  // The sixteenth and seventeenth are the seed snapshot's bringup (#203): a
+  // failure removes the snapshot, reports a removal that failed in turn, and
+  // rethrows the original.
+  "agent-sandbox.ts": 17,
   "chunk-land.ts": 6,
   "cleanup.ts": 1,
   "cli.ts": 2,
   "containers.ts": 1,
+  // The nightly base's job error (#201) runs the import's teardown, logs a
+  // failure of that teardown with its cause, and rethrows the original.
+  "db-base.ts": 2,
   // The deploy watcher's tick (#198) classifies a rate limit, an unanswered
   // request, a forge answer and a lease lost to cleanup; anything else is
   // rethrown.

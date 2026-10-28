@@ -65,6 +65,39 @@ export type LabelConfig = {
   readonly agentStuck: string;
 };
 
+// ---------------------------------------------------------------------------
+// promptExtensions (#91, #204)
+//
+// One optional `{ text }` or `{ path }` per role. Every role but the quality
+// pass gets it as written: text inlined, a path as an @ref only when the path
+// exists in the worktree that role reads (prompt.ts).
+//
+// `reviewerQuality` is a STANDARDS FILE, the grader of the quality pass, so it
+// follows the rule the gate stack does (#186): a path is read from the bare
+// cache's `origin/<sourceBranch>` at the start of each quality pass, never
+// from the branch under review, and handed to the quality roles inline. So,
+// like `gateStack.path`, it must be repository-relative without `..`, and is
+// normalized here. A file the tip lacks means the built-in standards alone; a
+// directory there is an error that says so. The implementer's own
+// extension still points into its worktree.
+//
+// A standards file is split into rule groups (standards-groups.ts owns the
+// parser):
+// - each `## <name>` outside a code fence opens a group; `###` and deeper are
+//   its body;
+// - `## Leave alone` (any case) is reserved, goes to every group, and several
+//   are joined;
+// - text before the first `##` is a preamble every group gets; over 600 chars
+//   is a warning;
+// - a heading may end in a flag list, `## Tests {janitor}`: `janitor` exposes
+//   the group to the idle janitor (#205), any other flag is a warning and is
+//   dropped;
+// - a file with no other `##` is one group, `project`;
+// - more than 5 groups in total, the built-in one included, is a warning.
+// Parse problems are logged once per version of the file and never refuse a
+// run.
+// ---------------------------------------------------------------------------
+
 export type PromptRole =
   | "implementer"
   | "reviewer"
@@ -135,7 +168,14 @@ export function resolvePromptExtensions(
       throw new SandbarError(`config.promptExtensions.${role} must be exactly { text: string } or { path: string }.`);
     }
   }
-  return configured;
+  // The other roles' paths are probed in a worktree; this one is read out of
+  // the source tip's commit (standards-groups.ts).
+  const quality = configured.reviewerQuality;
+  if (quality === undefined || !("path" in quality)) return configured;
+  return {
+    ...configured,
+    reviewerQuality: { path: repoRelativePath("config.promptExtensions.reviewerQuality.path", quality.path) },
+  };
 }
 
 export const DEFAULT_LABELS: LabelConfig = {
@@ -663,6 +703,40 @@ export type ResolvedEgress =
       readonly digest: string;
     };
 
+// Per-agent database copies (#201), of which this release has the nightly base
+// (`db-base.ts`): `sandbar db-base`, run by a systemd timer beside the daemon,
+// imports each new dump into a base datadir under `root` and swaps
+// `<root>/current` to it; the daemon only reads the outcome. The base is built
+// by the stack's own `container`, the sandbox sibling a copy will replace, so
+// its image and args are what the base is made with — there is no separate
+// image key. `assertDatabaseCopiesTarget` says what that container must be.
+export type DatabaseCopiesConfig = {
+  // Absolute path of the dump drop (#200), a gzipped SQL file replaced only by
+  // rename.
+  readonly dump: string;
+  // Absolute directory on the reflink volume that holds the bases.
+  readonly root: string;
+  // The stack container whose sandbox sibling receives a copy.
+  readonly container: string;
+  // The schema the dump loads into.
+  readonly database: string;
+  // Where the container keeps its datadir. Default: "/var/lib/mysql".
+  readonly datadir?: string;
+  // A copy's InnoDB buffer pool. Default: 256 MiB; at least 32 MiB.
+  readonly bufferPoolBytes?: number;
+  // The import's buffer pool. Default: 1 GiB.
+  readonly importBufferPoolBytes?: number;
+  // How long one import may take, bringup to clean shutdown. Default: 4 hours.
+  readonly importTimeoutMs?: number;
+  // How old the dump may be before the run complains. Default: 36 hours.
+  readonly staleAfterMs?: number;
+};
+
+export type DatabaseCopiesSettings = Required<DatabaseCopiesConfig>;
+
+// A container `assertDatabaseCopiesTarget` accepted.
+export type DbCopyTarget = ResolvedStackContainer & { readonly readiness: Readiness };
+
 // RunConfig is DEVIATIONS-ONLY by design. A consumer should write down two
 // kinds of thing and nothing else:
 //
@@ -875,7 +949,9 @@ export type RunConfig = {
 
   // Optional additions to each role's shipped prompt (#91). `{ text }` is
   // inlined verbatim; `{ path }` becomes an @ref only when that path exists in
-  // the worktree the role will inspect. No role has a default extension.
+  // the worktree the role will inspect. `reviewerQuality` is the exception: a
+  // standards file of rule groups, read at the source tip and inlined (see
+  // "promptExtensions" above, #204). No role has a default extension.
   readonly promptExtensions?: PromptExtensions;
 
   // The credentials, as a VALUE rather than a path (#38). Sandbar names no
@@ -982,6 +1058,10 @@ export type RunConfig = {
   // startup when `databaseCopies` (#201) puts prod data in the sandbox.
   readonly egress?: EgressConfig;
 
+  // Import the consumer's nightly database dump into a base for agents' copies
+  // (#201). Default: unset, no import and no copies.
+  readonly databaseCopies?: DatabaseCopiesConfig;
+
   // Which landing lane an issue takes when it carries no `auto-land` label
   // (#57, §1 of #54): "auto" — the gate is the last word, what sandbar has
   // always done — or "review", where a human looks before the work lands.
@@ -1052,8 +1132,8 @@ export type RunConfig = {
 // merely `Required<>`d because resolution changes their TYPE, not just their
 // presence: `labels` widens from Partial to the fully-populated vocabulary,
 // `gateStack` and `mergeMode` become their resolved-and-validated forms,
-// `deployWatch` is null when the watch is off, and `egress` is `open` without
-// an allowlist.
+// `deployWatch` and `databaseCopies` are null when they are off, and `egress`
+// is `open` without an allowlist.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
@@ -1061,6 +1141,7 @@ export type ResolvedConfig = Required<
     | "gateStack"
     | "mergeMode"
     | "deployWatch"
+    | "databaseCopies"
     | "requiresSandbar"
     | "implementerEffort"
     | "uiCheckEffort"
@@ -1097,6 +1178,7 @@ export type ResolvedConfig = Required<
   readonly mergeMode: ResolvedMergeMode;
   readonly deployWatch: DeployWatchSettings | null;
   readonly egress: ResolvedEgress;
+  readonly databaseCopies: DatabaseCopiesSettings | null;
 };
 
 export const DEFAULT_CWD = (): string => process.cwd();
@@ -1160,6 +1242,15 @@ export const DEFAULT_NO_CHECKS_GRACE_MS = 120_000;
 export const DEFAULT_DEPLOY_WATCH_LABEL = "deploy-red";
 // Outdoor's deploy runs take two to four minutes; its slowest red took 29.
 export const DEFAULT_DEPLOY_WATCH_TIMEOUT_MS = 60 * 60_000;
+const MIB = 1024 * 1024;
+export const DEFAULT_DB_DATADIR = "/var/lib/mysql";
+export const DEFAULT_DB_BUFFER_POOL_BYTES = 256 * MIB;
+export const MIN_DB_BUFFER_POOL_BYTES = 32 * MIB;
+export const DEFAULT_DB_IMPORT_BUFFER_POOL_BYTES = 1024 * MIB;
+// Outdoor's ~470 MB gzipped dump is estimated at an 8 GB datadir (#201).
+export const DEFAULT_DB_IMPORT_TIMEOUT_MS = 4 * 60 * 60_000;
+// A nightly dump with a day's slack.
+export const DEFAULT_DB_STALE_AFTER_MS = 36 * 60 * 60_000;
 
 // Non-negative, finite, real number. `> 0` alone lets NaN and Infinity through:
 // NaN fails every comparison, so `elapsed >= NaN` is never true and the check
@@ -1517,6 +1608,108 @@ export function egressStartupWarning(config: ResolvedConfig): string | null {
   return null;
 }
 
+// An absolute host path a podman `-v` spec can carry.
+function requireAbsoluteHostPath(field: string, value: unknown): string {
+  if (typeof value !== "string" || !isAbsolute(value) || value.includes(":")) {
+    throw new SandbarError(
+      `config.${field} must be an absolute path without ':' (got ${JSON.stringify(value)}).`,
+    );
+  }
+  return posix.normalize(value);
+}
+
+function requireBytesAtLeast(field: string, value: unknown, min: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min) {
+    throw new SandbarError(
+      `config.${field} must be a whole number of bytes, at least ${min} ` +
+        `(got ${String(value)}).`,
+    );
+  }
+  return value;
+}
+
+// Shape and defaults only. What the named container must be is a fact about
+// the stack, which a stack file only states at gate time:
+// `assertDatabaseCopiesTarget`.
+export function resolveDatabaseCopies(
+  dbc: DatabaseCopiesConfig | undefined,
+): DatabaseCopiesSettings | null {
+  if (dbc === undefined) return null;
+  if (!isRecord(dbc)) {
+    throw new SandbarError(
+      "config.databaseCopies must be { dump, root, container, database, ... }.",
+    );
+  }
+  const { container, database } = dbc;
+  if (typeof container !== "string" || !CONTAINER_NAME_RE.test(container)) {
+    throw new SandbarError(
+      "config.databaseCopies.container must name a gate stack container " +
+        `(got ${JSON.stringify(container)}).`,
+    );
+  }
+  // Interpolated into SQL as an identifier, so the grammar is the guard.
+  if (typeof database !== "string" || !/^[A-Za-z0-9_]{1,64}$/.test(database)) {
+    throw new SandbarError(
+      "config.databaseCopies.database must be 1-64 letters, digits or " +
+        `underscores (got ${JSON.stringify(database)}).`,
+    );
+  }
+  return {
+    dump: requireAbsoluteHostPath("databaseCopies.dump", dbc.dump),
+    root: requireAbsoluteHostPath("databaseCopies.root", dbc.root),
+    container,
+    database,
+    datadir: requireAbsoluteHostPath(
+      "databaseCopies.datadir",
+      dbc.datadir ?? DEFAULT_DB_DATADIR,
+    ),
+    bufferPoolBytes: requireBytesAtLeast(
+      "databaseCopies.bufferPoolBytes",
+      dbc.bufferPoolBytes ?? DEFAULT_DB_BUFFER_POOL_BYTES,
+      MIN_DB_BUFFER_POOL_BYTES,
+    ),
+    importBufferPoolBytes: requireBytesAtLeast(
+      "databaseCopies.importBufferPoolBytes",
+      dbc.importBufferPoolBytes ?? DEFAULT_DB_IMPORT_BUFFER_POOL_BYTES,
+      1,
+    ),
+    importTimeoutMs: requirePositiveMs(
+      "databaseCopies.importTimeoutMs",
+      dbc.importTimeoutMs ?? DEFAULT_DB_IMPORT_TIMEOUT_MS,
+    ),
+    staleAfterMs: requirePositiveMs(
+      "databaseCopies.staleAfterMs",
+      dbc.staleAfterMs ?? DEFAULT_DB_STALE_AFTER_MS,
+    ),
+  };
+}
+
+// The container a base is imported by and a copy replaces, checked wherever a
+// stack is resolved: at load for the inline stack, and by the stack source
+// for a stack file, where a failure refuses the run at startup and keeps the
+// last accepted stack afterwards (#186). It must run beside the agent, be a
+// real server rather than a held shell, and say when it is ready, since both
+// the import and a copy wait on that probe; and the name its copy runs under,
+// `<container>-dbcopy`, must be free.
+export function assertDatabaseCopiesTarget(
+  stack: ResolvedGateStack,
+  dbc: DatabaseCopiesSettings,
+  label = INLINE_STACK_LABEL,
+): DbCopyTarget {
+  const name = dbc.container;
+  const target = stack.containers.find((c) => c.name === name);
+  const refuse = (why: string) =>
+    new SandbarError(`${label}: config.databaseCopies.container '${name}' ${why}.`);
+  if (target === undefined) throw refuse("is not a container of this stack");
+  if (!target.inSandbox) throw refuse("must set inSandbox: a copy replaces its sandbox sibling");
+  if (target.hold) throw refuse("must run its image's server, not hold");
+  if (target.readiness === null) throw refuse("needs a readiness probe to import and copy against");
+  if (stack.containers.some((c) => c.name === `${name}-dbcopy`)) {
+    throw refuse(`cannot be used while a container is named '${name}-dbcopy', the name its copy runs under`);
+  }
+  return { ...target, readiness: target.readiness };
+}
+
 // Podman container-name grammar, and also what makes `sandbar-<id>-<name>`
 // parseable back into its parts by a human reading `podman ps`.
 const CONTAINER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
@@ -1544,21 +1737,23 @@ function resolveStackSource(
         "steps are in the file it names.",
     );
   }
-  const { path } = gateStack;
+  return { kind: "file", path: repoRelativePath("config.gateStack.path", gateStack.path) };
+}
+
+// A path read out of a commit (`<ref>:<path>`), which has no outside: an
+// absolute path or a `..` names nothing there. Normalized because git reads
+// `./` as relative to a working tree, which a bare cache does not have.
+function repoRelativePath(label: string, path: unknown): string {
   if (typeof path !== "string" || path.trim() === "") {
-    throw new SandbarError(
-      "config.gateStack.path must be a non-empty, repository-relative path.",
-    );
+    throw new SandbarError(`${label} must be a non-empty, repository-relative path.`);
   }
-  // The file is read out of a commit, which has no outside: an absolute path
-  // or a `..` names nothing there.
   if (isAbsolute(path) || path.split("/").includes("..")) {
     throw new SandbarError(
-      `config.gateStack.path ('${path}') must be relative to the repository ` +
-        "root and must not contain '..'.",
+      `${label} ('${path}') must be relative to the repository root and must ` +
+        "not contain '..'.",
     );
   }
-  return { kind: "file", path: posix.normalize(path) };
+  return posix.normalize(path);
 }
 
 const isRecord = (v: unknown): v is Readonly<Record<string, unknown>> =>
@@ -2719,6 +2914,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   const developers = requireDevelopers(config.developers);
   const env = resolveEnv(config.env);
   const gateStack = resolveStackSource(config.gateStack, env);
+  const databaseCopies = resolveDatabaseCopies(config.databaseCopies);
+  if (databaseCopies !== null && gateStack.kind === "inline") {
+    assertDatabaseCopiesTarget(gateStack.stack, databaseCopies);
+  }
   const images = resolveImages(config.images, config.sandboxImage);
   // Resolved to absolute HERE, not left as the host wrote it (#34). Since every
   // git call now runs with `cwd` as its process cwd, a RELATIVE `cwd` is
@@ -3015,6 +3214,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       adjudicatorAgent,
       mergerAgent,
     })),
+    databaseCopies,
     defaultLane: requireLane(config.defaultLane),
   };
 }

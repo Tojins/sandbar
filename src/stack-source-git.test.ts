@@ -9,7 +9,13 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BuiltImage, GateStackConfig, ResolvedGateStack } from "./config.js";
+import {
+  type BuiltImage,
+  type DatabaseCopiesSettings,
+  type GateStackConfig,
+  type ResolvedGateStack,
+  resolveDatabaseCopies,
+} from "./config.js";
 import { SandbarError } from "./errors.js";
 import type { EventInput } from "./events.js";
 import { openStackSource, readStackFrom, stackSpecToken } from "./stack-source.js";
@@ -33,6 +39,7 @@ describe("openStackSource over a stack file", () => {
   let events: EventInput[];
   let stackPath: string;
   let images: BuiltImage[];
+  let databaseCopies: DatabaseCopiesSettings | null;
   let hostChecks: ReturnType<typeof vi.fn<(stack: ResolvedGateStack) => Promise<void>>>;
 
   // Commit `text` as gate/stack.json and move origin/main to it.
@@ -51,6 +58,7 @@ describe("openStackSource over a stack file", () => {
       configEnv: {},
       images,
       sandboxImage: "localhost/sandbox",
+      databaseCopies,
       hostChecks,
       onEvent: (event) => {
         events.push(event);
@@ -65,6 +73,7 @@ describe("openStackSource over a stack file", () => {
     events = [];
     stackPath = "gate/stack.json";
     images = [];
+    databaseCopies = null;
     hostChecks = vi.fn(async () => undefined);
   });
 
@@ -117,6 +126,52 @@ describe("openStackSource over a stack file", () => {
     // An unchanged tip is not checked again.
     await source.current();
     expect(hostChecks).toHaveBeenCalledOnce();
+  });
+
+  // #201: the target is a fact about the stack, so a stack file states it
+  // only at the tip, and is held to it there like any other validation.
+  describe("with databaseCopies", () => {
+    const withTarget = (inSandbox: boolean): GateStackConfig => {
+      const stack = stackWith({ TZ: "UTC" });
+      return {
+        ...stack,
+        containers: stack.containers.map((c) => c.name === "db"
+          ? { ...c, inSandbox, readiness: { kind: "healthcheck", command: ["healthcheck.sh"] } }
+          : c),
+      };
+    };
+    beforeEach(() => {
+      databaseCopies = resolveDatabaseCopies({
+        dump: "/srv/drops/app/app.sql.gz",
+        root: "/srv/installations/app",
+        container: "db",
+        database: "app",
+      });
+    });
+
+    it("refuses to open on a tip whose target container cannot take a copy", async () => {
+      await land(JSON.stringify(withTarget(false)));
+      await expect(open()).rejects.toThrow(
+        new SandbarError(
+          "gate/stack.json at origin/main: config.databaseCopies.container 'db' " +
+            "must set inSandbox: a copy replaces its sandbox sibling.",
+        ),
+      );
+    });
+
+    it("keeps the last accepted stack when a new tip breaks the target", async () => {
+      await land(JSON.stringify(withTarget(true)));
+      const source = await open();
+      await land(JSON.stringify(withTarget(false)));
+
+      expect((await source.current()).stack.containers[0]!.inSandbox).toBe(true);
+      expect(hostChecks).not.toHaveBeenCalled();
+      expect(events).toEqual([{
+        kind: "complaint",
+        severity: "warning",
+        message: expect.stringMatching(/was not accepted[\s\S]*must set inSandbox/),
+      }]);
+    });
   });
 
   it("refuses a path that is a directory in the tip", async () => {
@@ -322,6 +377,7 @@ describe("openStackSource over an inline stack", () => {
       configEnv: {},
       images: [{ tag: "localhost/unrun", containerfile: "Containerfile", rebuildOn: ["lock"] }],
       sandboxImage: "localhost/sandbox",
+      databaseCopies: null,
       hostChecks: async () => undefined,
       onEvent: () => undefined,
     })).rejects.toThrow(/nothing\s+runs that image/);
@@ -340,6 +396,7 @@ describe("openStackSource over an inline stack", () => {
       configEnv: {},
       images: [],
       sandboxImage: "localhost/sandbox",
+      databaseCopies: null,
       hostChecks: async () => {
         throw new Error("not asked");
       },

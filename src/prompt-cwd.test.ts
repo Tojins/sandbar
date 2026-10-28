@@ -42,7 +42,6 @@ import {
   buildPrompt,
   buildProjectAnchor,
   buildCorrectnessPrompt,
-  buildQualityReviewPrompt,
   buildUiCheckPrompt,
 } from "./prompt.js";
 
@@ -312,53 +311,10 @@ describe("prompt anchors name their sources (#34, #38)", () => {
   });
 
   // The probe and the resolver must be the SAME tree. `worktreePath` is where
-  // the reviewer resolves an @ref, so a doc that exists only there — the shape
-  // of "the issue is: add CODING_STANDARDS.md" — has to be found. Probed
-  // against `repoDir` (as it was until #38) or against a source tree at
-  // `origin/<sourceBranch>` (as it was after), this drops the @ref and the
-  // reviewer judges the commit without the standards that commit authored.
-  it("points the quality pass at standards the BRANCH adds", async () => {
-    await writeFile(join(launchedFrom, "CODING_STANDARDS.md"), "# std\n");
-
-    const prompt = await buildQualityReviewPrompt({
-      issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
-      issueSource: ghIssueSource(CONFIGURED),
-      repo: CONFIGURED,
-      repoDir: target,
-      anchorCacheDir: join(target, "anchor-cache"),
-      worktreePath: launchedFrom,
-      sourceBranch: "main",
-      base: sourceBranchBase("main"),
-      claudeMdPath: "CLAUDE.md",
-      promptExtension: { path: "CODING_STANDARDS.md" },
-      mode: { kind: "list", scope: { kind: "full" }, overrules: [] },
-    });
-
-    expect(prompt).toContain("@CODING_STANDARDS.md");
-  });
-
-  it("drops the standards @ref when the branch does not have the file", async () => {
-    // Present in the repo the history comes from, absent from the tree under
-    // review — so probing the wrong one emits an @ref the reviewer cannot open.
-    await writeFile(join(target, "CODING_STANDARDS.md"), "# std\n");
-
-    const prompt = await buildQualityReviewPrompt({
-      issue: { id: "1", title: "t", branch: "sandbar/issue-1-t" },
-      issueSource: ghIssueSource(CONFIGURED),
-      repo: CONFIGURED,
-      repoDir: target,
-      anchorCacheDir: join(target, "anchor-cache"),
-      worktreePath: launchedFrom,
-      sourceBranch: "main",
-      base: sourceBranchBase("main"),
-      claudeMdPath: "CLAUDE.md",
-      promptExtension: { path: "CODING_STANDARDS.md" },
-      mode: { kind: "list", scope: { kind: "full" }, overrules: [] },
-    });
-
-    expect(prompt).not.toContain("@CODING_STANDARDS.md");
-  });
-
+  // the implementer resolves an @ref, so a doc that exists only there — the
+  // shape of "the issue is: add CODING_STANDARDS.md" — has to be found. The
+  // quality roles are the opposite case: they grade by the source tip's copy,
+  // inline (standards-groups.ts, #204).
   it("points the implementer at standards the branch under work adds", async () => {
     await writeFile(join(launchedFrom, "CODING_STANDARDS.md"), "# std\n");
 

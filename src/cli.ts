@@ -14,15 +14,16 @@
 // second installation. The hook belongs here, rather than in `index.ts`,
 // because `run(config)` receives an object that its library caller has already
 // imported; changing that caller's module resolution would be an unrelated
-// global side effect. All five bin modes use `loadConfig`, so run, gate, ui,
-// pulled-images and config-digest share the same hook.
+// global side effect. All six bin modes use `loadConfig`, so run, gate, ui,
+// pulled-images, config-digest and db-base share the same hook.
 //
 // The four constraints, written down so they are decisions and not drift:
 //   - EXACTLY ONE flag that carries configuration: `--config`. Every flag that
 //     duplicates a config field creates a second source of truth. (`--help`,
-//     `--version`, `gate`'s `--worktree`/`--keep` (#45), and `ui`'s `--port`
-//     (#138) duplicate nothing — the latter flags name what a standalone
-//     invocation has to be told and the config has no opinion about.)
+//     `--version`, `gate`'s `--worktree`/`--keep` (#45), `ui`'s `--port`
+//     (#138) and `db-base`'s `--force` (#201) duplicate nothing — the
+//     latter flags name what a standalone invocation has to be told and the
+//     config has no opinion about.)
 //   - NO config search up the directory tree. `./sandbar.config.mjs` or an
 //     explicit path — an ambiguous "which config did it find" is a run against
 //     the wrong repo.
@@ -46,6 +47,7 @@ import { resolveConfig, type RunConfig } from "./config.js";
 import { onCleanup, installCleanupTraps } from "./cleanup.js";
 import { SandbarError, faultDetail, isErrno } from "./errors.js";
 import { configDigest } from "./config-digest.js";
+import { dbBaseTargetOf, runDbBaseJob } from "./db-base.js";
 import { pulledImagesOf } from "./ensure-images.js";
 import { GATE_EXIT_NO_VERDICT, runGateCommand } from "./gate-run.js";
 import { run } from "./run.js";
@@ -82,12 +84,17 @@ const PULLED_IMAGES_SUBCOMMAND = "pulled-images";
 // path is hashed (#186). The deployment role compares it with the digest it
 // recorded and writes the restart request when it moved.
 const CONFIG_DIGEST_SUBCOMMAND = "config-digest";
+// The nightly database base (#201): imports a new dump, when there is one,
+// into a base for agents' copies. A systemd timer runs it beside the daemon,
+// never inside it, so a restart neither kills nor waits on an import.
+const DB_BASE_SUBCOMMAND = "db-base";
 
 const USAGE = `Usage: sandbar [--config <path>]
        sandbar gate [--config <path>] [--worktree <path>] [--keep]
        sandbar ui [--config <path>] [--port <n>]
        sandbar pulled-images [--config <path>]
        sandbar config-digest [--config <path>]
+       sandbar db-base [--config <path>] [--force]
 
   --config <path>   Config file to load. Default: ./${DEFAULT_CONFIG_FILE}
                     (resolved against the current directory). The file is an
@@ -109,11 +116,16 @@ stack file is read from the config's cwd. \`sandbar config-digest\` prints a
 sha256 of the evaluated config.images and the inline config.gateStack (only
 the path of a stack file, which a run reads at every gate), independent of key
 order: it changes exactly when what a daemon fixes at startup changes.
+\`sandbar db-base\` imports config.databaseCopies.dump into a new database base
+and makes it current, unless that dump was already attempted with the target
+container's server; it exits 0 when it imported or had nothing to do, and 1
+when the import failed. A stack file is read from the config's cwd.
 
   --worktree <path> The tree to gate. Default: the current directory.
   --keep            Leave the stack up afterwards, to inspect a red gate. The
                     next \`sandbar gate\` over the same worktree then reuses its
                     issue-lifecycle containers instead of recreating them.
+  --force           Import even a dump that was already attempted.
 
 Everything else is configured in that file — see the RunConfig type.`;
 
@@ -122,6 +134,7 @@ export type ParsedArgs =
   | { readonly kind: "ui"; readonly configPath: string; readonly port: number | null }
   | { readonly kind: "pulled-images"; readonly configPath: string }
   | { readonly kind: "config-digest"; readonly configPath: string }
+  | { readonly kind: "db-base"; readonly configPath: string; readonly force: boolean }
   | {
       readonly kind: "gate";
       readonly configPath: string;
@@ -145,7 +158,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const isUi = argv[0] === UI_SUBCOMMAND;
   const isPulledImages = argv[0] === PULLED_IMAGES_SUBCOMMAND;
   const isConfigDigest = argv[0] === CONFIG_DIGEST_SUBCOMMAND;
-  const rest = isGate || isUi || isPulledImages || isConfigDigest
+  const isDbBase = argv[0] === DB_BASE_SUBCOMMAND;
+  const rest = isGate || isUi || isPulledImages || isConfigDigest || isDbBase
     ? argv.slice(1)
     : argv;
 
@@ -153,6 +167,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   let worktree: string | null = null;
   let port: number | null = null;
   let keep = false;
+  let force = false;
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
     if (arg === "--help" || arg === "-h") return { kind: "help" };
@@ -188,6 +203,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       port = parsedPort;
       if (arg === "--port") i++;
+      continue;
+    }
+    if (arg === "--force") {
+      if (!isDbBase) {
+        throw new SandbarError(
+          `'${arg}' is a \`sandbar ${DB_BASE_SUBCOMMAND}\` flag.\n\n${USAGE}`,
+        );
+      }
+      force = true;
       continue;
     }
     // Gate-only flags are rejected on the run path by NAME rather than falling
@@ -227,6 +251,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (isUi) return { kind: "ui", configPath: resolvedConfigPath, port };
   if (isPulledImages) return { kind: "pulled-images", configPath: resolvedConfigPath };
   if (isConfigDigest) return { kind: "config-digest", configPath: resolvedConfigPath };
+  if (isDbBase) return { kind: "db-base", configPath: resolvedConfigPath, force };
   return isGate
     ? {
         kind: "gate",
@@ -314,6 +339,24 @@ export async function main(
     );
     console.log(configDigest(config));
     return 0;
+  }
+  if (parsed.kind === "db-base") {
+    const config = resolveConfig(
+      withDefaultCwd(await loadConfig(configPath), configPath),
+    );
+    if (config.databaseCopies === null) {
+      throw new SandbarError(`${configPath} sets no databaseCopies; there is no base to import.`);
+    }
+    // Like pulled-images, a stack file is read from the clone.
+    const target = await dbBaseTargetOf(config, config.databaseCopies);
+    installCleanupTraps();
+    const outcome = await runDbBaseJob({
+      cfg: config.databaseCopies,
+      target,
+      force: parsed.force,
+      log: (line) => console.log(line),
+    });
+    return outcome === "import-failed" ? 1 : 0;
   }
   if (parsed.kind === "ui") {
     const config = resolveConfig(

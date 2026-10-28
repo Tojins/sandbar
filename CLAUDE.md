@@ -27,8 +27,11 @@ After an interrupted run, check `ps -ef | grep [f]orks.js`.
 
 A library with a thin bin (#38): `run(config)` in `src/index.ts` is the
 contract; `src/cli.ts` imports `--config` (default `./sandbar.config.mjs`) and
-dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132), `pulled-images` and
-`config-digest` (#190, `src/config-digest.ts`).
+dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132), `pulled-images`,
+`config-digest` (#190, `src/config-digest.ts`) and `db-base` (#201,
+`src/db-base.ts`; pure layer `db-copy-policy.ts`): with
+`config.databaseCopies`, a systemd timer beside the daemon imports each new
+dump into a base datadir and swaps `<root>/current` to it.
 `npm run stats` (`src/stats-cli.ts`, #194) is a repo script, not a verb: the
 factory scorecard over run records (`stats-record.ts` reads, `stats.ts`
 reduces); nothing in the daemon imports it.
@@ -62,7 +65,9 @@ and the gate stack (`config.gateStack`, #24).
    above `condenseAboveChars`, once per thread change, falls back
    uncondensed), partition check (#158), UI check (#126), then implementer
    attempts → quality pass (read-only lister →
-   fixer that writes commits → read-only verify, #187) → gate-1 → verifier
+   fixer that writes commits → read-only verify, #187; graded by the
+   standards' rule groups as the source tip has them, `standards-groups.ts`,
+   #204) → gate-1 → verifier
    (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
    patch-scoped from round 2) → adjudicator on dispute of either pass (#167).
    Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`. Read-only
@@ -81,6 +86,8 @@ Daemon polling and the six exits (`stuck`, `quota`, `credential`, `storage`,
 holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 With `config.deployWatch`, polls and landings also kick the deploy watch
 (`deploy-watch.ts`, #198), which never blocks the loop.
+With `config.databaseCopies`, every recompute reads the base import's outcome
+(`createDbBaseWatch`, #201) into `db-base` events and stale/failed complaints.
 
 ## Invariants — where they live
 
@@ -91,7 +98,10 @@ With `config.deployWatch`, polls and landings also kick the deploy watch
   shell-out names its repo; every `gh` call passes `--repo` (`repo-ref.ts`).
 - **Isolation**: per-issue hardlink clones, scoped resource names
   (`naming.ts`, `containers.ts`); `reclaimIssueClone` in `agent-sandbox.ts` is
-  the one way to remove a clone. Branch shapes are owned by `naming.ts`.
+  the one way to remove a clone. A read-only seed snapshot under
+  `<workDir>/snapshots` (`createSeedSnapshotSandbox`, #203) is not a clone:
+  its own close removes it, and preflight sweeps the directory. Branch shapes
+  are owned by `naming.ts`.
   Egress (#202): `config.egress` resolves the allowlist (`config.ts`,
   provider hosts in `agent-providers.ts`); `egress-policy.ts` (pure allowlist
   and log fold), `egress-proxy-server.ts` (the DNS-sink, SNI/Host-splicing

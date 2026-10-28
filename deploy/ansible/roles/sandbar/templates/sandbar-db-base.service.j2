@@ -1,0 +1,14 @@
+# The nightly database base import (#201), in each installation user's
+# systemd session that has a dump drop. Timer-activated; never enabled on its
+# own. No `PartOf=sandbar.service`: a deploy restart of the daemon (#146)
+# neither kills an import nor waits for one, and an import never holds up
+# scheduling. A run with nothing new to import is a no-op.
+[Unit]
+Description=sandbar database base import for {{ sandbar_project }}
+
+[Service]
+Type=oneshot
+WorkingDirectory={{ sandbar_checkout }}
+ExecStart=/usr/bin/node {{ sandbar_driver_current }}/dist/cli.js db-base --config {{ sandbar_installation_dir }}/sandbar.config.mjs
+# Above the config's four-hour import bound and the ten-minute clean shutdown.
+TimeoutStartSec=5h

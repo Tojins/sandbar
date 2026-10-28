@@ -115,6 +115,9 @@
 // receives only its configured prompt
 // extension; prompt.ts probes path extensions in the issue worktree so a
 // branch can introduce the instructions it is expected to follow (#78, #91).
+// The quality pass is the exception (#204): its standards are the grader, so
+// each lister reads them at the source tip (`readQualityStandards`) and that
+// pass's fixer and verify reuse the same read.
 // Successful white-box rounds accumulate here beside the commits they judged
 // and are handed to the next white-box prompt (#88), which from then on reads
 // only the change since the last of those heads that HEAD still contains
@@ -193,7 +196,6 @@ import type { AgentRunMeasurement, AgentUsage } from "./agent-usage.js";
 import type { ChunkTarget } from "./chunks.js";
 import type { CodexAuthMount } from "./codex-auth.js";
 import type {
-  PromptExtension,
   PromptExtensions,
   ResolvedCopyToWorktreeEntry,
   SandboxGateAttachments,
@@ -283,6 +285,7 @@ import {
   startSandboxStack,
 } from "./sandbox-stack.js";
 import { stackChangeOf, type StackChange } from "./stack-change.js";
+import { type QualityStandards, readQualityStandards } from "./standards-groups.js";
 import {
   type BoundStack,
   type HeadStack,
@@ -953,6 +956,7 @@ async function runSandboxCycle(
     sinceImplementer: [],
     overrules: [],
     openRound: null,
+    standards: null,
   };
   const specGaps: SpecGap[] = [];
   let preparedWorktreePath: string | null = null;
@@ -1610,7 +1614,17 @@ export type QualityLedger = {
     readonly timer: () => number;
     quality: QualityOutcome | null;
   } | null;
+  // What the latest lister read at the source tip (#204): its fixer and
+  // verify grade by the same version, so one pass is one grader.
+  standards: QualityStandards | null;
 };
+
+function passStandards(quality: QualityLedger): QualityStandards {
+  if (quality.standards === null) {
+    throw new Error("a quality fixer or verify ran before any lister read the standards");
+  }
+  return quality.standards;
+}
 
 // The round a gate-1 or verifier result closes, for the `review-round`
 // record; null for every other event, and for a verifier write (which parks).
@@ -2057,8 +2071,6 @@ export async function runUiCheck(
   throw new Error("unreachable UI-check invocation count");
 }
 
-// The anchors and branch range every branch-reading cold role is built from,
-// with that role's own prompt extension.
 // Where every role's issue anchor is read from, and cached condensed.
 const issueAnchorOptionsOf = (config: InnerLoopConfig): IssueAnchorOptions => ({
   issueSource: config.issueSource,
@@ -2066,17 +2078,14 @@ const issueAnchorOptionsOf = (config: InnerLoopConfig): IssueAnchorOptions => ({
   anchorCacheDir: config.layout.anchorCacheDir,
 });
 
-const branchRoleInputs = (
-  ctx: ExecuteActionCtx,
-  promptExtension: PromptExtension | undefined,
-): ReviewerPromptInputs => ({
+// The anchors and branch range every branch-reading cold role is built from.
+const branchRoleInputs = (ctx: ExecuteActionCtx): ReviewerPromptInputs => ({
   issue: ctx.issue,
   ...issueAnchorOptionsOf(ctx.config),
   repoDir: ctx.config.layout.repoDir,
   worktreePath: ctx.sandbox.worktreePath,
   sourceBranch: ctx.config.sourceBranch,
   base: ctx.base,
-  ...(promptExtension === undefined ? {} : { promptExtension }),
   claudeMdPath: ctx.config.claudeMdPath,
   ...(ctx.config.contextMdPath === undefined ? {} : { contextMdPath: ctx.config.contextMdPath }),
 });
@@ -2114,11 +2123,18 @@ export async function runQualityReview(
     : { kind: "verify", anchor: action.anchor, report: action.report };
   if (mode.kind === "list") {
     quality.openRound = { attempt: action.attempt, timer: startTimer(), quality: null };
+    quality.standards = await readQualityStandards({
+      repoDir: config.layout.repoDir,
+      sourceBranch: config.sourceBranch,
+      extension: config.promptExtensions?.reviewerQuality,
+      onEvent: opts.onEvent,
+    });
   }
   const role = mode.kind === "list" ? "lister" : "verify";
   const head = await requireIssueTip(ctx, `before the quality ${role}`);
   const prompt = await buildQualityReviewPrompt({
-    ...branchRoleInputs(ctx, config.promptExtensions?.reviewerQuality),
+    ...branchRoleInputs(ctx),
+    standards: passStandards(quality),
     mode,
   });
   const measuredContextChars = contextChars(
@@ -2223,7 +2239,8 @@ export async function runQualityFix(
     // Rebuilt per invocation: a failed one may have committed, and the
     // branch picture is read from the head it left.
     const prompt = await buildQualityFixPrompt({
-      ...branchRoleInputs(ctx, config.promptExtensions?.reviewerQuality),
+      ...branchRoleInputs(ctx),
+      standards: passStandards(quality),
       report: action.report,
       ruling: action.ruling,
     });
@@ -2871,7 +2888,7 @@ export async function runAdjudicator(
   const { issue, sandbox, opts, config } = ctx;
   const { rejection } = action;
   const prompt = await buildAdjudicatorPrompt({
-    ...branchRoleInputs(ctx, undefined),
+    ...branchRoleInputs(ctx),
     pass: action.pass,
     head: rejection.head,
     report: rejection.report,
@@ -3059,7 +3076,10 @@ export async function runVerifier(
       [reviewed, await isAncestor(sandbox.worktreePath, reviewed, head)] as const,
   )));
   const prompt = await buildCorrectnessPrompt({
-    ...branchRoleInputs(ctx, config.promptExtensions?.reviewer),
+    ...branchRoleInputs(ctx),
+    ...(config.promptExtensions?.reviewer === undefined
+      ? {}
+      : { promptExtension: config.promptExtensions.reviewer }),
     priorRounds: ctx.priorReviewRounds,
     scope: reviewScope(ctx.priorReviewRounds, (sha) => contained.get(sha) === true),
   });

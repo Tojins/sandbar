@@ -13,7 +13,9 @@
 // `reflect/` holds the reports `npm run reflect` writes (#182), its answer
 // cache and its throwaway per-process workspaces; the daemon never reads or
 // touches it. Nor `replay/` (#195): `npm run replay`'s own lock, base cache
-// and sessions, laid out by `replay-run.ts`.
+// and sessions, laid out by `replay-run.ts`. `snapshots/` holds the seed
+// snapshots `createSeedSnapshotSandbox` checks out (#203); preflight removes
+// it whole at start, because under the workdir lock every entry is stale.
 //
 // `repo.git` being BARE is not tidiness: it is what makes the three
 // genuinely-destructive operations (`branch -D`, `worktree remove --force`,
@@ -101,6 +103,9 @@ export type RepoLayout = {
   // The thread condenser's answers, one file per issue (#217). Disposable, but
   // outside `logs/` because it has to outlive the run a deploy restarts.
   readonly anchorCacheDir: string;
+  // Read-only seed snapshots, one per issue (#203). Beside `worktreesDir`,
+  // not in it: the stale-clone sweep owns everything there.
+  readonly snapshotsDir: string;
 };
 
 export function repoLayout(hostCwd: string, workDir: string): RepoLayout {
@@ -114,6 +119,7 @@ export function repoLayout(hostCwd: string, workDir: string): RepoLayout {
     sourceWorktree: join(worktreesDir, SOURCE_WORKTREE_NAME),
     logsDir: join(stateDir, "logs"),
     anchorCacheDir: join(stateDir, "anchor-cache"),
+    snapshotsDir: join(stateDir, "snapshots"),
   };
 }
 

@@ -132,6 +132,10 @@
 - name: Install the standalone UI unit
   ansible.builtin.include_tasks: ui.yml
 
+- name: Install the database base import timer
+  ansible.builtin.include_tasks: db-base.yml
+  when: sandbar_installation.dump_drop is defined
+
 # Continuous deployment's last step (#146). The play never restarts a daemon
 # itself: a restart while an issue is running or landing would abort that work.
 # It leaves the commit it applied in the installation directory instead, and the

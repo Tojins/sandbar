@@ -1,8 +1,10 @@
 // A sha256 of a value that does not depend on how its objects spell their key
-// order (#190, #186). Three readers: `config-digest.ts`, which decides whether a
+// order (#190, #186). Four readers: `config-digest.ts`, which decides whether a
 // daemon restarts, `stackSpecToken` in stack-source.ts, which decides
-// whether a running gate stack is still the one in effect, and stack-change.ts,
-// which decides whether a branch changed a field of its gate stack.
+// whether a running gate stack is still the one in effect, stack-change.ts,
+// which decides whether a branch changed a field of its gate stack, and
+// `specTokenOf` in db-copy-policy.ts, which decides whether a database base
+// was built by the server in effect (#201).
 //
 // Object keys are sorted before serialising; array order is kept, because in
 // both readers a list's order is meaning (build order, bringup order, step

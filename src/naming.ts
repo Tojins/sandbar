@@ -245,6 +245,22 @@ export function resolveNetworkNameFor(scope: RunScope, n: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// The database import container (#201)
+//
+//   import    sandbar-<root scope>-db-import
+//
+// `sandbar db-base` holds no run lock, so it scopes its one container by
+// `runScope(realpath(databaseCopies.root))`, which no workdir run computes:
+// a daemon's orphan sweep never removes a running import, and the name is
+// scoped, so `findUnattributableResources` never reports it. One import runs
+// per root at a time (`<root>/import.lock`), so the name needs no id.
+// ---------------------------------------------------------------------------
+
+export function dbImportContainerName(rootScope: RunScope): string {
+  return `${scopedResourcePrefix(rootScope)}db-import`;
+}
+
+// ---------------------------------------------------------------------------
 // Branch names (#58)
 //
 // Sandbar owns three ref SHAPES under the same prefix:
@@ -546,4 +562,16 @@ export function egressImageTag(scope: RunScope, fingerprint: string): string {
   return `${EGRESS_IMAGE_REPOSITORY}:sb-egress-${scope}-${
     fingerprint.slice(0, IMAGE_FINGERPRINT_CHARS)
   }`;
+}
+
+// ---------------------------------------------------------------------------
+// Seed snapshots (#203)
+//
+// A seed snapshot's directory inside `RepoLayout.snapshotsDir`. Named after
+// the issue, not its branch: the snapshot is detached and holds no ref, so a
+// branch-shaped name would claim something it does not carry.
+// ---------------------------------------------------------------------------
+
+export function seedSnapshotDirName(issueId: string): string {
+  return `issue-${issueId}-seed`;
 }

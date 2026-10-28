@@ -18,6 +18,7 @@ import {
 import { parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
 import { loadTemplate } from "./prompts.js";
+import { combineStandards, parseStandards } from "./standards-groups.js";
 
 const baseInputs = {
   issue: { id: "42", title: "do the thing", branch: "sandbar/issue-42-do-the-thing" },
@@ -32,9 +33,15 @@ const baseInputs = {
   changedSinceStat: null,
 } as const;
 
+const builtinStandards = parseStandards(loadTemplate("coding-standards"), "sandbar");
+const projectStandards = parseStandards(
+  "## Naming {janitor}\n\nNo abbreviations.\n\n## Leave alone\n\nGenerated files.\n",
+  "project",
+);
+
 const qualityInputs = {
   ...baseInputs,
-  promptExtension: { path: "docs/CODING_STANDARDS.md" },
+  standards: combineStandards(builtinStandards, projectStandards),
 } as const;
 
 const implementerInputs = {
@@ -616,10 +623,13 @@ describe("renderQualityFixSlot (#185, #187)", () => {
     expect(slot).toMatch(/anything uncommitted is\s+discarded/);
   });
 
-  it("puts standards and project references in the fixer prompt", () => {
+  // Inline, as the source tip has them (#204): no `@ref` into the branch.
+  it("puts every rule group and Leave alone in the fixer prompt", () => {
     const slot = renderFix();
     expect(slot).toContain("## Coding standards");
-    expect(slot).toContain("@docs/CODING_STANDARDS.md");
+    expect(slot).toContain("## Naming\n\nNo abbreviations.");
+    expect(slot).toMatch(/## Leave alone\n\n- Pure taste[\s\S]*\n\nGenerated files\./);
+    expect(slot).not.toContain("{janitor}");
     expect(slot).not.toContain("{{");
   });
 });
@@ -759,20 +769,21 @@ describe("renderQualityReviewSlot (#187)", () => {
     });
     expect(slot).toContain("## This branch is part of a chunk");
     expect(slot).toContain("## Coding standards");
-    expect(slot).toContain("@docs/CODING_STANDARDS.md");
+    expect(slot).toContain("## Naming\n\nNo abbreviations.");
     expect(slot).not.toContain("{{");
   });
 
   it("keeps built-in standards when no project standards file is provided", () => {
-    const { promptExtension: _omitInput, ...noStandards } = qualityInputs;
     const slot = renderQualityReviewSlot({
-      ...noStandards,
+      ...qualityInputs,
+      standards: combineStandards(builtinStandards, null),
       ...picture,
       mode: list(),
       changedSinceStat: null,
     });
     expect(slot).toContain("## Coding standards");
-    expect(slot).not.toContain("### Project prompt extension");
+    expect(slot).toContain("## Leave alone");
+    expect(slot).not.toContain("## Naming");
   });
 });
 
