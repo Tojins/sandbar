@@ -28,6 +28,7 @@ import {
   fetchPullRequestsForBranches,
 } from "./chunk-reconcile.js";
 import { realAdapter as realFinalizeAdapter } from "./finalize.js";
+import { realJanitorForge } from "./janitor.js";
 import { realAdapter as realMergerAdapter } from "./merger.js";
 import { repoLayout } from "./repo-cache.js";
 
@@ -494,6 +495,22 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         expect(argv.slice(argv.indexOf("--json"), argv.indexOf("--json") + 2))
           .toEqual(["--json", "number,headRefName,title,state"]);
       }
+    });
+
+    it("asks for a janitor branch's latest pull request in any state, in the configured repo (#205)", async () => {
+      const forge = realJanitorForge({
+        repo: REPO,
+        repoDir: shimBin,
+        sourceBranch: "main",
+        beforeOriginWrite,
+      });
+      expect(await forge.latestPullRequest("sandbar/janitor-tidy")).toBeNull();
+
+      const [argv] = await calls();
+      expect(argv).toEqual([
+        "pr", "list", "--repo", "acme/app", "--head", "sandbar/janitor-tidy",
+        "--state", "all", "--json", "number,state,labels", "--limit", "5",
+      ]);
     });
   });
 });
