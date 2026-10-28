@@ -40,7 +40,9 @@
 // so `buildImage` reports an `ImageBuildError` carrying the captured output,
 // and gate-stack.ts turns one into a RED GATE: an unbuildable image is a
 // verdict about the branch, not an infrastructure fault to route to
-// HARD-ERROR.
+// HARD-ERROR. The one build failure that is neither is buildah's cache lookup
+// tripping over an image another run removed from the shared store ("layer
+// not known"); `buildImage` retries that one a bounded number of times.
 //
 // The uid check (#24 D3): a container in a pod cannot use `--userns=keep-id`,
 // and `--user 1000:1000` maps to a SUBUID whose worktree writes fail EACCES;
@@ -297,21 +299,53 @@ function appendTail(tail: string, chunk: string): string {
     : joined.slice(joined.length - BUILD_OUTPUT_TAIL_BYTES);
 }
 
+// Buildah's cache lookup reads the top layer of EVERY image in the store, not
+// only this step's candidates, so a removal anywhere in a shared store (another
+// run's reconciliation, another gate runner's sweep) between its listing and
+// that read fails an unrelated build with this message. It says nothing about
+// the recipe, so it is retried rather than reported as the branch's red.
+const CACHE_LOOKUP_RACE =
+  /checking if cached image exists from a previous build: .*layer not known/;
+const CACHE_LOOKUP_RACE_ATTEMPTS = 3;
+
 export async function buildImage(
   image: BuiltImage,
   opts: BuildOptions,
 ): Promise<string> {
+  for (let attempt = 1; ; attempt++) {
+    const result = await runBuild(image, opts);
+    if (result.ok) return result.output;
+    if (
+      attempt >= CACHE_LOOKUP_RACE_ATTEMPTS ||
+      !CACHE_LOOKUP_RACE.test(result.stderr)
+    ) {
+      throw result.error;
+    }
+  }
+}
+
+type BuildResult =
+  | { ok: true; output: string }
+  | { ok: false; error: ImageBuildError; stderr: string };
+
+async function runBuild(
+  image: BuiltImage,
+  opts: BuildOptions,
+): Promise<BuildResult> {
   const args = buildArgv(image, opts);
   const capture = opts.capture ?? true;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS;
   let output = "";
+  // stderr's tail even when uncaptured, so the cache-lookup race above stays
+  // recognisable on a build that renders straight to the terminal.
+  let stderr = "";
   let timedOut = false;
-  await new Promise<void>((resolve, reject) => {
+  return await new Promise<BuildResult>((resolve, reject) => {
     const child = spawn(RUNTIME, args, {
       stdio: [
         buildUsesStdin(image) ? "pipe" : "ignore",
         capture ? "pipe" : "inherit",
-        capture ? "pipe" : "inherit",
+        "pipe",
       ],
     });
     // SIGKILL, and a flag the timer sets rather than anything inferred from an
@@ -333,7 +367,9 @@ export async function buildImage(
       output = appendTail(output, c);
     });
     child.stderr?.on("data", (c: string) => {
-      output = appendTail(output, c);
+      stderr = appendTail(stderr, c);
+      if (capture) output = appendTail(output, c);
+      else process.stderr.write(c);
     });
     child.on("error", (err) => {
       untrack();
@@ -347,7 +383,7 @@ export async function buildImage(
       untrack();
       clearTimeout(timer);
       if (code === 0 && !timedOut) {
-        resolve();
+        resolve({ ok: true, output });
         return;
       }
       const note = timedOut
@@ -356,15 +392,17 @@ export async function buildImage(
           "since #37 the recipe and its inputs are the branch's. Raise " +
           "`images[].buildTimeoutMs` if the build is genuinely this slow."
         : `exited with code ${code}.`;
-      reject(
-        new ImageBuildError(
+      resolve({
+        ok: false,
+        error: new ImageBuildError(
           image.tag,
           `\`${RUNTIME} ${args.join(" ")}\` ${note}`,
           output.length === BUILD_OUTPUT_TAIL_BYTES
             ? `[output truncated to the last ${BUILD_OUTPUT_TAIL_BYTES} bytes]\n${output}`
             : output,
         ),
-      );
+        stderr: timedOut ? "" : stderr,
+      });
     });
     if (image.stdinContext && child.stdin) {
       const src = createReadStream(
@@ -387,7 +425,6 @@ export async function buildImage(
       src.pipe(child.stdin);
     }
   });
-  return output;
 }
 
 // Builds every declared image that is missing or stale, and returns the
