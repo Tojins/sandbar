@@ -190,6 +190,14 @@ async function imageExists(tag: string): Promise<boolean> {
 // The fingerprint an existing image was built from, or null when it is absent
 // or carries no such label. `image exists` names absence; inspect failures do
 // not establish either condition and propagate (#99).
+// A null recording would leave the tag out of `participating` in
+// `createBranchImages`, where "unknown provenance" would then mean "never
+// rebuild" rather than "always". So it is recorded as a fingerprint no tree can
+// produce.
+function baselineOf(recorded: string | null): string {
+  return recorded ?? UNKNOWN_PROVENANCE;
+}
+
 async function readExistingInputsLabel(tag: string): Promise<string | null> {
   const { stdout } = await exec(
     RUNTIME,
@@ -548,11 +556,8 @@ export async function ensureImages(
     if (!rebuildInPlace && exists) {
       // The baseline is what the image on disk was built from, not what this
       // context hashes to — see above. A null recording leaves the entry out,
-      // which drops the tag from `participating` in `createBranchImages`… and
-      // that is the one place this needs help, because "unknown provenance"
-      // would then mean "never rebuild" rather than "always". So it is recorded
-      // as a fingerprint no tree can produce.
-      baseFingerprints.set(image.tag, recorded ?? UNKNOWN_PROVENANCE);
+      // which drops the tag from `participating` in `createBranchImages`.
+      baseFingerprints.set(image.tag, baselineOf(recorded));
       await record(false, "rebuild-in-place-suspended");
       continue;
     }
@@ -597,7 +602,7 @@ export async function existingBaseFingerprints(
   const participating = images.filter((image) => (image.rebuildOn ?? []).length > 0);
   return new Map(await Promise.all(participating.map(async (image) => [
     image.tag,
-    (await readExistingInputsLabel(image.tag)) ?? UNKNOWN_PROVENANCE,
+    baselineOf(await readExistingInputsLabel(image.tag)),
   ] as const)));
 }
 
