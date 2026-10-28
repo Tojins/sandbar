@@ -1579,16 +1579,18 @@ export async function deployWatchRefusals(args: {
     }
   };
   const refusals: string[] = [];
-  // `gh workflow view` has no `--json`; `--yaml` reads the file and fails
-  // when the repository has no such workflow.
-  const workflow = await gh(["workflow", "view", watch.workflow, "--repo", repoFlag, "--yaml"]);
+  const [workflow, labels] = await Promise.all([
+    // `gh workflow view` has no `--json`; `--yaml` reads the file and fails
+    // when the repository has no such workflow.
+    gh(["workflow", "view", watch.workflow, "--repo", repoFlag, "--yaml"]),
+    gh(["label", "list", "--repo", repoFlag, "--limit", "200", "--json", "name"]),
+  ]);
   if ("failure" in workflow) {
     refusals.push(
       `config.deployWatch.workflow: ${repoFlag} has no workflow file ` +
         `${watch.workflow} (${workflow.failure}).`,
     );
   }
-  const labels = await gh(["label", "list", "--repo", repoFlag, "--limit", "200", "--json", "name"]);
   if ("failure" in labels) {
     refusals.push(`config.deployWatch: could not list ${repoFlag}'s labels (${labels.failure}).`);
   } else {
@@ -1601,7 +1603,7 @@ export async function deployWatchRefusals(args: {
     if (missing.length > 0) {
       refusals.push(
         `config.deployWatch: ${repoFlag} has no label ${missing.map((l) => `\`${l}\``).join(" or ")}; ` +
-          "sandbar never creates labels, so create it before turning the deploy watch on.",
+          "sandbar never creates labels, so create what is missing before turning the deploy watch on.",
       );
     }
   }
