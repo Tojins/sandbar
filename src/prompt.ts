@@ -2,7 +2,8 @@
 // project anchor (shared verbatim by both agents), issue anchor
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
 // commit list + diff stat (progressive disclosure, #158), the quality fixer's
-// commits since the last attempt (#185), sandbox-stack report #44, gate trace,
+// commits since the last attempt (#185), sandbox-stack report #44, the egress
+// allowlist note when it is enforced (#202), gate trace,
 // the latest verifier rejection — an accepted behavior finding is fixed at
 // every same-defect site behind a failing-first test (#181) — and the same
 // built-in coding standards the quality pass applies plus a live pre-promise
@@ -115,6 +116,7 @@ const IMPLEMENTER_SANDBOX_GATE_ACCESS_ATTACHED_TPL = loadTemplate(
 );
 const IMPLEMENTER_CHUNK_BASE_TPL = loadTemplate("implementer-chunk-base");
 const IMPLEMENTER_STACK_FILE_TPL = loadTemplate("implementer-stack-file");
+const IMPLEMENTER_SANDBOX_EGRESS_TPL = loadTemplate("implementer-sandbox-egress");
 const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
 const ADJUDICATOR_TPL = loadTemplate("adjudicator");
 
@@ -276,6 +278,9 @@ export type PromptInputs = {
   // The gate stack file the branch may edit only the container env of (#186).
   // Absent for an inline stack, which no branch reaches.
   readonly stackFile?: string;
+  // Whether this sandbox's egress allowlist refuses what it does not list
+  // (#202). Report mode refuses nothing, so it says nothing.
+  readonly egressEnforced?: boolean;
 };
 
 export type ReviewerPromptInputs = {
@@ -793,6 +798,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     qualityCommits: section(qualityCommitsSection),
     sandboxStack: section(sandboxStack),
     stackFile: section(stackFile),
+    egress: section(inputs.egressEnforced === true ? IMPLEMENTER_SANDBOX_EGRESS_TPL : ""),
     gateFailure: section(gateFailure),
     reviewerFeedback: section(reviewerFeedback),
     orchestratorNote: section(orchestratorNote),

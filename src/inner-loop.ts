@@ -1311,6 +1311,7 @@ async function runSandboxCycle(
           setupStack.attachments,
         ),
         ...stackFileInput(opts.stackSource),
+        egressEnforced: config.egress?.policy.mode === "enforce",
       }, anchorOpts);
       const size = contextChars(
         admissionPrompt,
@@ -2405,6 +2406,7 @@ export async function runImplementer(
         ctx.sandboxGateAttachments,
       ),
       ...stackFileInput(opts.stackSource),
+      egressEnforced: config.egress?.policy.mode === "enforce",
     },
     anchorOpts,
   );
