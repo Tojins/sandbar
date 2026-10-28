@@ -151,7 +151,8 @@ describe("scheduler decisions", () => {
     hasChunkRefreshRequests: false, hasCapacity: true,
     noProgressSinceLanding: 0,
     noProgressBackstop: 6, providerClosed: false, restartDue: false,
-    storageLow: false, ...overrides,
+    storageLow: false, janitorRunning: false, janitorStartable: false,
+    janitorLandRequested: false, ...overrides,
   });
 
   // Every row names the WHOLE action, reason included: the exit tags are the
@@ -240,5 +241,116 @@ describe("scheduler decisions", () => {
     ["a pending terminal is not idle", request({ active: 0, ongoing: 0, hasPendingTerminals: true }), null],
   ] as const)("restart due: %s", (_name, state, reason) => {
     expect(restartDueReason(state)).toBe(reason);
+  });
+});
+
+// #205 — an idle janitor run holds a slot beside the pool and yields it.
+describe("scheduler decisions: the idle janitor (#205)", () => {
+  const snapshot = (overrides: Partial<SchedulerSnapshot> = {}): SchedulerSnapshot => ({
+    active: 0, ongoing: 0, hasCompleted: false, hasPendingTerminals: false,
+    hasCandidates: false, hasRetries: false, hasLandRequests: false,
+    hasChunkRefreshRequests: false, hasCapacity: true,
+    noProgressSinceLanding: 0,
+    noProgressBackstop: 6, providerClosed: false, restartDue: false,
+    storageLow: false, janitorRunning: false, janitorStartable: false,
+    janitorLandRequested: false, ...overrides,
+  });
+  // A running janitor holds the one slot of a width-1 pool.
+  const running = { janitorRunning: true, active: 1, hasCapacity: false };
+
+  it.each([
+    ["a due restart", { restartDue: true }],
+    ["low storage", { storageLow: true }],
+    ["a closed provider", { providerClosed: true }],
+    ["the stuck backstop", { noProgressSinceLanding: 6 }],
+    ["a land on its own pull request", { janitorLandRequested: true }],
+    ["a candidate it keeps out", { hasCandidates: true }],
+    ["a retry it keeps out", { hasRetries: true }],
+  ])("pre-empts a running janitor for %s", (_, overrides) => {
+    expect(decideSchedulerAction(snapshot({ ...running, ...overrides }))).toEqual({ kind: "preempt-janitor" });
+  });
+
+  it("lets a completion recompute first", () => {
+    expect(decideSchedulerAction(snapshot({ ...running, hasCompleted: true, restartDue: true })))
+      .toEqual({ kind: "recompute" });
+  });
+
+  it("blocks admission only through its slot", () => {
+    expect(decideSchedulerAction(snapshot({
+      janitorRunning: true, active: 1, hasCapacity: true, hasCandidates: true,
+    }))).toEqual({ kind: "admit", next: "wait" });
+    expect(decideSchedulerAction(snapshot({ janitorRunning: true, active: 1, hasCapacity: false })))
+      .toEqual({ kind: "wait" });
+  });
+
+  it("keeps running beside a landing", () => {
+    expect(decideSchedulerAction(snapshot({ ...running, hasPendingTerminals: true })))
+      .toEqual({ kind: "land" });
+  });
+
+  it("starts only where the daemon would otherwise wait", () => {
+    expect(decideSchedulerAction(snapshot({ janitorStartable: true }))).toEqual({ kind: "janitor" });
+    expect(decideSchedulerAction(snapshot({ janitorStartable: true, hasCandidates: true })))
+      .toEqual({ kind: "admit", next: "wait" });
+    expect(decideSchedulerAction(snapshot({ janitorStartable: true, hasPendingTerminals: true })))
+      .toEqual({ kind: "land" });
+    expect(decideSchedulerAction(snapshot({ janitorStartable: true, hasCapacity: false, active: 1 })))
+      .toEqual({ kind: "wait" });
+    expect(decideSchedulerAction(snapshot({ janitorStartable: true, restartDue: true })))
+      .toEqual({ kind: "exit", reason: "restart" });
+  });
+
+  it("drains while an aborted janitor is still tearing down", () => {
+    const aborting = { janitorRunning: false, active: 1, hasCapacity: false };
+    expect(decideSchedulerAction(snapshot({ ...aborting, restartDue: true }))).toEqual({ kind: "drain" });
+    expect(decideSchedulerAction(snapshot({ ...aborting, storageLow: true }))).toEqual({ kind: "drain" });
+    expect(decideSchedulerAction(snapshot({ ...aborting, providerClosed: true }))).toEqual({ kind: "drain" });
+  });
+});
+
+describe("continuous pool: slots held outside it and the external wake (#205)", () => {
+  it("admits no more than the slots a held janitor leaves", () => {
+    const pool = new ContinuousPool<Issue, string>(2, (i) => i.id);
+    const [first, ...rest] = pool.admit([issue("1"), issue("2")], false, 1);
+    expect([first, ...rest].map((i) => i?.id)).toEqual(["1"]);
+    pool.start(first!, deferred<string>().promise);
+    expect(pool.admit([issue("3")], false, 1)).toEqual([]);
+    expect(pool.admit([issue("3")]).map((i) => i.id)).toEqual(["3"]);
+  });
+
+  it("returns a wake latched before the wait at once", async () => {
+    const pool = new ContinuousPool<Issue, string>(1, (i) => i.id);
+    pool.wakeExternal();
+    await expect(pool.waitForWake(60_000)).resolves.toBe("external");
+  });
+
+  it("resolves an armed wait, clears its timer, and is consumed", async () => {
+    vi.useFakeTimers();
+    try {
+      const pool = new ContinuousPool<Issue, string>(1, (i) => i.id);
+      const wake = pool.waitForWake(100);
+      pool.wakeExternal();
+      await expect(wake).resolves.toBe("external");
+      expect(vi.getTimerCount()).toBe(0);
+      const next = pool.waitForWake(100);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(next).resolves.toBe("poll");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never takes a slot completion with it", async () => {
+    const pool = new ContinuousPool<Issue, string>(2, (i) => i.id);
+    const target = pool.admit([issue("1")])[0]!;
+    const job = deferred<string>();
+    pool.start(target, job.promise);
+    const wake = pool.waitForWake(60_000);
+    pool.wakeExternal();
+    job.resolve("done");
+    await expect(wake).resolves.toBe("external");
+    expect(pool.hasPendingTerminals).toBe(false);
+    await expect(pool.waitForWake(60_000)).resolves.toBe("slot-freed");
+    expect(pool.hasPendingTerminals).toBe(true);
   });
 });

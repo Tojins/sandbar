@@ -25,6 +25,13 @@
 //
 //   1. recompute — a completion arrived while the plan was being built, so the
 //      snapshot describes a pool that no longer exists. Cheapest to rebuild.
+//   1a. preempt-janitor — an idle janitor run (#205) is in flight and something
+//      wants the daemon: a due restart, low storage, a closed provider, the
+//      stuck backstop, a `land` on the task's own pull request, or work that
+//      has no slot because the janitor holds one. Ahead of every stop because
+//      a janitor run is never committed work: it is discarded, not drained.
+//      Its teardown takes seconds, and run.ts counts it as one active slot
+//      until it has settled, so a drain waits for it.
 //   2. restart  — the box has a newer build of this driver and asked this
 //      process to step aside (#146), and the request is DUE (`restartDueReason`
 //      below: urgent, deferred long enough, or nothing to drain). A request
@@ -56,8 +63,12 @@
 //      `land` request. Chunk-specific growth is already excluded before the
 //      snapshot reaches this decision; unrelated running work is not a reason
 //      to starve a safe request (#168).
-//   8. wait     — wait on one cancellable race between a freed slot and the
+//   8. janitor  — nothing to admit or land, a free slot, no janitor in
+//      flight, and a configured idle task is due (`pickJanitorTask`): start
+//      it (#205). Last because it is what an otherwise idle daemon does.
+//   9. wait     — wait on one cancellable race between a freed slot and the
 //      poll timer. This is also the empty-plan action: the daemon stays alive.
+//      Both janitor actions are followed by this wait too.
 //
 // Restart and provider closure share `drainToward` because they are the same
 // stop: stop admitting, land what is already committed, let running work reach
@@ -103,6 +114,11 @@
 // keeps one removable completion waiter; a poll winner withdraws it, so a hung
 // issue cannot retain one callback for every interval it survives.
 //
+// `wakeExternal` is the janitor run's end (#205), which is no pool slot: it
+// resolves the armed wait as `external`, or is latched for the next one, and
+// never moves a terminal, so it does not go through `waitForFreedSlot`. A
+// janitor run touches neither `recordLandingOutcome` nor the stuck counter.
+//
 // `run.ts` wraps this one wait with a repository-lease renewal barrier (#139).
 // A separate heartbeat covers operations that outlast the wait cadence, but
 // poll and slot completion stay coalesced here so neither scheduler path can
@@ -112,7 +128,7 @@ export type SettledIssue<T, R> =
   | { readonly status: "fulfilled"; readonly issue: T; readonly value: R }
   | { readonly status: "rejected"; readonly issue: T; readonly reason: unknown };
 
-export type PoolWake = "slot-freed" | "poll";
+export type PoolWake = "slot-freed" | "poll" | "external";
 
 export type SchedulerExit = "restart" | "storage-low" | "provider-closed" | "stuck";
 export type SchedulerAction =
@@ -121,6 +137,8 @@ export type SchedulerAction =
   | { readonly kind: "land" }
   | { readonly kind: "wait" }
   | { readonly kind: "drain" }
+  | { readonly kind: "preempt-janitor" }
+  | { readonly kind: "janitor" }
   | { readonly kind: "exit"; readonly reason: SchedulerExit };
 
 export type SchedulerSnapshot = {
@@ -138,7 +156,21 @@ export type SchedulerSnapshot = {
   readonly providerClosed: boolean;
   readonly restartDue: boolean;
   readonly storageLow: boolean;
+  // An idle janitor run is in flight and has not been aborted (#205).
+  readonly janitorRunning: boolean;
+  // No janitor run is in flight and `pickJanitorTask` names a task.
+  readonly janitorStartable: boolean;
+  // The running task's pull request carries `land`.
+  readonly janitorLandRequested: boolean;
 };
+
+// Whether a running janitor must give way (rule 1a in the header).
+function janitorMustYield(state: SchedulerSnapshot): boolean {
+  return state.restartDue || state.storageLow || state.providerClosed ||
+    state.noProgressSinceLanding >= state.noProgressBackstop ||
+    state.janitorLandRequested ||
+    (!state.hasCapacity && (state.hasRetries || state.hasCandidates));
+}
 
 // A chunk refresh exists only to make a future admission safe (#174). Once an
 // admission-closing condition is latched, refreshing that candidate's base is
@@ -235,6 +267,7 @@ export function decideAfterFailedRefresh(
 // rules at several points in its outer loop.
 export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction {
   if (state.hasCompleted) return { kind: "recompute" };
+  if (state.janitorRunning && janitorMustYield(state)) return { kind: "preempt-janitor" };
   if (state.restartDue) return drainToward("restart", state);
   if (state.storageLow) {
     if (state.hasPendingTerminals) return { kind: "land" };
@@ -265,6 +298,9 @@ export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction
   ) {
     return { kind: "land" };
   }
+  if (state.janitorStartable && state.hasCapacity && !state.janitorRunning) {
+    return { kind: "janitor" };
+  }
   return { kind: "wait" };
 }
 
@@ -272,6 +308,8 @@ export class ContinuousPool<T, R> {
   readonly #active = new Map<string, Promise<SettledIssue<T, R>>>();
   readonly #completed: SettledIssue<T, R>[] = [];
   #completionWaiter: (() => void) | null = null;
+  #externalWaiter: (() => void) | null = null;
+  #externalLatched = false;
   readonly #pendingTerminals: SettledIssue<T, R>[] = [];
   readonly #ongoing = new Map<string, T>();
   readonly #started = new Set<string>();
@@ -303,9 +341,10 @@ export class ContinuousPool<T, R> {
 
   beginPoll(): void { this.#untilPoll.clear(); }
 
-  admit(candidates: readonly T[], closed = false): readonly T[] {
+  // `held` is slots taken outside the pool: a janitor run in flight (#205).
+  admit(candidates: readonly T[], closed = false, held = 0): readonly T[] {
     if (closed) return [];
-    const available = Math.max(0, this.width - this.#active.size);
+    const available = Math.max(0, this.width - this.#active.size - held);
     const issues = this.#retries.splice(0, available);
     for (const issue of candidates) {
       if (issues.length >= available) break;
@@ -348,6 +387,13 @@ export class ContinuousPool<T, R> {
     return settled;
   }
 
+  // Resolve the armed wait as `external`, or latch the wake for the next one.
+  wakeExternal(): void {
+    const wake = this.#externalWaiter;
+    if (wake === null) this.#externalLatched = true;
+    else wake();
+  }
+
   // One cancellable wake owns the daemon's wait (#133). The timer is armed
   // afresh after every recompute and cleared by whichever source wins. A slot
   // completion observed in the winner's microtask is named `slot-freed`, so
@@ -356,6 +402,10 @@ export class ContinuousPool<T, R> {
     if (this.#completed.length > 0) {
       await this.waitForFreedSlot();
       return "slot-freed";
+    }
+    if (this.#externalLatched) {
+      this.#externalLatched = false;
+      return "external";
     }
     const waitForPoll = this.#active.size < this.width;
     const wake = await new Promise<PoolWake>((resolve) => {
@@ -369,10 +419,12 @@ export class ContinuousPool<T, R> {
         if (finished) return;
         finished = true;
         if (this.#completionWaiter === slotFreed) this.#completionWaiter = null;
+        this.#externalWaiter = null;
         if (timer !== undefined) clearTimeout(timer);
         resolve(trigger);
       };
       this.#completionWaiter = slotFreed;
+      this.#externalWaiter = () => finish("external");
       if (waitForPoll) {
         timer = setTimeout(() => finish("poll"), pollIntervalMs);
       }

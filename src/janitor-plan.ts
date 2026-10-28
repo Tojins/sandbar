@@ -15,8 +15,9 @@
 // - The rolling branch starts fresh from the source tip when origin has
 //   none, when its latest pull request (any state) is merged or closed, or
 //   when the source already contains it: containment alone misses a squash
-//   merge. Otherwise it continues. Either way the push leases on the origin
-//   tip seen now, the empty string meaning the branch must not exist.
+//   merge. Otherwise it continues from origin's tip. Either way the push
+//   leases on the origin tip seen now, the empty string meaning the branch
+//   must not exist, so a continued branch's lease is its tip.
 // - A DONE run is `committed`; a NEEDS-INFO with nothing committed beyond
 //   the base is `no-change`, the anchor's way of saying there was nothing to
 //   do; QUOTA, CREDENTIAL and an exhausted HARD-ERROR are `failed`; every
