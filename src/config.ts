@@ -1,12 +1,23 @@
+import { isIP } from "node:net";
 import { dirname, isAbsolute, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   type AgentProviderName,
+  PROVIDER_EGRESS_HOSTS,
   assertRoleModelIdNamed,
   parseAgentProviderName,
+  requiredAgentProviders,
 } from "./agent-providers.js";
 import type { SandboxHooks } from "./agent-sandbox.js";
+import { canonicalSha256 } from "./canonical-json.js";
+import {
+  type EgressMode,
+  GITHUB_HOSTS,
+  PRESETS,
+  type ResolvedEgressEntry,
+  normalizeHost,
+} from "./egress-policy.js";
 import { SandbarError } from "./errors.js";
 import { DEFAULT_LANE, type Lane } from "./lanes.js";
 import { ALL_BRANCH_INFIXES, BRANCH_PREFIX } from "./naming.js";
@@ -619,6 +630,39 @@ export type DeployWatchConfig = {
   readonly timeoutMs?: number;
 };
 
+// One `egress.allow` entry (#202). A string is a preset name (`"npm"`,
+// `"packagist"`), a `host`, a `*.suffix` (subdomains only, never the apex) or a
+// `host:port`; the object form names its ports and may reach addresses in the
+// private ranges (`egress-policy.ts`). Ports default to 443 and 80.
+export type EgressAllowEntry =
+  | string
+  | {
+      readonly host: string;
+      readonly ports?: readonly number[];
+      readonly private?: boolean;
+    };
+
+export type EgressConfig = {
+  // Default "enforce". "report" refuses nothing and records what enforce would
+  // have refused, to discover an installation's list from its run record.
+  readonly mode?: EgressMode;
+  readonly allow: readonly EgressAllowEntry[];
+};
+
+// The resolved allowlist (`resolveEgress`). `open` is the sandbox without a
+// proxy, every argv as it was before #202. `entries` are the defaults (GitHub
+// and the hosts of every provider the run invokes) and the consumer's own,
+// deduplicated and sorted; `digest` hashes them with the mode, for the
+// standalone gate's reuse token.
+export type ResolvedEgress =
+  | { readonly kind: "open" }
+  | {
+      readonly kind: "allowlist";
+      readonly mode: EgressMode;
+      readonly entries: readonly ResolvedEgressEntry[];
+      readonly digest: string;
+    };
+
 // RunConfig is DEVIATIONS-ONLY by design. A consumer should write down two
 // kinds of thing and nothing else:
 //
@@ -930,6 +974,14 @@ export type RunConfig = {
   // Default: unset, no watch.
   readonly deployWatch?: DeployWatchConfig;
 
+  // An outbound allowlist for every agent sandbox, its siblings, the gate
+  // stacks and the merger's resolve container (#202, `egress.ts`). GitHub and
+  // the model API of every provider the run invokes are always on it; package
+  // registries are opt-in presets. Each refused host is recorded as an
+  // `egress-refused` event. Default: unset, open egress — warned about at
+  // startup when `databaseCopies` (#201) puts prod data in the sandbox.
+  readonly egress?: EgressConfig;
+
   // Which landing lane an issue takes when it carries no `auto-land` label
   // (#57, §1 of #54): "auto" — the gate is the last word, what sandbar has
   // always done — or "review", where a human looks before the work lands.
@@ -999,8 +1051,9 @@ export type RunConfig = {
 // `maxConcurrentGates` (unlimited). The others are re-declared rather than
 // merely `Required<>`d because resolution changes their TYPE, not just their
 // presence: `labels` widens from Partial to the fully-populated vocabulary,
-// `gateStack` and `mergeMode` become their resolved-and-validated forms, and
-// `deployWatch` is null when the watch is off.
+// `gateStack` and `mergeMode` become their resolved-and-validated forms,
+// `deployWatch` is null when the watch is off, and `egress` is `open` without
+// an allowlist.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
@@ -1020,6 +1073,7 @@ export type ResolvedConfig = Required<
     | "reflectSynthesizerEffort"
     | "maxConcurrentGates"
     | "copyToWorktree"
+    | "egress"
   >
 > & {
   readonly requiresSandbar?: string;
@@ -1042,6 +1096,7 @@ export type ResolvedConfig = Required<
   readonly gateStack: ResolvedStackSource;
   readonly mergeMode: ResolvedMergeMode;
   readonly deployWatch: DeployWatchSettings | null;
+  readonly egress: ResolvedEgress;
 };
 
 export const DEFAULT_CWD = (): string => process.cwd();
@@ -1340,6 +1395,125 @@ export function resolveDeployWatch(
       watch.timeoutMs ?? DEFAULT_DEPLOY_WATCH_TIMEOUT_MS,
     ),
   };
+}
+
+const DEFAULT_EGRESS_PORTS: readonly number[] = [443, 80];
+
+const EGRESS_HOST_RE = /^(\*\.)?([a-z0-9-]+\.)+[a-z0-9-]+$/;
+
+// `.mjs` is type-checked by nothing, so every entry is checked here. An IP
+// literal is refused rather than allowed: the proxy routes by the name a
+// client asks for, so an address would match nothing; and a bare word is far
+// likelier a misspelt preset than a host.
+function egressHost(field: string, raw: unknown): string {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw new SandbarError(`${field} must name a host (got ${JSON.stringify(raw)}).`);
+  }
+  const host = normalizeHost(raw.trim());
+  if (isIP(host) !== 0) {
+    throw new SandbarError(
+      `${field} is the IP literal ${JSON.stringify(raw)}; allow the host name it serves under.`,
+    );
+  }
+  if (!EGRESS_HOST_RE.test(host)) {
+    throw new SandbarError(
+      `${field} must be a preset (${Object.keys(PRESETS).join(", ")}), a host ` +
+        `name, \`*.suffix\` or \`host:port\` (got ${JSON.stringify(raw)}).`,
+    );
+  }
+  return host;
+}
+
+function egressPort(field: string, raw: unknown): number {
+  if (!Number.isInteger(raw) || (raw as number) < 1 || (raw as number) > 65_535) {
+    throw new SandbarError(
+      `${field} has port ${JSON.stringify(raw)}; a port is an integer from 1 through 65535.`,
+    );
+  }
+  return raw as number;
+}
+
+function resolveEgressEntry(entry: unknown, i: number): ResolvedEgressEntry[] {
+  const field = `config.egress.allow[${i}]`;
+  const entryOf = (
+    host: string,
+    ports: readonly number[] = DEFAULT_EGRESS_PORTS,
+    reachesPrivate = false,
+  ): ResolvedEgressEntry => ({ host, ports, private: reachesPrivate });
+  if (typeof entry === "string") {
+    const preset = Object.hasOwn(PRESETS, entry) ? PRESETS[entry] : undefined;
+    if (preset !== undefined) return preset.map((host) => entryOf(host));
+    // One colon is `host:port`. An IPv6 literal has several and is refused
+    // whole, as an IP literal.
+    const parts = entry.split(":");
+    if (parts.length !== 2) return [entryOf(egressHost(field, entry))];
+    const [host, port] = parts as [string, string];
+    return [entryOf(
+      egressHost(field, host),
+      [egressPort(field, /^\d+$/.test(port) ? Number(port) : port)],
+    )];
+  }
+  if (!isRecord(entry)) {
+    throw new SandbarError(
+      `${field} must be a string or { host, ports?, private? } (got ${JSON.stringify(entry)}).`,
+    );
+  }
+  const { ports, private: reachesPrivate } = entry;
+  if (ports !== undefined && (!Array.isArray(ports) || ports.length === 0)) {
+    throw new SandbarError(`${field}.ports must be a non-empty array of ports.`);
+  }
+  if (reachesPrivate !== undefined && typeof reachesPrivate !== "boolean") {
+    throw new SandbarError(`${field}.private must be a boolean.`);
+  }
+  return [entryOf(
+    egressHost(`${field}.host`, entry.host),
+    ports?.map((port: unknown) => egressPort(`${field}.ports`, port)),
+    reachesPrivate,
+  )];
+}
+
+export function resolveEgress(
+  egress: EgressConfig | undefined,
+  providers: readonly AgentProviderName[],
+): ResolvedEgress {
+  if (egress === undefined) return { kind: "open" };
+  if (!isRecord(egress) || !Array.isArray(egress.allow)) {
+    throw new SandbarError("config.egress must be { mode?, allow: [...] }.");
+  }
+  const mode = egress.mode ?? "enforce";
+  if (mode !== "enforce" && mode !== "report") {
+    throw new SandbarError(
+      `config.egress.mode must be "enforce" or "report" (got ${JSON.stringify(mode)}).`,
+    );
+  }
+  const defaults = [
+    ...GITHUB_HOSTS,
+    ...providers.flatMap((provider) => PROVIDER_EGRESS_HOSTS[provider]),
+  ].map((host): ResolvedEgressEntry => ({ host, ports: DEFAULT_EGRESS_PORTS, private: false }));
+  const byKey = new Map(
+    [...defaults, ...egress.allow.flatMap(resolveEgressEntry)]
+      .map((entry) => [JSON.stringify(entry), entry] as const),
+  );
+  const entries = [...byKey.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([, entry]) => entry);
+  return { kind: "allowlist", mode, entries, digest: canonicalSha256({ mode, entries }) };
+}
+
+// Prod data with open egress is never silent (#202): the startup warning when
+// `databaseCopies` (#201) is configured and no allowlist is enforced. Read by
+// presence only, because the key and its shape belong to #201.
+export function egressStartupWarning(config: ResolvedConfig): string | null {
+  if (!("databaseCopies" in config) || config.databaseCopies === undefined) return null;
+  if (config.egress.kind === "open") {
+    return "egress is open while databaseCopies is configured: prod data can leave the " +
+      "sandbox. Set config.egress to enforce an allowlist.";
+  }
+  if (config.egress.mode === "report") {
+    return "egress is in report mode while databaseCopies is configured: prod data can " +
+      'leave the sandbox, and refusals are only recorded. Set config.egress.mode to "enforce".';
+  }
+  return null;
 }
 
 // Podman container-name grammar, and also what makes `sandbar-<id>-<name>`
@@ -2829,6 +3003,17 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
     deployWatch: resolveDeployWatch(config.deployWatch),
+    egress: resolveEgress(config.egress, requiredAgentProviders({
+      uiPrototypeCheck,
+      condenseAboveChars,
+      condenserAgent,
+      implementerAgent,
+      uiCheckAgent,
+      reviewerAgent,
+      reviewerQualityAgent,
+      adjudicatorAgent,
+      mergerAgent,
+    })),
     defaultLane: requireLane(config.defaultLane),
   };
 }

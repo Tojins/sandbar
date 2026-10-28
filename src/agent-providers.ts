@@ -298,6 +298,15 @@ export const PROVIDER_CREDENTIALS: Record<
   ],
 };
 
+// The hosts a provider's CLI reaches from inside a sandbox (#202): with an
+// `egress` allowlist configured, every provider a run invokes gets these by
+// default (config.ts), beside its credential. codex's ChatGPT subscription
+// talks to `chatgpt.com` and refreshes its token at `auth.openai.com`.
+export const PROVIDER_EGRESS_HOSTS: Record<AgentProviderName, readonly string[]> = {
+  claude: ["api.anthropic.com"],
+  codex: ["api.openai.com", "chatgpt.com", "auth.openai.com"],
+};
+
 // The trap that a provider accepting BOTH kinds of credential creates, and the
 // only thing `bills`/`preferred` exist for (#73).
 //

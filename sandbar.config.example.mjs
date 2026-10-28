@@ -153,6 +153,14 @@ export default {
   // label (or `label`) and `ready-for-human` must already exist.
   // deployWatch: { workflow: "deploy.yml", notifyLogin: "your-login" },
 
+  // Allow sandboxes, gates and resolve containers to reach only GitHub, the
+  // model APIs of the providers in use and these hosts; every refused host is
+  // recorded as an `egress-refused` event. Entries: a preset ("npm",
+  // "packagist"), "host", "*.suffix", "host:port", or
+  // { host, ports, private: true } for a name that resolves to a private
+  // address. Start in "report" mode to discover the list from the run record.
+  // egress: { mode: "report", allow: ["npm", "packagist"] },
+
   // `auto` lets the gate decide. `review` lands connected review-gated issues
   // on a draft chunk pull request. An issue's `auto-land` label overrides the
   // default, unless review-gating reaches it through `## Blocked by`; inherited
