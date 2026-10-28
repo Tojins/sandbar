@@ -3840,6 +3840,33 @@ describe("runInnerLoop context terminals (#158)", () => {
         .toMatchObject({ janitor: task, phases: [] });
     });
 
+    it("closes the header row at the last phase's attempt when a cycle aborts after it", async () => {
+      const { opts, events } = harness(routine);
+      const runCycle = vi.fn(async (_issue, cycleOpts) => {
+        await cycleOpts.onEvent({ kind: "phase", janitor: task, attempt: 2, phases: ["implementer"] });
+        throw new InnerLoopAbortedError();
+      });
+
+      await expect(runInnerLoop(janitorIssue, { ...opts, janitor }, runCycle))
+        .rejects.toBeInstanceOf(InnerLoopAbortedError);
+
+      expect(events.at(-1)).toMatchObject({ kind: "phase", janitor: task, attempt: 2, phases: [] });
+    });
+
+    it("emits one empty phase when the cycle already closed the row", async () => {
+      const { opts, events } = harness(routine);
+      const runCycle = vi.fn(async (_issue, cycleOpts) => {
+        await cycleOpts.onEvent({ kind: "phase", janitor: task, attempt: 1, phases: ["review"] });
+        await cycleOpts.onEvent({ kind: "phase", janitor: task, attempt: 1, phases: [] });
+        return { verdict: { type: "DONE" as const, commits: [] }, accumulatedCommits: [], specGaps: [] };
+      });
+
+      await runInnerLoop(janitorIssue, { ...opts, janitor }, runCycle);
+
+      const phases = events.flatMap((event) => event.kind === "phase" ? [event.phases] : []);
+      expect(phases).toEqual([["review"], []]);
+    });
+
     it("closes its phase when a setup failure surfaces after the retries", async () => {
       innerLoopMocks.prepareWorktree.mockRejectedValue(new Error("podman"));
       const { opts, events } = harness(routine);
