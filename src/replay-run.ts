@@ -275,17 +275,20 @@ async function freezeCase(args: {
   const { issue, admission, repoDir } = args;
   const merge = await landingMerge(repoDir, args.sourceBranch, issue);
   const seed: { readonly seedSha: string; readonly seedFrom: SeedFrom } | null =
-    admission?.seedSha != null
+    admission !== null && admission.seedSha !== null
       ? { seedSha: admission.seedSha, seedFrom: "recorded" }
       : merge !== null ? { seedSha: merge.base, seedFrom: "merge-base" } : null;
-  if (seed === null) {
+  // The title it was admitted under, else the one it landed under: its branch
+  // name, and so every prompt, depend on it.
+  const title = admission?.title ?? merge?.title;
+  if (seed === null || title === undefined) {
     return {
       failure: `#${issue}: no recorded seed and no \`${issueMergeSubject(issue, "…")}\` merge on ` +
         `origin/${args.sourceBranch}; a case for it needs its seedSha written by hand (seedFrom: "manual")`,
     };
   }
   let text: CaseText & { readonly issueJson: IssueJson };
-  if (admission?.issueSnapshot != null) {
+  if (admission !== null && admission.issueSnapshot !== null) {
     const path = join(args.logsDir, admission.run, `issue-${issue}`, admission.issueSnapshot);
     text = { issueFrom: "recorded", issueJson: JSON.parse(await readFile(path, "utf8")) as IssueJson };
   } else {
@@ -304,7 +307,7 @@ async function freezeCase(args: {
   return {
     case: {
       issue,
-      title: admission?.title ?? merge?.title ?? text.issueJson.title ?? `#${issue}`,
+      title,
       ...seed,
       ...text,
       original: admission === null ? null : { logsDir: args.logsDir, run: admission.run },
@@ -380,14 +383,6 @@ export function replayRouting(config: ResolvedConfig): Readonly<Record<string, R
   };
 }
 
-// What `run` refused before it started anything.
-export class ReplayRefusedError extends SandbarError {
-  constructor(message: string) {
-    super(message);
-    this.name = "ReplayRefusedError";
-  }
-}
-
 async function readCases(casesFile: string, config: ResolvedConfig): Promise<{
   readonly cases: ReplayCases;
   readonly sha256: string;
@@ -398,13 +393,13 @@ async function readCases(casesFile: string, config: ResolvedConfig): Promise<{
     json = JSON.parse(bytes.toString("utf8"));
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err;
-    throw new ReplayRefusedError(`${casesFile} is not JSON: ${err.message}`);
+    throw new SandbarError(`${casesFile} is not JSON: ${err.message}`);
   }
   const parsed = parseReplayCases(json);
-  if ("errors" in parsed) throw new ReplayRefusedError(`${casesFile}:\n${parsed.errors.join("\n")}`);
+  if ("errors" in parsed) throw new SandbarError(`${casesFile}:\n${parsed.errors.join("\n")}`);
   const configured = repoSlug({ owner: config.ghOwner, name: config.ghRepo });
   if (parsed.cases.repo !== configured || parsed.cases.sourceBranch !== config.sourceBranch) {
-    throw new ReplayRefusedError(
+    throw new SandbarError(
       `${casesFile} was frozen from ${parsed.cases.repo} ${parsed.cases.sourceBranch}, ` +
         `but the config names ${configured} ${config.sourceBranch}`,
     );
@@ -482,7 +477,7 @@ export type ReplayRunOptions = {
 };
 
 // 0 when every case ran, 3 when a quota or credential stopped the session.
-// A refusal throws `ReplayRefusedError` before anything is spent.
+// A refusal throws a SandbarError before any token is spent.
 export async function runReplay(opts: ReplayRunOptions): Promise<0 | 3> {
   const { config } = opts;
   const layout = replayLayout(config);
@@ -503,20 +498,20 @@ async function replaySession(opts: ReplayRunOptions, layout: RepoLayout, lockedW
   const casesFile = resolve(opts.casesFile);
   const { cases, sha256 } = await readCases(casesFile, config);
   if (!existsSync(layout.repoDir)) {
-    throw new ReplayRefusedError(`No replay base cache at ${layout.repoDir}; run \`replay freeze\` first.`);
+    throw new SandbarError(`No replay base cache at ${layout.repoDir}; run \`replay freeze\` first.`);
   }
   const missing = await missingSeeds(layout.repoDir, cases.cases);
   if (missing.length > 0) {
-    throw new ReplayRefusedError(`Seed(s) missing from ${layout.repoDir}; freeze again:\n${missing.join("\n")}`);
+    throw new SandbarError(`Seed(s) missing from ${layout.repoDir}; freeze again:\n${missing.join("\n")}`);
   }
   const sessionDir = join(layout.stateDir, "sessions", opts.label);
-  if (existsSync(sessionDir)) throw new ReplayRefusedError(`Session ${sessionDir} already exists.`);
+  if (existsSync(sessionDir)) throw new SandbarError(`Session ${sessionDir} already exists.`);
   const parallel = Math.min(opts.parallel, config.maxParallelIssues);
   const routing = replayRouting(config);
   log(renderReplayPlan({ label: opts.label, cases: cases.cases.length, repeats: opts.repeats, parallel, routing }));
 
   const space = await graphRootSpace(await podmanGraphRoot());
-  if (graphRootSpaceIsLow(space)) throw new ReplayRefusedError(formatLowGraphRootSpace(space));
+  if (graphRootSpaceIsLow(space)) throw new SandbarError(formatLowGraphRootSpace(space));
 
   const scope = runScope(lockedWorkDir);
   const providers = requiredAgentProviders(config);

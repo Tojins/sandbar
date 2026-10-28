@@ -470,6 +470,7 @@ export type IssueEnding =
   | Terminal
   | { readonly type: "REJECTED"; readonly reason: string };
 
+// A rejected loop's ending: the error's message is its reason.
 export const rejectedEnding = (err: unknown): IssueEnding => ({
   type: "REJECTED",
   reason: err instanceof Error ? err.message : String(err),

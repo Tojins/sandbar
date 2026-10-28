@@ -110,7 +110,7 @@ vi.mock("./inner-loop.js", async (importOriginal) => ({
 const { readStatsInput } = await import("./stats-record.js");
 const { resolveConfig } = await import("./config.js");
 const { ensureRepoCache } = await import("./repo-cache.js");
-const { ReplayRefusedError, replayLayout, runReplay } = await import("./replay-run.js");
+const { replayLayout, runReplay } = await import("./replay-run.js");
 
 let root: string;
 let checkout: string;
@@ -228,7 +228,7 @@ describe("replay run (#195)", () => {
 
   it("refuses a label that already exists", async () => {
     await expect(replay("again", 1)).resolves.toBe(0);
-    await expect(replay("again", 1)).rejects.toThrow(ReplayRefusedError);
+    await expect(replay("again", 1)).rejects.toThrow(/already exists/);
     expect(seams.loops).toHaveLength(2);
   });
 });
