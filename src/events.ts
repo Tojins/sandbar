@@ -436,6 +436,9 @@ export type RunEvent = EventInput & {
   readonly ts: string;
 };
 
+// Every recorded event but those naming a janitor task (#205).
+export type IssueRunEvent = Exclude<RunEvent, { readonly janitor: string }>;
+
 export type EventRecord = TranscriptTree & {
   readonly eventsPath: string;
   emit(event: EventInput): Promise<RunEvent>;

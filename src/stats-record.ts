@@ -30,7 +30,12 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { isErrno } from "./errors.js";
-import { EventRecordReadError, parseEventLines, type RunEvent } from "./events.js";
+import {
+  EventRecordReadError,
+  type IssueRunEvent,
+  parseEventLines,
+  type RunEvent,
+} from "./events.js";
 
 // `runs` names run directories outright: replay's report reads one run at a
 // time (#195), and no flag of the scorecard's names it.
@@ -62,7 +67,6 @@ export function parseStatsWindow(flags: {
   return DEFAULT_STATS_WINDOW;
 }
 
-type IssueRunEvent = Exclude<RunEvent, { readonly janitor: string }>;
 type ReviewRound = Extract<IssueRunEvent, { kind: "review-round" }>;
 
 // The events the reducer reads: today's issue-run union, with each field that

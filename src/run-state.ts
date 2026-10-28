@@ -41,6 +41,7 @@
 import type {
   GateStepEvent,
   HeldReason,
+  IssueRunEvent,
   IssueAnchorResult,
   ScenarioWriterResult,
   RecomputeWaiting,
@@ -572,7 +573,6 @@ function applyPhase(issue: MutableIssue, event: Extract<RunEvent, { kind: "phase
 type JanitorEvent = Extract<RunEvent, { readonly janitor?: string }> & {
   readonly janitor: string;
 };
-type IssueRunEvent = Exclude<RunEvent, { readonly janitor: string }>;
 
 const isJanitorEvent = (event: RunEvent): event is JanitorEvent =>
   "janitor" in event && event.janitor !== undefined;
