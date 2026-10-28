@@ -230,13 +230,19 @@ const bump = (counts: EgressCounts, key: string): EgressCounts => ({
 });
 
 // Folds complete log lines into the tally a proxy's earlier drains built, and
-// names the refusals sighted for the first time. A `would-refuse` is a refusal
-// that was not enforced (report mode); both count as refused.
+// names the refusals sighted for the first time and every destination these
+// lines refused, first sighting or not. A `would-refuse` is a refusal that was
+// not enforced (report mode); both count as refused.
 export function foldEgressLog(
   lines: readonly string[],
   tally: EgressTally,
-): { readonly firstRefusals: readonly EgressRefusal[]; readonly tally: EgressTally } {
+): {
+  readonly firstRefusals: readonly EgressRefusal[];
+  readonly refused: readonly string[];
+  readonly tally: EgressTally;
+} {
   const firstRefusals: EgressRefusal[] = [];
+  const refusedHere = new Set<string>();
   const seen = new Set(tally.seen);
   let { allowed, refused, upstreamErrors } = tally;
   for (const line of lines) {
@@ -247,6 +253,7 @@ export function foldEgressLog(
     else if (entry.t === "upstream-error") upstreamErrors = bump(upstreamErrors, key);
     else {
       refused = bump(refused, key);
+      refusedHere.add(key);
       if (!seen.has(key)) {
         seen.add(key);
         firstRefusals.push({
@@ -258,7 +265,11 @@ export function foldEgressLog(
       }
     }
   }
-  return { firstRefusals, tally: { seen, allowed, refused, upstreamErrors } };
+  return {
+    firstRefusals,
+    refused: [...refusedHere],
+    tally: { seen, allowed, refused, upstreamErrors },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -271,13 +282,15 @@ export function internalNetworkCreateArgs(name: string): string[] {
 }
 
 // On the owner's internal network and on podman's default bridge, which is its
-// way out. No env: the policy file is its whole input.
+// way out. No env: the policy file is its whole input. `ip` pins its address on
+// the internal network, for an owner whose resolv.conf already names one.
 export function egressProxyRunArgs(opts: {
   readonly name: string;
   readonly internalNet: string;
   readonly image: string;
   readonly logHostPath: string;
   readonly policyHostPath: string;
+  readonly ip?: string | undefined;
 }): string[] {
   return [
     "run",
@@ -288,7 +301,7 @@ export function egressProxyRunArgs(opts: {
     "sandbar=true",
     "--image-volume=ignore",
     "--network",
-    opts.internalNet,
+    opts.ip === undefined ? opts.internalNet : `${opts.internalNet}:ip=${opts.ip}`,
     "--network",
     "podman",
     "-v",

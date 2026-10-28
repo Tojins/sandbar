@@ -182,6 +182,7 @@ const config = (
     builtTags: vi.fn(() => new Set<string>()),
   },
   scope: { id: "12345678", prefix: "sandbar-w12345678" },
+  egress: null,
   claudeMdPath: "CLAUDE.md",
   botName: "sandbar-bot",
   botEmail: "bot@example.test",

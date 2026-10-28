@@ -46,7 +46,9 @@
 // narrows the channels; it does not seal them.
 //
 // A failed bringup or a dead proxy throws a plain `Error`, never a
-// `SandbarError`: it is infrastructure, so HARD-ERROR and a fresh retry.
+// `SandbarError`: it is infrastructure, so HARD-ERROR and a fresh retry. A
+// dead one is an `EgressProxyDiedError`, so a caller that classifies an
+// agent's failure can tell the host's apart.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -88,6 +90,7 @@ import {
   containerState,
   logTail,
 } from "./gate-stack.js";
+import type { EgressSubject, EventInput } from "./events.js";
 import { type RunScope, egressImageTag, egressProxyNameFor } from "./naming.js";
 import { RUNTIME } from "./runtime.js";
 import { startTimer } from "./timing.js";
@@ -159,6 +162,19 @@ export async function ensureEgressImage(
   return tag;
 }
 
+export class EgressProxyDiedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EgressProxyDiedError";
+  }
+}
+
+// Set in an allowlisted agent container so the CLI's telemetry does not
+// litter the run record with refusals.
+export const EGRESS_AGENT_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+};
+
 export type EgressSummary = {
   readonly mode: EgressMode;
   readonly allowed: EgressCounts;
@@ -169,19 +185,57 @@ export type EgressSummary = {
   readonly durationMs: number;
 } & ContainerResources;
 
+// What one drain read: the refusals first sighted since the previous drain,
+// and every destination refused in its lines (`egressDestination`), so a
+// gate run can name what it was refused even when an earlier run saw it first.
+export type EgressDrain = {
+  readonly firstRefusals: readonly EgressRefusal[];
+  readonly refused: readonly string[];
+};
+
 export type EgressHandle = {
   // The proxy's address on the owner's network.
   readonly ip: string;
   // `--dns`/`--dns-search` for the owner's `run` or `pod create`.
   readonly dnsArgs: readonly string[];
-  // The refusals first sighted since the previous drain.
-  readonly drain: () => Promise<{ readonly firstRefusals: readonly EgressRefusal[] }>;
+  readonly drain: () => Promise<EgressDrain>;
   // Throws when podman says the proxy is stopped or gone. An unanswered
   // inspect is no evidence either way and passes.
   readonly assertAlive: () => Promise<void>;
   // Removes the proxy, then the network if `startEgress` created it.
   // Idempotent; also registered with cleanup.ts.
   readonly stop: () => Promise<EgressSummary>;
+};
+
+// Where an owner's proxy records go (#202): each drain's first-sighted
+// refusals as `egress-refused` events, and at teardown the ones only the last
+// drain read, then the `egress` summary.
+export type EgressReport = {
+  readonly refusals: (refusals: readonly EgressRefusal[]) => Promise<void>;
+  readonly stopped: (summary: EgressSummary) => Promise<void>;
+};
+
+export function egressReport(
+  emit: (event: EventInput) => Promise<unknown> | void,
+  subject: EgressSubject,
+): EgressReport {
+  const refusals = async (found: readonly EgressRefusal[]): Promise<void> => {
+    for (const refusal of found) await emit({ kind: "egress-refused", ...subject, ...refusal });
+  };
+  return {
+    refusals,
+    stopped: async ({ firstRefusals, ...summary }) => {
+      await refusals(firstRefusals);
+      await emit({ kind: "egress", ...subject, ...summary });
+    },
+  };
+}
+
+// An owner's egress as its caller hands it down: where the proxy comes from
+// and where its records go.
+export type OwnerEgress = {
+  readonly context: EgressContext;
+  readonly report: EgressReport;
 };
 
 // The complete lines of the proxy's log past `offset`, and where they end.
@@ -198,8 +252,16 @@ export async function readLogFrom(
   };
 }
 
-export async function startEgress(opts: {
+// What a run hands every network owner when `config.egress` is an allowlist:
+// the proxy image run.ts built, the policy, and `<runDir>/egress`.
+export type EgressContext = {
   readonly scope: RunScope;
+  readonly image: string;
+  readonly policy: EgressPolicy;
+  readonly logDir: string;
+};
+
+export async function startEgress(opts: EgressContext & {
   // `sbx-<issue>`, a gate stackId, or `resolve-<n>`; names the proxy and its
   // files in `logDir`.
   readonly owner: string;
@@ -207,9 +269,9 @@ export async function startEgress(opts: {
   // False when the owner's network already exists (the gate stack creates its
   // own `--internal`); the proxy then joins it and leaves it in place.
   readonly createNetwork: boolean;
-  readonly image: string;
-  readonly policy: EgressPolicy;
-  readonly logDir: string;
+  // The address to take on that network: a reused gate pod's resolv.conf
+  // already names its proxy's (gate-stack.ts).
+  readonly ip?: string | undefined;
 }): Promise<EgressHandle> {
   const elapsed = startTimer();
   const name = egressProxyNameFor(opts.scope, opts.owner);
@@ -230,19 +292,19 @@ export async function startEgress(opts: {
     );
   };
 
-  const drainOnce = async (): Promise<{ readonly firstRefusals: readonly EgressRefusal[] }> => {
+  const drainOnce = async (): Promise<EgressDrain> => {
     const { lines, end } = await readLogFrom(logPath, offset);
     const folded = foldEgressLog(lines, tally);
     offset = end;
     tally = folded.tally;
-    return { firstRefusals: folded.firstRefusals };
+    return { firstRefusals: folded.firstRefusals, refused: folded.refused };
   };
   // Each drain starts after the previous one settles, so overlapping drains
   // (a checkpoint and stop's own) read from the advanced `offset` and fold
   // each line once. A previous drain's rejection is its own caller's; the
   // next drain runs regardless.
   let draining: Promise<unknown> = Promise.resolve();
-  const drain = (): Promise<{ readonly firstRefusals: readonly EgressRefusal[] }> => {
+  const drain = (): Promise<EgressDrain> => {
     const next = draining.then(drainOnce, drainOnce);
     draining = next;
     return next;
@@ -251,7 +313,7 @@ export async function startEgress(opts: {
   const assertAlive = async (): Promise<void> => {
     const state = await containerState(name);
     if (state === "stopped" || state === "gone") {
-      throw new Error(`egress proxy ${name} died (${state}):\n${await logTail(name)}`);
+      throw new EgressProxyDiedError(`egress proxy ${name} died (${state}):\n${await logTail(name)}`);
     }
   };
 
@@ -364,6 +426,7 @@ export async function startEgress(opts: {
         image: opts.image,
         logHostPath: logPath,
         policyHostPath: policyPath,
+        ip: opts.ip,
       }),
       "start",
     );

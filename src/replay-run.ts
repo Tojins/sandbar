@@ -633,6 +633,8 @@ async function prepareSession(
       env: sandboxEnv,
       codexAuthMount,
       agentImages,
+      // Replay sandboxes keep open egress: #223 wires the daemon's owners.
+      egress: null,
     }),
   };
 }

@@ -2762,6 +2762,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         sandboxImage: "sandbox-image",
         agentImages: {},
         scope: "w12345678",
+        egress: null,
         claudeMdPath: "CLAUDE.md",
         ...overrides,
       },

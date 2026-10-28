@@ -158,7 +158,7 @@
 
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   type ResolvedConfig,
@@ -213,7 +213,7 @@ import {
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { reconcileImages } from "./image-lifecycle.js";
-import { currentEgressImageTag } from "./egress.js";
+import { type EgressContext, currentEgressImageTag, ensureEgressImage } from "./egress.js";
 import { makeEnvReader } from "./env.js";
 import { startTimer } from "./timing.js";
 import {
@@ -524,6 +524,7 @@ export function innerLoopConfigOf(
     readonly env: Record<string, string>;
     readonly codexAuthMount: CodexAuthMount | undefined;
     readonly agentImages: AgentImages;
+    readonly egress: EgressContext | null;
   },
 ): InnerLoopConfig {
   const { codexAuthMount, ...rest } = parts;
@@ -1358,6 +1359,10 @@ export async function run(
   let initialSourceWorktree: string;
   let initialBaseFingerprints: ReadonlyMap<string, string>;
   let initialAgentImages: AgentImages;
+  // What every sandbox, gate stack and resolve container gets with an egress
+  // allowlist (#202): the proxy image, the policy, and the run's own log
+  // directory for the proxies' decisions. Null keeps open egress.
+  let egress: EgressContext | null = null;
   try {
     initialSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
     initialBaseFingerprints = await ensureImages(config.images, initialSourceWorktree, {
@@ -1376,6 +1381,14 @@ export async function run(
       onImage: recordImage,
       log: () => undefined,
     });
+    if (config.egress.kind === "allowlist") {
+      egress = {
+        scope,
+        image: await ensureEgressImage(scope, recordImage),
+        policy: { mode: config.egress.mode, entries: config.egress.entries },
+        logDir: join(runRecord.runDir, "egress"),
+      };
+    }
   } catch (err) {
     return await stopAtStartup("image-build-failed", err);
   }
@@ -2609,6 +2622,7 @@ export async function run(
         env: sandboxEnv,
         codexAuthMount,
         agentImages: admissionImages.agentImages,
+        egress,
       });
       for (const issue of executionIssues) {
         const issueLogger = await runRecord.issue(issue.id);

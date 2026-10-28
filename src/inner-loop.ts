@@ -169,7 +169,13 @@ import {
   withPartialOutput,
 } from "./agent-sandbox.js";
 import type { RateLimitMeasurement } from "./agent-run-end.js";
-import type { AgentInvocationRecord, AgentRunEndedBy, Sandbox, SandboxHooks } from "./agent-sandbox.js";
+import type {
+  AgentInvocationRecord,
+  AgentRunEndedBy,
+  Sandbox,
+  SandboxHooks,
+  SandboxRunResult,
+} from "./agent-sandbox.js";
 import { maxContextDepth, sumAgentUsage, usageFields } from "./agent-usage.js";
 import type { AgentRunMeasurement, AgentUsage } from "./agent-usage.js";
 
@@ -186,6 +192,15 @@ import {
   type AgentImages,
   resolveSandboxImage,
 } from "./agent-tools.js";
+import {
+  type EgressContext,
+  type EgressHandle,
+  type EgressReport,
+  EGRESS_AGENT_ENV,
+  EgressProxyDiedError,
+  egressReport,
+  startEgress,
+} from "./egress.js";
 import type { BranchImages } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import type {
@@ -241,7 +256,7 @@ import {
   writeCondenseCache,
 } from "./issue-anchor.js";
 import type { AgentInvocationSequence, AttemptLogger } from "./logs.js";
-import { type RunScope, scopedResourcePrefix } from "./naming.js";
+import { type RunScope, sandboxNetworkNameFor, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
 import {
@@ -667,6 +682,9 @@ export type InnerLoopConfig = {
   // This run's podman resource scope (#28) — see naming.ts. Both the agent
   // sandbox container and the gate stack are named under it.
   readonly scope: RunScope;
+  // The egress allowlist's proxies (#202): null with open egress, otherwise
+  // the sandbox and the gate stack each get one on their own internal network.
+  readonly egress: EgressContext | null;
   readonly claudeMdPath: string;
   readonly contextMdPath?: string;
   readonly adrDir?: string;
@@ -916,6 +934,9 @@ async function runSandboxCycle(
   let sandbox: Sandbox | null = null;
   let sandboxStack: SandboxStack | null = null;
   let stack: BoundStack | null = null;
+  let egress: EgressHandle | null = null;
+  const subject = { issue: Number(issue.id), title: issue.title };
+  const sandboxEgress = egressReport(opts.onEvent, { stack: "sandbox", ...subject });
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
   const priorReviewRounds: PriorReviewRound[] = [];
@@ -1034,7 +1055,11 @@ async function runSandboxCycle(
     // SOURCE and podman reads it at container start, so a missing one is a
     // bringup failure rather than an empty mount.
     if (sbxContainers.length > 0) await prepareSandboxLogDir(sandboxLogDir);
-    const holder: { stack: SandboxStack | null } = { stack: null };
+    const holder: { stack: SandboxStack | null; egress: EgressHandle | null } = {
+      stack: null,
+      egress: null,
+    };
+    const egressNetwork = sandboxNetworkNameFor(config.scope, issue.id);
 
     // Two timers, not one: the sandbox and the gate stack come up in PARALLEL,
     // so a single number for the pair would say how long the slower one took
@@ -1054,6 +1079,18 @@ async function runSandboxCycle(
     };
     const [sandboxResult, stackResult] = await Promise.allSettled([
       stamp((async () => {
+        // The sandbox's own network and its only way out (#202), ahead of the
+        // image resolve: it is seconds where a branch image can be minutes,
+        // and once in the holder it is the teardown's to stop on any later
+        // failure. The siblings join the sandbox's netns, so it covers them.
+        if (config.egress !== null) {
+          holder.egress = await startEgress({
+            ...config.egress,
+            owner: `sbx-${issue.id}`,
+            networkName: egressNetwork,
+            createNetwork: true,
+          });
+        }
         // The sandbox's own image is a function of the branch too (#46), and
         // the worktree above is what makes that answerable here: it is on disk
         // before this line, which is all the fingerprint needs. Resolved once
@@ -1109,6 +1146,11 @@ async function runSandboxCycle(
           sandbox: podman({
             imageName,
             namePrefix: scopedResourcePrefix(config.scope),
+            ...(holder.egress === null ? {} : {
+              network: egressNetwork,
+              dnsArgs: holder.egress.dnsArgs,
+              env: EGRESS_AGENT_ENV,
+            }),
           }),
           hooks: opts.hooks,
           env: config.env,
@@ -1172,6 +1214,12 @@ async function runSandboxCycle(
           title: issue.title,
           ...record,
         }),
+        ...(config.egress === null ? {} : {
+          egress: {
+            context: config.egress,
+            report: egressReport(opts.onEvent, { stack: "gate", ...subject }),
+          },
+        }),
         // A thunk, not a value: the stack calls it before every gate run, and
         // the answer changes as the agent commits (#37). It hands back the
         // tags it runs, so the sandbox's entry is not resolved here (#46).
@@ -1196,8 +1244,13 @@ async function runSandboxCycle(
     // in its prompt (D3).
     sandboxStack = holder.stack;
     sandboxStatuses = sandboxStack?.statuses ?? [];
+    egress = holder.egress;
 
-    if (sandboxResult.status === "fulfilled") sandbox = sandboxResult.value;
+    if (sandboxResult.status === "fulfilled") {
+      sandbox = egress === null
+        ? sandboxResult.value
+        : withEgressCheckpoints(sandboxResult.value, egress, sandboxEgress);
+    }
     if (stackResult.status === "fulfilled") stack = stackResult.value;
     if (sandbox === null || stack === null) {
       throw sandboxResult.status === "rejected"
@@ -1477,7 +1530,50 @@ async function runSandboxCycle(
         });
       }
     }
+    // Last: the sandbox and its siblings were the proxy's only clients, and
+    // its network goes with it.
+    if (egress) {
+      try {
+        await sandboxEgress.stopped(await egress.stop());
+      } catch (err) {
+        await opts.onEvent({
+          kind: "complaint",
+          severity: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
+}
+
+// Every agent invocation in an allowlisted sandbox ends at a checkpoint
+// (#202): the refusals its proxy first sighted are recorded, and a failed
+// invocation whose proxy is dead raises that death instead — infrastructure,
+// so HARD-ERROR and a fresh sandbox, where the agent's error would have
+// charged the role with a network that no longer exists.
+function withEgressCheckpoints(
+  sandbox: Sandbox,
+  egress: EgressHandle,
+  report: EgressReport,
+): Sandbox {
+  const checkpoint = async (): Promise<void> => {
+    await report.refusals((await egress.drain()).firstRefusals);
+  };
+  return {
+    ...sandbox,
+    run: async (o) => {
+      let result: SandboxRunResult;
+      try {
+        result = await sandbox.run(o);
+      } catch (err) {
+        await egress.assertAlive();
+        await checkpoint();
+        throw err;
+      }
+      await checkpoint();
+      return result;
+    },
+  };
 }
 
 type ExecuteActionCtx = {
@@ -3175,7 +3271,12 @@ async function runReadOnlyReview(
             config.maxContextChars,
           );
         }
-        if (err instanceof AgentQuotaError || err instanceof AgentCredentialError) throw err;
+        // A dead egress proxy is the host's failure, not the reviewer's (#202).
+        if (
+          err instanceof AgentQuotaError ||
+          err instanceof AgentCredentialError ||
+          err instanceof EgressProxyDiedError
+        ) throw err;
         // The bytes the agent had emitted before it failed ride out on the
         // error (#41, agent-sandbox F9). Without them a reviewer that emitted
         // a verdict and then died is indistinguishable from one that emitted
