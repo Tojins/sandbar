@@ -724,6 +724,16 @@ export type RunConfig = {
   // Independent judge for an unchanged rejected head (#167). Defaults to the
   // verifier's code-review (`reviewer*`) routing, not the quality pass's.
   readonly adjudicatorModelId?: string;
+  // The issue-thread condenser (#197, #217), a read-only step ahead of the
+  // partition check. It runs only when the issue anchor, after sandbar's
+  // traces are dropped, is longer than `condenseAboveChars` (default 20_000;
+  // null turns the step off), and once per thread change: its answer is
+  // cached. It follows the quality pass's CLI; on claude its model is
+  // "sonnet" rather than the quality pass's, and on another vendor it takes
+  // the quality pass's model only while it shares that vendor. Its effort has
+  // no driver default.
+  readonly condenseAboveChars?: number | null;
+  readonly condenserModelId?: string;
   readonly mergerModelId?: string;
   // `npm run reflect`'s two steps (#182, #208), never run by the daemon: the
   // tagger labels findings against a closed vocabulary ("sonnet"), the
@@ -749,6 +759,7 @@ export type RunConfig = {
   // shares a session.
   readonly reviewerQualityAgent?: AgentProviderName;
   readonly adjudicatorAgent?: AgentProviderName;
+  readonly condenserAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
   readonly reflectTaggerAgent?: AgentProviderName;
   readonly reflectSynthesizerAgent?: AgentProviderName;
@@ -762,7 +773,8 @@ export type RunConfig = {
   // gets the driver default beside its default model — implementer, UI
   // checker and reviewer `high`, reviewer-quality and merger `medium`, the
   // adjudicator the reviewer's, the reflect tagger `medium` and its
-  // synthesizer `high`. A role routed elsewhere has no driver default:
+  // synthesizer `high`; the condenser has none (#217). A role routed elsewhere
+  // has no driver default either:
   // UNSET MEANS ABSENT, no flag is emitted and the CLI's own default applies
   // (for codex the per-model default the server ships, `low` for gpt-5.6-sol
   // when this was written). The level a run used is on its log line
@@ -772,6 +784,7 @@ export type RunConfig = {
   readonly reviewerEffort?: string;
   readonly reviewerQualityEffort?: string;
   readonly adjudicatorEffort?: string;
+  readonly condenserEffort?: string;
   readonly mergerEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
@@ -961,6 +974,7 @@ export type ResolvedConfig = Required<
     | "reviewerEffort"
     | "reviewerQualityEffort"
     | "adjudicatorEffort"
+    | "condenserEffort"
     | "mergerEffort"
     | "reflectTaggerEffort"
     | "reflectSynthesizerEffort"
@@ -977,6 +991,7 @@ export type ResolvedConfig = Required<
   readonly reviewerEffort?: string;
   readonly reviewerQualityEffort?: string;
   readonly adjudicatorEffort?: string;
+  readonly condenserEffort?: string;
   readonly mergerEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
@@ -1002,6 +1017,8 @@ export const DEFAULT_MERGER_MODEL_ID = "opus";
 export const DEFAULT_REFLECT_TAGGER_MODEL_ID = "sonnet";
 export const DEFAULT_REFLECT_SYNTHESIZER_MODEL_ID = "opus";
 export const DEFAULT_UI_CHECK_MODEL_ID = "sonnet";
+export const DEFAULT_CONDENSER_MODEL_ID = "sonnet";
+export const DEFAULT_CONDENSE_ABOVE_CHARS = 20_000;
 // Reasoning effort for a claude-routed role that names none (#130's field).
 // Unattended work whose output decides something runs at `high`: the
 // implementer, the verdict-holding reviewer (and so the adjudicator), and the
@@ -2505,6 +2522,24 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     config.adjudicatorAgent === undefined || adjudicatorAgent === reviewerAgent
       ? config.reviewerModelId
       : undefined;
+  const condenseAboveChars = config.condenseAboveChars === undefined
+    ? DEFAULT_CONDENSE_ABOVE_CHARS
+    : config.condenseAboveChars === null
+      ? null
+      : requirePositiveInteger("condenseAboveChars", config.condenseAboveChars);
+  const condenserAgent = parseAgentProviderName(
+    "condenserAgent",
+    config.condenserAgent ?? reviewerQualityAgent,
+  );
+  // A Sonnet-class job (#197): on claude it never inherits the quality
+  // model, and elsewhere it takes that model only from the same vendor.
+  const condenserModelId = config.condenserModelId ?? (
+    condenserAgent === "claude"
+      ? DEFAULT_CONDENSER_MODEL_ID
+      : condenserAgent === reviewerQualityAgent
+        ? config.reviewerQualityModelId
+        : undefined
+  );
   const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
   assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
   if (uiPrototypeCheck) {
@@ -2541,6 +2576,13 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       modelField: "adjudicatorModelId",
     },
   );
+  if (condenseAboveChars !== null) {
+    assertRoleModelIdNamed("condenser", condenserAgent, condenserModelId, {
+      agentField:
+        config.condenserAgent === undefined ? "reviewerQualityAgent" : "condenserAgent",
+      modelField: "condenserModelId",
+    });
+  }
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   const reflectTaggerAgent = parseAgentProviderName(
     "reflectTaggerAgent",
@@ -2564,6 +2606,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "reviewerEffort",
     "reviewerQualityEffort",
     "adjudicatorEffort",
+    "condenserEffort",
     "mergerEffort",
     "reflectTaggerEffort",
     "reflectSynthesizerEffort",
@@ -2600,6 +2643,9 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       config.adjudicatorModelId ??
       inheritedAdjudicatorModelId ??
       DEFAULT_REVIEWER_MODEL_ID,
+    condenseAboveChars,
+    // Only a disabled step leaves it unnamed off claude; nothing reads it then.
+    condenserModelId: condenserModelId ?? DEFAULT_CONDENSER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     reflectTaggerModelId: config.reflectTaggerModelId ?? DEFAULT_REFLECT_TAGGER_MODEL_ID,
     reflectSynthesizerModelId:
@@ -2609,6 +2655,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     reviewerAgent,
     reviewerQualityAgent,
     adjudicatorAgent,
+    condenserAgent,
     mergerAgent,
     reflectTaggerAgent,
     reflectSynthesizerAgent,
