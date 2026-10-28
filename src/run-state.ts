@@ -30,6 +30,7 @@ import type {
   WaitingReason,
 } from "./events.js";
 import type { ContainerResources } from "./container-resources.js";
+import type { RestartDueReason } from "./scheduler.js";
 
 export type TimelineSpan = {
   readonly kind: "impl" | "review" | "adjudication";
@@ -118,8 +119,13 @@ export type UiState = {
     readonly exit: { readonly tag: string; readonly reason: string } | null;
     // The deploy channel's pending instruction (#146): set from the moment the
     // request is observed, so a reader watching a long drain sees WHY nothing
-    // new is being admitted instead of an idle-looking pool.
-    readonly restart: { readonly detail: string; readonly at: string } | null;
+    // new is being admitted instead of an idle-looking pool. `deferredUntil`
+    // is set while the pool still admits; null once it drains.
+    readonly restart: {
+      readonly detail: string;
+      readonly at: string;
+      readonly deferredUntil: string | null;
+    } | null;
     readonly complaints: readonly {
       readonly seq: number;
       readonly severity: "warning" | "error";
@@ -155,6 +161,12 @@ type MutableIssue = {
 };
 
 const triggerText = (trigger: string): string => trigger.replaceAll("-", " ");
+
+const RESTART_DUE_TEXT: Readonly<Record<RestartDueReason, string>> = {
+  urgent: "urgent",
+  "deferral-elapsed": "deferral elapsed",
+  idle: "nothing running",
+};
 
 type ImplementerEvent = Extract<RunEvent, { kind: "implementer" }>;
 
@@ -216,7 +228,10 @@ function feedText(event: RunEvent): FeedEvent | null {
       tone = "dim";
       break;
     case "restart-requested":
-      text = `restart requested · ${event.detail} · draining`;
+      text = event.deferredUntil !== undefined
+        ? `restart requested · ${event.detail} · deferred until ${event.deferredUntil}`
+        : `restart requested · ${event.detail} · draining` +
+          (event.due === undefined ? "" : ` (${RESTART_DUE_TEXT[event.due]})`);
       tone = "warn";
       break;
     case "preflight":
@@ -860,7 +875,13 @@ export function reduceRunEvents(
           }
         : null,
       exit: exit ? { tag: exit.tag, reason: exit.reason } : null,
-      restart: restart ? { detail: restart.detail, at: restart.ts } : null,
+      restart: restart
+        ? {
+          detail: restart.detail,
+          at: restart.ts,
+          deferredUntil: restart.deferredUntil ?? null,
+        }
+        : null,
       complaints,
     },
     pool: [...issues.values()].sort((a, b) => a.issue - b.issue),

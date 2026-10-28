@@ -77,6 +77,7 @@ import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
 import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
 import type { QualityOutcome, Verdict } from "./inner-loop-machine.js";
+import type { RestartDueReason } from "./scheduler.js";
 import type { StackClassification } from "./stack-change.js";
 import type { AgentRunEndedBy } from "./agent-sandbox.js";
 import type { ContainerResources } from "./container-resources.js";
@@ -257,7 +258,17 @@ export type EventInput =
       readonly pid: number;
     }
   | { readonly kind: "wake-lock"; readonly state: "held" | "refused" | "lost" | "released"; readonly detail: string }
-  | { readonly kind: "restart-requested"; readonly detail: string }
+  | {
+      readonly kind: "restart-requested";
+      readonly detail: string;
+      readonly urgent?: true;
+      // Exactly one of these on a current record: a request first seen while
+      // the pool is busy is deferred, and a second event says when and why it
+      // became due (`restartDueReason`, scheduler.ts). Records written before
+      // the deferral carry neither and were always draining.
+      readonly deferredUntil?: string;
+      readonly due?: RestartDueReason;
+    }
   | { readonly kind: "idle"; readonly pollIntervalMs: number }
   | { readonly kind: "preflight"; readonly action: string; readonly detail: string }
   | { readonly kind: "sweep"; readonly scope: "startup" | "quiescent"; readonly removed: readonly string[]; readonly failures: readonly string[] }

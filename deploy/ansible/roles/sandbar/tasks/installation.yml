@@ -144,9 +144,25 @@
 # upgrades already replace packages under a running daemon, so a box-wide freeze
 # would not buy an invariant this box has today and would couple the
 # installations' queues.
+#
+# The second line is `urgent` when this flip applied a `Sandbar-Restart: now`
+# commit (driver.yml), or when the request this one replaces still said so: a
+# daemon that has not yet read an urgent request must not lose it to the next
+# commit's ordinary one.
+- name: Read the restart request still pending for this installation
+  ansible.builtin.slurp:
+    src: "{{ sandbar_installation_dir }}/{{ sandbar_restart_request_file }}"
+  register: sandbar_pending_restart
+  failed_when: false
+
 - name: Ask the daemon to restart into what this play changed
+  vars:
+    sandbar_restart_urgent: >-
+      {{ (sandbar_driver_urgent | default(false) | bool)
+         or ('urgent' in ((sandbar_pending_restart.content | default('') | b64decode).splitlines()
+                          | map('trim') | list)) }}
   ansible.builtin.copy:
-    content: "{{ sandbar_driver_commit }}\n"
+    content: "{{ sandbar_driver_commit }}\n{{ 'urgent\n' if sandbar_restart_urgent | bool else '' }}"
     dest: "{{ sandbar_installation_dir }}/{{ sandbar_restart_request_file }}"
     owner: "{{ sandbar_user }}"
     group: "{{ sandbar_user }}"

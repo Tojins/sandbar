@@ -4,6 +4,7 @@ import {
   ContinuousPool,
   decideAfterFailedRefresh,
   decideSchedulerAction,
+  restartDueReason,
   type SchedulerSnapshot,
 } from "./scheduler.js";
 
@@ -149,7 +150,7 @@ describe("scheduler decisions", () => {
     hasCandidates: false, hasRetries: false, hasLandRequests: false,
     hasChunkRefreshRequests: false, hasCapacity: true,
     noProgressSinceLanding: 0,
-    noProgressBackstop: 6, providerClosed: false, restartRequested: false,
+    noProgressBackstop: 6, providerClosed: false, restartDue: false,
     storageLow: false, ...overrides,
   });
 
@@ -164,16 +165,16 @@ describe("scheduler decisions", () => {
     ["provider closure exits", snapshot({ providerClosed: true }), { kind: "exit", reason: "provider-closed" }],
     ["provider closure outranks stuck", snapshot({ providerClosed: true, noProgressSinceLanding: 6 }), { kind: "exit", reason: "provider-closed" }],
     ["provider closure outranks admission", snapshot({ providerClosed: true, hasCandidates: true }), { kind: "exit", reason: "provider-closed" }],
-    ["restart lands pending terminals first", snapshot({ restartRequested: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
-    ["restart lands an outstanding land request", snapshot({ restartRequested: true, hasLandRequests: true }), { kind: "land" }],
-    ["restart ignores a chunk refresh request", snapshot({ restartRequested: true, hasChunkRefreshRequests: true }), { kind: "exit", reason: "restart" }],
-    ["restart drains running work", snapshot({ restartRequested: true, active: 1, ongoing: 1 }), { kind: "drain" }],
-    ["restart exits when idle", snapshot({ restartRequested: true }), { kind: "exit", reason: "restart" }],
-    ["restart outranks admission", snapshot({ restartRequested: true, hasCandidates: true }), { kind: "exit", reason: "restart" }],
-    ["restart outranks provider closure", snapshot({ restartRequested: true, providerClosed: true }), { kind: "exit", reason: "restart" }],
-    ["restart outranks stuck", snapshot({ restartRequested: true, noProgressSinceLanding: 6 }), { kind: "exit", reason: "restart" }],
-    ["restart outranks low storage", snapshot({ restartRequested: true, storageLow: true }), { kind: "exit", reason: "restart" }],
-    ["a completion still outranks restart", snapshot({ restartRequested: true, hasCompleted: true, active: 1, ongoing: 1 }), { kind: "recompute" }],
+    ["restart lands pending terminals first", snapshot({ restartDue: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
+    ["restart lands an outstanding land request", snapshot({ restartDue: true, hasLandRequests: true }), { kind: "land" }],
+    ["restart ignores a chunk refresh request", snapshot({ restartDue: true, hasChunkRefreshRequests: true }), { kind: "exit", reason: "restart" }],
+    ["restart drains running work", snapshot({ restartDue: true, active: 1, ongoing: 1 }), { kind: "drain" }],
+    ["restart exits when idle", snapshot({ restartDue: true }), { kind: "exit", reason: "restart" }],
+    ["restart outranks admission", snapshot({ restartDue: true, hasCandidates: true }), { kind: "exit", reason: "restart" }],
+    ["restart outranks provider closure", snapshot({ restartDue: true, providerClosed: true }), { kind: "exit", reason: "restart" }],
+    ["restart outranks stuck", snapshot({ restartDue: true, noProgressSinceLanding: 6 }), { kind: "exit", reason: "restart" }],
+    ["restart outranks low storage", snapshot({ restartDue: true, storageLow: true }), { kind: "exit", reason: "restart" }],
+    ["a completion still outranks restart", snapshot({ restartDue: true, hasCompleted: true, active: 1, ongoing: 1 }), { kind: "recompute" }],
     ["low storage lands pending terminals", snapshot({ storageLow: true, hasPendingTerminals: true, ongoing: 1 }), { kind: "land" }],
     ["low storage drains running work", snapshot({ storageLow: true, active: 1, ongoing: 1, hasCandidates: true }), { kind: "drain" }],
     ["low storage exits when drained", snapshot({ storageLow: true }), { kind: "exit", reason: "storage-low" }],
@@ -212,12 +213,32 @@ describe("scheduler decisions", () => {
   it.each([
     ["no restart: retry", snapshot(), { kind: "wait" }],
     ["no restart, nothing running: still a retry", snapshot({ noProgressSinceLanding: 6, providerClosed: true }), { kind: "wait" }],
-    ["a drained restart exits without the refs", snapshot({ restartRequested: true }), { kind: "exit", reason: "restart" }],
-    ["restart with a slot still held retries", snapshot({ restartRequested: true, active: 1, ongoing: 1 }), { kind: "wait" }],
-    ["restart with work still ongoing retries", snapshot({ restartRequested: true, ongoing: 1 }), { kind: "wait" }],
-    ["restart with a terminal still to land retries", snapshot({ restartRequested: true, hasPendingTerminals: true }), { kind: "wait" }],
-    ["an outstanding land request could not land on refs this poll lacks", snapshot({ restartRequested: true, hasLandRequests: true }), { kind: "exit", reason: "restart" }],
+    ["a drained restart exits without the refs", snapshot({ restartDue: true }), { kind: "exit", reason: "restart" }],
+    ["restart with a slot still held retries", snapshot({ restartDue: true, active: 1, ongoing: 1 }), { kind: "wait" }],
+    ["restart with work still ongoing retries", snapshot({ restartDue: true, ongoing: 1 }), { kind: "wait" }],
+    ["restart with a terminal still to land retries", snapshot({ restartDue: true, hasPendingTerminals: true }), { kind: "wait" }],
+    ["an outstanding land request could not land on refs this poll lacks", snapshot({ restartDue: true, hasLandRequests: true }), { kind: "exit", reason: "restart" }],
   ] as const)("failed poll refresh: %s", (_name, state, action) => {
     expect(decideAfterFailedRefresh(state)).toEqual(action);
+  });
+  // A deploy waits for the pool unless waiting costs more than it saves: every
+  // landing on this repo is a deploy, and draining for each one emptied every
+  // slot once per landed issue.
+  const request = (overrides: Partial<Parameters<typeof restartDueReason>[0]> = {}) => ({
+    urgent: false, ageMs: 0, deferMs: 7_200_000,
+    active: 2, ongoing: 3, hasPendingTerminals: false, ...overrides,
+  });
+  it.each([
+    ["a fresh request on a busy pool waits", request(), null],
+    ["just short of the deferral waits", request({ ageMs: 7_199_999 }), null],
+    ["the deferral elapsed", request({ ageMs: 7_200_000 }), "deferral-elapsed"],
+    ["no deferral configured", request({ deferMs: 0 }), "deferral-elapsed"],
+    ["an urgent request", request({ urgent: true }), "urgent"],
+    ["urgency names itself even when the deferral elapsed", request({ urgent: true, ageMs: 9e9 }), "urgent"],
+    ["an empty pool has nothing to drain", request({ active: 0, ongoing: 0 }), "idle"],
+    ["a DONE issue waiting to land is not idle", request({ active: 0, ongoing: 1 }), null],
+    ["a pending terminal is not idle", request({ active: 0, ongoing: 0, hasPendingTerminals: true }), null],
+  ] as const)("restart due: %s", (_name, state, reason) => {
+    expect(restartDueReason(state)).toBe(reason);
   });
 });

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   RESTART_REQUEST_FILE,
   clearRestartRequest,
+  parseRestartRequest,
   readRestartRequest,
   restartRequestDetail,
   restartRequestPath,
@@ -36,6 +37,24 @@ describe("restart request (#146)", () => {
     expect(restartRequestDetail(contents)).toBe(detail);
   });
 
+  // The play's second line: a `Sandbar-Restart: now` trailer in what it
+  // applied, which drains at once instead of waiting out `restartDeferMs`.
+  it.each([
+    ["the commit alone", "abc1234\n", false],
+    ["an urgent line", "abc1234\nurgent\n", true],
+    ["an urgent line with stray whitespace", "abc1234\r\n  urgent \r\n", true],
+    ["urgent as the commit line", "urgent\n", false],
+    ["another second line", "abc1234\napplied 2026-09-11\n", false],
+  ])("reads urgency from %s", (_name, contents, urgent) => {
+    expect(parseRestartRequest(contents).urgent).toBe(urgent);
+  });
+
+  it("clears an urgent request by the commit it names", async () => {
+    await writeFile(path, "abc1234\nurgent\n");
+    await expect(readRestartRequest(path)).resolves.toEqual({ detail: "abc1234", urgent: true });
+    await expect(clearRestartRequest(path, "abc1234")).resolves.toBe(true);
+  });
+
   it("reads no request when the file is absent", async () => {
     await expect(readRestartRequest(path)).resolves.toBeNull();
     await expect(clearRestartRequest(path, "abc1234")).resolves.toBe(false);
@@ -43,8 +62,9 @@ describe("restart request (#146)", () => {
 
   it("reads the pending request without consuming it", async () => {
     await writeFile(path, "abc1234\n");
-    await expect(readRestartRequest(path)).resolves.toBe("abc1234");
-    await expect(readRestartRequest(path)).resolves.toBe("abc1234");
+    const pending = { detail: "abc1234", urgent: false };
+    await expect(readRestartRequest(path)).resolves.toEqual(pending);
+    await expect(readRestartRequest(path)).resolves.toEqual(pending);
     await expect(readFile(path, "utf8")).resolves.toBe("abc1234\n");
   });
 
@@ -66,7 +86,7 @@ describe("restart request (#146)", () => {
     ["a request with nothing readable in it", "\n"],
   ])("leaves a request rewritten since as %s", async (_name, rewritten) => {
     await writeFile(path, "abc1234\n");
-    await expect(readRestartRequest(path)).resolves.toBe("abc1234");
+    await expect(readRestartRequest(path)).resolves.toMatchObject({ detail: "abc1234" });
     await writeFile(path, rewritten);
     await expect(clearRestartRequest(path, "abc1234")).resolves.toBe(false);
     await expect(readFile(path, "utf8")).resolves.toBe(rewritten);

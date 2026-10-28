@@ -45,7 +45,9 @@ describe("run event reducer", () => {
     const draining = reduceRunEvents(events, {
       now: new Date("2026-09-11T09:02:00Z"), pidAlive: true,
     });
-    expect(draining.run.restart).toEqual({ detail: "abc1234", at: "2026-09-11T09:01:00Z" });
+    expect(draining.run.restart).toEqual({
+      detail: "abc1234", at: "2026-09-11T09:01:00Z", deferredUntil: null,
+    });
     expect(draining.events[0]).toMatchObject({
       text: "restart requested · abc1234 · draining", tone: "warn",
     });
@@ -56,8 +58,46 @@ describe("run event reducer", () => {
         kind: "exit", tag: "restart", reason: "drained", exitCode: 75,
       }),
     ], { now: new Date("2026-09-11T09:06:00Z"), pidAlive: false });
-    expect(exited.run.restart).toEqual({ detail: "abc1234", at: "2026-09-11T09:01:00Z" });
+    expect(exited.run.restart).toEqual({
+      detail: "abc1234", at: "2026-09-11T09:01:00Z", deferredUntil: null,
+    });
     expect(exited.run.exit).toEqual({ tag: "restart", reason: "drained" });
+  });
+
+  // A deferred request keeps the pool admitting, so the header must say it is
+  // waiting rather than draining, then switch once it becomes due.
+  it("shows a deferred restart until it becomes due", () => {
+    const events = [
+      at(1, "2026-09-11T09:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: "/i/c.mjs",
+        workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-11T09:01:00Z", {
+        kind: "restart-requested", detail: "abc1234", deferredUntil: "2026-09-11T11:01:00.000Z",
+      }),
+    ];
+    const deferred = reduceRunEvents(events, {
+      now: new Date("2026-09-11T09:02:00Z"), pidAlive: true,
+    });
+    expect(deferred.run.restart).toEqual({
+      detail: "abc1234", at: "2026-09-11T09:01:00Z", deferredUntil: "2026-09-11T11:01:00.000Z",
+    });
+    expect(deferred.events[0]).toMatchObject({
+      text: "restart requested · abc1234 · deferred until 2026-09-11T11:01:00.000Z",
+    });
+
+    const due = reduceRunEvents([
+      ...events,
+      at(3, "2026-09-11T09:30:00Z", {
+        kind: "restart-requested", detail: "def5678", urgent: true, due: "urgent",
+      }),
+    ], { now: new Date("2026-09-11T09:31:00Z"), pidAlive: true });
+    expect(due.run.restart).toEqual({
+      detail: "def5678", at: "2026-09-11T09:30:00Z", deferredUntil: null,
+    });
+    expect(due.events[0]).toMatchObject({
+      text: "restart requested · def5678 · draining (urgent)",
+    });
   });
 
   it("reports no pending restart on a run nobody asked to stop", () => {

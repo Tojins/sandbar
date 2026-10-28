@@ -41,6 +41,13 @@
 // the daemon decides is "restart", never which commit to run. The driver it
 // relaunches into is whatever `/opt/sandbar/current` points at by then, which
 // is the same question `run-start`'s driver identity answers for real.
+//
+// A second line reading `urgent` is the one other thing the file can say: the
+// play writes it when a commit it applied carries the `Sandbar-Restart: now`
+// trailer, and keeps it while an earlier urgent request is still pending. An
+// ordinary request is deferred while the pool keeps working (`restartDeferMs`,
+// `restartDueReason` in scheduler.ts) so landings share one drain; an urgent
+// one — a revert, a fix to the loop itself — drains at once.
 
 import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -61,19 +68,31 @@ export function restartRequestDetail(contents: string): string {
   return first === "" ? "no commit recorded" : first;
 }
 
+export type RestartRequest = {
+  readonly detail: string;
+  readonly urgent: boolean;
+};
+
+export function parseRestartRequest(contents: string): RestartRequest {
+  return {
+    detail: restartRequestDetail(contents),
+    urgent: contents.split(/\r?\n/).slice(1).some((line) => line.trim() === "urgent"),
+  };
+}
+
 // `null` when no restart is pending. Anything other than "no such file" is the
 // daemon failing to read a file it owns, and propagates: a request it cannot
 // see is a deploy that silently never arrives.
-export async function readRestartRequest(path: string): Promise<string | null> {
+export async function readRestartRequest(path: string): Promise<RestartRequest | null> {
   try {
-    return restartRequestDetail(await readFile(path, "utf8"));
+    return parseRestartRequest(await readFile(path, "utf8"));
   } catch (err) {
     if (isErrno(err, "ENOENT")) return null;
     throw err;
   }
 }
 
-// Removes the request only while it still carries `answered` — the content the
+// Removes the request only while it still names `answered` — the commit the
 // caller read before it became the process that answers it. A file withdrawn or
 // rewritten for a newer commit since then is left exactly where it is and
 // `false` says so; the ordinary per-recompute read is what picks that one up.
@@ -86,7 +105,7 @@ export async function clearRestartRequest(
   path: string,
   answered: string,
 ): Promise<boolean> {
-  if ((await readRestartRequest(path)) !== answered) return false;
+  if ((await readRestartRequest(path))?.detail !== answered) return false;
   await rm(path);
   return true;
 }

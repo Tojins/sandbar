@@ -120,6 +120,9 @@ export default {
   // maxConcurrentGates: 1,
   // Refresh origin and the tracker after this many idle milliseconds.
   // pollIntervalMs: 60000,
+  // Keep admitting this long after a deploy asks for a restart, so several
+  // landings share one drain. An idle pool or an urgent request restarts now.
+  // restartDeferMs: 7200000,
   // Keep the host awake even while no work is available.
   // keepAwakeWhileIdle: false,
 

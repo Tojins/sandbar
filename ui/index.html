@@ -68,9 +68,10 @@ function render(state, serverNotice=null) {
   const w=(from,to) => Math.max(.2,((to?parse(to):now)-parse(from))/width*100).toFixed(2)+"%";
   const ticks=[]; for(let t=firstTick(t0,tickMs);t<t1;t+=tickMs) ticks.push(`<span style="left:${((t-t0)/width*100).toFixed(2)}%">${clockTime(t)}</span>`);
   const pill=r.status==="live"?`<span class="pill live"><span class="dot"></span>live · ${since(r.startedAt,state.now)}</span>`:`<span class="pill ${r.status}">${r.status}${r.exit?` · ${esc(r.exit.tag)}`:""}</span>`;
-  // A restart request stops admission while landing continues, so a reader
-  // looking at a shrinking pool is told why it is shrinking (#146).
-  const restart=r.restart&&!r.exit?`<span class="pill restart">restart pending · draining · ${esc(r.restart.detail)}</span>`:"";
+  // A due restart stops admission while landing continues, so a reader
+  // looking at a shrinking pool is told why it is shrinking (#146). A deferred
+  // one still admits and says until when.
+  const restart=r.restart&&!r.exit?`<span class="pill restart">restart pending · ${r.restart.deferredUntil?`deferred until ${clockTime(r.restart.deferredUntil)}`:"draining"} · ${esc(r.restart.detail)}</span>`:"";
   const visibleComplaints=r.complaints.filter(c=>localStorage.getItem(complaintKey(r.directory,c.seq))===null);
   const complaints=visibleComplaints.length?`<div class="complaints">${visibleComplaints.map(c=>`<div class="complaint ${c.severity==="error"?"bad":"warn"}"><span>⚠ ${esc(c.text)}</span><button type="button" aria-label="Dismiss" onclick="dismissComplaint(${c.seq})">×</button></div>`).join("")}</div>`:"";
   const top=`<header class="top"><span class="name" title="${esc(r.driver)}">${esc(driverName(r.driver))}</span>${pill}${restart}${r.lastRecompute?`<span class="dim mono">recompute ${r.lastRecompute.n} · ${esc(r.lastRecompute.trigger)} · ${clockTime(r.lastRecompute.at)}</span>`:""}${serverNotice?notice(serverNotice):""}${complaints}</header>`;

@@ -541,7 +541,7 @@ describe("continuous deployment (#146)", () => {
 
   it("asks only the installations this play changed to restart", () => {
     const request = taskNamed(installationTasks, "Ask the daemon to restart into what this play changed");
-    expect(request).toContain('content: "{{ sandbar_driver_commit }}\\n"');
+    expect(request).toContain('content: "{{ sandbar_driver_commit }}\\n{{ \'urgent\\n\' if sandbar_restart_urgent | bool else \'\' }}"');
     expect(request).toContain(
       'dest: "{{ sandbar_installation_dir }}/{{ sandbar_restart_request_file }}"',
     );
@@ -558,6 +558,32 @@ describe("continuous deployment (#146)", () => {
     // The play never starts or restarts a daemon itself.
     expect(installationTasks).not.toContain("state: restarted");
     expect(installationTasks).not.toContain("state: started");
+  });
+
+  // The daemon defers an ordinary request; `Sandbar-Restart: now` on any
+  // commit the flip applied drains it at once, and a pending urgent request
+  // survives the next commit's ordinary one.
+  it("marks a restart request urgent from a trailer in the flipped range", () => {
+    const trailers = taskNamed(driverTasks, "Look for an urgent restart trailer in the commits this flip applied");
+    expect(trailers).toContain('- "--format=%(trailers:key=Sandbar-Restart,valueonly)"');
+    expect(trailers).toContain(
+      '- "{{ sandbar_driver_link.stat.lnk_target | basename }}..{{ sandbar_driver_commit }}"',
+    );
+    expect(trailers).toContain("- sandbar_driver_flip is changed");
+    expect(trailers).toContain("failed_when: false");
+    const decide = taskNamed(driverTasks, "Decide whether this flip's restart requests are urgent");
+    expect(decide).toContain("select('equalto', 'now')");
+    expect(driverTasks.indexOf("- name: Point the current driver at that build"))
+      .toBeLessThan(driverTasks.indexOf("- name: Look for an urgent restart trailer"));
+
+    const pending = taskNamed(installationTasks, "Read the restart request still pending for this installation");
+    expect(pending).toContain("ansible.builtin.slurp:");
+    expect(pending).toContain("failed_when: false");
+    const request = taskNamed(installationTasks, "Ask the daemon to restart into what this play changed");
+    expect(request).toContain("sandbar_driver_urgent | default(false) | bool");
+    expect(request).toContain("'urgent' in ((sandbar_pending_restart.content");
+    expect(installationTasks.indexOf("- name: Read the restart request still pending"))
+      .toBeLessThan(installationTasks.indexOf("- name: Ask the daemon to restart"));
   });
 
   // A consumer's gate stack or image change is a restart of its own (#190):

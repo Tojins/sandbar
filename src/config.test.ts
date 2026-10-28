@@ -17,6 +17,7 @@ import {
   DEFAULT_MAX_QUALITY_ROUNDS,
   DEFAULT_MAX_REVIEW_ROUNDS,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_RESTART_DEFER_MS,
   DEFAULT_KEEP_AWAKE_WHILE_IDLE,
   DEFAULT_MAX_CONCURRENT_GATES,
   DEFAULT_MAX_CONTEXT_CHARS,
@@ -497,6 +498,8 @@ describe("resolveConfig", () => {
     expect(r.maxGateRounds).toBe(DEFAULT_MAX_GATE_ROUNDS);
     expect(r.maxReviewRounds).toBe(DEFAULT_MAX_REVIEW_ROUNDS);
     expect(r.pollIntervalMs).toBe(DEFAULT_POLL_INTERVAL_MS);
+    expect(r.restartDeferMs).toBe(DEFAULT_RESTART_DEFER_MS);
+    expect(DEFAULT_RESTART_DEFER_MS).toBe(2 * 60 * 60 * 1000);
     expect(r.keepAwakeWhileIdle).toBe(DEFAULT_KEEP_AWAKE_WHILE_IDLE);
     expect(r.copyToWorktree).toEqual([]);
     expect(r.labels).toEqual(DEFAULT_LABELS);
@@ -612,6 +615,20 @@ describe("resolveConfig", () => {
     (pollIntervalMs) => {
       expect(() => resolveConfig({ ...minimal, pollIntervalMs })).toThrow(
         /config\.pollIntervalMs.*positive integer/,
+      );
+    },
+  );
+
+  // 0 is a real setting: drain on every request, as before the deferral.
+  it("accepts a zero restartDeferMs", () => {
+    expect(resolveConfig({ ...minimal, restartDeferMs: 0 }).restartDeferMs).toBe(0);
+  });
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "refuses invalid restartDeferMs %s",
+    (restartDeferMs) => {
+      expect(() => resolveConfig({ ...minimal, restartDeferMs })).toThrow(
+        /config\.restartDeferMs.*non-negative integer/,
       );
     },
   );

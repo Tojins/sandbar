@@ -484,7 +484,7 @@ describe("run UI server", () => {
     const run = {
       startedAt: "2026-09-07T09:00:00Z", status: "live", driver: "sandbar test",
       slots: { used: 1, max: 2 }, lastRecompute: null, exit: null,
-      restart: { detail: "abc1234", at: "2026-09-07T09:30:00Z" }, complaints: [],
+      restart: { detail: "abc1234", at: "2026-09-07T09:30:00Z", deferredUntil: null }, complaints: [],
     };
     const state = {
       now: "2026-09-07T10:00:00Z", run,
@@ -513,6 +513,35 @@ describe("run UI server", () => {
     await interval?.();
     expect(app.innerHTML).toContain('<span class="pill ended">ended · restart</span>');
     expect(app.innerHTML).not.toContain("restart pending");
+  });
+
+  it("says a deferred restart is waiting rather than draining", async () => {
+    const html = await readFile(join(process.cwd(), "ui/index.html"), "utf8");
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    const app = { innerHTML: "" };
+    const run = {
+      startedAt: "2026-09-07T09:00:00Z", status: "live", driver: "sandbar test",
+      slots: { used: 3, max: 3 }, lastRecompute: null, exit: null,
+      restart: {
+        detail: "abc1234", at: "2026-09-07T09:30:00Z", deferredUntil: "2026-09-07T11:30:00.000Z",
+      },
+      complaints: [],
+    };
+    const state = {
+      now: "2026-09-07T10:00:00Z", run,
+      pool: [], waiting: [], finished: [], eventCount: 0, events: [],
+    };
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => state });
+    runInNewContext(script!, {
+      document: { getElementById: () => app }, fetch,
+      setInterval: () => 1,
+      Date, Intl, Math, String, Error, TypeError,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(app.innerHTML).toMatch(
+      /<span class="pill restart">restart pending · deferred until \d{2}:\d{2} · abc1234<\/span>/,
+    );
+    expect(app.innerHTML).not.toContain("draining");
   });
 
   it("uses both run.pid and process liveness to classify standalone runs", async () => {

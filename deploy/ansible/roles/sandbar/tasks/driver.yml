@@ -101,6 +101,34 @@
     group: root
   register: sandbar_driver_flip
 
+# A daemon defers an ordinary restart request so several landings share one
+# drain (`restartDeferMs`, src/scheduler.ts). A commit that cannot wait — a
+# revert, a fix to the loop itself — says so with a `Sandbar-Restart: now`
+# trailer, and any commit between the build that was current and the one just
+# flipped to counts, since one play often applies several. A range git cannot
+# read (a first install, a rewritten history) is simply not urgent.
+- name: Look for an urgent restart trailer in the commits this flip applied
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ sandbar_driver_src }}"
+      - log
+      - "--format=%(trailers:key=Sandbar-Restart,valueonly)"
+      - "{{ sandbar_driver_link.stat.lnk_target | basename }}..{{ sandbar_driver_commit }}"
+  when:
+    - sandbar_driver_flip is changed
+    - sandbar_driver_link.stat.lnk_target is defined
+  register: sandbar_driver_trailers
+  changed_when: false
+  failed_when: false
+
+- name: Decide whether this flip's restart requests are urgent
+  ansible.builtin.set_fact:
+    sandbar_driver_urgent: >-
+      {{ sandbar_driver_trailers.stdout_lines | default([]) | map('trim') | map('lower')
+         | select('equalto', 'now') | list | length > 0 }}
+
 # The previous build stays so a revert lands on bytes that are already on disk.
 # Anything older is what a revert would have to rebuild anyway.
 - name: List the driver builds on disk

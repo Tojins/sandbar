@@ -831,6 +831,12 @@ export type RunConfig = {
   // 60 seconds. A poll fetches source plus issue, chunk and member refs before
   // planning.
   readonly pollIntervalMs?: number;
+  // How long a deploy's restart request (#146) may wait while the pool keeps
+  // admitting, so several landings share one drain instead of each emptying
+  // every slot. An empty pool or an urgent request drains at once
+  // (`restartDueReason` in scheduler.ts). Default: 2 hours; 0 drains as soon
+  // as the request is observed.
+  readonly restartDeferMs?: number;
 
   // Keep the host wake lock while the daemon is idle. Default false: ordinary
   // desktop hosts may sleep between polls and poll immediately after waking.
@@ -1036,6 +1042,7 @@ export const DEFAULT_MAX_PARALLEL_ISSUES = 3;
 export const DEFAULT_MAX_CONCURRENT_GATES: number | undefined = undefined;
 export const DEFAULT_UI_PORT = 7331;
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
+export const DEFAULT_RESTART_DEFER_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_KEEP_AWAKE_WHILE_IDLE = false;
 export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
 // 20 minutes. Covers a queued runner plus a browser suite; a repo whose CI is
@@ -2292,6 +2299,15 @@ function requirePositiveInteger(field: string, value: unknown): number {
   return value as number;
 }
 
+function requireNonNegativeInteger(field: string, value: unknown): number {
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    throw new SandbarError(
+      `config.${field} must be a non-negative integer (got ${String(value)}).`,
+    );
+  }
+  return value as number;
+}
+
 function requirePort(value: unknown): number {
   const port = requirePositiveInteger("uiPort", value);
   if (port > 65_535) {
@@ -2666,6 +2682,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     pollIntervalMs: requirePositiveInteger(
       "pollIntervalMs",
       config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    ),
+    restartDeferMs: requireNonNegativeInteger(
+      "restartDeferMs",
+      config.restartDeferMs ?? DEFAULT_RESTART_DEFER_MS,
     ),
     keepAwakeWhileIdle,
     maxParallelIssues: requirePositiveInteger(

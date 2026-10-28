@@ -319,6 +319,8 @@ import {
   chunkRefreshRequestsAreRunnable,
   decideAfterFailedRefresh,
   decideSchedulerAction,
+  restartDueReason,
+  type RestartDueReason,
   type SchedulerExit,
   type SettledIssue,
 } from "./scheduler.js";
@@ -1472,8 +1474,14 @@ export async function run(
   // reading keeps this latched through the drain so recovery can perform it,
   // while an exit leaves it untouched and starts no unnecessary build.
   let pendingSourceImageRefresh: "poll" | "planning" | "landing" | null = null;
-  // What the observed request carried, and the whole of the drain's state.
-  let restartRequested: string | null = null;
+  // What the observed request carried and when this process first saw it;
+  // `restartDueAs` is the drain's whole state once the deferral is over.
+  let restartRequested: {
+    readonly detail: string;
+    readonly urgent: boolean;
+    readonly observedAt: number;
+  } | null = null;
+  let restartDueAs: RestartDueReason | null = null;
   let nextPlanTrigger: RecomputeTrigger = "launch";
   // The previous poll's pending chunk graph (#193, `chunks.ts` "Settling"):
   // fresh chunks start only once two consecutive polls agree on it. Memory
@@ -1542,17 +1550,56 @@ export async function run(
     return wake;
   };
 
-  // One observation per recompute, and the request is latched: the play may
-  // overwrite a pending file with a newer commit, but this process is already
-  // leaving for whichever driver `current` names by the time it restarts, so a
-  // second reading would only move the detail in the record.
+  // One observation per recompute. A request is latched from the first
+  // reading and deferred until `restartDueReason` says it is due (scheduler.ts,
+  // "WHEN A RESTART IS DUE"). While deferred the file is read again, because
+  // the play may have rewritten it urgent for a later commit — a revert must
+  // not wait out a deferral an earlier landing started. Urgency only ever
+  // upgrades, and the deferral keeps its first observation's clock. Once due
+  // the request is final: this process is leaving for whichever driver
+  // `current` names by the time it restarts, so another reading would only
+  // move the detail in the record. The record gets one event when the request
+  // is first seen deferred and one when it becomes due.
   const observeRestartRequest = async (): Promise<void> => {
-    if (restartRequestFile === null || restartRequested !== null) return;
+    if (restartRequestFile === null || restartDueAs !== null) return;
     const pending = await readRestartRequest(restartRequestFile);
-    if (pending === null) return;
-    restartRequested = pending;
-    await runRecord.emit({ kind: "restart-requested", detail: pending });
+    const previous = restartRequested;
+    if (pending !== null) {
+      restartRequested = {
+        detail: pending.detail,
+        urgent: pending.urgent || (previous?.urgent ?? false),
+        observedAt: previous?.observedAt ?? Date.now(),
+      };
+    }
+    if (restartRequested === null) return;
+    const request = restartRequested;
+    restartDueAs = restartDueReason({
+      urgent: request.urgent,
+      ageMs: Date.now() - request.observedAt,
+      deferMs: config.restartDeferMs,
+      active: pool.activeCount,
+      ongoing: pool.ongoingCount,
+      hasPendingTerminals: pool.hasPendingTerminals,
+    });
+    if (restartDueAs !== null) {
+      await runRecord.emit({
+        kind: "restart-requested",
+        detail: request.detail,
+        ...(request.urgent ? { urgent: true } : {}),
+        due: restartDueAs,
+      });
+    } else if (previous === null) {
+      await runRecord.emit({
+        kind: "restart-requested",
+        detail: request.detail,
+        deferredUntil: new Date(request.observedAt + config.restartDeferMs).toISOString(),
+      });
+    }
   };
+
+  // Read through a call: the latch is assigned only inside the closure above,
+  // so the loop's own control flow would narrow it to its initial null.
+  const requestedRestartDetail = (): string | null => restartRequested?.detail ?? null;
 
   const emitRecompute = async (
     iteration: number,
@@ -1862,11 +1909,11 @@ export async function run(
   // the origin lease and the `run.pid` sidecar (#139).
   if (restartRequestFile !== null && restartRequestAtStartup !== null) {
     try {
-      if (await clearRestartRequest(restartRequestFile, restartRequestAtStartup)) {
+      if (await clearRestartRequest(restartRequestFile, restartRequestAtStartup.detail)) {
         await runRecord.emit({
           kind: "preflight",
           action: "restart-request-cleared",
-          detail: `Started for the deployment of ${restartRequestAtStartup}`,
+          detail: `Started for the deployment of ${restartRequestAtStartup.detail}`,
         });
       }
     } catch (err) {
@@ -1886,7 +1933,7 @@ export async function run(
     // The drained-restart exception is the same at either fetch boundary: it
     // reads no refs, while every other state waits for a complete snapshot.
     const stalled = decideAfterFailedRefresh({
-      restartRequested: restartRequested !== null,
+      restartDue: restartDueAs !== null,
       active: pool.activeCount,
       ongoing: pool.ongoingCount,
       hasPendingTerminals: pool.hasPendingTerminals,
@@ -1915,7 +1962,7 @@ export async function run(
         schedulerExit(stalled.reason, {
           pool,
           providerExit: providerExitPending ?? closedProviderExit(config, providerState),
-          restartDetail: restartRequested,
+          restartDetail: requestedRestartDetail(),
           storage: storageLow,
         }),
       );
@@ -1985,14 +2032,14 @@ export async function run(
         // a poll boundary and must not spend that guard.
         pool.beginPoll();
         sourceChangedOnPoll = refresh.sourceChanged;
-        // A pending restart admits nothing more, so rebuilding this run's
+        // A due restart admits nothing more, so rebuilding this run's
         // images for a source that just moved is minutes the deploy waits on
         // and the restarted driver spends again with the new code. That case is
         // the COMMON one here, not an edge: the commit the play applied is a
         // commit on this same source branch. Landing keeps working without it —
         // gate-2 resolves its branch images from the merger worktree, which is
         // the merge result rather than either input.
-        if (sourceChangedOnPoll && restartRequested === null) {
+        if (sourceChangedOnPoll && restartDueAs === null) {
           pendingSourceImageRefresh ??= "poll";
         }
       }
@@ -2081,12 +2128,12 @@ export async function run(
         }
         continue;
       }
-      if (planningRefresh.sourceChanged && restartRequested === null) {
+      if (planningRefresh.sourceChanged && restartDueAs === null) {
         pendingSourceImageRefresh ??= planTrigger === "poll" ? "poll" : "planning";
       }
       if (
         storageLow === null &&
-        restartRequested === null &&
+        restartDueAs === null &&
         pendingSourceImageRefresh !== null
       ) {
         if (
@@ -2387,7 +2434,7 @@ export async function run(
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         providerClosed,
-        restartRequested: restartRequested !== null,
+        restartDue: restartDueAs !== null,
         storageLow: storageLow !== null,
       };
       const schedulerAction = decideSchedulerAction(schedulerSnapshot);
@@ -2414,7 +2461,7 @@ export async function run(
           schedulerExit(schedulerAction.reason, {
             pool,
             providerExit: providerExitPending ?? closedProviderExit(config, providerState),
-            restartDetail: restartRequested,
+            restartDetail: requestedRestartDetail(),
             storage: storageLow,
           }),
         );

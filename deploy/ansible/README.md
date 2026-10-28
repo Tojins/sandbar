@@ -108,7 +108,15 @@ between the two asks again. A missing file counts as changed, so the first play
 after this landed requested one restart per installation. An ordinary consumer
 landing changes neither field and restarts nothing.
 
-The daemon reads that file at the top of every recompute. It then **drains** —
+The daemon reads that file at the top of every recompute. An ordinary request
+is first **deferred**: the pool keeps admitting for up to `restartDeferMs`
+(default 2 hours), so the landings in that window share one restart instead of
+each emptying every slot. It stops waiting early when nothing is running,
+ongoing or landing, because then a restart costs nothing, or when the request
+is **urgent**: the play adds an `urgent` line when any commit the flip applied
+carries a `Sandbar-Restart: now` trailer, and keeps that line while an earlier
+urgent request is still pending. Put the trailer on a revert or on a fix the
+loop itself needs. Once the request is due the daemon **drains** —
 stops admitting, keeps landing every pending terminal and every landable `land`
 request — and exits 75 once nothing is running, ongoing or landing. The unit's
 `RestartForceExitStatus=75` turns exactly that exit back into a start; `Restart=no`

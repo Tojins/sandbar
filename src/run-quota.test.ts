@@ -1575,8 +1575,9 @@ describe("run quota orchestration (#109)", () => {
         { configPath: join(installation, "sandbar.config.mjs") },
       )).rejects.toThrow("EXIT:75");
       expect(exit).toHaveBeenCalledWith(75);
+      // Nothing was running, so the request was due on sight: no deferral.
       expect(eventsOf("restart-requested"))
-        .toEqual([{ kind: "restart-requested", detail: "abc1234" }]);
+        .toEqual([{ kind: "restart-requested", detail: "abc1234", due: "idle" }]);
       expect(eventsOf("complaint").map((event) => event.message)).toContainEqual(
         "Poll refresh failed; the pending restart needs none of it, so exiting: " +
         "Fetching origin refs failed: network unavailable",
@@ -2971,6 +2972,95 @@ describe("run quota orchestration (#109)", () => {
     expect(seams.merger).not.toHaveBeenCalled();
   });
 
+  // Every landing on this repo is a deploy, so a request that drained at once
+  // emptied every slot per landed issue. A deferred one keeps admitting, and
+  // restarts for free once the pool empties.
+  it("keeps admitting while a restart request is deferred", async () => {
+    const installation = await mkdtemp(join(tmpdir(), "sandbar-run-defer-"));
+    const running = issue("1");
+    const arriving = issue("2");
+    let polled = false;
+    seams.plan.mockImplementation(async () =>
+      resolution(polled ? [running, arriving] : [running]));
+    vi.mocked(fetchOriginRefs).mockImplementation(async () => {
+      polled = true;
+      return { sourceChanged: false, failures: [] };
+    });
+    let releaseRunning = (): void => {};
+    const runningHeld = new Promise<void>((resolve) => { releaseRunning = resolve; });
+    seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) => {
+      if (candidate.id === running.id) {
+        await writeFile(join(installation, RESTART_REQUEST_FILE), "abc1234\n");
+        // Released by the second admission; the timer only bounds a failure.
+        await Promise.race([runningHeld, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+      } else {
+        releaseRunning();
+      }
+      return { type: "DONE", commits: [{ sha: candidate.id }] };
+    });
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) =>
+      summary(batch));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    try {
+      await expect(run(
+        { ...config, maxParallelIssues: 2, pollIntervalMs: 1 },
+        { configPath: join(installation, "sandbar.config.mjs") },
+      )).rejects.toThrow("EXIT:75");
+
+      expect(exit).toHaveBeenCalledWith(75);
+      expect(seams.innerLoop.mock.calls.map(([candidate]) => candidate.id))
+        .toEqual(["1", "2"]);
+      const requests = eventsOf("restart-requested");
+      expect(requests).toEqual([
+        expect.objectContaining({ detail: "abc1234", deferredUntil: expect.any(String) }),
+        { kind: "restart-requested", detail: "abc1234", due: "idle" },
+      ]);
+    } finally {
+      await rm(installation, { recursive: true, force: true });
+    }
+  });
+
+  it("drains at once for an urgent restart request", async () => {
+    const installation = await mkdtemp(join(tmpdir(), "sandbar-run-urgent-"));
+    const running = issue("1");
+    const arriving = issue("2");
+    // #2 is offered only once the request is on disk, so any recompute that
+    // could admit it has also read the request.
+    let requested = false;
+    seams.plan.mockImplementation(async () =>
+      resolution(requested ? [running, arriving] : [running]));
+    vi.mocked(fetchOriginRefs).mockResolvedValue({ sourceChanged: false, failures: [] });
+    seams.innerLoop.mockImplementation(async (candidate: ReturnType<typeof issue>) => {
+      await writeFile(join(installation, RESTART_REQUEST_FILE), "abc1234\nurgent\n");
+      requested = true;
+      // Long enough for several polls that could have admitted #2.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return { type: "DONE", commits: [{ sha: candidate.id }] };
+    });
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) =>
+      summary(batch));
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    try {
+      await expect(run(
+        { ...config, maxParallelIssues: 2, pollIntervalMs: 1 },
+        { configPath: join(installation, "sandbar.config.mjs") },
+      )).rejects.toThrow("EXIT:75");
+
+      expect(seams.innerLoop.mock.calls.map(([candidate]) => candidate.id)).toEqual(["1"]);
+      expect(eventsOf("restart-requested")).toEqual([
+        { kind: "restart-requested", detail: "abc1234", urgent: true, due: "urgent" },
+      ]);
+    } finally {
+      await rm(installation, { recursive: true, force: true });
+    }
+  });
+
   it("does not attach a chunk refresh to committed work during restart drain", async () => {
     const installation = await mkdtemp(join(tmpdir(), "sandbar-refresh-restart-"));
     const done = issue("1");
@@ -2994,8 +3084,10 @@ describe("run quota orchestration (#109)", () => {
     }) as never);
 
     try {
+      // No deferral: the request drains the pool the moment it is observed,
+      // with the DONE issue still waiting to land.
       await expect(run(
-        config,
+        { ...config, restartDeferMs: 0 },
         { configPath: join(installation, "sandbar.config.mjs") },
       )).rejects.toThrow("EXIT:75");
 

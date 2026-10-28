@@ -127,7 +127,10 @@ holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 A commit on `main` is the deploy: the box `ansible-pull`s every five minutes,
 builds into `/opt/sandbar/builds/<sha>` and requests restarts. Config and
 credentials live in the sandbar user's `~/installation/`; the source is
-`deploy/ansible/` (see its README). `mergeMode` stays `direct`. To exercise
+`deploy/ansible/` (see its README). A daemon defers each restart request up to
+`restartDeferMs` (2h) so landings share one drain; put a
+`Sandbar-Restart: now` trailer on a commit that must not wait (a revert, a
+loop fix). `mergeMode` stays `direct`. To exercise
 unlanded code: `npm run build && node dist/cli.js --config <path>`.
 
 - One coherent deliverable per issue; split into a `## Blocked by` chain only

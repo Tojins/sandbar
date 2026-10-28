@@ -26,7 +26,10 @@
 //   1. recompute — a completion arrived while the plan was being built, so the
 //      snapshot describes a pool that no longer exists. Cheapest to rebuild.
 //   2. restart  — the box has a newer build of this driver and asked this
-//      process to step aside (#146). It outranks both stops below because it
+//      process to step aside (#146), and the request is DUE (`restartDueReason`
+//      below: urgent, deferred long enough, or nothing to drain). A request
+//      that is not yet due changes nothing here — the pool keeps admitting.
+//      It outranks both stops below because it
 //      is an INSTRUCTION rather than a condition, and because everything those
 //      two describe is run-local state a fresh process re-derives in seconds:
 //      a closed quota window and a red source branch are both rediscovered
@@ -64,6 +67,16 @@
 // pass). Stuck deliberately keeps its own two lines — it does not honour an
 // outstanding `land` request on the way out, and folding it in here would
 // quietly change that.
+//
+// WHEN A RESTART IS DUE. On this repo every landing is a deploy, so draining
+// for each request emptied every slot once per landed issue, for as long as
+// the slowest running issue took. A request is therefore deferred: the pool
+// keeps admitting until the request is `restartDeferMs` old, and the landings
+// in that window share one drain. Two cases skip the wait. An urgent request
+// (the `Sandbar-Restart: now` trailer, restart-request.ts) is a revert or a
+// fix the loop itself needs. An empty pool — nothing active, ongoing or
+// waiting to land — has nothing a drain would cost, so its restart is free.
+// Once due, run.ts latches it: a due restart never goes back to deferred.
 //
 // A RECOMPUTE WHOSE REF REFRESH FAILED never reaches that decision: planning
 // and landing both read refs it did not get, so run.ts reports the failure and
@@ -123,7 +136,7 @@ export type SchedulerSnapshot = {
   readonly noProgressSinceLanding: number;
   readonly noProgressBackstop: number;
   readonly providerClosed: boolean;
-  readonly restartRequested: boolean;
+  readonly restartDue: boolean;
   readonly storageLow: boolean;
 };
 
@@ -136,7 +149,7 @@ export function chunkRefreshRequestsAreRunnable(
   state: Pick<
     SchedulerSnapshot,
     | "hasChunkRefreshRequests"
-    | "restartRequested"
+    | "restartDue"
     | "storageLow"
     | "providerClosed"
     | "noProgressSinceLanding"
@@ -144,7 +157,7 @@ export function chunkRefreshRequestsAreRunnable(
   >,
 ): boolean {
   return state.hasChunkRefreshRequests &&
-    !state.restartRequested &&
+    !state.restartDue &&
     !state.storageLow &&
     !state.providerClosed &&
     state.noProgressSinceLanding < state.noProgressBackstop;
@@ -162,11 +175,31 @@ function drainToward(
   return state.active > 0 ? { kind: "drain" } : { kind: "exit", reason };
 }
 
+export type RestartDueReason = "urgent" | "deferral-elapsed" | "idle";
+
+// Why a latched request should drain now, or null to keep deferring it. See
+// "WHEN A RESTART IS DUE" above.
+export function restartDueReason(state: {
+  readonly urgent: boolean;
+  readonly ageMs: number;
+  readonly deferMs: number;
+  readonly active: number;
+  readonly ongoing: number;
+  readonly hasPendingTerminals: boolean;
+}): RestartDueReason | null {
+  if (state.urgent) return "urgent";
+  if (state.ageMs >= state.deferMs) return "deferral-elapsed";
+  if (state.active === 0 && state.ongoing === 0 && !state.hasPendingTerminals) {
+    return "idle";
+  }
+  return null;
+}
+
 // What a poll whose ref refresh FAILED may still do (#146). Ordinarily
 // nothing: the refs planning and landing read are exactly what the fetch did
 // not produce, so the daemon reports the failure and waits for another wake.
 //
-// A latched restart with nothing left to drain is the one state where waiting
+// A due restart with nothing left to drain is the one state where waiting
 // is wrong, and the asymmetry is deliberate. That wake is the ONLY one an
 // emptied pool gets — `waitForWake` arms the poll timer and nothing else — so a
 // fetch that keeps failing means the exit never happens: the deploy stays
@@ -186,10 +219,10 @@ function drainToward(
 export function decideAfterFailedRefresh(
   state: Pick<
     SchedulerSnapshot,
-    "restartRequested" | "active" | "ongoing" | "hasPendingTerminals"
+    "restartDue" | "active" | "ongoing" | "hasPendingTerminals"
   >,
 ): Extract<SchedulerAction, { kind: "exit" | "wait" }> {
-  if (!state.restartRequested) return { kind: "wait" };
+  if (!state.restartDue) return { kind: "wait" };
   if (state.active > 0 || state.ongoing > 0 || state.hasPendingTerminals) {
     return { kind: "wait" };
   }
@@ -202,7 +235,7 @@ export function decideAfterFailedRefresh(
 // rules at several points in its outer loop.
 export function decideSchedulerAction(state: SchedulerSnapshot): SchedulerAction {
   if (state.hasCompleted) return { kind: "recompute" };
-  if (state.restartRequested) return drainToward("restart", state);
+  if (state.restartDue) return drainToward("restart", state);
   if (state.storageLow) {
     if (state.hasPendingTerminals) return { kind: "land" };
     return state.active > 0
