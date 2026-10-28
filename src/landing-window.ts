@@ -70,6 +70,8 @@ function minuteOfWeek(timeZone: string, now: Date): number {
     }
     return value;
   };
-  const day = WEEKDAYS.indexOf(part("weekday") as (typeof WEEKDAYS)[number]);
+  const weekday = part("weekday");
+  const day = WEEKDAYS.findIndex((d) => d === weekday);
+  if (day < 0) throw new Error(`Intl gave unknown weekday ${weekday} in ${timeZone}`);
   return day * 24 * 60 + Number(part("hour")) * 60 + Number(part("minute"));
 }

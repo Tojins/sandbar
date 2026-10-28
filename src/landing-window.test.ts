@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveLandingWindow } from "./config.js";
 import { landingClosedUntil, waitsForLandingWindow } from "./landing-window.js";
@@ -75,5 +75,32 @@ describe("waitsForLandingWindow (#244)", () => {
     expect(waitsForLandingWindow({ landLabels: ["land"] })).toBe(true);
     expect(waitsForLandingWindow({ landLabels: ["land-hotfix"] })).toBe(false);
     expect(waitsForLandingWindow({ landLabels: ["land", "land-hotfix"] })).toBe(false);
+  });
+});
+
+describe("landingClosedUntil on an incomplete Intl answer (#244)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const stubParts = (parts: Intl.DateTimeFormatPart[]): void => {
+    vi.spyOn(Intl, "DateTimeFormat").mockImplementation(
+      function () {
+        return { formatToParts: () => parts };
+      } as unknown as typeof Intl.DateTimeFormat,
+    );
+  };
+  const all: Intl.DateTimeFormatPart[] = [
+    { type: "weekday", value: "Fri" },
+    { type: "hour", value: "12" },
+    { type: "minute", value: "00" },
+  ];
+
+  it.each(["weekday", "hour", "minute"])("throws without a %s part", (type) => {
+    stubParts(all.filter((p) => p.type !== type));
+    expect(() => landingClosedUntil(outdoor, new Date(0))).toThrow(`no ${type}`);
+  });
+
+  it("throws on a weekday it does not know", () => {
+    stubParts(all.map((p) => (p.type === "weekday" ? { ...p, value: "Fre" } : p)));
+    expect(() => landingClosedUntil(outdoor, new Date(0))).toThrow("unknown weekday");
   });
 });

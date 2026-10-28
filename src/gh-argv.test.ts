@@ -543,6 +543,17 @@ describe("the forge readers fail soft (#64)", () => {
     ).toEqual([]);
   });
 
+  it("answers 'no requests' when only one of the two land listings fails", async () => {
+    await writeFile(
+      join(shimBin, "gh"),
+      `#!/bin/sh\ncase "$*" in *land-hotfix*) exit 1;; esac\ncat <<'SANDBAR_EOF'\n${JSON.stringify([
+        { number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42", state: "OPEN", labels: LAND },
+      ])}\nSANDBAR_EOF\n`,
+      { mode: 0o755 },
+    );
+    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
+  });
+
   it("answers 'no requests' on output that is not JSON at all", async () => {
     await shimAnswering("gh: could not resolve to a Repository");
     expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);

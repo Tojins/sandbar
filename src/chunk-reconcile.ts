@@ -189,7 +189,7 @@ export async function fetchPullRequestsForBranches(
       "--json",
       PULL_REQUEST_FIELDS,
     ]);
-    if (!r.ok) return [];
+    if (!r.ok) continue;
     found.push(...parsePullRequests(r.stdout, new Set(["OPEN", "MERGED"])));
   }
   return found;
@@ -224,7 +224,7 @@ export async function fetchLandRequestPullRequests(
       "--limit",
       "200",
     ]);
-    if (!r.ok) continue;
+    if (!r.ok) return [];
     for (const pr of parsePullRequests(r.stdout, new Set(["OPEN"]))) {
       byNumber.set(pr.number, pr);
     }
