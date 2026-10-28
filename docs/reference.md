@@ -122,11 +122,14 @@ export default { /* ... */ env, ...routing };
   reach agent containers. An empty value inherits from the launching shell.
 - **Routing** keys `SANDBAR_<ROLE>_AGENT`, `_MODEL_ID` and `_EFFORT` choose the
   agent CLI, model and effort per role. Roles: `IMPLEMENTER`, `UI_CHECK`,
-  `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, `MERGER`. They never enter a
+  `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, `MERGER`, and `npm run
+  reflect`'s `REFLECT_TAGGER` and `REFLECT_SYNTHESIZER`. They never enter a
   sandbox. Defaults are claude with `opus` at `high` for the implementer and
   reviewer (and so the adjudicator), `sonnet` at `high` for the UI check,
-  `sonnet` at `medium` for the quality pass and `opus` at `medium` for the
-  merger. A role routed off claude gets no effort flag unless it names one.
+  `sonnet` at `medium` for the quality pass and the reflect tagger, `opus`
+  at `medium` for the merger and `opus` at `high` for the reflect
+  synthesizer. A role routed off claude gets no effort flag unless it names
+  one.
 
 [`sandbar.env.example`](../sandbar.env.example) lists every key.
 

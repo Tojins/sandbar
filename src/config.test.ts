@@ -832,6 +832,28 @@ describe("resolveConfig", () => {
     expect(r.reviewerAgent).toBe("claude");
   });
 
+  it("routes reflect's tagger and synthesizer on their own keys, with defaults (#208)", () => {
+    const none = resolveConfig(minimal);
+    expect([none.reflectTaggerAgent, none.reflectTaggerModelId, none.reflectTaggerEffort])
+      .toEqual(["claude", "sonnet", "medium"]);
+    expect([
+      none.reflectSynthesizerAgent, none.reflectSynthesizerModelId, none.reflectSynthesizerEffort,
+    ]).toEqual(["claude", "opus", "high"]);
+    const routed = resolveConfig({
+      ...minimal,
+      reflectTaggerAgent: "codex",
+      reflectTaggerModelId: "gpt-5.6-sol",
+      reflectSynthesizerEffort: "max",
+    });
+    expect([routed.reflectTaggerAgent, routed.reflectTaggerModelId, routed.reflectTaggerEffort])
+      .toEqual(["codex", "gpt-5.6-sol", undefined]);
+    expect(routed.reflectSynthesizerEffort).toBe("max");
+    expect(() => resolveConfig({ ...minimal, reflectSynthesizerAgent: "codex" }))
+      .toThrow(/config\.reflectSynthesizerModelId/);
+    expect(() => resolveConfig({ ...minimal, reflectTaggerEffort: "" }))
+      .toThrow(/config\.reflectTaggerEffort/);
+  });
+
   // The third per-call knob (#130). Passed through per role; an unset one
   // gets the driver default for a claude-routed role and stays ABSENT for any
   // other vendor, whose level set and server default are its own.

@@ -81,7 +81,7 @@ describe("readEnvFile", () => {
 });
 
 describe("splitRoleRouting", () => {
-  it("maps all eighteen reserved keys to their config field names", () => {
+  it("maps all twenty-four reserved keys to their config field names", () => {
     const pairs = [
       ["SANDBAR_IMPLEMENTER_AGENT", "implementerAgent"],
       ["SANDBAR_IMPLEMENTER_MODEL_ID", "implementerModelId"],
@@ -101,6 +101,12 @@ describe("splitRoleRouting", () => {
       ["SANDBAR_MERGER_AGENT", "mergerAgent"],
       ["SANDBAR_MERGER_MODEL_ID", "mergerModelId"],
       ["SANDBAR_MERGER_EFFORT", "mergerEffort"],
+      ["SANDBAR_REFLECT_TAGGER_AGENT", "reflectTaggerAgent"],
+      ["SANDBAR_REFLECT_TAGGER_MODEL_ID", "reflectTaggerModelId"],
+      ["SANDBAR_REFLECT_TAGGER_EFFORT", "reflectTaggerEffort"],
+      ["SANDBAR_REFLECT_SYNTHESIZER_AGENT", "reflectSynthesizerAgent"],
+      ["SANDBAR_REFLECT_SYNTHESIZER_MODEL_ID", "reflectSynthesizerModelId"],
+      ["SANDBAR_REFLECT_SYNTHESIZER_EFFORT", "reflectSynthesizerEffort"],
     ] as const;
     const record = Object.fromEntries(
       pairs.map(([key, field]) => [key, `value-for-${field}`]),
