@@ -318,9 +318,17 @@ describe.runIf(available)("an agent's process group against real podman (#189)",
   }, 60_000);
 
   // Field 5 of /proc/<pid>/stat is the process group, after the `)` that
-  // closes comm; zombies are excluded because --init reaps them.
+  // closes comm; zombies are excluded because --init reaps them. A /proc with
+  // no stat line at all is impossible (pid 1 is always there), yet a loaded
+  // remote podman occasionally returns an empty successful exec, as pid1Comm
+  // above notes; re-read that observation rather than count it as an empty
+  // group, which would fail the control and pass the reaps vacuously.
   const groupMembers = async (pgid: string): Promise<number> => {
-    const { stdout } = await exec(RUNTIME, ["exec", name, "sh", "-c", "cat /proc/[0-9]*/stat 2>/dev/null"]);
+    let stdout = "";
+    for (let attempt = 0; attempt < 20 && stdout.trim() === ""; attempt += 1) {
+      if (attempt > 0) await delay(250);
+      ({ stdout } = await exec(RUNTIME, ["exec", name, "sh", "-c", "cat /proc/[0-9]*/stat 2>/dev/null"]));
+    }
     return stdout.split("\n").filter((l) => {
       const fields = l.slice(l.lastIndexOf(")") + 2).split(" ");
       return fields[0] !== "Z" && fields[2] === pgid;
