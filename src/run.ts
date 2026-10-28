@@ -163,6 +163,7 @@ import { dirname, join } from "node:path";
 import {
   type ResolvedConfig,
   type RunConfig,
+  egressStartupWarning,
   resolveConfig,
 } from "./config.js";
 import {
@@ -213,7 +214,13 @@ import {
   worktreeMountingTagsOf,
 } from "./ensure-images.js";
 import { reconcileImages } from "./image-lifecycle.js";
-import { type EgressContext, currentEgressImageTag, ensureEgressImage } from "./egress.js";
+import {
+  type EgressContext,
+  currentEgressImageTag,
+  egressReport,
+  ensureEgressImage,
+  ownerEgress,
+} from "./egress.js";
 import { makeEnvReader } from "./env.js";
 import { startTimer } from "./timing.js";
 import {
@@ -1193,6 +1200,11 @@ export async function run(
       action: "started",
       detail: "Preflight started",
     });
+    // Before the checks, so a run that fails preflight still says it (#202).
+    const egressWarning = egressStartupWarning(config);
+    if (egressWarning !== null) {
+      await runRecord.emit({ kind: "complaint", severity: "warning", message: egressWarning });
+    }
     ({ readyLabelPolicy, stackSource } = await runPreflightAfterReachability({
       ...preflightBase,
       onEvent: (event) => runRecord.emit(event).then(() => undefined),
@@ -1362,7 +1374,7 @@ export async function run(
   // What every sandbox, gate stack and resolve container gets with an egress
   // allowlist (#202): the proxy image, the policy, and the run's own log
   // directory for the proxies' decisions. Null keeps open egress.
-  let egress: EgressContext | null = null;
+  let egressContext: EgressContext | null = null;
   try {
     initialSourceWorktree = await ensureSourceWorktree(layout, config.sourceBranch);
     initialBaseFingerprints = await ensureImages(config.images, initialSourceWorktree, {
@@ -1382,7 +1394,7 @@ export async function run(
       log: () => undefined,
     });
     if (config.egress.kind === "allowlist") {
-      egress = {
+      egressContext = {
         scope,
         image: await ensureEgressImage(scope, recordImage),
         policy: { mode: config.egress.mode, entries: config.egress.entries },
@@ -2622,7 +2634,7 @@ export async function run(
         env: sandboxEnv,
         codexAuthMount,
         agentImages: admissionImages.agentImages,
-        egress,
+        egress: egressContext,
       });
       for (const issue of executionIssues) {
         const issueLogger = await runRecord.issue(issue.id);
@@ -2774,6 +2786,9 @@ export async function run(
               stack: "gate",
               ...record,
             }).then(() => undefined),
+            ...(egressContext === null ? {} : {
+              egress: ownerEgress(egressContext, egressReport(runRecord.emit, { stack: "gate" })),
+            }),
             // gate-2 needs this as much as gate-1 does (#37): the merge result
             // is a tree neither branch had, and two branches that each touched
             // the lockfile compose into a third lockfile. Resolved per gate
@@ -2807,6 +2822,9 @@ export async function run(
             },
             stackChange: async () => stackChangeOf((await headStack()).classification),
             beforeOriginWrite: renewOriginLease,
+            ...(egressContext === null ? {} : {
+              egress: ownerEgress(egressContext, egressReport(runRecord.emit, { stack: "resolve" })),
+            }),
           });
 
           // The only site that supplies the probe tree by hand — the two

@@ -126,6 +126,7 @@
 // escape hatches are a static probe binary or `hold: true` + a
 // `postReadyCommand`.
 
+import { isIPv4 } from "node:net";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 
 import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
@@ -134,6 +135,8 @@ import type {
   ResolvedStackContainer,
   ResolvedStackMount,
 } from "./config.js";
+import type { EgressHandle, EgressReport, OwnerEgress } from "./egress.js";
+import { internalNetworkCreateArgs } from "./egress-policy.js";
 import { type ImageMap, ImageBuildError } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { type GateResult, type GateStepTiming, stripAnsi } from "./gate.js";
@@ -356,6 +359,12 @@ export type StackOptions = {
   // runs would pay for a build the gate cannot use and let that build's failure
   // red a gate it has nothing to do with.
   readonly images?: (only: ReadonlySet<string>) => Promise<ImageMap>;
+
+  // The egress allowlist (#202). Present, the stack's network is `--internal`
+  // and the pod's only DNS and only way out is this stack's own proxy, started
+  // after the network and before the pod and stopped between the two at
+  // teardown. Absent, the stack is exactly what it was before #202.
+  readonly egress?: OwnerEgress | undefined;
 
   // -------------------------------------------------------------------------
   // The standalone `sandbar gate` (#45). Every field below is omitted by every
@@ -585,6 +594,9 @@ export function podCreateArgs(opts: {
   // every stack inside a run, which is torn down with the issue and has nothing
   // to reuse.
   readonly reuseToken?: string | undefined;
+  // The egress proxy's `--dns`/`--dns-search` (#202), in place of the public
+  // resolvers. Absent with open egress.
+  readonly dnsArgs?: readonly string[] | undefined;
 }): string[] {
   return [
     "pod",
@@ -593,7 +605,7 @@ export function podCreateArgs(opts: {
     opts.podName,
     "--network",
     opts.networkName,
-    ...DNS_SERVERS.flatMap((s) => ["--dns", s]),
+    ...(opts.dnsArgs ?? DNS_SERVERS.flatMap((s) => ["--dns", s])),
     ...(opts.reuseToken === undefined
       ? []
       : ["--label", `${REUSE_TOKEN_LABEL}=${opts.reuseToken}`]),
@@ -873,6 +885,23 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   // the error. Read rather than recomputed, so it cannot come to disagree with
   // the early return that produced it.
   let podKept = false;
+  // The stack's egress proxy (#202), once started; `stop` removes it between
+  // the pod and the network, and every gate run checks and drains it.
+  let proxy: EgressHandle | null = null;
+  const startProxy = async (ip?: string): Promise<EgressHandle | null> => {
+    if (opts.egress === undefined) return null;
+    proxy = await opts.egress.start({
+      owner: opts.stackId,
+      networkName,
+      createNetwork: false,
+      ip,
+    });
+    return proxy;
+  };
+  const stopProxy = async (): Promise<void> => {
+    if (proxy === null || opts.egress === undefined) return;
+    await opts.egress.report.stopped(await proxy.stop());
+  };
   const resourceDeps = systemContainerResourceDeps(boundedPodman);
   const resourceSnapshotReader = opts.containerResourceSnapshot ??
     (opts.containerResources === undefined
@@ -1055,6 +1084,10 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       );
     };
     await attempt(POD_RM_ARGS(podName));
+    // The proxy after the pod, its only client, and before the network, which
+    // is the stack's (#202). Its own teardown failure names what it leaked.
+    const [proxyStopped] = await Promise.allSettled([stopProxy()]);
+    if (proxyStopped?.status === "rejected") teardownFailures.push(proxyStopped.reason);
     await attempt(["network", "rm", "-f", networkName]);
     const removalFailure = failures.length > 0
       ? new SandbarError(
@@ -1088,9 +1121,17 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // containers: the pod is the one resource that outlives every member, so it
     // is the only honest place to record what config the members were created
     // from.
-    const reusing =
+    const tokenMatches =
       opts.reuseToken !== undefined &&
       (await podReuseToken(podName)) === opts.reuseToken;
+    // Behind an egress allowlist (#202) the pod's resolv.conf names the proxy
+    // it was created with, and a pod cannot be given another resolver: the
+    // replacement proxy takes that address, and a pod whose address cannot be
+    // read is not adopted.
+    const adoptedProxyIp = tokenMatches && opts.egress !== undefined
+      ? await podDnsServer(podName)
+      : undefined;
+    const reusing = tokenMatches && adoptedProxyIp !== null;
 
     if (!reusing) {
       // A namesake surviving an older run may be DNS-enabled or otherwise stale
@@ -1107,13 +1148,23 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
         CONTROL_TIMEOUT_MS,
       );
       await mustSucceed(
-        ["network", "create", "--disable-dns", networkName],
+        opts.egress === undefined
+          ? ["network", "create", "--disable-dns", networkName]
+          : internalNetworkCreateArgs(networkName),
         `create network ${networkName}`,
       );
+      const created = await startProxy();
       await mustSucceed(
-        podCreateArgs({ podName, networkName, reuseToken: opts.reuseToken }),
+        podCreateArgs({
+          podName,
+          networkName,
+          reuseToken: opts.reuseToken,
+          dnsArgs: created?.dnsArgs,
+        }),
         `create pod ${podName}`,
       );
+    } else {
+      await startProxy(adoptedProxyIp ?? undefined);
     }
 
     const attach: ContainerAttachment = { kind: "pod", podName };
@@ -1209,12 +1260,13 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       networkName,
       reused: reused.map((c) => c.name),
       stop,
-      runGate: () =>
-        runStackGate({
+      runGate: async () => {
+        const result = await runStackGate({
           spec,
           attemptContainers,
           issueContainers,
           attach,
+          egress: proxy,
           worktreePath: opts.worktreePath,
           hideWorktreeGit: opts.hideWorktreeGit,
           nameOf,
@@ -1229,7 +1281,11 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
           resourceSnapshotReader,
           recordTeardown,
           bringUpCtx,
-        }),
+        });
+        return proxy === null || opts.egress === undefined
+          ? result
+          : await withEgressRefusals(result, proxy, opts.egress.report);
+      },
     };
   } catch (err) {
     // The bringup failure is the diagnosis; a teardown failure on top of it is
@@ -1282,6 +1338,31 @@ async function readHealthLog(
   );
   if (!boundedOk(r)) return [];
   return parseHealthLog(r.stdout);
+}
+
+// The one resolver a pod's resolv.conf names, from `podman pod inspect`'s
+// `InfraConfig.DNSServer` (#202), or null for anything else: a pod whose
+// proxy address is unknown is recreated rather than adopted.
+export function parsePodDnsServer(json: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json.trim());
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    return null;
+  }
+  return Array.isArray(parsed) && parsed.length === 1 &&
+      typeof parsed[0] === "string" && isIPv4(parsed[0])
+    ? parsed[0]
+    : null;
+}
+
+async function podDnsServer(podName: string): Promise<string | null> {
+  const r = await boundedPodman(
+    ["pod", "inspect", "--format", "{{json .InfraConfig.DNSServer}}", podName],
+    LOG_READ_TIMEOUT_MS,
+  );
+  return boundedOk(r) ? parsePodDnsServer(r.stdout) : null;
 }
 
 // The reuse token recorded on an existing pod (#45), or null for a pod that is
@@ -1971,6 +2052,9 @@ type RunGateCtx = {
   readonly attemptContainers: readonly ResolvedStackContainer[];
   readonly issueContainers: readonly ResolvedStackContainer[];
   readonly attach: ContainerAttachment;
+  // The stack's egress proxy (#202), asked whether it is alive beside the
+  // issue containers; null with open egress.
+  readonly egress: EgressHandle | null;
   readonly worktreePath: string;
   readonly hideWorktreeGit: boolean;
   readonly nameOf: (c: ResolvedStackContainer) => string;
@@ -2025,6 +2109,9 @@ type RunGateCtx = {
 // cost a podman call per step per gate run to shave one attempt off a failure
 // that is already rare, and would still leave a window inside the step itself.
 async function assertIssueContainersAlive(ctx: RunGateCtx): Promise<void> {
+  // The proxy is the stack's way out and lives as long as its issue
+  // containers do, so its death is the same infrastructure failure (#202).
+  await ctx.egress?.assertAlive();
   for (const c of ctx.issueContainers) {
     const containerName = ctx.nameOf(c);
     const state = await containerState(containerName);
@@ -2628,6 +2715,25 @@ async function withContainerLogs(
     );
   }
   return { ...result, containerLogs: sections.join("\n") };
+}
+
+// After every gate run behind an egress allowlist (#202): the refusals the
+// proxy first sighted are recorded, and a red gate's container logs lead with
+// every destination it refused during the run, first sighting or not, so a
+// step that needs an unlisted host says so in the trace of every attempt.
+async function withEgressRefusals(
+  result: GateResult,
+  egress: EgressHandle,
+  report: EgressReport,
+): Promise<GateResult> {
+  const { firstRefusals, refused } = await egress.drain();
+  await report.refusals(firstRefusals);
+  if (result.ok || refused.length === 0) return result;
+  return {
+    ...result,
+    containerLogs:
+      `\negress refused during this run: ${refused.join(", ")}\n${result.containerLogs}`,
+  };
 }
 
 function sleep(ms: number): Promise<void> {

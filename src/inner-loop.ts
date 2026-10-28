@@ -199,6 +199,7 @@ import {
   EGRESS_AGENT_ENV,
   EgressProxyDiedError,
   egressReport,
+  ownerEgress,
   startEgress,
 } from "./egress.js";
 import type { BranchImages } from "./ensure-images.js";
@@ -1215,10 +1216,10 @@ async function runSandboxCycle(
           ...record,
         }),
         ...(config.egress === null ? {} : {
-          egress: {
-            context: config.egress,
-            report: egressReport(opts.onEvent, { stack: "gate", ...subject }),
-          },
+          egress: ownerEgress(
+            config.egress,
+            egressReport(opts.onEvent, { stack: "gate", ...subject }),
+          ),
         }),
         // A thunk, not a value: the stack calls it before every gate run, and
         // the answer changes as the agent commits (#37). It hands back the

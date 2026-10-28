@@ -387,6 +387,7 @@ import {
   type AgentProvider,
 } from "./agent-sandbox.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
+import { EGRESS_AGENT_ENV, type OwnerEgress } from "./egress.js";
 import { SandbarError, hasExitCode, isErrno, isExitCode } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
 import { dirtyWorktreePaths, fetchOriginChunkBranch } from "./git-ops.js";
@@ -433,6 +434,7 @@ import {
   issueMergeSubject,
   issueNumberFromBranch,
   type RunScope,
+  resolveNetworkNameFor,
   scopedResourcePrefix,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
@@ -2827,6 +2829,9 @@ export type RealAdapterDeps = {
   // Daemon ownership barrier (#139), immediately before each origin/tracker
   // write.
   readonly beforeOriginWrite: OriginWriteBarrier;
+  // The egress allowlist (#202): each resolve attempt's container runs on its
+  // own internal network behind its own proxy. Absent with open egress.
+  readonly egress?: OwnerEgress | undefined;
   // Process seams for the resolve container lifecycle. Production uses the
   // shared bounded runtime, byte-verbatim capture and disposable registry;
   // tests inject them to pin inspect/removal and signal-cleanup ordering
@@ -3039,6 +3044,9 @@ export function buildResolveRunArgv(args: {
   readonly credentials: Readonly<Record<string, string | undefined>>;
   readonly botName: string;
   readonly botEmail: string;
+  // The attempt's internal network and its proxy's `--dns` (#202). Absent,
+  // the argv is what it was before #202.
+  readonly egress?: { readonly network: string; readonly dnsArgs: readonly string[] };
 }): RuntimeInvocation {
   // Every variable the resolve container needs, in one record. The argv below
   // names none of them: `withRuntimeEnv` writes this record to the file it adds
@@ -3059,6 +3067,7 @@ export function buildResolveRunArgv(args: {
     GIT_AUTHOR_EMAIL: args.botEmail,
     GIT_COMMITTER_NAME: args.botName,
     GIT_COMMITTER_EMAIL: args.botEmail,
+    ...(args.egress === undefined ? {} : EGRESS_AGENT_ENV),
   };
   const argv = [
     "run",
@@ -3076,6 +3085,9 @@ export function buildResolveRunArgv(args: {
     "--userns=keep-id:uid=1000,gid=1000",
     "--user",
     "1000:1000",
+    ...(args.egress === undefined
+      ? []
+      : ["--network", args.egress.network, ...args.egress.dnsArgs]),
     "-v",
     `${args.cwd}:/workspace`,
     ...args.extraMounts.flatMap((mount) => ["-v", `${mount}:${mount}`]),
@@ -3347,6 +3359,17 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         prompt,
         dangerouslySkipPermissions: true,
       });
+      // The attempt's own network and its only way out (#202), up before the
+      // container and stopped after it is removed, with the other cleanup.
+      const egress = deps.egress;
+      const network = resolveNetworkNameFor(deps.scope, attempt);
+      const proxy = egress === undefined
+        ? null
+        : await egress.start({
+            owner: `resolve-${attempt}`,
+            networkName: network,
+            createNetwork: true,
+          });
       const runInvocation = buildResolveRunArgv({
         container,
         cwd,
@@ -3358,6 +3381,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         credentials: resolveAgentCredentials(deps.mergerAgent, deps.env),
         botName: deps.botName,
         botEmail: deps.botEmail,
+        ...(proxy === null ? {} : { egress: { network, dnsArgs: proxy.dnsArgs } }),
       });
       let containerStarted = false;
       let removePromise: Promise<void> | undefined;
@@ -3423,6 +3447,12 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         removeContainer(),
       ]);
       disposeContainer?.();
+      const proxyStopped = proxy === null || egress === undefined
+        ? undefined
+        : (await Promise.allSettled([proxy.stop().then(egress.report.stopped)]))[0];
+      const proxyFailure = proxyStopped?.status === "rejected"
+        ? proxyStopped.reason
+        : undefined;
       const removed = removal[0];
       const removalFailure = removed?.status === "rejected"
         ? removed.reason
@@ -3449,6 +3479,12 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
           : {
               message: `Resolve container '${container}' cleanup also failed`,
               cause: removalFailure,
+            },
+        proxyFailure === undefined
+          ? undefined
+          : {
+              message: `Resolve container '${container}' egress proxy teardown also failed`,
+              cause: proxyFailure,
             },
       ].filter((failure): failure is { readonly message: string; readonly cause: unknown } =>
         failure !== undefined,

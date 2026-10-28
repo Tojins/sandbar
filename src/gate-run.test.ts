@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   type BuiltImage,
   type GateStackConfig,
+  type ResolvedEgress,
   type ResolvedGateStack,
   resolveGateStack,
 } from "./config.js";
@@ -78,10 +79,23 @@ const stack = (over: Partial<GateStackConfig> = {}): ResolvedGateStack =>
     ...over,
   });
 
-const token = (s: ResolvedGateStack, wt = WT, v = V): string =>
-  gateReuseToken(s, wt, v);
+const token = (
+  s: ResolvedGateStack,
+  wt = WT,
+  v = V,
+  egress: ResolvedEgress = { kind: "open" },
+): string => gateReuseToken(s, wt, v, egress);
 
 describe("gateReuseToken", () => {
+  // #202: a kept pod sits on its allowlist's network behind its proxy.
+  it("changes with the egress allowlist's digest", () => {
+    const allowlist = (digest: string): ResolvedEgress =>
+      ({ kind: "allowlist", mode: "enforce", entries: [], digest });
+    expect(token(stack(), WT, V, allowlist("a"))).not.toBe(token(stack()));
+    expect(token(stack(), WT, V, allowlist("a"))).not.toBe(token(stack(), WT, V, allowlist("b")));
+    expect(token(stack(), WT, V, allowlist("a"))).toBe(token(stack(), WT, V, allowlist("a")));
+  });
+
   it("is stable for the same spec, tree and version", () => {
     expect(token(stack())).toBe(token(stack()));
     expect(token(stack())).toMatch(/^[0-9a-f]{64}$/);

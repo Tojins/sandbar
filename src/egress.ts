@@ -231,12 +231,32 @@ export function egressReport(
   };
 }
 
-// An owner's egress as its caller hands it down: where the proxy comes from
-// and where its records go.
+// What `startEgress` needs beyond the run's context: which owner, on which
+// network.
+export type EgressOwner = {
+  // `sbx-<issue>`, a gate stackId, or `resolve-<n>`; names the proxy and its
+  // files in `logDir`.
+  readonly owner: string;
+  readonly networkName: string;
+  // False when the owner's network already exists (the gate stack creates its
+  // own `--internal`); the proxy then joins it and leaves it in place.
+  readonly createNetwork: boolean;
+  // The address to take on that network: a reused gate pod's resolv.conf
+  // already names its proxy's (gate-stack.ts).
+  readonly ip?: string | undefined;
+};
+
+// An owner's egress as its caller hands it down: how to start its proxy and
+// where its records go. A function rather than the context, so gate-stack.ts,
+// whose podman helpers this module uses, imports nothing from it but types.
 export type OwnerEgress = {
-  readonly context: EgressContext;
+  readonly start: (owner: EgressOwner) => Promise<EgressHandle>;
   readonly report: EgressReport;
 };
+
+export function ownerEgress(context: EgressContext, report: EgressReport): OwnerEgress {
+  return { start: (owner) => startEgress({ ...context, ...owner }), report };
+}
 
 // The complete lines of the proxy's log past `offset`, and where they end.
 export async function readLogFrom(
@@ -261,18 +281,9 @@ export type EgressContext = {
   readonly logDir: string;
 };
 
-export async function startEgress(opts: EgressContext & {
-  // `sbx-<issue>`, a gate stackId, or `resolve-<n>`; names the proxy and its
-  // files in `logDir`.
-  readonly owner: string;
-  readonly networkName: string;
-  // False when the owner's network already exists (the gate stack creates its
-  // own `--internal`); the proxy then joins it and leaves it in place.
-  readonly createNetwork: boolean;
-  // The address to take on that network: a reused gate pod's resolv.conf
-  // already names its proxy's (gate-stack.ts).
-  readonly ip?: string | undefined;
-}): Promise<EgressHandle> {
+export async function startEgress(
+  opts: EgressContext & EgressOwner,
+): Promise<EgressHandle> {
   const elapsed = startTimer();
   const name = egressProxyNameFor(opts.scope, opts.owner);
   const logPath = join(opts.logDir, `${opts.owner}.jsonl`);
