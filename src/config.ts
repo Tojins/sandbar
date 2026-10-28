@@ -41,9 +41,9 @@ export const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
 export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
 
 // The handoff label sandbar APPLIES when it parks an issue for a human. It is
-// NOT auto-created by sandbar (#8) — a host must define it in its repo, and a
-// missing/misconfigured label fails loud at finalize time rather than being
-// silently swallowed.
+// NOT auto-created by the run (#8) — a host must define it in its repo, by
+// hand or with `sandbar labels sync` (#245), and a missing/misconfigured
+// label fails loud at finalize time rather than being silently swallowed.
 //
 // `handoff` is the single "the agent stopped, a human acts next" label (#242).
 // Every park — a NEEDS-INFO question, a missing UI prototype, a partition
@@ -62,6 +62,19 @@ export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
 // in only one of those places would silently desync the queue.
 export type LabelConfig = {
   readonly handoff: string;
+};
+
+// One entry of `config.labelSync` (#245), read only by `sandbar labels sync`.
+// A name that is one of sandbar's protocol labels (label-sync.ts) overrides
+// its canonical description or colour; any other name is a host label and
+// must give both. `from` declares a rename: the repo's `from` label is edited
+// into `name`, so the issues that carry it keep it.
+export type LabelDeclaration = {
+  readonly name: string;
+  readonly description?: string;
+  // Six hex digits without `#`, as `gh label create --color` takes it.
+  readonly color?: string;
+  readonly from?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -202,6 +215,49 @@ function resolveLabels(labels: Partial<LabelConfig> | undefined): LabelConfig {
     );
   }
   return { ...DEFAULT_LABELS, ...labels };
+}
+
+const LABEL_DECLARATION_KEYS = new Set(["name", "description", "color", "from"]);
+
+// The shape of each entry, with colours lowercased the way GitHub answers
+// them. Rules over the whole set (duplicates, a rename onto a declared name,
+// a host label missing a field) need the protocol set, so they live in
+// label-sync.ts's `declaredLabels`.
+function resolveLabelSync(value: unknown): readonly LabelDeclaration[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new SandbarError("config.labelSync must be an array of { name, description?, color?, from? }.");
+  }
+  return value.map((entry: unknown, i): LabelDeclaration => {
+    const field = `config.labelSync[${i}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new SandbarError(`${field} must be an object.`);
+    }
+    const unknownKeys = Object.keys(entry).filter((key) => !LABEL_DECLARATION_KEYS.has(key));
+    if (unknownKeys.length > 0) {
+      throw new SandbarError(
+        `${field} has unknown field ${unknownKeys.map((k) => JSON.stringify(k)).join(", ")}; ` +
+          "expected name, description, color, from.",
+      );
+    }
+    const { name, description, color, from } = entry as Record<string, unknown>;
+    // Non-empty because `gh` sends an empty description as no change at all.
+    const text = (key: string, v: unknown): string => {
+      if (typeof v !== "string" || v.trim() === "") {
+        throw new SandbarError(`${field}.${key} must be a non-empty string.`);
+      }
+      return v;
+    };
+    if (color !== undefined && (typeof color !== "string" || !/^[0-9a-fA-F]{6}$/.test(color))) {
+      throw new SandbarError(`${field}.color must be six hex digits without "#", got ${JSON.stringify(color)}.`);
+    }
+    return {
+      name: text("name", name),
+      ...(description === undefined ? {} : { description: text("description", description) }),
+      ...(color === undefined ? {} : { color: color.toLowerCase() }),
+      ...(from === undefined ? {} : { from: text("from", from) }),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,6 +1158,13 @@ export type RunConfig = {
   // to DEFAULT_LABELS. The removed `needsInfo`/`agentStuck` keys are refused
   // (#242).
   readonly labels?: Partial<LabelConfig>;
+
+  // The labels `sandbar labels sync` (#245) makes the repo match beside the
+  // protocol labels sandbar declares itself: host labels with their
+  // description and colour, overrides of a protocol label's description or
+  // colour, and renames (`from`). The run loop never reads it and never
+  // creates a label (#8). Default: none, so a sync covers the protocol labels.
+  readonly labelSync?: readonly LabelDeclaration[];
 
   // Extra host paths copied into each issue worktree. A string keeps the
   // original behaviour exactly: it is joined to `cwd` and mirrored at that
@@ -3398,6 +3461,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
         : requirePositiveInteger("maxConcurrentGates", config.maxConcurrentGates),
     copyToWorktree: resolveCopyToWorktree(config.copyToWorktree, cwd),
     labels: resolveLabels(config.labels),
+    labelSync: resolveLabelSync(config.labelSync),
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
     deployWatch: resolveDeployWatch(config.deployWatch),

@@ -1230,6 +1230,32 @@ describe("resolveConfig", () => {
     expect(() => resolveConfig({ ...minimal, labels } as never)).toThrow(message);
   });
 
+  it("resolves labelSync to its entries with lowercased colours, none by default (#245)", () => {
+    expect(resolveConfig(minimal).labelSync).toEqual([]);
+    const r = resolveConfig({
+      ...minimal,
+      labelSync: [
+        { name: "ready-for-human", description: "A human picks this up", color: "D93F0B" },
+        { name: "needs-human", from: "needs-info" },
+      ],
+    });
+    expect(r.labelSync).toEqual([
+      { name: "ready-for-human", description: "A human picks this up", color: "d93f0b" },
+      { name: "needs-human", from: "needs-info" },
+    ]);
+  });
+
+  it.each([
+    [{ name: "x" }, /config\.labelSync must be an array/],
+    [[{ name: "" }], /config\.labelSync\[0\]\.name must be a non-empty string/],
+    [[{ name: "x", description: "" }], /config\.labelSync\[0\]\.description must be a non-empty/],
+    [[{ name: "x", color: "#d93f0b" }], /config\.labelSync\[0\]\.color must be six hex digits/],
+    [[{ name: "x", colour: "d93f0b" }], /config\.labelSync\[0\] has unknown field "colour"/],
+    [["x"], /config\.labelSync\[0\] must be an object/],
+  ])("refuses labelSync %o", (labelSync, message) => {
+    expect(() => resolveConfig({ ...minimal, labelSync } as never)).toThrow(message);
+  });
+
   it("defaults images to building the sandbox image from ./Containerfile", () => {
     const r = resolveConfig(minimal);
     expect(r.images).toEqual([

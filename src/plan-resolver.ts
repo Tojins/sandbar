@@ -224,7 +224,7 @@ import type { HeldReason, WaitingReason } from "./events.js";
 
 const exec = promisify(execFile);
 
-const WAITING_LABEL = "waiting";
+export const WAITING_LABEL = "waiting";
 const READY_LABEL = "ready-for-agent";
 const LABEL_EVENT_WINDOW = 100;
 

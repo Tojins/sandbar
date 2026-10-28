@@ -138,6 +138,13 @@ export default {
 
   // Rename the handoff label every park applies, if it differs in this repository.
   // labels: { handoff: "needs-human" },
+  // What `sandbar labels sync` makes the repo's labels match, beside the
+  // protocol labels sandbar declares itself: host labels (description and
+  // colour required), a protocol label's description, and renames (`from`).
+  // labelSync: [
+  //   { name: "ready-for-human", description: "Triaged for a human", color: "d93f0b" },
+  //   { name: "needs-human", from: "needs-info" },
+  // ],
   // Copy host-only paths into each issue worktree before setup runs.
   // copyToWorktree: [],
 

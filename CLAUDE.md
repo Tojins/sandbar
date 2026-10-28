@@ -33,7 +33,10 @@ dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132), `pulled-images`,
 `config-digest` (#190, `src/config-digest.ts`) and `db-base` (#201,
 `src/db-base.ts`; pure layer `db-copy-policy.ts`): with
 `config.databaseCopies`, a systemd timer beside the daemon imports each new
-dump into a base datadir and swaps `<root>/current` to it.
+dump into a base datadir and swaps `<root>/current` to it. `labels sync`
+(#245, `src/label-sync.ts`) creates or updates the protocol labels and
+`config.labelSync`'s, renames, never deletes; the run itself still never
+creates a label (#8).
 `npm run stats` (`src/stats-cli.ts`, #194) is a repo script, not a verb: the
 factory scorecard over run records (`stats-record.ts` reads, `stats.ts`
 reduces); nothing in the daemon imports it.
