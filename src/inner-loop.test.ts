@@ -3216,6 +3216,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         dbCopies,
         stackSource: {
           path: null,
+          current: async () => ({ stack: dbStack }),
           forHead: async () => ({
             stack: dbStack,
             attachments: { env: {}, mounts: [] },
@@ -3244,7 +3245,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
       expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
         "implementer-158-attempt-1",
-        "quality-list-158-attempt-1",
+        "quality-list-158-attempt-1-group-sandbar",
         "reviewer-158-round-1",
         "implementer-158-attempt-2",
       ]);
