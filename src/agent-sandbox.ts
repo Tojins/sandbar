@@ -30,7 +30,12 @@
 // `ParsedStreamEvent` and `parseCodexJsonLine`. Two lifecycle registers sit
 // beside them (#189): `turn_end` is Claude's `result` line closing a turn,
 // which can precede the process's exit by any amount, and `control` marks a
-// raw lifecycle line that the invocation record keeps uncapped. A third,
+// raw lifecycle line that the invocation record keeps uncapped. An
+// informational `tool_call` carries, for Claude, the context depth of the
+// message that issued it — read from that message's own usage, so the agent is
+// never asked to report it — and the invocation record lists every one
+// uncapped as `commands`. Codex's exec stream has no per-turn usage, so its
+// commands carry none (absent, not zero). A third,
 // `background_tasks`, carries the count Claude's last `background_tasks_changed`
 // listed: it holds off the completion grace while tasks are pending (#192)
 // and rides onto the run result for the inner loop's nudge choice (#191).
@@ -245,7 +250,7 @@ export type SandboxHooks = {
 export type ParsedStreamEvent =
   | { type: "text"; text: string }
   | { type: "result"; result: string }
-  | { type: "tool_call"; name: string; args: string }
+  | { type: "tool_call"; name: string; args: string; contextTokens?: number }
   | { type: "session_id"; sessionId: string }
   | { type: "usage"; usage: AgentUsage }
   | { type: "tool_calls"; count: number }
@@ -516,6 +521,15 @@ export type AgentInvocationRecord = ContainerResources & {
   // Every raw line the provider's parser marked `control`, uncapped and in
   // order (#189). The tails above can lose them to large neighbours.
   readonly controlLines: readonly string[];
+  // Every informational tool call in order, uncapped, with the context depth
+  // it was issued at when the provider reports one. A report only.
+  readonly commands: readonly AgentCommand[];
+};
+
+export type AgentCommand = {
+  readonly name: string;
+  readonly args: string;
+  readonly contextTokens?: number;
 };
 
 export type SandboxRunResult = ContainerResources & {
@@ -949,7 +963,12 @@ const parseStreamJsonObject = (parsed: Record<string, unknown>): ParsedStreamEve
           events.push({ type: "text", text: texts.join("") });
           texts.length = 0;
         }
-        events.push({ type: "tool_call", name: block.name, args: argValue });
+        events.push({
+          type: "tool_call",
+          name: block.name,
+          args: argValue,
+          ...(depth === undefined ? {} : { contextTokens: depth }),
+        });
       }
     }
     if (texts.length > 0) {
@@ -2520,6 +2539,7 @@ const invokeAgent = async (
     const stdoutTail = new BoundedTail(MAX_TAIL_CHARS, "");
     const stderrTail = new BoundedTail(MAX_TAIL_CHARS, "");
     const controlLines: string[] = [];
+    const commands: AgentCommand[] = [];
     // Inside the container, outside the worktree: one per invocation.
     const pidfile = `/tmp/${RESOURCE_PREFIX}agent-${randomUUID()}.pgid`;
 
@@ -2573,6 +2593,7 @@ const invokeAgent = async (
         stdout: execResult.stdout,
         stderr: execResult.stderr,
         controlLines,
+        commands,
       });
     };
     const tails = () => ({
@@ -2841,6 +2862,14 @@ const invokeAgent = async (
             return;
           }
           if (events.some((event) => event.type === "control")) controlLines.push(line);
+          for (const event of events) {
+            if (event.type !== "tool_call") continue;
+            commands.push({
+              name: event.name,
+              args: event.args,
+              ...(event.contextTokens === undefined ? {} : { contextTokens: event.contextTokens }),
+            });
+          }
           turnEnded = turnEndedAfter(turnEnded, events);
           turnSettled = turnSettledAfter(turnSettled, tasksBefore, events);
           if (matchedSignal === undefined) {

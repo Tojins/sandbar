@@ -242,6 +242,21 @@ describe("parseStreamJsonLine", () => {
     ]);
   });
 
+  it("stamps a tool_call with the context depth of the message that issued it", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      message: {
+        usage: { input_tokens: 3, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 1_247 },
+        content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }],
+      },
+    });
+    expect(parseStreamJsonLine(line)).toEqual([
+      { type: "context_depth", tokens: 41_250 },
+      { type: "tool_calls", count: 1 },
+      { type: "tool_call", name: "Bash", args: "npm test", contextTokens: 41_250 },
+    ]);
+  });
+
   it("drops non-allowlisted tools but keeps surrounding text", () => {
     const line = JSON.stringify({
       type: "assistant",
@@ -2845,6 +2860,10 @@ describe("createSandbox integration (local provider)", () => {
           agent: scriptedAgent(
             `${backgroundChild("accepted")}; ` +
               `git commit --allow-empty -m "finished" >/dev/null 2>&1 && ` +
+              `${line({ type: "assistant", message: {
+                usage: { input_tokens: 7, cache_read_input_tokens: 1_000 },
+                content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }],
+              } })} && ` +
               `${success("done <promise>COMPLETE</promise>")} && ` +
               `${line({ type: "system", subtype: "background_tasks_changed", tasks: [] })} && ` +
               `sleep 30`,
@@ -2871,6 +2890,9 @@ describe("createSandbox integration (local provider)", () => {
         expect(records[0]?.detail).toContain("reported a successful result");
         expect(records[0]?.detail).not.toContain("reaping");
         expect(records[0]?.controlLines).toHaveLength(2);
+        expect(records[0]?.commands).toEqual([
+          { name: "Bash", args: "ls", contextTokens: 1_007 },
+        ]);
         expect(await reaped("accepted")).toBe(true);
       } finally {
         await sandbox.close();

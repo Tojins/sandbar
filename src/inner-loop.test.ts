@@ -2948,6 +2948,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
           stdout: `stdout-${cycle}`,
           stderr: `stderr-${cycle}`,
           controlLines: [],
+          commands: [],
         };
         await opts.attemptLogger.writeInvocation(
           sequence.filename({ role: "ui-check", invocation: 1 }),

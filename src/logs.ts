@@ -19,6 +19,9 @@
 // human opens says OOMKilled even without consulting events.jsonl. An
 // invocation file ends with its uncapped control lines (#189), the lifecycle
 // evidence a hang is diagnosed from, which the bounded tails can lose.
+// Before them, its commands: one line each, prefixed with the context depth
+// the provider reported when the command was issued, or `-` when it reported
+// none. The agent never reports that depth itself; it is read off the stream.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -194,6 +197,15 @@ export async function createTranscriptTree(runDir: string): Promise<TranscriptTr
   };
 }
 
+// One line per command: a multi-line argument (a heredoc) shows its first
+// line and an ellipsis, so the depth column stays scannable.
+const formatCommand = (command: AgentInvocationRecord["commands"][number]): string => {
+  const depth = command.contextTokens === undefined ? "-" : `${command.contextTokens} tok`;
+  const [first = ""] = command.args.split("\n");
+  const args = first === command.args ? first : `${first} …`;
+  return `[${depth}] ${command.name}: ${args}\n`;
+};
+
 async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLogger> {
   const dir = join(runDir, `issue-${issueId}`);
   await mkdir(dir, { recursive: true });
@@ -218,6 +230,7 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
         `${header}\n--- speech ---\n${record.speech}\n` +
           `--- stdout tail ---\n${record.stdout}\n` +
           `--- stderr tail ---\n${record.stderr}\n` +
+          `--- commands ---\n${record.commands.map(formatCommand).join("")}` +
           `--- control lines ---\n${record.controlLines.map((line) => `${line}\n`).join("")}`,
         { flag: "wx" },
       );

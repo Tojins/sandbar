@@ -63,6 +63,10 @@ describe("raw transcript tree", () => {
       stdout: "implementer stdout",
       stderr: "implementer stderr",
       controlLines: ["{\"type\":\"system\"}", "{\"type\":\"result\"}"],
+      commands: [
+        { name: "Bash", args: "npm test", contextTokens: 41_250 },
+        { name: "command_execution", args: "cat <<'EOF'\nbody\nEOF" },
+      ],
     });
     expect((await readdir(tree.runDir)).sort()).toEqual(["issue-47"]);
     expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8")).toBe(
@@ -73,6 +77,8 @@ describe("raw transcript tree", () => {
       "--- speech ---\nimplementer speech\n" +
       "--- stdout tail ---\nimplementer stdout\n" +
       "--- stderr tail ---\nimplementer stderr\n" +
+      "--- commands ---\n[41250 tok] Bash: npm test\n" +
+      "[-] command_execution: cat <<'EOF' …\n" +
       "--- control lines ---\n{\"type\":\"system\"}\n{\"type\":\"result\"}\n",
     );
     await expect(issue.writeInvocation("attempt-2.log", {
@@ -87,6 +93,7 @@ describe("raw transcript tree", () => {
       stdout: "replacement",
       stderr: "",
       controlLines: [],
+      commands: [],
     })).rejects.toMatchObject({ code: "EEXIST" });
     expect(await readFile(join(issue.dir, "attempt-2.log"), "utf8"))
       .toContain("implementer speech");
