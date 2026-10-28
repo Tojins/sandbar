@@ -28,6 +28,9 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // The nightly base's job error (#201) runs the import's teardown, logs a
   // failure of that teardown with its cause, and rethrows the original.
   "db-base.ts": 2,
+  // A database copy's slot (#201) releases the copy when a swap throws,
+  // reports a release that failed in turn, and rethrows the original.
+  "db-copy.ts": 2,
   // The deploy watcher's tick (#198) classifies a rate limit, an unanswered
   // request, a forge answer and a lease lost to cleanup; anything else is
   // rethrown.

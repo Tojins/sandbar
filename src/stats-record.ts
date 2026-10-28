@@ -109,7 +109,7 @@ const V6_KINDS = {
   "quality-review": true, "quality-pass": true, "review-pass": true, adjudication: true,
   "resolve-attempt": true, container: true, "review-round": true, repair: true,
   "hard-error": true, terminal: true, landed: true, finalise: true, deploy: true,
-  "db-base": true,
+  "db-base": true, "db-copy": true,
 } as const satisfies Record<RunEvent["kind"], true>;
 
 const knownKinds = (

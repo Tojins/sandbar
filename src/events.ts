@@ -83,6 +83,11 @@
 // reason code, never a server message. A stale dump or a failed import is
 // also a complaint; the feed shows neither event. A new kind, so no bump.
 //
+// `db-copy` (#201, `db-copy.ts`) is one change to an issue's database copy:
+// `created` for a holder with its hook's outcome, `dropped` with the
+// volume's used bytes, or `failed` with a reason code. The feed does not
+// show it. A new kind, so no bump.
+//
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
@@ -94,7 +99,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ChunkBlockReason } from "./chunks.js";
-import type { DbBaseEvent } from "./db-copy-policy.js";
+import type { DbBaseEvent, DbCopyEvent } from "./db-copy-policy.js";
 import type { DeployEvent } from "./deploy-watch.js";
 import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
@@ -329,6 +334,7 @@ export type EventInput =
   | { readonly kind: "notice"; readonly message: string }
   | DeployEvent
   | DbBaseEvent
+  | DbCopyEvent
   | {
       readonly kind: "complaint";
       readonly severity: "warning" | "error";

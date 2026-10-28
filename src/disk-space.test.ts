@@ -6,6 +6,7 @@ import {
   dbVolumeSpace,
   dbVolumeSpaceIsLow,
   formatLowDbVolumeSpace,
+  usedBytes,
   formatBytes,
   formatLowGraphRootSpace,
   graphRootSpace,
@@ -60,6 +61,8 @@ describe("database volume space", () => {
     expect(space).toEqual({ root: "/srv/db", availableBytes: 8192n });
     expect(dbVolumeSpaceIsLow({ root: "/srv/db", availableBytes: MIN_DB_VOLUME_FREE_BYTES - 1n })).toBe(true);
     expect(dbVolumeSpaceIsLow({ root: "/srv/db", availableBytes: MIN_DB_VOLUME_FREE_BYTES })).toBe(false);
+    expect(await usedBytes("/srv/db", async () => ({ blocks: 10n, bfree: 4n, bavail: 2n, bsize: 4096n })))
+      .toBe(24_576n);
     expect(formatLowDbVolumeSpace(space)).toBe(
       "Database volume '/srv/db' has 8192 bytes (0.0 GiB) free, below sandbar's " +
         "10737418240 bytes (10.0 GiB) floor",

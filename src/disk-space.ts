@@ -59,6 +59,8 @@ export type GraphRootSpace = {
 };
 
 type StatFs = (path: string) => Promise<{
+  readonly blocks: bigint;
+  readonly bfree: bigint;
   readonly bavail: bigint;
   readonly bsize: bigint;
 }>;
@@ -72,6 +74,15 @@ export async function freeBytes(
 ): Promise<bigint> {
   const stats = await read(path);
   return stats.bavail * stats.bsize;
+}
+
+// What is in use on the filesystem holding `path`, by everyone.
+export async function usedBytes(
+  path: string,
+  read: StatFs = defaultStatFs,
+): Promise<bigint> {
+  const stats = await read(path);
+  return (stats.blocks - stats.bfree) * stats.bsize;
 }
 
 export async function graphRootSpace(
