@@ -3,10 +3,10 @@
 // Every agent prompt's prose lives as a markdown file in the repo-root
 // `prompts/` directory, NOT as string literals scattered through `lines.push`
 // calls. This module is the only thing that reads those files; the prompt
-// assemblers (`prompt.ts`, `resolve-loop.ts`) load their templates into
-// module-level constants at import time (I/O at the boundary) and then render
-// them with `render()`, which is a pure string substitution — so the assembly
-// functions themselves stay pure and table-testable.
+// assemblers (`prompt.ts`, `resolve-loop.ts`, `reflect.ts`) load their
+// templates into module-level constants at import time (I/O at the boundary)
+// and then render them with `render()`, which is a pure string substitution
+// — so the assembly functions themselves stay pure and table-testable.
 //
 // Division of labour: substantive instructional prose belongs in the markdown
 // templates. Structural scaffolding — section headings, code-fence wrapping,

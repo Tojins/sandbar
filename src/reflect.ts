@@ -306,11 +306,9 @@ function sandboxInvoker(config: ResolvedConfig, layout: RepoLayout, workspace: s
           return { answer: result.stdout, ...(result.usage === undefined ? {} : { usage: result.usage }) };
         } catch (err) {
           // A run that ended without an answer; anything else is the host's.
-          if (err instanceof AgentError || err instanceof AgentIdleTimeoutError ||
-            err instanceof AgentInputTooLargeError) {
-            return { failure: err.message };
-          }
-          throw err;
+          if (!(err instanceof AgentError || err instanceof AgentIdleTimeoutError ||
+            err instanceof AgentInputTooLargeError)) throw err;
+          return { failure: err.message };
         }
       });
     },
@@ -541,42 +539,55 @@ async function runAgents(
     await rm(workspace, { recursive: true, force: true });
   };
   const ctx: StepContext = { config, invoker, cacheDir: join(reflectDir, "cache"), log: opts.log ?? (() => undefined) };
-  let part: AgentsPart;
-  try {
-    const tagging = await tagBuckets(ctx, mining.buckets);
-    const clusters = [...mining.structured, ...tagClusters(tagging.tagged)];
-    const candidates = deletionCandidates(tagging.tagged);
-    const synthesis = clusters.length + candidates.length === 0
-      ? { synthesis: null, steps: [], failures: [] }
-      : await synthesize(ctx, workspace, files, {
-          clusters,
-          candidates,
-          outliers: mining.outliers,
-          gists: gistsOf(tagging.tagged),
-          prose: new Map(stats.invocations.flatMap((row) =>
-            row.transcript === null || typeof row.prose !== "string"
-              ? []
-              : [[memberProseKey({ run: row.run, issue: row.issue, transcript: row.transcript }), row.prose]])),
-        });
-    part = {
-      clusters,
-      candidates,
-      agents: {
-        sourceBranch: config.sourceBranch,
-        tip,
-        steps: [...tagging.steps, ...synthesis.steps],
-        failures: [...tagging.failures, ...synthesis.failures],
-        synthesis: synthesis.synthesis,
-      },
-    };
-  } catch (err) {
-    await cleanup().catch((cleanupError: unknown) => {
-      console.error(`reflect: could not remove ${workspace} after a failure: ${String(cleanupError)}`);
-    });
-    throw err;
+  const [steps] = await Promise.allSettled([agentSteps(ctx, { workspace, files, tip, stats, mining })]);
+  const [cleaned] = await Promise.allSettled([cleanup()]);
+  if (steps.status === "rejected") {
+    if (cleaned.status === "rejected") {
+      console.error(`reflect: could not clean up ${workspace} after a failure: ${String(cleaned.reason)}`);
+    }
+    throw steps.reason;
   }
-  await cleanup();
-  return part;
+  if (cleaned.status === "rejected") throw cleaned.reason;
+  return steps.value;
+}
+
+async function agentSteps(
+  ctx: StepContext,
+  run: {
+    readonly workspace: string;
+    readonly files: ReadonlyMap<string, string>;
+    readonly tip: string;
+    readonly stats: StatsReport;
+    readonly mining: Mining;
+  },
+): Promise<AgentsPart> {
+  const { mining } = run;
+  const tagging = await tagBuckets(ctx, mining.buckets);
+  const clusters = [...mining.structured, ...tagClusters(tagging.tagged)];
+  const candidates = deletionCandidates(tagging.tagged);
+  const synthesis = clusters.length + candidates.length === 0
+    ? { synthesis: null, steps: [], failures: [] }
+    : await synthesize(ctx, run.workspace, run.files, {
+        clusters,
+        candidates,
+        outliers: mining.outliers,
+        gists: gistsOf(tagging.tagged),
+        prose: new Map(run.stats.invocations.flatMap((row) =>
+          row.transcript === null || typeof row.prose !== "string"
+            ? []
+            : [[memberProseKey({ run: row.run, issue: row.issue, transcript: row.transcript }), row.prose]])),
+      });
+  return {
+    clusters,
+    candidates,
+    agents: {
+      sourceBranch: ctx.config.sourceBranch,
+      tip: run.tip,
+      steps: [...tagging.steps, ...synthesis.steps],
+      failures: [...tagging.failures, ...synthesis.failures],
+      synthesis: synthesis.synthesis,
+    },
+  };
 }
 
 const gistsOf = (tagged: readonly TaggedBucket[]): Map<string, string[]> => {

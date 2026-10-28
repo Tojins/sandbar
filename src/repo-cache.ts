@@ -10,8 +10,9 @@
 // non-reproducible resident since #134 is `codex-auth.json`: deleting the state
 // directory can lose its live refresh-token family and cost one dedicated
 // `codex login`, which the credential terminal then surfaces loudly.
-// `reflect/` holds the reports `npm run reflect` writes (#182); the daemon
-// never reads or touches it.
+// `reflect/` holds the reports `npm run reflect` writes (#182), its answer
+// cache and its throwaway per-process workspaces; the daemon never reads or
+// touches it.
 //
 // `repo.git` being BARE is not tidiness: it is what makes the three
 // genuinely-destructive operations (`branch -D`, `worktree remove --force`,

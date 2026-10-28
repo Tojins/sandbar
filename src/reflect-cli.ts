@@ -31,7 +31,7 @@ import { parseArgs } from "node:util";
 
 import { loadConfig, withDefaultCwd } from "./cli.js";
 import { resolveConfig } from "./config.js";
-import { faultDetail, isParseArgsError } from "./errors.js";
+import { isParseArgsError } from "./errors.js";
 import { reflect } from "./reflect.js";
 import { repoLayout } from "./repo-cache.js";
 import { parseStatsWindow, type StatsWindow } from "./stats-record.js";
@@ -77,17 +77,12 @@ if ("error" in args) {
   process.exitCode = 2;
 } else {
   const configPath = resolve(args.config);
-  try {
-    const config = resolveConfig(withDefaultCwd(await loadConfig(configPath), configPath));
-    const { reportPath, report } = await reflect(config, {
-      logsDir: resolve(args.logs ?? repoLayout(config.cwd, config.workDir).logsDir),
-      window: args.window,
-      agents: args.agents,
-      log: (line) => console.error(`reflect: ${line}`),
-    });
-    process.stdout.write(`${report}\n${reportPath}\n`);
-  } catch (err) {
-    console.error(faultDetail(err));
-    process.exitCode = 1;
-  }
+  const config = resolveConfig(withDefaultCwd(await loadConfig(configPath), configPath));
+  const { reportPath, report } = await reflect(config, {
+    logsDir: resolve(args.logs ?? repoLayout(config.cwd, config.workDir).logsDir),
+    window: args.window,
+    agents: args.agents,
+    log: (line) => console.error(`reflect: ${line}`),
+  });
+  process.stdout.write(`${report}\n${reportPath}\n`);
 }

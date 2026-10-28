@@ -32,9 +32,11 @@ dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132), `pulled-images` and
 `npm run stats` (`src/stats-cli.ts`, #194) is a repo script, not a verb: the
 factory scorecard over run records (`stats-record.ts` reads, `stats.ts`
 reduces); nothing in the daemon imports it.
-`npm run reflect -- --no-agents` (`src/reflect-cli.ts`, #182/#207) is another:
-it mines that report (`reflect-mine.ts`) into typed clusters and outlier
-issues and writes the tables (`reflect-report.ts`) under `<stateDir>/reflect/`.
+`npm run reflect` (`src/reflect-cli.ts`, #182/#207/#208) is another: it mines
+that report (`reflect-mine.ts`) into typed clusters and outlier issues, has a
+tagger and a synthesizer (`reflect.ts`, cached, sandboxed in `reflectScope`)
+turn them into proposals, and writes the report (`reflect-report.ts`) under
+`<stateDir>/reflect/`; `--no-agents` stops at the tables.
 The config is a **program**, imported not parsed; `src/config.ts` is the one
 validation boundary and owns all defaults. Sandbar drives a GitHub-Issues coding
 agent loop against a consumer repo, which supplies Containerfiles, anchor docs
@@ -106,7 +108,8 @@ holds planning until reset (`forge-rate-limit.ts`) instead of halting.
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
   configured); quality lister 5.0k, verify 5.3k, fixer 4.8k; verifier
   white-box 4.1k; adjudicator 1.1k + the report; UI check 1.6k and partition
-  check 1.5k + the issue anchor; resolve 1.2k + anchor + paths/trace. The
+  check 1.5k + the issue anchor; resolve 1.2k + anchor + paths/trace; reflect
+  tagger 1.2k + the chunk, synthesizer 2.4k (no anchor). The
   issue anchor (median 5.6k, max 41k measured, #197) has sandbar's traces and
   quoted reviewer prose dropped by `issue-anchor.ts`. Look before you add a
   paragraph to any of these.
