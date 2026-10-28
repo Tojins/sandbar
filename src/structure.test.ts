@@ -249,6 +249,16 @@ describe("version check", () => {
       line: /^version: package\.json at HEAD is not JSON: /,
     },
     {
+      name: "an unknown option",
+      args: ["version", "--bogus"],
+      line: /--bogus.*; usage: run\.mjs \[version\]… \[--base <ref>\] \[--git-dir <dir>\]$/,
+    },
+    {
+      name: "an option missing its value",
+      args: ["--base"],
+      line: /--base.*; usage: run\.mjs \[version\]…/,
+    },
+    {
       name: "an unknown check",
       args: ["nope"],
       line: /^unknown check 'nope'; usage: run\.mjs \[version\]… \[--base <ref>\] \[--git-dir <dir>\]$/,
