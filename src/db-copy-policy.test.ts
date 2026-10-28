@@ -13,6 +13,7 @@ import {
   basesToSweep,
   dbBaseComplaints,
   dbBaseEventOf,
+  dbCopyHolderFor,
   importNeeded,
   importSpaceNeeded,
   planAlign,
@@ -21,6 +22,7 @@ import {
   withDbCopy,
 } from "./db-copy-policy.js";
 import { MIN_DB_VOLUME_FREE_BYTES } from "./disk-space.js";
+import type { LoopAction } from "./inner-loop-machine.js";
 
 const dump: DumpIdentity = { name: "app-latest.sql.gz", size: 1000, mtimeMs: 1_700_000_000_000, ino: 42 };
 
@@ -200,6 +202,29 @@ const cfg = resolveDatabaseCopies({
   database: "app",
   bufferPoolBytes: 64 * 1024 * 1024,
 })!;
+
+describe("dbCopyHolderFor", () => {
+  // One action of every kind; only the kind is read.
+  const kinds: readonly [LoopAction["kind"], DbCopyHolder | null][] = [
+    ["run-anchor-condense", null],
+    ["run-partition-check", null],
+    ["run-ui-check", null],
+    ["start-scenario-writer", null],
+    ["run-implementer", "implementer"],
+    ["run-quality-list", null],
+    ["run-quality-fix", null],
+    ["run-quality-verify", null],
+    ["run-gate", null],
+    ["await-scenario-writer", null],
+    ["run-verifier", null],
+    ["run-adjudicator", null],
+    ["terminate", null],
+  ];
+
+  it.each(kinds)("%s is held by %s", (kind, holder) => {
+    expect(dbCopyHolderFor({ kind } as LoopAction)).toBe(holder);
+  });
+});
 
 describe("planAlign", () => {
   it.each<[DbCopyHolder | null, DbCopyHolder | null, boolean, DbCopyHolder | null]>([

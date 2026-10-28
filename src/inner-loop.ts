@@ -164,6 +164,15 @@
 // verifier. A terminal before the join aborts it in `runInnerLoop`'s finally.
 // The action that starts it has no visible phase, so it emits no `phase`
 // event; attempt 1's follows at once.
+// With `config.databaseCopies` (#201) each sandbox cycle has a slot of the
+// run's copies (`createDbCopySlot`) for the target sibling of its stack in
+// effect at setup. Before every action the runner aligns it to that action's
+// holder (`dbCopyHolderFor`): the implementer gets a fresh copy each round,
+// kept across back-to-back implementer actions and dropped at any other, so
+// quality, gate and the verifier run beside the fixtures. Only the
+// implementer's prompt reads the slot's answer; an unavailable copy renders
+// nothing. The teardown drops the copy ahead of the siblings it runs among,
+// so neither a HARD-ERROR's fresh sandbox nor a preserved clone keeps it.
 // Each duration-bearing agent event carries that invocation's peak-memory/OOM
 // evidence, gate events retain it per step, and both stacks emit each sibling's
 // final teardown record after their resources are removed (#141).
@@ -206,11 +215,19 @@ import type { AgentRunMeasurement, AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
 import type { CodexAuthMount } from "./codex-auth.js";
-import type {
-  PromptExtensions,
-  ResolvedCopyToWorktreeEntry,
-  SandboxGateAttachments,
+import {
+  type PromptExtensions,
+  type ResolvedCopyToWorktreeEntry,
+  type SandboxGateAttachments,
+  assertDatabaseCopiesTarget,
 } from "./config.js";
+import {
+  type DbCopies,
+  type DbCopySlot,
+  type DbCopyStatus,
+  createDbCopySlot,
+} from "./db-copy.js";
+import { dbCopyHolderFor } from "./db-copy-policy.js";
 import {
   AgentToolsImageError,
   type AgentImages,
@@ -754,6 +771,9 @@ export type InnerLoopOptions = {
   readonly providerState?: RunProviderState;
   // The one run-wide admission seam shared with the merger (#142).
   readonly gateSemaphore: GateSemaphore;
+  // The run's database copies (#201), null when `config.databaseCopies` is
+  // off. Each sandbox cycle aligns a slot of them before every action.
+  readonly dbCopies: DbCopies | null;
 };
 
 // The `gate-stack` record for one sandbox cycle (#186): the spec in effect at
@@ -993,6 +1013,7 @@ async function runSandboxCycle(
   let sandboxStack: SandboxStack | null = null;
   let stack: BoundStack | null = null;
   let egress: OwnerProxy | null = null;
+  let dbCopySlot: DbCopySlot | null = null;
   const subject = { issue: Number(issue.id), title: issue.title };
   let sandboxStatuses: readonly SandboxContainerStatus[] = [];
   const accumulated: { sha: string }[] = [];
@@ -1336,6 +1357,26 @@ async function runSandboxCycle(
     // re-registration is needed here.
     const gateStack: BoundStack = stack;
 
+    // The issue's database copy (#201), swapped into the sandbox stack for
+    // the target sibling of the stack in effect at setup. The stack source
+    // accepts only stacks whose target runs `inSandbox`, so the sandbox
+    // stack is up whenever copies are on.
+    if (opts.dbCopies !== null) {
+      if (sandboxStack === null) {
+        throw new SandbarError("database copies: the sandbox stack that runs the target is not up");
+      }
+      dbCopySlot = createDbCopySlot({
+        copies: opts.dbCopies,
+        target: assertDatabaseCopiesTarget(setupStack.stack, opts.dbCopies.cfg),
+        stack: sandboxStack,
+        sandbox: loopSandbox,
+        hooks: opts.hooks.sandbox?.onDbCopyReady ?? [],
+        issue,
+        logDir: sandboxLogDir,
+        emit: opts.onEvent,
+      });
+    }
+
     // No probe tree here on purpose (#34): `buildPrompt` derives it from
     // `inputs.worktreePath`, so this site cannot hand the anchor the wrong
     // tree. It used to, and nothing could see it — every candidate is a
@@ -1414,6 +1455,9 @@ async function runSandboxCycle(
     });
 
     while (action.kind !== "terminate") {
+      // Before every action, so a copy is dropped at each handover and the
+      // next holder gets a fresh one (db-copy-policy.ts).
+      const dbCopy = await dbCopySlot?.align(dbCopyHolderFor(action)) ?? { kind: "none" };
       const event = await executeAction(action, {
         issue,
         sandbox: loopSandbox,
@@ -1433,6 +1477,7 @@ async function runSandboxCycle(
         invocationSequence,
         imageName: bringup.imageName,
         scenarioWriter,
+        dbCopy,
       });
       const r = step(state, event);
       state = r.state;
@@ -1570,6 +1615,11 @@ async function runSandboxCycle(
     // leaks for the rest of the run. run.ts:466 already orders the merge
     // phase this way, with the same reasoning.
     if (stack) await tearDown(stack.stop);
+    // The database copy goes before the siblings it runs among, every cycle,
+    // so a HARD-ERROR's fresh sandbox, the next admission and a preserved
+    // clone all start without it.
+    const copySlot = dbCopySlot;
+    if (copySlot) await tearDown(() => copySlot.align(null), "Failed to drop the database copy: ");
     // Then the sandbox's own siblings, and BEFORE `sandbox.close()` (#44). They
     // are attached to the agent container's network namespace, and podman
     // refuses to remove a container others depend on — so the reverse order
@@ -1650,6 +1700,9 @@ type ExecuteActionCtx = {
   // The cycle's resolved sandbox image, and the admission's writer when on.
   readonly imageName: string;
   readonly scenarioWriter: ScenarioWriterTask | null;
+  // The database copy this action runs beside (#201); only the implementer's
+  // prompt reads it.
+  readonly dbCopy: DbCopyStatus;
 };
 
 // Runner-owned facts about the quality pass in this sandbox cycle (#185,
@@ -2478,6 +2531,7 @@ export async function runImplementer(
       ),
       ...stackFileInput(opts.stackSource),
       egressEnforced: config.egress?.policy.mode === "enforce",
+      ...(ctx.dbCopy.kind === "held" ? { dbCopy: ctx.dbCopy } : {}),
     },
     anchorOpts,
   );

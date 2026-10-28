@@ -23,14 +23,19 @@
 // A superseded base is deleted only after a grace, so a copy that resolved the
 // old path just before the swap finishes first.
 //
-// ONE COPY PER HOLDER, NEVER HANDED ON (decision 8). A copy is dropped at
-// every change of holder and a fresh one made for the next, because the last
-// holder's experiments dirtied it. The one exception is the implementer
-// followed by the implementer (a re-prompt or a nudge round), which keeps it.
+// ONE COPY PER HOLDER, NEVER HANDED ON (decision 8). Who holds the copy is a
+// function of the loop's next action (`dbCopyHolderFor`), kept outside the
+// state machine because it never changes which action comes next. Today only
+// the implementer holds one: quality, gate and the verifier never do, until
+// #180's scenario runner joins the verifier. A copy is dropped at every change
+// of holder and a fresh one made for the next, because the last holder's
+// experiments dirtied it. The one exception is the implementer followed by
+// the implementer (a re-prompt or a nudge round), which keeps it.
 
 import { canonicalSha256 } from "./canonical-json.js";
 import type { DatabaseCopiesSettings, ResolvedStackContainer } from "./config.js";
 import { MIN_DB_VOLUME_FREE_BYTES } from "./disk-space.js";
+import type { LoopAction } from "./inner-loop-machine.js";
 
 // What a rename of the dump changes.
 export type DumpIdentity = {
@@ -198,6 +203,29 @@ export function dbBaseComplaints(input: {
 
 // Who a copy is made for.
 export type DbCopyHolder = "implementer" | "scenario-runner";
+
+// Who holds the copy while `action` runs; null drops it. The verifier is
+// the white-box review alone, the correctness pass, which gets no copy; #180's
+// scenario runner will hold one there.
+export function dbCopyHolderFor(action: LoopAction): DbCopyHolder | null {
+  switch (action.kind) {
+    case "run-implementer":
+      return "implementer";
+    case "run-anchor-condense":
+    case "run-partition-check":
+    case "run-ui-check":
+    case "start-scenario-writer":
+    case "run-quality-list":
+    case "run-quality-fix":
+    case "run-quality-verify":
+    case "run-gate":
+    case "await-scenario-writer":
+    case "run-verifier":
+    case "run-adjudicator":
+    case "terminate":
+      return null;
+  }
+}
 
 // Why a holder proceeds without a copy (decision 10): no base yet, a base
 // built by another server, a low volume, a failed `cp`, or a copy that did

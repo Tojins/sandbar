@@ -276,7 +276,7 @@ describe("createDbCopySlot", () => {
   it("acquires for the implementer, keeps the copy across implementer actions, and drops it at handover", async () => {
     await publish();
     const { slot, ops, events } = slotWith();
-    const held = { kind: "held", holder: "implementer" };
+    const held = { kind: "held", holder: "implementer", container: "db", dumpDate: "2026-10-28", hook: "ok" };
     expect(await slot.align("implementer")).toEqual(held);
     expect(await slot.align("implementer")).toEqual(held);
     expect(await readdir(layout.copies)).toEqual([dbCopyDirName(SCOPE, "221", 1)]);
@@ -305,7 +305,7 @@ describe("createDbCopySlot", () => {
     const { slot, ops } = slotWith({ hooks: 0 });
     await slot.align("implementer");
     expect(await slot.align("scenario-runner")).toEqual({
-      kind: "held", holder: "scenario-runner",
+      kind: "held", holder: "scenario-runner", container: "db", dumpDate: "2026-10-28", hook: "none",
     });
     expect(ops).toEqual([expect.stringMatching(/^in .*-1 /), "out", expect.stringMatching(/^in .*-2 /)]);
   });
@@ -313,7 +313,7 @@ describe("createDbCopySlot", () => {
   it("keeps a copy whose hook failed, and says so", async () => {
     await publish();
     const { slot, events } = slotWith({ hookOk: false });
-    expect(await slot.align("implementer")).toMatchObject({ kind: "held" });
+    expect(await slot.align("implementer")).toMatchObject({ kind: "held", hook: "failed" });
     expect(events).toEqual([expect.objectContaining({ action: "created", hook: "failed" })]);
   });
 

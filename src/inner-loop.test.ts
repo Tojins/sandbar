@@ -35,6 +35,8 @@ const innerLoopMocks = vi.hoisted(() => ({
   revParse: vi.fn(async () => "seed-sha"),
   forkPoint: vi.fn(async () => "fork-sha"),
   createScenarioWriterTask: vi.fn(),
+  createDbCopySlot: vi.fn(),
+  startSandboxStack: vi.fn(),
   isAncestor: vi.fn(async (_cwd: string, _ancestor: string, _descendant: string) => true),
   fetchIssueAnchor: vi.fn(async (): Promise<IssueAnchor> => ({
     text: "Issue #1: Issue",
@@ -108,6 +110,17 @@ vi.mock("./scenario-writer-run.js", async (importOriginal) => ({
   createScenarioWriterTask: innerLoopMocks.createScenarioWriterTask,
 }));
 
+vi.mock("./db-copy.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./db-copy.js")>()),
+  createDbCopySlot: innerLoopMocks.createDbCopySlot,
+}));
+
+vi.mock("./sandbox-stack.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./sandbox-stack.js")>()),
+  startSandboxStack: innerLoopMocks.startSandboxStack,
+  prepareSandboxLogDir: async () => undefined,
+}));
+
 vi.mock("./issue-anchor.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./issue-anchor.js")>()),
   fetchIssueAnchor: innerLoopMocks.fetchIssueAnchor,
@@ -178,7 +191,13 @@ import { combineVerifier } from "./verifier.js";
 import { parsePromise } from "./promise-parser.js";
 import { loadTemplate } from "./prompts.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
-import type { SandboxGateAttachments } from "./config.js";
+import {
+  type SandboxGateAttachments,
+  resolveDatabaseCopies,
+  resolveGateStack,
+} from "./config.js";
+import type { DbCopies, DbCopyStatus } from "./db-copy.js";
+import type { DbCopyHolder } from "./db-copy-policy.js";
 import {
   containerResourcesOf,
   type ContainerResources,
@@ -941,6 +960,7 @@ describe("silent implementer attempt policy (#116)", () => {
       quality,
       sandboxStatuses: [],
       invocationSequence: createAgentInvocationSequencer().startCycle(),
+      dbCopy: { kind: "none" },
     } as unknown as Parameters<typeof runImplementer>[1];
     const pending = runImplementer(
       {
@@ -2868,6 +2888,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         writeIssueSnapshot: vi.fn(async () => "issue-snapshot-1.json"),
       },
       gateSemaphore: createGateSemaphore(undefined),
+      dbCopies: null,
       onEvent: (event: EventInput) => events.push(event),
     } as unknown as Parameters<typeof runInnerLoop>[1];
     return { sandbox, stack, opts, events };
@@ -2977,6 +2998,155 @@ describe("runInnerLoop context terminals (#158)", () => {
       });
       expect(started.length).toBeGreaterThan(0);
       for (const p of started) expect(p.stop).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("with database copies (#201)", () => {
+    const dbStack = resolveGateStack({
+      containers: [
+        {
+          name: "db",
+          image: "docker.io/library/mariadb:10.11",
+          inSandbox: true,
+          readiness: { kind: "healthcheck", command: ["healthcheck.sh", "--connect"] },
+        },
+        { name: "runner", image: "localhost/runner", mountWorktree: "/w", hold: true },
+      ],
+      steps: [{ name: "s", in: "runner", command: ["true"] }],
+    });
+    const dbCopies = {
+      cfg: resolveDatabaseCopies({ dump: "/d", root: "/r", container: "db", database: "app" })!,
+      acquire: vi.fn(),
+    } satisfies DbCopies;
+    const held: DbCopyStatus = {
+      kind: "held", holder: "implementer", container: "db", dumpDate: "2026-10-28", hook: "ok",
+    };
+
+    // The harness with the target sibling up beside the agent, and a fake
+    // slot whose answer to the implementer is `implementerCopy`. `calls`
+    // interleaves the slot's aligns with the sandbox lifecycle.
+    const copiesHarness = (
+      run: Sandbox["run"],
+      implementerCopy: DbCopyStatus = held,
+    ) => {
+      const calls: string[] = [];
+      const built = harness(run);
+      const sandbox = built.sandbox;
+      sandbox.close = vi.fn(async () => { calls.push("close sandbox"); });
+      innerLoopMocks.createSandbox.mockImplementation(async (options: {
+        beforeSandboxReady?: (name: string) => Promise<void>;
+      }) => {
+        calls.push("create sandbox");
+        await options.beforeSandboxReady?.("anchor");
+        return sandbox;
+      });
+      innerLoopMocks.startSandboxStack.mockReset().mockImplementation(async () => ({
+        statuses: [],
+        swapDbCopyIn: vi.fn(),
+        swapDbCopyOut: vi.fn(),
+        stop: vi.fn(async () => { calls.push("stop siblings"); }),
+      }));
+      innerLoopMocks.createDbCopySlot.mockReset().mockImplementation(() => ({
+        align: vi.fn(async (desired: DbCopyHolder | null) => {
+          calls.push(`align ${desired}`);
+          return desired === "implementer" ? implementerCopy : { kind: "none" };
+        }),
+      }));
+      const opts = {
+        ...built.opts,
+        dbCopies,
+        stackSource: {
+          path: null,
+          forHead: async () => ({
+            stack: dbStack,
+            attachments: { env: {}, mounts: [] },
+            classification: { kind: "same" },
+            tipBlob: null,
+          }),
+        },
+      } as unknown as Parameters<typeof runInnerLoop>[1];
+      return { ...built, opts, calls };
+    };
+
+    it("holds a copy for each implementer round only, and drops it before the siblings stop", async () => {
+      const { sandbox, opts, calls } = copiesHarness(async (options) => {
+        const name = options.name ?? "";
+        if (name === "implementer-158-attempt-1") return completeRun;
+        if (name === "implementer-158-attempt-2") {
+          return { ...completeRun, stdout: "<promise>NEEDS-INFO</promise><questions>stop</questions>", commits: [] };
+        }
+        if (name.startsWith("quality-")) return approvedReview;
+        if (name.startsWith("reviewer-")) {
+          return { ...approvedReview, stdout: "finding\n<verdict>CHANGES-REQUESTED</verdict>" };
+        }
+        throw new Error(`unexpected agent invocation ${name}`);
+      });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
+      expect(vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name)).toEqual([
+        "implementer-158-attempt-1",
+        "quality-list-158-attempt-1",
+        "reviewer-158-round-1",
+        "implementer-158-attempt-2",
+      ]);
+      // anchor, implementer, quality list, gate, verifier, implementer; then
+      // the teardown's drop.
+      expect(calls).toEqual([
+        "create sandbox",
+        "align null",
+        "align implementer",
+        "align null",
+        "align null",
+        "align null",
+        "align implementer",
+        "align null",
+        "stop siblings",
+        "close sandbox",
+      ]);
+      expect(innerLoopMocks.createDbCopySlot).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        copies: dbCopies,
+        target: expect.objectContaining({ name: "db", inSandbox: true }),
+        hooks: [],
+        issue,
+      }));
+      const prompts = innerLoopMocks.buildPrompt.mock.calls as unknown as [{ dbCopy?: unknown }][];
+      expect(prompts.map(([inputs]) => inputs.dbCopy)).toEqual([held, held]);
+    });
+
+    it("drops the copy before a HARD-ERROR's fresh sandbox comes up", async () => {
+      let cycle = 0;
+      const { opts, calls } = copiesHarness(async (options) => {
+        const name = options.name ?? "";
+        if (name.startsWith("implementer-") && cycle++ === 0) throw new Error("podman socket refused");
+        if (name.startsWith("implementer-")) {
+          return { ...completeRun, stdout: "<promise>NEEDS-INFO</promise><questions>stop</questions>", commits: [] };
+        }
+        throw new Error(`unexpected agent invocation ${name}`);
+      });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
+      const fresh = calls.indexOf("create sandbox", 1);
+      expect(calls.slice(0, fresh + 1)).toEqual([
+        "create sandbox",
+        "align null",
+        "align implementer",
+        "align null",
+        "stop siblings",
+        "close sandbox",
+        "create sandbox",
+      ]);
+    });
+
+    it("renders no copy slot when the copy is unavailable", async () => {
+      const { opts } = copiesHarness(
+        async () => ({ ...completeRun, stdout: "<promise>NEEDS-INFO</promise><questions>stop</questions>", commits: [] }),
+        { kind: "unavailable", reason: "no-base" },
+      );
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
+      const prompts = innerLoopMocks.buildPrompt.mock.calls as unknown as [Record<string, unknown>][];
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]![0]).not.toHaveProperty("dbCopy");
     });
   });
 

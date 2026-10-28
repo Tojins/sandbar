@@ -145,7 +145,8 @@
 // import's outcome (#201, `db-base.ts`): each new attempt is a `db-base`
 // event, and a missing or stale dump or a failed import is a complaint once
 // per run. The import itself runs beside the daemon, never in it. The
-// run's own copies of that base (`db-copy.ts`) are swept at startup, after
+// run's own copies of that base (`db-copy.ts`) come from one registry every
+// inner loop shares, one copy per issue; they are swept at startup, after
 // the orphan containers, and again at each quiescent sweep.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
@@ -248,7 +249,7 @@ import {
   podmanGraphRoot,
 } from "./disk-space.js";
 import { createDbBaseWatch } from "./db-base.js";
-import { sweepDbCopies } from "./db-copy.js";
+import { createDbCopies, sweepDbCopies } from "./db-copy.js";
 import { createDeployWatcher, realDeployWatchAdapter } from "./deploy-watch.js";
 import {
   SandbarError,
@@ -1320,6 +1321,11 @@ export async function run(
       await runRecord.emit({ kind: "sweep", scope: sweepScope, ...copies });
     }
   };
+  // The run's database copies (#201), one per issue at a time; the inner
+  // loop aligns each sandbox's slot of them before every action.
+  const dbCopies = config.databaseCopies === null
+    ? null
+    : createDbCopies({ cfg: config.databaseCopies, scope });
   // The egress proxy image this driver builds (#202): live whether or not this
   // installation runs proxies, exactly as the tools pins are.
   let egressImageTag!: string;
@@ -2729,6 +2735,7 @@ export async function run(
               sandboxLogBaseDir: issueLogger.dir,
               attemptLogger: issueLogger,
               gateSemaphore,
+              dbCopies,
               onEvent: (event) => runRecord.emit(event).then(() => undefined),
               providerState,
             });

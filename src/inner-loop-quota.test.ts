@@ -126,11 +126,12 @@ const issue = (id: string): PlannedIssue => ({
 
 const runInnerLoop = (
   plannedIssue: PlannedIssue,
-  opts: Omit<InnerLoopOptions, "attemptLogger" | "gateSemaphore">,
+  opts: Omit<InnerLoopOptions, "attemptLogger" | "gateSemaphore" | "dbCopies">,
 ) => {
   const invocationSequencer = createAgentInvocationSequencer();
   return runInnerLoopActual(plannedIssue, {
     ...opts,
+    dbCopies: null,
     attemptLogger: {
       writeInvocation: vi.fn(),
       writeGate: vi.fn(),
