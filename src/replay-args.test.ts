@@ -20,8 +20,14 @@ describe("parseReplayArgs (#195)", () => {
       .toEqual({ verb: "run", config: "k.mjs", cases: "c", label: "x", repeat: 3, parallel: 2 });
   });
 
+  it("parses report, its session directories in order", () => {
+    expect(parseReplayArgs(["report", "s/base", "s/cand"])).toEqual({ verb: "report", sessions: ["s/base", "s/cand"], json: false });
+    expect(parseReplayArgs(["report", "--json", "s/base"])).toEqual({ verb: "report", sessions: ["s/base"], json: true });
+  });
+
   it.each<[string, string[], string]>([
     ["no verb", [], "unknown verb (none)"],
+    ["report without a session", ["report", "--json"], "report needs at least one session directory"],
     ["an unknown verb", ["all"], "unknown verb all"],
     ["freeze without --issues", ["freeze", "--logs", "l", "--out", "o"], "freeze needs --issues, --logs and --out"],
     ["freeze without --logs", ["freeze", "--issues", "1", "--out", "o"], "freeze needs --issues, --logs and --out"],
@@ -45,6 +51,7 @@ describe("parseReplayArgs (#195)", () => {
     ["an unknown flag", ["run", "--cases", "c", "--label", "x", "--all"]],
     ["a flag of the other verb", ["freeze", "--issues", "1", "--logs", "l", "--out", "o", "--label", "x"]],
     ["a positional", ["run", "--cases", "c", "--label", "x", "extra"]],
+    ["a --config on report", ["report", "s", "--config", "k.mjs"]],
   ])("refuses %s with parseArgs' own message", (_, argv) => {
     expect(parseReplayArgs(argv)).toEqual({ error: expect.any(String) });
   });

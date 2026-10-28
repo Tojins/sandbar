@@ -30,7 +30,12 @@ import { join } from "node:path";
 import { isErrno } from "./errors.js";
 import { EventRecordReadError, parseEventLines, type RunEvent } from "./events.js";
 
-export type StatsWindow = { readonly last: number } | { readonly since: string };
+// `runs` names run directories outright: replay's report reads one run at a
+// time (#195), and no flag of the scorecard's names it.
+export type StatsWindow =
+  | { readonly last: number }
+  | { readonly since: string }
+  | { readonly runs: readonly string[] };
 
 export const DEFAULT_STATS_WINDOW: StatsWindow = { last: 10 };
 
@@ -157,6 +162,7 @@ export function selectRuns(
   window: StatsWindow,
 ): readonly string[] {
   const runs = dirNames.filter((name) => name.startsWith("run-")).sort();
+  if ("runs" in window) return runs.filter((name) => window.runs.includes(name));
   return "last" in window
     ? runs.slice(Math.max(0, runs.length - window.last))
     : runs.filter((name) => name.slice("run-".length) >= window.since);

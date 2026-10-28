@@ -17,9 +17,31 @@
 // session spreads across cases instead of landing on the last one. A case not
 // run — because a quota or credential stop closed the session — says why, and
 // a repeat whose record never started has no `run`.
+//
+// A REPORT lays each case out in columns: the original run, then one per
+// session in the order given. `compareReplay` reduces each column's runs —
+// a session's results, each with its own run's `StatsReport` (#194), and the
+// original's one record — into a `Spread` per metric, whose `of` is the
+// column's runs and `n` those measured: absent never counts as 0 (#82), and a
+// not-run result is a run with nothing measured. A session's outcome, gate and
+// diff are its manifest's; the original's are its record's last terminal and
+// gate-1 and the case's landed diff. Rounds and tokens are the issue's rollup,
+// context depth its invocation rows: `first` the role's earliest
+// `firstContext`, `peak` its largest `peakContext`.
 
 import { type IssueComment, type IssueJson, issueJsonErrors } from "./issue-anchor.js";
 import type { Terminal } from "./inner-loop.js";
+import {
+  type Cell,
+  type InvocationRow,
+  type IssueRollup,
+  type Outcome,
+  type Role,
+  type StatsReport,
+  ROLES,
+  agg,
+  table,
+} from "./stats.js";
 
 export type DiffSize = {
   readonly files: number;
@@ -275,6 +297,9 @@ export function parseNumstat(numstat: string): DiffSize {
   return { files: rows.length, insertions: lines(0), deletions: lines(1) };
 }
 
+const describeRouting = (r: RoleRouting): string =>
+  `${r.agent} ${r.model}${r.effort === null ? "" : ` (effort ${r.effort})`}`;
+
 // What `replay run` prints before it starts: the size of the spend, who each
 // role runs on, and that the quota is shared.
 export function renderReplayPlan(args: {
@@ -289,7 +314,224 @@ export function renderReplayPlan(args: {
     `replay ${args.label}: ${args.cases} cases × ${args.repeats} = ` +
       `${args.cases * args.repeats} runs, ${args.parallel} at a time`,
     ...Object.entries(args.routing).map(([role, r]) =>
-      `  ${role.padEnd(width)}  ${r.agent} ${r.model}${r.effort === null ? "" : ` (effort ${r.effort})`}`),
+      `  ${role.padEnd(width)}  ${describeRouting(r)}`),
     "Every run spends real tokens from the same model quota as any sandbar daemon on this account.",
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// report
+// ---------------------------------------------------------------------------
+
+export type Spread = {
+  readonly of: number;
+  readonly n: number;
+  readonly min: number | null;
+  readonly median: number | null;
+  readonly max: number | null;
+};
+
+export function spread(values: readonly (number | null)[]): Spread {
+  const { of, n, median, max } = agg(values);
+  const measured = values.filter((value): value is number => value !== null);
+  return { of, n, min: n === 0 ? null : Math.min(...measured), median, max };
+}
+
+export type ReplayOutcome = Outcome | "not-run";
+
+export type RoleSpread = {
+  readonly input: Spread;
+  readonly cached: Spread;
+  readonly output: Spread;
+  readonly firstContext: Spread;
+  readonly peakContext: Spread;
+};
+
+export type ReplayColumn = {
+  // `original`, or the session's label.
+  readonly label: string;
+  readonly runs: number;
+  // A run whose record holds no cycle of the issue has no outcome.
+  readonly outcomes: Readonly<Partial<Record<ReplayOutcome, number>>>;
+  readonly attempts: Spread;
+  readonly rounds: { readonly gate: Spread; readonly quality: Spread; readonly review: Spread };
+  // The roles that ran in any of the column's runs.
+  readonly roles: Readonly<Partial<Record<Role, RoleSpread>>>;
+  // The last gate-1 per run; unknown where none ran.
+  readonly gate: { readonly green: number; readonly red: number; readonly unknown: number };
+  readonly diff: { readonly files: Spread; readonly insertions: Spread; readonly deletions: Spread };
+};
+
+export type ReplayCaseReport = {
+  readonly issue: number;
+  readonly title: string;
+  readonly columns: readonly ReplayColumn[];
+};
+
+export type ReplayReport = {
+  readonly replayReport: 1;
+  readonly sessions: readonly Omit<ReplaySession, "results">[];
+  readonly cases: readonly ReplayCaseReport[];
+};
+
+export type SessionRecords = {
+  readonly session: ReplaySession;
+  // Each run's report, by the run its results name.
+  readonly runs: ReadonlyMap<string, StatsReport>;
+};
+
+// One run of a case, as its column reads it.
+type Sample = {
+  readonly outcome: ReplayOutcome | null;
+  readonly rollup: IssueRollup | null;
+  readonly invocations: readonly InvocationRow[];
+  readonly gateOk: boolean | null;
+  readonly diff: DiffSize | null;
+};
+
+const NOT_RUN: Sample = { outcome: "not-run", rollup: null, invocations: [], gateOk: null, diff: null };
+
+const recordOf = (report: StatsReport | undefined, issue: number): Pick<Sample, "rollup" | "invocations"> => ({
+  rollup: report?.issues.find((rollup) => rollup.issue === issue) ?? null,
+  invocations: report?.invocations.filter((row) => row.issue === issue) ?? [],
+});
+
+function originalSample(c: ReplayCase, report: StatsReport | undefined): Sample {
+  const record = recordOf(report, c.issue);
+  return {
+    ...record,
+    outcome: record.rollup?.outcome ?? null,
+    gateOk: report?.gates.filter((gate) => gate.issue === c.issue && gate.gate === "gate-1").at(-1)?.ok ?? null,
+    diff: c.landed?.diff ?? null,
+  };
+}
+
+const sessionSample = (result: ReplayResult, runs: SessionRecords["runs"]): Sample =>
+  result.status === "not-run" ? NOT_RUN : {
+    ...recordOf(result.run === null ? undefined : runs.get(result.run), result.issue),
+    outcome: result.terminal,
+    gateOk: result.lastGateOk,
+    diff: result.diff,
+  };
+
+const spreadOf = (samples: readonly Sample[], value: (sample: Sample) => number | null | undefined): Spread =>
+  spread(samples.map((sample) => value(sample) ?? null));
+
+function roleSpread(samples: readonly Sample[], role: Role): RoleSpread {
+  const tokens = (sample: Sample) => sample.rollup?.tokensByRole[role];
+  const rows = (sample: Sample) => sample.invocations.filter((row) => row.role === role);
+  return {
+    input: spreadOf(samples, (sample) => tokens(sample)?.input),
+    cached: spreadOf(samples, (sample) => tokens(sample)?.cached),
+    output: spreadOf(samples, (sample) => tokens(sample)?.output),
+    firstContext: spreadOf(samples, (sample) => rows(sample)[0]?.firstContext),
+    peakContext: spreadOf(samples, (sample) => agg(rows(sample).map((row) => row.peakContext)).max),
+  };
+}
+
+function column(label: string, samples: readonly Sample[]): ReplayColumn {
+  const outcomes: Partial<Record<ReplayOutcome, number>> = {};
+  for (const { outcome } of samples) if (outcome !== null) outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
+  const ran = (role: Role): boolean => samples.some((sample) =>
+    sample.rollup?.tokensByRole[role] !== undefined || sample.invocations.some((row) => row.role === role));
+  const gates = (ok: boolean | null): number => samples.filter((sample) => sample.gateOk === ok).length;
+  return {
+    label,
+    runs: samples.length,
+    outcomes,
+    attempts: spreadOf(samples, (sample) => sample.rollup?.attempts),
+    rounds: {
+      gate: spreadOf(samples, (sample) => sample.rollup?.rounds.gate),
+      quality: spreadOf(samples, (sample) => sample.rollup?.rounds.quality),
+      review: spreadOf(samples, (sample) => sample.rollup?.rounds.review),
+    },
+    roles: Object.fromEntries(ROLES.filter(ran).map((role) => [role, roleSpread(samples, role)])),
+    gate: { green: gates(true), red: gates(false), unknown: gates(null) },
+    diff: {
+      files: spreadOf(samples, (sample) => sample.diff?.files),
+      insertions: spreadOf(samples, (sample) => sample.diff?.insertions),
+      deletions: spreadOf(samples, (sample) => sample.diff?.deletions),
+    },
+  };
+}
+
+// Every case, with the original's column and then one per session.
+export function compareReplay(args: {
+  readonly cases: readonly ReplayCase[];
+  // The original run's report by issue, for each case that has one.
+  readonly originals: ReadonlyMap<number, StatsReport>;
+  readonly sessions: readonly SessionRecords[];
+}): ReplayReport {
+  return {
+    replayReport: 1,
+    sessions: args.sessions.map(({ session: { results: _, ...session } }) => session),
+    cases: args.cases.map((c) => ({
+      issue: c.issue,
+      title: c.title,
+      columns: [
+        column("original", c.original === null ? [] : [originalSample(c, args.originals.get(c.issue))]),
+        ...args.sessions.map(({ session, runs }) => column(
+          session.label,
+          session.results.filter((result) => result.issue === c.issue).map((result) => sessionSample(result, runs)),
+        )),
+      ],
+    })),
+  };
+}
+
+// The median, the range when the runs differ, and `n/of` when some runs went
+// unmeasured.
+function spreadCell(value: Spread): string | null {
+  if (value.n === 0) return null;
+  const range = value.min === value.max ? "" : ` [${value.min}..${value.max}]`;
+  return `${value.median}${range}${value.n < value.of ? ` (${value.n}/${value.of})` : ""}`;
+}
+
+const countsCell = (counts: Readonly<Record<string, number | undefined>>): string | null =>
+  Object.entries(counts).filter(([, n]) => n !== undefined && n > 0).map(([key, n]) => `${key} ${n}`).join(", ") || null;
+
+const ROLE_METRICS = ["input", "cached", "output", "firstContext", "peakContext"] as const;
+
+function caseTable(c: ReplayCaseReport): string {
+  const { columns } = c;
+  const row = (metric: string, cell: (column: ReplayColumn) => Cell): readonly Cell[] =>
+    [metric, ...columns.map(cell)];
+  const roles = ROLES.filter((role) => columns.some((col) => col.roles[role] !== undefined));
+  return table(`#${c.issue} ${c.title}`, ["metric", ...columns.map((col) => col.label)], [
+    row("runs", (col) => col.runs),
+    row("outcomes", (col) => countsCell(col.outcomes)),
+    row("attempts", (col) => spreadCell(col.attempts)),
+    row("gate rounds", (col) => spreadCell(col.rounds.gate)),
+    row("quality rounds", (col) => spreadCell(col.rounds.quality)),
+    row("review rounds", (col) => spreadCell(col.rounds.review)),
+    row("gate-1 on head", (col) => countsCell(col.gate)),
+    row("diff files", (col) => spreadCell(col.diff.files)),
+    row("diff insertions", (col) => spreadCell(col.diff.insertions)),
+    row("diff deletions", (col) => spreadCell(col.diff.deletions)),
+    ...roles.flatMap((role) => ROLE_METRICS.map((metric) => row(`${role} ${metric}`, (col) => {
+      const spreads = col.roles[role];
+      return spreads === undefined ? null : spreadCell(spreads[metric]);
+    }))),
+  ]);
+}
+
+export function renderReplayReport(report: ReplayReport): string {
+  const { sessions } = report;
+  const roles = [...new Set(sessions.flatMap((session) => Object.keys(session.routing)))];
+  return [
+    `# Replay: ${["original", ...sessions.map((session) => session.label)].join(" / ")}`,
+    "",
+    table("Sessions", ["session", "driver", "repeats", "parallel", "quality", "gate", "review", "cases sha256"],
+      sessions.map((session) => [
+        session.label, session.driver, session.repeats, session.parallel,
+        session.budgets.maxQualityRounds, session.budgets.maxGateRounds, session.budgets.maxReviewRounds,
+        session.casesSha256.slice(0, 12),
+      ])),
+    table("Routing", ["role", ...sessions.map((session) => session.label)],
+      roles.map((role) => [role, ...sessions.map((session) => {
+        const routing = session.routing[role];
+        return routing === undefined ? null : describeRouting(routing);
+      })])),
+    ...report.cases.map(caseTable),
   ].join("\n");
 }

@@ -7,13 +7,17 @@
 //
 //   freeze --issues 317,412 --logs <dir> --out <file> [--config <path>]
 //   run --cases <file> --label <name> [--repeat k] [--parallel P] [--config <path>]
+//   report <sessionDir>… [--json]
 //
 // `freeze` spends no tokens: it writes the case file (`replay.ts`) create-only
 // from the run records under `--logs` and from git and GitHub. `run` prints
 // its plan and starts, with no confirmation, into a new session
 // `<workDir>/replay/sessions/<label>/` (`replay-run.ts`). `--repeat` and
 // `--parallel` default to 1; `--parallel` is capped at `maxParallelIssues`.
-// `--config` defaults to `./sandbar.config.mjs`, loaded as `sandbar` loads it.
+// `report` spends no tokens and loads no config: it prints each case's
+// original run beside every session named, in that order, as tables or with
+// `--json` the `ReplayReport`. `--config` defaults to `./sandbar.config.mjs`,
+// loaded as `sandbar` loads it.
 // Through npm the flags follow `--`.
 //
 // Exit 0 ok, 1 refused or failed, 2 bad args, 3 stopped by a quota or
@@ -26,9 +30,15 @@ import { resolveConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import { LockHeldError } from "./lock.js";
 import { USAGE, type ReplayArgs, parseReplayArgs } from "./replay-args.js";
-import { freeze, runReplay } from "./replay-run.js";
+import { renderReplayReport } from "./replay.js";
+import { freeze, report, runReplay } from "./replay-run.js";
 
 async function replay(args: ReplayArgs): Promise<number> {
+  if (args.verb === "report") {
+    const replayReport = await report(args.sessions.map((dir) => resolve(dir)));
+    process.stdout.write(args.json ? `${JSON.stringify(replayReport, null, 2)}\n` : renderReplayReport(replayReport));
+    return 0;
+  }
   const configPath = resolve(args.config);
   const config = resolveConfig(withDefaultCwd(await loadConfig(configPath), configPath));
   const log = (line: string): void => console.error(line);

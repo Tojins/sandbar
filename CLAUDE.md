@@ -40,7 +40,9 @@ turn them into proposals, and writes the report (`reflect-report.ts`) under
 `npm run replay` (`src/replay-cli.ts`, args in `replay-args.ts`, #195) is a third, and HUMAN-ONLY: `freeze`
 writes a case file of past issues at their seeds, `run` drives
 `runInnerLoop` over it k times into `<workDir>/replay/sessions/<label>/` with
-no forge credential (`replay-run.ts`; pure layer `replay.ts`); the daemon,
+no forge credential (`replay-run.ts`; pure layer `replay.ts`), and `report`
+sets each case's original run beside the sessions as spreads
+(`compareReplay`, every run read through `computeStats`); the daemon,
 `cli.ts`, `index.ts`, prompts and reflect never import or name it.
 `scripts/stats-classify.mjs` (#209) classes the `--json --with-prose` report's
 quality findings and fixer commits for #183; plain ESM, not shipped.
