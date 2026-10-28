@@ -37,6 +37,9 @@
 // (#188): the work its branch already carries beyond the seed, so a retry or a
 // resumed branch is not told it made no commits.
 //
+// `revParse` is exported for the inner loop's `admitted.seedSha` (#195): the
+// commit the symbolic seed ref named when the issue was admitted.
+//
 // `hasNonMergeCommitOutside` is the shared safety test for retiring issue
 // branches (#177, #179). Chunk wrap-up applies it to origin's freshly fetched
 // copy; preflight applies it to a CLOSED issue's cache copy. Keeping the git
@@ -283,7 +286,7 @@ const revParseOrNull = async (cwd: string, ref: string): Promise<string | null> 
 const errorMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
-const revParse = async (cwd: string, ref: string): Promise<string> =>
+export const revParse = async (cwd: string, ref: string): Promise<string> =>
   (await exec("git", ["rev-parse", "--verify", "--quiet", ref], { cwd })).stdout.trim();
 
 const isAncestor = async (

@@ -34,6 +34,12 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   })),
   branchCommitsSinceSeed: seams.branchCommitsSinceSeed,
   ensureIssueBranch: seams.ensureIssueBranch,
+  revParse: vi.fn(async () => "seed-sha"),
+}));
+
+vi.mock("./issue-anchor.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./issue-anchor.js")>(),
+  fetchIssueSnapshot: vi.fn(async () => ({ title: "Issue", body: "", comments: [] })),
 }));
 
 vi.mock("./agent-sandbox.js", async (importOriginal) => {
@@ -121,6 +127,7 @@ const runInnerLoop = (
     attemptLogger: {
       writeInvocation: vi.fn(),
       writeGate: vi.fn(),
+      writeIssueSnapshot: vi.fn(async () => "issue-snapshot-1.json"),
       startInvocationCycle: () => invocationSequencer.startCycle(),
     },
     gateSemaphore: createGateSemaphore(undefined),

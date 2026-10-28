@@ -106,6 +106,10 @@
 // sequence beside the directory whose names it allocates, and every gate-1
 // result — green as well as red — is filed from it as that attempt's
 // `attempt-<n>-gate.log` (#153).
+// The first `admitted` of a loop carries the seed's sha and the name of the
+// issue snapshot this wrapper files before forwarding it (#195), so the
+// admission can be replayed; a fetch failure throws as the anchor's would, and
+// a HARD-ERROR retry, whose `admitted` is dropped, files no second snapshot.
 // Sandbox close defers clone reclamation silently to run.ts's next origin-lease
 // barrier; this is distinct from the human-inspection preservation channel and
 // therefore cannot overwrite or manufacture an operator-facing reason (#139).
@@ -183,6 +187,7 @@ import {
   fastForwardOffBranchHead,
   headMismatch,
   settleQualityResidue,
+  revParse,
   symbolicHeadRef,
 } from "./git-ops.js";
 import {
@@ -199,6 +204,7 @@ import {
   step,
   visiblePhases,
 } from "./inner-loop-machine.js";
+import { fetchIssueSnapshot } from "./issue-anchor.js";
 import type { AgentInvocationSequence, AttemptLogger } from "./logs.js";
 import { type RunScope, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
@@ -682,7 +688,12 @@ export async function runInnerLoop(
     onEvent: async (event) => {
       if (event.kind === "admitted") {
         if (admitted) return;
+        const issueSnapshot = await opts.attemptLogger.writeIssueSnapshot(
+          await fetchIssueSnapshot(issue.id, opts.config.repo),
+        );
+        await opts.onEvent({ ...event, issueSnapshot });
         admitted = true;
+        return;
       }
       if (
         event.kind === "partition-check" &&
@@ -861,6 +872,7 @@ async function runSandboxCycle(
       branch: issue.branch,
       chunk: issue.chunk?.branch ?? null,
       seedRef: base.ref,
+      seedSha: await revParse(config.layout.repoDir, base.ref),
     });
     // What origin's copy of the branch had to say (#112): a fast-forward, a
     // resume from origin, unpushed work kept, abandonment, or an origin that

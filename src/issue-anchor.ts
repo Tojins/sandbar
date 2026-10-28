@@ -12,6 +12,9 @@
 // posts through the same operator account the human uses. Quoted or inline
 // occurrences stay human-authored because they do not start the trimmed body.
 //
+// That boundary is exported as `fetchIssueSnapshot` so the inner loop can file
+// the issue as it stood at admission beside the run's logs (#195).
+//
 // Fetch/parse failures THROW (SandbarError): a missing anchor must halt loudly
 // rather than degrade into a placeholder string the agent ignores.
 
@@ -75,7 +78,7 @@ export function renderIssueText(issueId: string, issue: IssueJson): string {
 // (the prompt-layer call site omitted the optional `cwd` #34 added), then the
 // cache's `origin`. `config.ghOwner`/`config.ghRepo` are required fields, so
 // naming them is one answer that no directory can contradict.
-async function fetchIssueJson(
+export async function fetchIssueSnapshot(
   issueId: string,
   repo: RepoRef,
 ): Promise<IssueJson> {
@@ -118,7 +121,7 @@ export async function fetchIssueData(
   issueId: string,
   repo: RepoRef,
 ): Promise<IssueData> {
-  const issue = await fetchIssueJson(issueId, repo);
+  const issue = await fetchIssueSnapshot(issueId, repo);
   return {
     title: issue.title ?? "(no title)",
     body: issue.body ?? "",
@@ -129,5 +132,5 @@ export async function fetchIssueText(
   issueId: string,
   repo: RepoRef,
 ): Promise<string> {
-  return renderIssueText(issueId, await fetchIssueJson(issueId, repo));
+  return renderIssueText(issueId, await fetchIssueSnapshot(issueId, repo));
 }

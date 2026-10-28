@@ -133,6 +133,24 @@ describe("raw transcript tree", () => {
     })).rejects.toMatchObject({ code: "EEXIST" });
   });
 
+  it("files each admission's issue snapshot create-only, in its own sequence (#195)", async () => {
+    const tree = await makeRun();
+    const issue = await tree.issue("195");
+    const first = { title: "Replay", body: "as admitted", comments: [] };
+    await expect(issue.writeIssueSnapshot(first)).resolves.toBe("issue-snapshot-1.json");
+    await expect((await tree.issue("195")).writeIssueSnapshot({ title: "Replay", body: "edited" }))
+      .resolves.toBe("issue-snapshot-2.json");
+    expect(JSON.parse(await readFile(join(issue.dir, "issue-snapshot-1.json"), "utf8")))
+      .toEqual(first);
+
+    // A logger that lost the sequence must fail rather than erase the record.
+    const restarted = await (await createTranscriptTree(tree.runDir)).issue("195");
+    await expect(restarted.writeIssueSnapshot({ title: "replacement" }))
+      .rejects.toMatchObject({ code: "EEXIST" });
+    expect(JSON.parse(await readFile(join(issue.dir, "issue-snapshot-1.json"), "utf8")))
+      .toEqual(first);
+  });
+
   it("keeps merger and resolve transcripts as raw artefacts", async () => {
     const tree = await makeRun();
     const landing = tree.landing(1);
