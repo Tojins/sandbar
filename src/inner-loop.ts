@@ -584,6 +584,13 @@ class PartitionRequiredError extends Error {
   }
 }
 
+// A run that ended without an answer, for a role that may go on without one;
+// anything else is the host's.
+export const endedWithoutAnswer = (err: unknown): boolean =>
+  err instanceof AgentError || err instanceof AgentIdleTimeoutError ||
+  err instanceof AgentQuotaError || err instanceof AgentCredentialError ||
+  err instanceof AgentInputTooLargeError;
+
 // What a pre-attempt role's failed invocation records as its result.
 export const agentFailureResult = (
   err: unknown,
@@ -1736,10 +1743,7 @@ export async function runAnchorCondense(
       ...invocationLog(opts.attemptLogger, transcript),
     }));
   } catch (err) {
-    // A run that ended without an answer; anything else is the host's.
-    if (!(err instanceof AgentError || err instanceof AgentIdleTimeoutError ||
-      err instanceof AgentQuotaError || err instanceof AgentCredentialError ||
-      err instanceof AgentInputTooLargeError)) throw err;
+    if (!endedWithoutAnswer(err)) throw err;
     failure = err;
   }
   const wrote = await enforceReadOnlyAgentSnapshot(

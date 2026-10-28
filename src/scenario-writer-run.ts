@@ -31,10 +31,6 @@
 
 import { buildAgentProvider } from "./agent-providers.js";
 import {
-  AgentCredentialError,
-  AgentError,
-  AgentIdleTimeoutError,
-  AgentInputTooLargeError,
   AgentQuotaError,
   type SeedSnapshotSandbox,
   agentPartialContainerResources,
@@ -54,6 +50,7 @@ import {
   type IssueRef,
   agentFailureResult,
   agentSandboxNotice,
+  endedWithoutAnswer,
   issueAnchorOptionsOf,
   runWithProviderState,
 } from "./inner-loop.js";
@@ -102,11 +99,8 @@ type Settlement =
   | { readonly outcome: ScenarioWriterOutcome }
   | { readonly error: unknown };
 
-// A run that ended without an answer; anything else is the host's.
-const isHarnessFailure = (err: unknown): boolean =>
-  err instanceof AgentError || err instanceof AgentIdleTimeoutError ||
-  err instanceof AgentQuotaError || err instanceof AgentCredentialError ||
-  err instanceof AgentInputTooLargeError;
+const SNAPSHOT_KEPT =
+  "the scenario writer changed its read-only seed snapshot; kept for human inspection";
 
 const errorText = (err: unknown): string => err instanceof Error ? err.message : String(err);
 
@@ -144,6 +138,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
 
   // An invocation that threw: aborted, a harness failure, or the host's.
   const ranAndThrew = async (
+    open: SeedSnapshotSandbox,
     invocation: number,
     transcript: string,
     err: unknown,
@@ -165,23 +160,21 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
       await record(invocation, "aborted", fields);
       return failed("aborted: the admission ended before the join");
     }
-    if (!isHarnessFailure(err)) throw err;
-    const wrote = await snapshotWrote(invocation, fields);
+    if (!endedWithoutAnswer(err)) throw err;
+    const wrote = await snapshotWrote(open, invocation, fields);
     if (wrote !== null) return wrote;
     await record(invocation, agentFailureResult(err), fields);
     return failed(errorText(err));
   };
 
   // A run may not have changed the snapshot, whatever else it did.
-  let preserve: string | undefined;
   const snapshotWrote = async (
+    open: SeedSnapshotSandbox,
     invocation: number,
     fields: Fields,
   ): Promise<ScenarioWriterOutcome | null> => {
-    const open = requireSandbox();
     const changed = await open.changed();
     if (changed === null) return null;
-    preserve = "the scenario writer changed its read-only seed snapshot; kept for human inspection";
     await record(invocation, "wrote", fields);
     return {
       kind: "wrote",
@@ -189,13 +182,10 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
     };
   };
 
-  const requireSandbox = (): SeedSnapshotSandbox => {
-    if (sandbox === null) throw new Error("scenario writer ran without its sandbox");
-    return sandbox;
-  };
-
-  async function converse(input: ScenarioWriterInput): Promise<ScenarioWriterOutcome> {
-    const open = requireSandbox();
+  async function converse(
+    open: SeedSnapshotSandbox,
+    input: ScenarioWriterInput,
+  ): Promise<ScenarioWriterOutcome> {
     const prompt = await buildScenarioWriterPrompt(
       issue.id,
       issueAnchorOptionsOf(config),
@@ -211,11 +201,11 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
     let stdout = "";
     let next = prompt;
     for (let invocation = 1; invocation <= 2; invocation += 1) {
-      const transcript = sequence.filename({ role: "scenario-writer", invocation });
       if (aborted) {
         await record(invocation, "aborted", {});
         return failed("aborted: the admission ended before the join");
       }
+      const transcript = sequence.filename({ role: "scenario-writer", invocation });
       const timer = startTimer();
       let run: Awaited<ReturnType<SeedSnapshotSandbox["run"]>>;
       try {
@@ -229,7 +219,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
             attemptLogger.writeInvocation(transcript, invocationRecord),
         }));
       } catch (err) {
-        return ranAndThrew(invocation, transcript, err, timer());
+        return ranAndThrew(open, invocation, transcript, err, timer());
       }
       const usage = usageFields(run, run.rateLimit);
       const fields: Fields = {
@@ -240,7 +230,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
         ...(usage === undefined ? {} : { usage }),
         ...containerResourcesOf(run),
       };
-      const wrote = await snapshotWrote(invocation, fields);
+      const wrote = await snapshotWrote(open, invocation, fields);
       if (wrote !== null) return wrote;
       // The nudge's reply may only finish what the first run said.
       stdout = `${stdout}\n${run.stdout}`;
@@ -272,8 +262,9 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
   }
 
   async function write(input: ScenarioWriterInput): Promise<ScenarioWriterOutcome> {
+    let open: SeedSnapshotSandbox;
     try {
-      sandbox = await createSeedSnapshotSandbox({
+      open = await createSeedSnapshotSandbox({
         layout: config.layout,
         issueId: issue.id,
         seedSha: input.seedSha,
@@ -295,11 +286,13 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
       await record(1, "failed", {});
       return failed(`the writer's sandbox did not come up: ${errorText(err)}`);
     }
-    try {
-      return await converse(input);
-    } finally {
-      await closeSandbox(preserve === undefined ? {} : { preserve });
-    }
+    sandbox = open;
+    const outcome = await converse(open, input).catch(async (err: unknown) => {
+      await closeSandbox({});
+      throw err;
+    });
+    await closeSandbox(outcome.kind === "wrote" ? { preserve: SNAPSHOT_KEPT } : {});
+    return outcome;
   }
 
   // A teardown whose failure says nothing about the scenarios: a leaked

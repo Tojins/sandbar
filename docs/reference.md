@@ -92,6 +92,7 @@ defaults.
 | `partitionCheck` | `true` | Ask whether an issue is too big before starting it. |
 | `uiPrototypeCheck` | `true` | Ask whether an issue needs a UI prototype first. |
 | `condenseAboveChars` | `20000` | Condense issue threads longer than this; `null` turns it off. |
+| `scenarioWriter` | `true` | Write hidden test scenarios for each issue beside its first attempt. |
 | `maxContextChars` | `600000` | Context budget per role (prompt plus diff). |
 | `maxQualityRounds` | `3` | See [Budgets](#budgets). |
 | `maxGateRounds` | `4` | See [Budgets](#budgets). |
@@ -123,14 +124,17 @@ export default { /* ... */ env, ...routing };
   reach agent containers. An empty value inherits from the launching shell.
 - **Routing** keys `SANDBAR_<ROLE>_AGENT`, `_MODEL_ID` and `_EFFORT` choose the
   agent CLI, model and effort per role. Roles: `IMPLEMENTER`, `UI_CHECK`,
-  `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, `CONDENSER`, `MERGER`, and
+  `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, `CONDENSER`, `SCENARIO_WRITER`,
+  `MERGER`, and
   `npm run reflect`'s `REFLECT_TAGGER` and `REFLECT_SYNTHESIZER`. They never enter a
   sandbox. Defaults are claude with `opus` at `high` for the implementer and
   reviewer (and so the adjudicator), `sonnet` at `high` for the UI check,
   `sonnet` at `medium` for the quality pass and the reflect tagger, `opus`
   at `medium` for the merger and `opus` at `high` for the reflect
   synthesizer. The condenser follows the quality pass's CLI, on `sonnet` when
-  that is claude, with no effort flag. A role routed off claude gets no effort
+  that is claude, with no effort flag. The scenario writer runs claude with
+  `opus` and no effort flag, whatever the other roles run. A role routed off
+  claude gets no effort
   flag unless it names one.
 
 [`sandbar.env.example`](../sandbar.env.example) lists every key.
@@ -235,6 +239,19 @@ then two read-only agents classify the issue:
 
 `maxContextChars` is checked again before each review, against the prompt plus
 the branch's diff.
+
+### Scenario writer
+
+With `scenarioWriter` on, a read-only agent starts beside the first attempt
+and writes adversarial Given/When/Then scenarios for the issue: edge cases,
+hostile input, regressions and the cheapest wrong way to satisfy it. It runs in
+its own container on a read-only copy of the code before the work started, and
+never sees the implementer's branch. The set lands in the run's issue log
+directory as `scenarios-<k>.json`; the implementer never sees it, and nothing
+posts it to GitHub. The first attempt never waits for it; the verifier does.
+If the writer fails, that is recorded and nothing else changes. It runs once
+per admission, routed by `scenarioWriter*` and
+`promptExtensions.scenarioWriter`.
 
 ### Rounds
 

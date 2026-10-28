@@ -370,11 +370,11 @@ export function parseAgentProviderName(
 //
 // Every invoked routing knob participates, the reviewer's quality pass included
 // (#121); the UI checker (#126), the condenser (#217) and the scenario writer
-// (#203) participate only when enabled. Requiring the routed set up front is deliberate over discovering a
-// missing credential in the resolve loop, after a run may already have landed
-// work — and for the quality pass it is also what puts its CLI in the sandbox
-// image (#75), a pass that opens every round being a pass whose missing
-// binary is a fixer that cannot run at all.
+// (#203) participate only when enabled. Requiring the routed set up front is
+// deliberate over discovering a missing credential in the resolve loop, after
+// a run may already have landed work — and for the quality pass it is also
+// what puts its CLI in the sandbox image (#75), a pass that opens every round
+// being a pass whose missing binary is a fixer that cannot run at all.
 export function requiredAgentProviders(roles: {
   readonly uiPrototypeCheck: boolean;
   readonly condenseAboveChars: number | null;
