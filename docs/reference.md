@@ -241,9 +241,9 @@ Red tests and rejections go back to the implementer. Quality findings never
 do. The implementer doesn't see the coding standards; the quality roles do.
 
 Role routing: the quality roles use `reviewerQuality*` and
-`promptExtensions.reviewerQuality`; the verifier's code review uses
-`reviewer*` and `promptExtensions.reviewer`, and the adjudicator defaults to
-that routing.
+`promptExtensions.reviewerQuality`, defaulting to claude whatever the
+reviewer runs on; the verifier's code review uses `reviewer*` and
+`promptExtensions.reviewer`, and the adjudicator defaults to that routing.
 
 ### Budgets
 

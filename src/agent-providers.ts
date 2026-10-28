@@ -14,8 +14,8 @@
 // default so that what a run ran at is in the config and on the log line,
 // never in a dotfile no log records. The two reviewer calls used to share one provider
 // because a resumed session cannot cross vendor CLIs; #121 deleted the resume,
-// so `reviewerQualityAgent` is a routing knob — defaulting to
-// `reviewerAgent`, so a config that says nothing still has one reviewer vendor.
+// so `reviewerQualityAgent` is a routing knob with its own "claude" default
+// (#228), matching its claude-alias model default.
 // The dispute adjudicator (#167) defaults all three routing knobs to that
 // reviewer (the verifier's code review) and may likewise be split explicitly.
 // The earlier, single-call UI classifier (#126) similarly names

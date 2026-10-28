@@ -709,10 +709,12 @@ export type RunConfig = {
   readonly implementerAgent?: AgentProviderName;
   readonly uiCheckAgent?: AgentProviderName;
   readonly reviewerAgent?: AgentProviderName;
-  // The quality pass's CLI (#121). Defaults to `reviewerAgent`, so a config
-  // that says nothing keeps one reviewer vendor. Routing it elsewhere moves the
-  // quality pass off the correctness vendor's rate window while the deciding verdict
-  // stays where it was; it is only possible because no pass shares a session.
+  // The quality pass's CLI (#121). Defaults to "claude" on its own, not to
+  // `reviewerAgent` (#228): its model default is a claude alias, so following
+  // a reviewer routed elsewhere would only half-move it. Routing it elsewhere
+  // moves the quality pass off the correctness vendor's rate window while the
+  // deciding verdict stays where it was; it is only possible because no pass
+  // shares a session.
   readonly reviewerQualityAgent?: AgentProviderName;
   readonly adjudicatorAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
@@ -2350,12 +2352,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       ? config.implementerModelId
       : undefined;
   const reviewerAgent = parseAgentProviderName("reviewerAgent", config.reviewerAgent);
-  // Defaulted to the correctness pass's CLI rather than to "claude": one
-  // reviewer vendor stays one field, and #121's split is opt-in (#72's
-  // no-op-for-older-configs rule, one level down).
+  // Its own "claude" default, independent of the correctness pass (#228).
   const reviewerQualityAgent = parseAgentProviderName(
     "reviewerQualityAgent",
-    config.reviewerQualityAgent ?? reviewerAgent,
+    config.reviewerQualityAgent,
   );
   const adjudicatorAgent = parseAgentProviderName(
     "adjudicatorAgent",
@@ -2391,12 +2391,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   // #72's half-moved config, and the correctness pass's own id says nothing
   // about it.
   assertRoleModelIdNamed("reviewer", reviewerQualityAgent, config.reviewerQualityModelId, {
-    // The field the operator actually WROTE. A quality pass that inherited its
-    // provider from `reviewerAgent` has no `reviewerQualityAgent` line, and a
-    // message naming one sends them looking for a field their config does not
-    // contain.
-    agentField:
-      config.reviewerQualityAgent === undefined ? "reviewerAgent" : "reviewerQualityAgent",
+    agentField: "reviewerQualityAgent",
     modelField: "reviewerQualityModelId",
   });
   assertRoleModelIdNamed(

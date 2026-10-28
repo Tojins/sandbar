@@ -929,23 +929,13 @@ describe("resolveConfig", () => {
     expect(() => resolveConfig({ ...minimal, mergerAgent: "codex" })).toThrow(
       /mergerModelId/,
     );
-    // The quality pass inherits `reviewerAgent` when it names no CLI of its
-    // own (#121), so routing the reviewer role obliges BOTH ids — and the
-    // message names the field the operator WROTE, not the inherited one they
-    // would go looking for and not find.
+    // The quality pass keeps its own claude default (#228), so routing the
+    // reviewer role obliges only the reviewer's id.
     expect(() =>
       resolveConfig({
         ...minimal,
         reviewerAgent: "codex",
         reviewerModelId: "gpt-5.6-sol",
-      }),
-    ).toThrow(/config\.reviewerAgent is "codex"[\s\S]*config\.reviewerQualityModelId/);
-    expect(() =>
-      resolveConfig({
-        ...minimal,
-        reviewerAgent: "codex",
-        reviewerModelId: "gpt-5.6-sol",
-        reviewerQualityModelId: "gpt-5.6-sol",
       }),
     ).not.toThrow();
   });
@@ -978,16 +968,16 @@ describe("resolveConfig", () => {
     ).toBe("opus");
   });
 
-  it("defaults the quality pass's CLI to the reviewer's own (#121)", () => {
+  it("defaults the quality pass to claude, whatever the reviewer runs on (#228)", () => {
     expect(resolveConfig(minimal).reviewerQualityAgent).toBe("claude");
-    expect(
-      resolveConfig({
-        ...minimal,
-        reviewerAgent: "codex",
-        reviewerModelId: "gpt-5.6-sol",
-        reviewerQualityModelId: "gpt-5.6-sol",
-      }).reviewerQualityAgent,
-    ).toBe("codex");
+    const r = resolveConfig({
+      ...minimal,
+      reviewerAgent: "codex",
+      reviewerModelId: "gpt-5.6-sol",
+    });
+    expect(r.reviewerQualityAgent).toBe("claude");
+    expect(r.reviewerQualityModelId).toBe("sonnet");
+    expect(r.reviewerQualityEffort).toBe("medium");
   });
 
   it("defaults adjudication to correctness routing and validates an explicit split (#167)", () => {
