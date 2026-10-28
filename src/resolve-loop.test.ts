@@ -19,19 +19,46 @@ import {
   runResolveLoop,
 } from "./resolve-loop.js";
 
+const promptInputs = {
+  projectAnchor: "anchor",
+  primaryIssue: issue(42),
+  primaryIssueAnchor: "body",
+  relatedIssues: [],
+  repoSlug: "acme/app",
+  attempt: 1,
+  maxAttempts: 4,
+  mode: { kind: "still-conflicted", paths: ["src/a.ts"] },
+} as const;
+
 it("inlines only the configured merger prompt extension", () => {
   const prompt = buildResolvePromptBody({
-    projectAnchor: "anchor",
+    ...promptInputs,
     promptExtension: { text: "merger-only rule" },
-    primaryIssue: issue(42),
-    primaryIssueAnchor: "body",
-    relatedIssueAnchors: [],
-    attempt: 1,
-    maxAttempts: 4,
-    mode: { kind: "still-conflicted", digest: "digest" },
   });
   expect(prompt).toContain("merger-only rule");
   expect(prompt).toContain("### Project prompt extension");
+});
+
+// #197: no prompt embeds a diff body or another issue's thread.
+describe("buildResolvePromptBody — lists instead of embedding", () => {
+  it("lists the conflicted paths and tells the agent to read the diff itself", () => {
+    const prompt = buildResolvePromptBody({
+      ...promptInputs,
+      mode: { kind: "still-conflicted", paths: ["src/a.ts", "src/b.ts"] },
+    });
+    expect(prompt).toContain("**Conflicted paths (2):**\n- `src/a.ts`\n- `src/b.ts`");
+    expect(prompt).toContain("Run `git status` and `git diff` yourself");
+    expect(prompt).not.toContain("```diff");
+  });
+
+  it("names each related issue on one line with the command to read it", () => {
+    const prompt = buildResolvePromptBody({
+      ...promptInputs,
+      relatedIssues: [issue(40), issue(44)],
+    });
+    expect(prompt).toContain("- #40: t-40 (branch `sandbar/issue-40`)\n- #44: t-44 (branch `sandbar/issue-44`)");
+    expect(prompt).toContain("`gh issue view N --repo acme/app --comments`");
+  });
 });
 
 function issue(n: number): IssueRef {
@@ -103,7 +130,7 @@ type Calls = {
   agentRuns: number;
   prompts: string[];
   isMergeInProgressCalls: number;
-  conflictDigestCalls: number;
+  unmergedPathsCalls: number;
   installCalls: number;
   gateCalls: number;
   bodyFetches: string[];
@@ -115,7 +142,7 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
     agentRuns: 0,
     prompts: [],
     isMergeInProgressCalls: 0,
-    conflictDigestCalls: 0,
+    unmergedPathsCalls: 0,
     installCalls: 0,
     gateCalls: 0,
     bodyFetches: [],
@@ -149,13 +176,9 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
       calls.isMergeInProgressCalls++;
       return merging;
     },
-    async conflictDigest() {
-      calls.conflictDigestCalls++;
-      return {
-        status: "UU foo.ts\nUU bar.ts",
-        diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>",
-        paths: ["foo.ts", "bar.ts"],
-      };
+    async unmergedPaths() {
+      calls.unmergedPathsCalls++;
+      return ["foo.ts", "bar.ts"];
     },
     async npmInstall() {
       const r = script.installs?.[iIdx++] ?? true;
@@ -182,6 +205,7 @@ function makeAdapter(script: Script): { adapter: ResolveAdapter; calls: Calls } 
 }
 
 const projectAnchor = "# Project anchor (test)\n";
+const repoSlug = "acme/app";
 const conflictMode: ResolveMode = { kind: "conflict" };
 const gateRedMode: ResolveMode = { kind: "gate-red", initialOutput: gateOut() };
 
@@ -251,7 +275,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.agentRuns).toBe(1);
@@ -270,6 +294,7 @@ describe("runResolveLoop — conflict mode", () => {
     });
     const out = await runResolveLoop(issue(42), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
     });
     expect(out).toEqual({ kind: "resolved" });
   });
@@ -290,7 +315,7 @@ describe("runResolveLoop — conflict mode", () => {
       [issue(40)],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
     expect(out).toMatchObject({
       kind: "abandon",
@@ -313,14 +338,15 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.agentRuns).toBe(2);
     expect(calls.installCalls).toBe(1);
     expect(calls.gateCalls).toBe(1);
-    expect(calls.prompts[0]).toContain("git status");
-    expect(calls.prompts[1]).toContain("git status");
+    expect(calls.prompts[0]).toContain("- `foo.ts`\n- `bar.ts`");
+    expect(calls.prompts[1]).toContain("- `foo.ts`\n- `bar.ts`");
+    expect(calls.unmergedPathsCalls).toBe(2);
   });
 
   it("agent resolves but gate red, then fixes on attempt 2", async () => {
@@ -337,7 +363,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.agentRuns).toBe(2);
@@ -362,7 +388,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, preMergeSha: "pre-sha" },
+      { projectAnchor, repoSlug, preMergeSha: "pre-sha" },
     );
     expect(out.kind).toBe("abandon");
     if (out.kind === "abandon") {
@@ -384,7 +410,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.headShaCalls).toBe(0);
@@ -402,7 +428,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, preMergeSha: "pre-sha" },
+      { projectAnchor, repoSlug, preMergeSha: "pre-sha" },
     );
     expect(out).toEqual({ kind: "resolved" });
   });
@@ -425,7 +451,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
     expect(out.kind).toBe("abandon");
     if (out.kind === "abandon") {
@@ -449,7 +475,7 @@ describe("runResolveLoop — conflict mode", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.installCalls).toBe(2);
@@ -470,11 +496,11 @@ describe("runResolveLoop — gate-red mode", () => {
       [],
       gateRedMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
     expect(out).toEqual({ kind: "resolved" });
     expect(calls.agentRuns).toBe(1);
-    expect(calls.conflictDigestCalls).toBe(0);
+    expect(calls.unmergedPathsCalls).toBe(0);
   });
 
   it("agent ABANDON: returns abandon with mergeInProgress=false", async () => {
@@ -492,7 +518,7 @@ describe("runResolveLoop — gate-red mode", () => {
       [issue(44)],
       gateRedMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
     expect(out).toMatchObject({
       kind: "abandon",
@@ -507,7 +533,7 @@ describe("runResolveLoop — gate-red mode", () => {
       agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
       gates: [{ ok: true }],
     });
-    await runResolveLoop(issue(42), [], gateRedMode, adapter, { projectAnchor });
+    await runResolveLoop(issue(42), [], gateRedMode, adapter, { projectAnchor, repoSlug, repoSlug });
     expect(calls.prompts[0]).toContain("Gate output");
     expect(calls.prompts[0]).toContain("test out");
   });
@@ -529,6 +555,7 @@ describe("runResolveLoop — forge-red mode (#22)", () => {
     });
     await runResolveLoop(issue(42), [], forgeRedMode, adapter, {
       projectAnchor,
+      repoSlug,
       preMergeSha: "before-fix",
     });
     expect(calls.prompts[0]).toContain("playwright: expected 1 got 0");
@@ -536,8 +563,8 @@ describe("runResolveLoop — forge-red mode (#22)", () => {
     // The agent must be told the local gate's green is not evidence against
     // the forge's red — otherwise "works on my machine" is the obvious move.
     expect(calls.prompts[0]).toContain("evidence against this failure");
-    // No conflict digest is fetched: the tree is merged and clean.
-    expect(calls.conflictDigestCalls).toBe(0);
+    // No unmerged set is asked for: the tree is merged and clean.
+    expect(calls.unmergedPathsCalls).toBe(0);
   });
 
   it("a green local gate after a real commit is 'worth re-asking the forge', i.e. resolved", async () => {
@@ -549,6 +576,7 @@ describe("runResolveLoop — forge-red mode (#22)", () => {
     });
     const out = await runResolveLoop(issue(42), [], forgeRedMode, adapter, {
       projectAnchor,
+      repoSlug,
       preMergeSha: "before-fix",
     });
     expect(out).toEqual({ kind: "resolved" });
@@ -563,6 +591,7 @@ describe("runResolveLoop — forge-red mode (#22)", () => {
     });
     const out = await runResolveLoop(issue(42), [], forgeRedMode, adapter, {
       projectAnchor,
+      repoSlug,
       preMergeSha: "before-fix",
     });
     expect(out.kind).toBe("abandon");
@@ -571,7 +600,7 @@ describe("runResolveLoop — forge-red mode (#22)", () => {
 });
 
 describe("runResolveLoop — multi-issue context", () => {
-  it("fetches and embeds each related issue's body; skips self", async () => {
+  it("embeds only its own issue's thread and lists the others; skips self", async () => {
     const { adapter, calls } = makeAdapter({
       initiallyConflicted: true,
       agentRuns: [{ stdout: "<promise>COMMITTED</promise>" }],
@@ -587,14 +616,15 @@ describe("runResolveLoop — multi-issue context", () => {
       [issue(40), issue(42), issue(44)],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
     );
-    expect(calls.bodyFetches).toEqual(["42", "40", "44"]);
+    expect(calls.bodyFetches).toEqual(["42"]);
     expect(calls.prompts[0]).toContain("this branch body");
-    expect(calls.prompts[0]).toContain("earlier issue body");
-    expect(calls.prompts[0]).toContain("later issue body");
-    expect(calls.prompts[0]).toContain("Related issue #40");
-    expect(calls.prompts[0]).toContain("Related issue #44");
+    expect(calls.prompts[0]).not.toContain("earlier issue body");
+    expect(calls.prompts[0]).not.toContain("later issue body");
+    expect(calls.prompts[0]).toContain("- #40: t-40");
+    expect(calls.prompts[0]).toContain("- #44: t-44");
+    expect(calls.prompts[0]).not.toContain("- #42: t-42");
   });
 
   it("with no related issues, the related-issues section is omitted", async () => {
@@ -605,6 +635,7 @@ describe("runResolveLoop — multi-issue context", () => {
     });
     await runResolveLoop(issue(42), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
     });
     expect(calls.prompts[0]).not.toContain("Related issues in this run");
   });
@@ -622,6 +653,7 @@ describe("runResolveLoop — landing target in the prompt", () => {
     });
     await runResolveLoop(issue(42), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
     });
     expect(calls.prompts[0]).toContain("into the source branch");
   });
@@ -634,6 +666,7 @@ describe("runResolveLoop — landing target in the prompt", () => {
     });
     await runResolveLoop(issue(42), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
       target: "its chunk's branch `sandbar/chunk-42-c`",
     });
     expect(calls.prompts[0]).toContain("sandbar/chunk-42-c");
@@ -659,7 +692,7 @@ describe("runResolveLoop — landing target in the prompt", () => {
         },
       },
       adapter,
-      { projectAnchor, target: "its chunk's branch `sandbar/chunk-42-c`" },
+      { projectAnchor, repoSlug, target: "its chunk's branch `sandbar/chunk-42-c`" },
     );
     expect(calls.prompts[0]).toContain("merged cleanly into its chunk's branch");
   });
@@ -681,7 +714,7 @@ describe("runResolveLoop — logging", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
       (line) => {
         lines.push(line);
       },
@@ -776,7 +809,7 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
       gates: [{ ok: true }],
     });
     await expect(
-      runResolveLoop(issue(64), [], conflictMode, adapter, { projectAnchor }),
+      runResolveLoop(issue(64), [], conflictMode, adapter, { projectAnchor, repoSlug, repoSlug }),
     ).rejects.toBeInstanceOf(SandbarError);
     expect(calls.agentRuns).toBe(1);
   });
@@ -804,7 +837,7 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor, onAttempt: sink },
+      { projectAnchor, repoSlug, onAttempt: sink },
     ).catch((e: unknown) => e as Error);
     expect(err.message).toContain("sandbar-wdeadbeef-resolve-1-abc");
     expect(err.message).toContain("exited with code 125");
@@ -824,6 +857,7 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
     });
     const err = await runResolveLoop(issue(64), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
     }).catch((e: unknown) => e as Error);
     expect(err.message).toContain("not captured to a file");
   });
@@ -836,6 +870,7 @@ describe("runResolveLoop — an attempt that never ran (#67)", () => {
     const { sink, records } = makeSink();
     await runResolveLoop(issue(64), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
       onAttempt: sink,
     }).catch(() => undefined);
     expect(records).toHaveLength(1);
@@ -863,6 +898,7 @@ describe("runResolveLoop — quota capture (#109)", () => {
 
     const err = await runResolveLoop(issue(109), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
       onAttempt: sink,
     }, (line) => { lines.push(line); }).catch((e: unknown) => e);
 
@@ -891,6 +927,7 @@ describe("runResolveLoop — credential closure (#134)", () => {
 
     const err = await runResolveLoop(issue(134), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
       onAttempt: sink,
     }).catch((e: unknown) => e);
 
@@ -924,7 +961,7 @@ describe("runResolveLoop — the timeout is a spent attempt (#67)", () => {
       [],
       conflictMode,
       adapter,
-      { projectAnchor },
+      { projectAnchor, repoSlug, repoSlug },
       (l) => {
         lines.push(l);
       },
@@ -941,6 +978,7 @@ describe("runResolveLoop — the timeout is a spent attempt (#67)", () => {
     });
     const out = await runResolveLoop(issue(64), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
     });
     if (out.kind !== "abandon") throw new Error("expected abandon");
     expect(out.attempts).toHaveLength(RESOLVE_MAX_ATTEMPTS);
@@ -964,6 +1002,7 @@ describe("runResolveLoop — the journal an abandon carries (#67)", () => {
     const { sink } = makeSink();
     const out = await runResolveLoop(issue(64), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
       onAttempt: sink,
     });
     if (out.kind !== "abandon") throw new Error("expected abandon");
@@ -990,6 +1029,7 @@ describe("runResolveLoop — the journal an abandon carries (#67)", () => {
     });
     const out = await runResolveLoop(issue(64), [], gateRedMode, adapter, {
       projectAnchor,
+      repoSlug,
     });
     if (out.kind !== "abandon") throw new Error("expected abandon");
     expect(out.conflictPaths).toEqual([]);
@@ -1009,6 +1049,7 @@ describe("runResolveLoop — the journal an abandon carries (#67)", () => {
     const { sink, records } = makeSink();
     await runResolveLoop(issue(64), [], conflictMode, adapter, {
       projectAnchor,
+      repoSlug,
       preMergeSha: "before",
       onAttempt: sink,
     });

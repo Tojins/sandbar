@@ -31,13 +31,15 @@ const runMergerWithAdapter = (
   adapter: MergerAdapter,
   log?: Parameters<typeof runMergerCore>[2],
   onGateRed?: Parameters<typeof runMergerCore>[3],
-  options: Omit<RunMergerOptions, "observations" | "agentStuckLabel"> & {
+  options: Omit<RunMergerOptions, "observations" | "agentStuckLabel" | "repoSlug"> & {
     readonly observations?: RunMergerOptions["observations"];
     readonly agentStuckLabel?: string;
+    readonly repoSlug?: string;
   } = {},
 ) => runMergerCore(issues, adapter, log, onGateRed, {
   ...options,
   agentStuckLabel: options.agentStuckLabel ?? "agent-stuck",
+  repoSlug: options.repoSlug ?? "acme/app",
   observations: options.observations ?? DISCARD_MERGER_OBSERVATIONS,
 });
 
@@ -69,7 +71,6 @@ type Calls = {
   // was described by is observable from out here.
   agentPrompts: string[];
   isMergeChecks: number;
-  conflictDigests: number;
   bodies: string[];
   aborts: number;
   resets: { sha: string }[];
@@ -143,9 +144,9 @@ type Script = {
   // path to the file's text, conflict markers and all. Absent ⇒ no version file
   // is conflicted, which is what every test that predates #68 means.
   conflictFiles?: Record<string, string>;
-  // Conflicted paths the mechanical resolution never touches. Defaulted to the
-  // one `conflictDigest` has always reported, so a scripted conflict is a
-  // conflict for both readers of the unmerged set.
+  // Conflicted paths the mechanical resolution never touches. Defaulted to one
+  // path, so a scripted conflict is a conflict for both readers of the
+  // unmerged set (#68 and the resolve loop).
   otherConflicts?: string[];
   // Whether `git commit --no-edit` succeeds, per call. Default true.
   mergeCommits?: boolean[];
@@ -163,7 +164,6 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     agentRuns: [],
     agentPrompts: [],
     isMergeChecks: 0,
-    conflictDigests: 0,
     bodies: [],
     aborts: 0,
     resets: [],
@@ -260,14 +260,6 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     async isMergeInProgress() {
       calls.isMergeChecks++;
       return merging;
-    },
-    async conflictDigest() {
-      calls.conflictDigests++;
-      return {
-        status: "UU foo",
-        diff: "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>>",
-        paths: ["foo"],
-      };
     },
     async getIssueBody(id) {
       calls.bodies.push(id);
@@ -1337,7 +1329,7 @@ describe("runMergerWithAdapter — gate-red enters resolve loop", () => {
 });
 
 describe("runMergerWithAdapter — multi-issue context", () => {
-  it("passes other cycle issues to the resolve loop (bodies fetched for siblings, not self)", async () => {
+  it("lists other cycle issues in the resolve prompt and fetches only its own thread", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["conflict"],
       agents: [{ stdout: "<promise>COMMITTED</promise>" }],
@@ -1351,7 +1343,11 @@ describe("runMergerWithAdapter — multi-issue context", () => {
       { ongoingIssues: [issue(40), issue(42), issue(44)] },
     );
 
-    expect(calls.bodies).toEqual(["42", "40", "44"]);
+    expect(calls.bodies).toEqual(["42"]);
+    expect(calls.agentPrompts[0]).toContain("- #40: t-40");
+    expect(calls.agentPrompts[0]).toContain("- #44: t-44");
+    expect(calls.agentPrompts[0]).not.toContain("- #42: t-42");
+    expect(calls.agentPrompts[0]).toContain("--repo acme/app");
   });
 
   it("defaults cycleIssues to the issues argument when not provided", async () => {
@@ -1361,7 +1357,7 @@ describe("runMergerWithAdapter — multi-issue context", () => {
       gates: [{ ok: true }, { ok: true }],
     });
     await runMergerWithAdapter([issue(40), issue(42)], adapter);
-    expect(calls.bodies).toEqual(["40", "42"]);
+    expect(calls.agentPrompts[0]).toContain("- #42: t-42");
   });
 });
 
@@ -3352,9 +3348,10 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     );
 
     const prompt = calls.agentPrompts[0] ?? "";
-    expect(prompt).toContain("Related issue #43");
+    expect(prompt).toContain("- #43:");
+    expect(prompt).toContain("(branch `refs/remotes/origin/sandbar/chunk-42-c`)");
     expect(prompt).toContain("Branch: refs/remotes/origin/sandbar/chunk-42-c");
-    expect(prompt).not.toMatch(/Branch: sandbar\/chunk-42-c/);
+    expect(prompt).not.toMatch(/(Branch: |branch `)sandbar\/chunk-42-c/);
   });
 
   it("hands the forge the composition in MERGE order, chunk members underneath", async () => {

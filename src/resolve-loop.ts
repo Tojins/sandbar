@@ -58,6 +58,11 @@
 // from.
 // Every attempt also carries the resolve container's peak-memory/OOM evidence
 // in its event, transcript header, merger line and abandon prose (#141).
+//
+// The prompt embeds no diff and no related thread (#197): a conflict is shown
+// as its unmerged paths, and each related issue as one line naming its number,
+// title and branch. The agent runs `git diff` and `gh issue view` itself, like
+// every other role, and reads only what the conflict needs.
 
 import { SandbarError } from "./errors.js";
 import {
@@ -88,8 +93,8 @@ import {
 
 export const RESOLVE_MAX_ATTEMPTS = 4;
 
-// 10 minutes per agent invocation: each iteration may need to read several
-// related issues + the conflict / gate trace + edit files. The loop bounds
+// 10 minutes per agent invocation: each iteration may need to read the
+// conflict or gate trace, look up related issues and edit files. The loop bounds
 // total agentic time at RESOLVE_MAX_ATTEMPTS × this.
 //
 // Here rather than beside the adapter that enforces it (#67): the prose this
@@ -250,15 +255,10 @@ export type ResolveAdapter = {
   // an anonymous one leaves an operator grepping `podman events` by timestamp.
   runResolveAgent(prompt: string, attempt: number): Promise<ResolveAgentRun>;
   isMergeInProgress(): Promise<boolean>;
-  // `paths` is the unmerged set (`git diff --name-only --diff-filter=U`), kept
-  // apart from the human-readable `status` because the abandon comment lists
-  // the conflicted files and parsing them back out of porcelain prose is a
-  // parser nobody would trust (#67).
-  conflictDigest(): Promise<{
-    readonly status: string;
-    readonly diff: string;
-    readonly paths: readonly string[];
-  }>;
+  // The unmerged set (`git diff --name-only --diff-filter=U`): what the prompt
+  // lists and the abandon comment names (#67). The merger asks it too, to
+  // settle the version collision first (#68).
+  unmergedPaths(): Promise<readonly string[]>;
   npmInstall(): Promise<{ readonly ok: boolean }>;
   // The timings ride out on both branches (#82): a green re-gate is the one
   // this loop pays for on every recovered attempt, and it has no failure to
@@ -304,6 +304,9 @@ export type ResolveLoopDeps = {
   // Pre-built project anchor — fetched once by the caller and reused across
   // all attempts (large, static).
   readonly projectAnchor: string;
+  // `owner/repo` the prompt names in its `gh issue view` hint for related
+  // issues.
+  readonly repoSlug: string;
   readonly promptExtension?: PromptExtension;
   // Sha of HEAD captured before `git merge --no-ff` started. The loop refuses
   // to report "resolved" if HEAD still equals this after an attempt's gate
@@ -334,7 +337,7 @@ export type ResolveLoopDeps = {
 export const SOURCE_TARGET_PHRASE = "the source branch";
 
 type AttemptTrace =
-  | { readonly kind: "still-conflicted"; readonly digest: string }
+  | { readonly kind: "still-conflicted"; readonly paths: readonly string[] }
   | { readonly kind: "gate-red"; readonly trace: string }
   | {
       readonly kind: "forge-red";
@@ -351,24 +354,7 @@ export async function runResolveLoop(
   log: ResolveLogger = () => undefined,
 ): Promise<ResolveOutcome> {
   const primaryIssueAnchor = await adapter.getIssueBody(issue.id);
-  // getIssueBody renders title + body + COMMENTS (issue-anchor.ts), and since
-  // #30 Phase 4a runs before the merge — so a sibling that terminated
-  // NEEDS-INFO / NEEDS-HUMAN / NEEDS-UI-PROTOTYPE this cycle already carries
-  // sandbar's handoff comment by the time this reads it, which it did not when
-  // finalise ran after the merge. That is the right side of the trade (knowing
-  // a sibling did not land is context, not noise), and the comments are all
-  // BOT_COMMENT_PREFIX-stamped so their provenance is legible — but they are
-  // written TO A HUMAN and contain imperatives ("push a fix on this branch",
-  // "reply 'no prototype needed'"). If a resolve agent is ever seen acting on
-  // one, this is the line that let it see it.
-  const relatedIssueAnchors: { issue: IssueRef; body: string }[] = [];
-  for (const r of relatedIssues) {
-    if (r.id === issue.id) continue;
-    relatedIssueAnchors.push({
-      issue: r,
-      body: await adapter.getIssueBody(r.id),
-    });
-  }
+  const others = relatedIssues.filter((r) => r.id !== issue.id);
 
   // The journal the abandon comment is written from, and the paths it names.
   // Both accumulate as the loop runs; both are reported on every abandon,
@@ -378,9 +364,8 @@ export async function runResolveLoop(
 
   let trace: AttemptTrace;
   if (initialMode.kind === "conflict") {
-    const d = await adapter.conflictDigest();
-    conflictPaths = d.paths;
-    trace = { kind: "still-conflicted", digest: formatConflictDigest(d) };
+    conflictPaths = await adapter.unmergedPaths();
+    trace = { kind: "still-conflicted", paths: conflictPaths };
   } else if (initialMode.kind === "forge-red") {
     trace = {
       kind: "forge-red",
@@ -412,7 +397,8 @@ export async function runResolveLoop(
       target: deps.target,
       primaryIssue: issue,
       primaryIssueAnchor,
-      relatedIssueAnchors,
+      relatedIssues: others,
+      repoSlug: deps.repoSlug,
       attempt,
       maxAttempts: RESOLVE_MAX_ATTEMPTS,
       mode: trace,
@@ -505,9 +491,8 @@ export async function runResolveLoop(
     if (stillConflicted) {
       await log(`resolve-attempt ${attempt} still conflicted; re-prompting`);
       record("still-conflicted");
-      const d = await adapter.conflictDigest();
-      conflictPaths = d.paths;
-      trace = { kind: "still-conflicted", digest: formatConflictDigest(d) };
+      conflictPaths = await adapter.unmergedPaths();
+      trace = { kind: "still-conflicted", paths: conflictPaths };
       continue;
     }
 
@@ -698,34 +683,16 @@ export function formatResolveAttempts(
     .join("\n");
 }
 
-// The conflicted-file block. Empty for a gate-red or forge-red abandon, where
-// there were never any — saying "conflicted paths: none" there would read as a
-// clean merge rather than as a question that was never asked.
+// The conflicted-file block, in the conflict prompt and every abandon comment.
+// Empty for a gate-red or forge-red abandon, where there were never any —
+// saying "conflicted paths: none" there would read as a clean merge rather than
+// as a question that was never asked.
 export function formatConflictPaths(paths: readonly string[]): string {
   if (paths.length === 0) return "";
   return (
     `**Conflicted path${paths.length === 1 ? "" : "s"} (${paths.length}):**\n` +
     paths.map((f) => `- \`${f}\``).join("\n")
   );
-}
-
-function formatConflictDigest(d: {
-  readonly status: string;
-  readonly diff: string;
-}): string {
-  return [
-    "## git status",
-    "",
-    "```",
-    d.status,
-    "```",
-    "",
-    "## conflict markers (full diff)",
-    "",
-    "```diff",
-    d.diff,
-    "```",
-  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -737,10 +704,9 @@ export type ResolvePromptInputs = {
   readonly promptExtension?: PromptExtension;
   readonly primaryIssue: IssueRef;
   readonly primaryIssueAnchor: string;
-  readonly relatedIssueAnchors: readonly {
-    readonly issue: IssueRef;
-    readonly body: string;
-  }[];
+  // The cycle's other issues, listed for the agent to look up on demand.
+  readonly relatedIssues: readonly IssueRef[];
+  readonly repoSlug: string;
   readonly attempt: number;
   readonly maxAttempts: number;
   readonly mode: AttemptTrace;
@@ -767,19 +733,11 @@ export function buildResolvePromptBody(inputs: ResolvePromptInputs): string {
     ].join("\n"),
   );
 
-  if (inputs.relatedIssueAnchors.length > 0) {
-    const blocks = inputs.relatedIssueAnchors
-      .map(({ issue, body }) =>
-        [
-          `## Related issue #${issue.id}: ${issue.title}`,
-          ``,
-          `Branch: ${issue.branch}`,
-          ``,
-          body,
-        ].join("\n"),
-      )
-      .join("\n\n");
-    parts.push(render(RELATED_INTRO_TPL, { blocks }));
+  if (inputs.relatedIssues.length > 0) {
+    const issues = inputs.relatedIssues
+      .map((r) => `- #${r.id}: ${r.title} (branch \`${r.branch}\`)`)
+      .join("\n");
+    parts.push(render(RELATED_INTRO_TPL, { issues, repoSlug: inputs.repoSlug }));
   }
 
   parts.push(
@@ -793,7 +751,7 @@ export function buildResolvePromptBody(inputs: ResolvePromptInputs): string {
 
 function renderModeBlock(mode: AttemptTrace, target: string): string {
   if (mode.kind === "still-conflicted") {
-    return render(CONFLICT_TPL, { digest: mode.digest, target });
+    return render(CONFLICT_TPL, { paths: formatConflictPaths(mode.paths), target });
   }
   if (mode.kind === "forge-red") {
     return render(FORGE_RED_TPL, {

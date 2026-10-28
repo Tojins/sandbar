@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { realAdapter, resolveVersionCollision } from "./merger.js";
+import { runResolveLoop } from "./resolve-loop.js";
 
 const exec = promisify(execFile);
 
@@ -114,7 +115,7 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
   // Asserted by running a real conflicting merge, in a linked worktree, for the
   // same reason isMergeInProgress is.
   it("names the unmerged paths, and only those, while a merge is conflicted", async () => {
-    // A second file that merges cleanly, so a digest that simply listed every
+    // A second file that merges cleanly, so a reader that simply listed every
     // changed path would be caught.
     await git(repo, "checkout", "-q", "side");
     await commit(repo, "clean.txt", "from side\n");
@@ -124,13 +125,37 @@ describe("realAdapter.isMergeInProgress (real linked worktree)", () => {
 
     await expect(git(wt, "merge", "--no-ff", "side")).rejects.toThrow();
 
-    const digest = await adapterAt(wt).conflictDigest();
-    expect(digest.paths).toEqual(["a.txt"]);
-    expect(digest.status).toContain("a.txt");
+    expect(await adapterAt(wt).unmergedPaths()).toEqual(["a.txt"]);
   });
 
   it("names no path at all on a clean tree", async () => {
-    expect((await adapterAt(wt).conflictDigest()).paths).toEqual([]);
+    expect(await adapterAt(wt).unmergedPaths()).toEqual([]);
+  });
+
+  // #197: the resolve prompt lists the conflict; it never embeds the diff.
+  it("prompts a conflicted merge with its unmerged paths and no diff text", async () => {
+    await expect(git(wt, "merge", "--no-ff", "side")).rejects.toThrow();
+    const prompts: string[] = [];
+    const real = adapterAt(wt);
+    await expect(runResolveLoop(
+      { id: "7", title: "t", branch: "side" },
+      [],
+      { kind: "conflict" },
+      {
+        ...real,
+        getIssueBody: async () => "issue text",
+        runResolveAgent: async (prompt) => {
+          prompts.push(prompt);
+          throw new Error("stop after the first prompt");
+        },
+      },
+      { projectAnchor: "anchor", repoSlug: "o/r" },
+    )).rejects.toThrow("stop after the first prompt");
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("- `a.txt`");
+    expect(prompts[0]).not.toContain("<<<<<<<");
+    expect(prompts[0]).not.toContain("side\n=======");
   });
 });
 

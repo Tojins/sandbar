@@ -40,9 +40,10 @@
 //                            abandon  → reset --hard preMergeSha + skip
 //                            resolved → merged.push (loop already gated)
 //
-// The resolve loop loads the bodies of *all* other issues in this cycle so the
-// agent can reason about "branch B's intent collides with branch A — abandon
-// B" instead of being stuck inside a single-issue context.
+// The resolve loop lists *all* other issues in this cycle (number, title,
+// branch; the agent reads them with `gh issue view`) so it can reason about
+// "branch B's intent collides with branch A — abandon B" instead of being
+// stuck inside a single-issue context.
 //
 // ---------------------------------------------------------------------------
 // Two landing targets (#60, §2–3 of the design in #54)
@@ -54,7 +55,7 @@
 // `origin/<sourceBranch>` the first time a member lands on it. Everything
 // between the two paths is the same code: same ephemeral worktree, same
 // per-issue `merge --no-ff`, same resolve loop with the same sibling issue
-// bodies, same gate-2 on the composition, same `preMergeSha` revert on
+// list, same gate-2 on the composition, same `preMergeSha` revert on
 // abandon. The only differences are what the worktree is detached at, where
 // the result is pushed, and what the issue is told afterwards.
 //
@@ -802,12 +803,10 @@ export type MergerAdapter = ResolveAdapter & {
     readonly conflicted?: boolean;
   }>;
   // --- the version collision (#68) ---
-  // The unmerged set on its own, without the `git status` + `git diff` that
-  // `conflictDigest` runs to build the agent's prompt. Asked twice per
-  // conflicted merge — once to find the version files, once to learn whether
-  // anything is left after they are staged — and the second question is the
-  // whole decision between completing the merge here and calling the agent.
-  unmergedPaths(): Promise<readonly string[]>;
+  // `unmergedPaths` (from ResolveAdapter) is asked twice per conflicted merge —
+  // once to find the version files, once to learn whether anything is left
+  // after they are staged — and the second question is the whole decision
+  // between completing the merge here and calling the agent.
   // The conflicted file AS GIT LEFT IT, markers and all. Null ⇒ there is no
   // file to read (a modify/delete conflict), which declines rather than
   // throwing: an unreadable candidate is the agent's problem, not a halt.
@@ -1203,10 +1202,12 @@ export type RunMergerOptions = {
   // Configured human-handoff label named in the resolve-loop action line.
   readonly agentStuckLabel: string;
   // Full set of planner-visible ongoing issues in this run.
-  // The resolve loop loads the bodies of all *other* entries so the agent has
-  // multi-issue context when reasoning about an integration failure.
+  // The resolve loop lists all *other* entries so the agent has multi-issue
+  // context when reasoning about an integration failure.
   readonly ongoingIssues?: readonly IssueRef[];
   readonly projectAnchor?: string;
+  // `owner/repo`, for the resolve prompt's `gh issue view` hint.
+  readonly repoSlug: string;
   readonly promptExtension?: PromptExtension;
   // Test seam for the duration fields this module logs (#82). Absent ⇒
   // `performance.now`. See `timing.ts` for why the clock is injectable at all.
@@ -1244,7 +1245,7 @@ export type RunMergerOptions = {
     readonly adapter: VerifyAdapter;
     readonly options: Omit<
       VerifiedLandingOptions,
-      "mergedIssues" | "cycleIssues" | "projectAnchor"
+      "mergedIssues" | "cycleIssues" | "projectAnchor" | "repoSlug"
     >;
     // Test seam for the check-poll clock. ONE object, not a sleep and a now:
     // the poll's pacing and its deadline both read from it, and a caller able
@@ -1262,6 +1263,7 @@ type MergeAttemptDeps = {
   readonly adapter: MergerAdapter;
   readonly emit: (line: string) => Promise<void>;
   readonly projectAnchor: string;
+  readonly repoSlug: string;
   readonly promptExtension?: PromptExtension;
   readonly resolveLog: ResolveLogger;
   readonly onGateRed?: MergerGateOutputSink | undefined;
@@ -1382,8 +1384,8 @@ async function attemptMerge(
   args: {
     readonly unit: MergeUnit;
     readonly target: MergeTarget;
-    // Whose issue bodies the resolve agent gets: the cycle's other issues for
-    // an issue branch, the chunk's members for a chunk.
+    // Which issues the resolve agent is told about: the cycle's other issues
+    // for an issue branch, the chunk's members for a chunk.
     readonly related: readonly IssueRef[];
     // How this unit is named in the merger log — `#12`, or `chunk #42`.
     readonly label: string;
@@ -1394,7 +1396,7 @@ async function attemptMerge(
   },
   deps: MergeAttemptDeps,
 ): Promise<MergeAttempt> {
-  const { adapter, emit, projectAnchor, resolveLog, onGateRed } = deps;
+  const { adapter, emit, projectAnchor, repoSlug, resolveLog, onGateRed } = deps;
   const { unit, target, label } = args;
   const onAttempt = deps.resolveSinkFor(args.gateKey);
   const onGate = (gate: Awaited<ReturnType<MergerAdapter["runGate"]>>) =>
@@ -1409,6 +1411,7 @@ async function attemptMerge(
   const preMergeSha = await adapter.getHeadSha();
   const resolveDeps = {
     projectAnchor,
+    repoSlug,
     promptExtension: deps.promptExtension,
     preMergeSha,
     target: describeMergeTarget(target),
@@ -1684,6 +1687,7 @@ export async function runMergerWithAdapter(
     adapter,
     emit,
     projectAnchor,
+    repoSlug: opts.repoSlug,
     promptExtension: opts.promptExtension,
     resolveLog,
     onGateRed,
@@ -2448,6 +2452,7 @@ export async function runMergerWithAdapter(
         mergedIssues: landingIssues,
         cycleIssues: cycle,
         projectAnchor,
+        repoSlug: opts.repoSlug,
         promptExtension: opts.promptExtension,
         // Keyed by ROUND (#67): each round runs a fresh resolve loop whose
         // attempts start again at 1, so a single key would have round 2
@@ -2911,8 +2916,8 @@ export function parseCapturedAgentRun(
     // parser classified as agent speech may reach parseResolveSignal (#74).
     output: speech.spoken,
     cause: classification.cause,
-    // Resolve's conflict digest is explicitly outside #158's issue-loop
-    // partition terminal. A size refusal here remains an infrastructure halt.
+    // Resolve's prompt is explicitly outside #158's issue-loop partition
+    // terminal. A size refusal here remains an infrastructure halt.
     verdict: classification.verdict === "input-too-large"
       ? "infra"
       : classification.verdict,
@@ -3059,12 +3064,12 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       return classifyPushError(err);
     }
   };
-  // The unmerged set. One spelling, shared by the conflict digest the resolve
-  // agent reads (#67) and the mechanical version resolution that runs before it
-  // (#68) — the second asks the same question twice per conflicted merge, and a
-  // second copy of the flags is a chance for the two to come to disagree about
-  // what "still conflicted" means. A failure is not an empty set and
-  // propagates (#99).
+  // The unmerged set. One spelling, shared by the resolve loop's path list
+  // (#67) and the mechanical version resolution that runs before it (#68) —
+  // the second asks the same question twice per conflicted merge, and a second
+  // copy of the flags is a chance for the two to come to disagree about what
+  // "still conflicted" means. A failure is not an empty set and propagates
+  // (#99).
   const unmergedPaths = async (): Promise<readonly string[]> => {
     const r = await exec("git", ["diff", "--name-only", "--diff-filter=U"], {
       cwd,
@@ -3367,26 +3372,6 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       if (!p) return false;
       return existsSync(isAbsolute(p) ? p : join(cwd, p));
     },
-    async conflictDigest() {
-      const status = (await exec("git", ["status", "--short"], { cwd })).stdout;
-      const diff = (
-        await exec("git", ["diff"], {
-          cwd,
-          maxBuffer: 50 * 1024 * 1024,
-        })
-      ).stdout;
-      // The unmerged set, asked for as such rather than parsed back out of the
-      // porcelain above (#67): the abandon comment lists these files, and a
-      // status-line parser that silently produced an empty list would make a
-      // hard conflict read like a broken container — the exact confusion the
-      // comment exists to end. Read failures propagate rather than rendering
-      // an empty section as if no paths were conflicted (#99).
-      return {
-        status: status.trim(),
-        diff: diff.trim(),
-        paths: await unmergedPaths(),
-      };
-    },
     unmergedPaths,
     async readWorktreeFile(path) {
       try {
@@ -3422,7 +3407,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     async getIssueBody(issueId) {
       // Throws (SandbarError) on fetch failure: a resolve agent reasoning
-      // about cross-branch intent without the issue specs is worse than a
+      // about the branch's intent without its issue spec is worse than a
       // halted merge phase.
       return fetchIssueText(issueId, deps.repo);
     },

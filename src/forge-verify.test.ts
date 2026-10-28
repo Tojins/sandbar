@@ -628,8 +628,8 @@ function makeVerify(script: VerifyScript): {
     async isMergeInProgress() {
       return false;
     },
-    async conflictDigest() {
-      return { status: "", diff: "", paths: [] };
+    async unmergedPaths() {
+      return [];
     },
     async npmInstall() {
       return { ok: true };
@@ -665,6 +665,7 @@ const baseOptions: VerifiedLandingOptions = {
   pollIntervalMs: 1_000,
   sourceBranch: "main",
   projectAnchor: "ANCHOR",
+  repoSlug: "acme/app",
   mergedIssues: [issue(7), issue(9)],
   cycleIssues: [issue(7), issue(9)],
 };
@@ -730,9 +731,10 @@ describe("runVerifiedLanding", () => {
     // The prompt carries the CI log, not just the check name.
     expect(calls.agentPrompts[0]).toContain("log for browser");
     expect(calls.agentPrompts[0]).toContain("browser");
-    // Cross-branch context: both cycle issues reach the agent.
-    expect(calls.agentPrompts[0]).toContain("body of #7");
+    // Cross-branch context: the topmost issue's thread, the other one listed.
     expect(calls.agentPrompts[0]).toContain("body of #9");
+    expect(calls.agentPrompts[0]).not.toContain("body of #7");
+    expect(calls.agentPrompts[0]).toContain("- #7:");
   });
 
   it("hands the merger extension through the verified-landing resolve path", async () => {
