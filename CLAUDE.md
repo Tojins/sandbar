@@ -29,6 +29,9 @@ A library with a thin bin (#38): `run(config)` in `src/index.ts` is the
 contract; `src/cli.ts` imports `--config` (default `./sandbar.config.mjs`) and
 dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132), `pulled-images` and
 `config-digest` (#190, `src/config-digest.ts`).
+`npm run stats` (`src/stats-cli.ts`, #194) is a repo script, not a verb: the
+factory scorecard over run records (`stats-record.ts` reads, `stats.ts`
+reduces); nothing in the daemon imports it.
 The config is a **program**, imported not parsed; `src/config.ts` is the one
 validation boundary and owns all defaults. Sandbar drives a GitHub-Issues coding
 agent loop against a consumer repo, which supplies Containerfiles, anchor docs
