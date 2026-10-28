@@ -42,12 +42,27 @@ describe("agent invocation records (#135)", () => {
     [{ role: "adjudicator", attempt: 3, invocation: 1 },
       "attempt-3-adjudicator-1.log"],
     [{ role: "gate", attempt: 3 }, "attempt-3-gate.log"],
+    [{ role: "scenario-runner", attempt: 3, invocation: 2 }, "attempt-3-scenario-runner-2.log"],
+    [{ role: "verifier-round", attempt: 3 }, join("verifier", "round-3")],
     [{ role: "anchor-condense", invocation: 2 }, "anchor-condense-2.log"],
     [{ role: "ui-check", invocation: 2 }, "ui-check-2.log"],
     [{ role: "partition-check", invocation: 2 }, "partition-check-2.log"],
     [{ role: "scenario-writer", invocation: 2 }, "scenario-writer-2.log"],
   ] as const)("names %j as %s", (identity, expected) => {
     expect(agentInvocationFilename(identity)).toBe(expected);
+  });
+
+  // A HARD-ERROR cycle renumbers attempts from 1, and a verifier round's
+  // evidence directory must not land in an earlier cycle's (#238).
+  it("numbers a verifier round's directory like its attempt, across cycles", async () => {
+    const sequencer = createAgentInvocationSequencer();
+    const first = sequencer.startCycle();
+    expect(first.filename({ role: "verifier-round", attempt: 2 })).toBe(join("verifier", "round-2"));
+    const second = sequencer.startCycle();
+    expect(second.filename({ role: "verifier-round", attempt: 1 })).toBe(join("verifier", "round-3"));
+    const issue = await (await makeRun()).issue("7");
+    expect(issue.verifierRoundDir(join("verifier", "round-3")))
+      .toBe(join(issue.dir, "verifier", "round-3"));
   });
 
   it("numbers each pre-attempt role on its own run-wide counter across cycles", () => {

@@ -16,8 +16,9 @@
 // provider boundary: config.env retains its allowlist fallback semantics while
 // the gate's own env stays literal, and the provider sees one final record.
 // `Sandbox.runHooks` (#201) runs in-sandbox hooks on demand after setup —
-// `onDbCopyReady`, after each database copy is swapped in — and answers a
-// failure or timeout with its output instead of throwing: a failed migration
+// `onDbCopyReady`, after each database copy is swapped in, and
+// `beforeScenarioRun`, before a verifier round runs scenarios (#238) — and
+// answers a failure or timeout with its output instead of throwing: a failed migration
 // on a copy is evidence for the agent, never a reason to rebuild the sandbox.
 //
 // A provider's parser answers in seven registers and the difference between
@@ -44,6 +45,8 @@
 // `background_tasks`, carries the count Claude's last `background_tasks_changed`
 // listed: it holds off the completion grace while tasks are pending (#192)
 // and rides onto the run result for the inner loop's nudge choice (#191).
+// `session_id`, the conversation claude or codex named first, rides out the
+// same way, so a later run can resume that session by id (#238).
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -711,6 +714,8 @@ export type CreateSandboxOptions = {
   // same-trust sandboxes that already hold the credential readable. Codex's
   // reload-before-refresh protocol requires one file per serialized stream;
   // separate writable copies rotate one token family away from each other.
+  // The verifier's workspace (#238) is the other writable one: the scenario
+  // runner's evidence, which the host archives out of it after each round.
   extraMounts?: readonly Mount[];
   // Run-owned callers route recoverable cleanup/preservation notices into the
   // event record. Standalone callers retain the terminal renderer.

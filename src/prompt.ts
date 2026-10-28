@@ -45,6 +45,14 @@
 // and its own prompt extension, probed in the seed snapshot it explores; no
 // project anchor, diff or branch history, because it works from the seed and
 // discovers the rest itself.
+// The verifier's scenario runner (#238) gets the project anchor, its contract
+// with what the sandbox offers this round (the sandbox-stack and egress slots
+// the implementer reads, the database copy it holds, how the
+// `beforeScenarioRun` hook went) and the scenarios it runs, then its own
+// prompt extension: no issue anchor and no diff, because it checks each Then
+// and judging the branch against the issue is the white-box review's. While
+// it holds a production copy, the white-box review beside it is told not to
+// read or quote it.
 // The UI and partition checkers (#126/#158) are intentionally smaller: issue
 // anchor plus their own decision contracts, with no project standards, diff or
 // prior-round history. The anchor condenser (#217) is smaller still: its
@@ -96,6 +104,8 @@ import type { RepoRef } from "./repo-ref.js";
 import type { DbCopyHeld } from "./db-copy.js";
 import { DB_COPY_HOOK_LOG } from "./db-copy-policy.js";
 import { SANDBOX_LOG_MOUNT, type SandboxContainerStatus } from "./sandbox-stack.js";
+import { type Scenario, renderScenario } from "./scenario-parser.js";
+import { APP_HOOK_LOG, VERIFIER_MOUNT } from "./verifier.js";
 import { type QualityStandards, type RuleGroup, renderStandards } from "./standards-groups.js";
 import { type ParsedVerdict, stripVerdictTokens } from "./verdict-parser.js";
 
@@ -127,6 +137,9 @@ const UI_CHECK_TPL = loadTemplate("ui-check");
 const PARTITION_CHECK_TPL = loadTemplate("partition-check");
 const ANCHOR_CONDENSER_TPL = loadTemplate("anchor-condenser");
 const SCENARIO_WRITER_TPL = loadTemplate("scenario-writer");
+const SCENARIO_RUNNER_TPL = loadTemplate("scenario-runner");
+const SCENARIO_RUNNER_DB_COPY_TPL = loadTemplate("scenario-runner-db-copy");
+const REVIEWER_DB_NOTICE_TPL = loadTemplate("reviewer-db-notice");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
 const IMPLEMENTER_QUALITY_COMMITS_TPL = loadTemplate("implementer-quality-commits");
@@ -370,6 +383,9 @@ export type CorrectnessPromptInputs = ReviewerPromptInputs & {
   // What this round reads (verifier.ts `reviewScope`): the whole branch, or
   // the change since the last reviewed head (#180).
   readonly scope: ReviewScope;
+  // Whether the scenario runner holds a production database copy beside this
+  // review (#238): the review is then told not to read or quote it.
+  readonly productionData: boolean;
 };
 
 // A quality report an adjudicator overruled, with its ruling (#187). The one
@@ -483,6 +499,79 @@ export async function buildScenarioWriterPrompt(
   const slot = promptExtensionSlot(resolvePromptExtension(snapshotPath, extension)).trimEnd();
   return [await buildIssueAnchor(issueId, anchor), SCENARIO_WRITER_TPL, ...(slot ? [slot] : [])]
     .join("\n\n---\n\n");
+}
+
+// What the scenario runner can rely on in the sandbox this round (#238).
+export type ScenarioRunnerEnvironment = {
+  readonly sandboxStack: readonly SandboxContainerStatus[];
+  readonly sandboxHasGateAttachments: boolean;
+  readonly egressEnforced: boolean;
+  // The copy the runner holds; null without one.
+  readonly dbCopy: DbCopyHeld | null;
+  readonly appHook: "ok" | "failed" | "none";
+};
+
+export type ScenarioRunnerSlotRender = ScenarioRunnerEnvironment & {
+  readonly scenarios: readonly Scenario[];
+};
+
+export type ScenarioRunnerPromptInputs = ScenarioRunnerSlotRender & {
+  readonly anchor: Omit<ProjectAnchorOptions, "anchorCacheDir">;
+  // The issue worktree, where the anchor's doc probes and a path extension
+  // resolve.
+  readonly worktreePath: string;
+  readonly promptExtension?: PromptExtension;
+};
+
+// The verifier's scenario runner (#180, #238): the project anchor, its
+// contract with what the sandbox offers this round, and the scenarios to run,
+// then its prompt extension. No issue anchor and no diff: it checks each
+// Then, and judging the branch against the issue is the white-box review's.
+export async function buildScenarioRunnerPrompt(
+  inputs: ScenarioRunnerPromptInputs,
+): Promise<string> {
+  const slot = promptExtensionSlot(
+    resolvePromptExtension(inputs.worktreePath, inputs.promptExtension),
+  ).trimEnd();
+  return [
+    await buildProjectAnchor(inputs.anchor, inputs.worktreePath),
+    renderScenarioRunnerSlot(inputs),
+    ...(slot ? [slot] : []),
+  ].join("\n\n---\n\n");
+}
+
+export function renderScenarioRunnerSlot(inputs: ScenarioRunnerSlotRender): string {
+  const appHookLog = `\`${VERIFIER_MOUNT}/run/${APP_HOOK_LOG}\``;
+  const appHook = {
+    ok: `The app was rebuilt from this head by the \`beforeScenarioRun\` hook; its output is in ${appHookLog}.`,
+    failed: "**The `beforeScenarioRun` hook failed**, so the app may not serve this head; " +
+      `its output is in ${appHookLog}. No scenario that needs the UI or the API is yours this round.`,
+    none: "",
+  }[inputs.appHook];
+  return render(SCENARIO_RUNNER_TPL, {
+    environment: [
+      renderSandboxStackSlot(inputs.sandboxStack, inputs.sandboxHasGateAttachments),
+      inputs.egressEnforced ? IMPLEMENTER_SANDBOX_EGRESS_TPL : "",
+      inputs.dbCopy === null ? "" : renderRunnerDbCopySlot(inputs.dbCopy),
+      appHook,
+    ].map(section).join(""),
+    scenarios: inputs.scenarios.map(renderScenario).join("\n\n"),
+  });
+}
+
+// The runner's database slot: the copy it may write to, and what the copy
+// hook did. A failure of the branch's own migration is the branch's defect;
+// any other hook failure leaves the SQL unverifiable.
+function renderRunnerDbCopySlot(copy: DbCopyHeld): string {
+  const log = `\`${SANDBOX_LOG_MOUNT}/${DB_COPY_HOOK_LOG}\``;
+  const hook = {
+    ok: `The copy hook applied the branch's migrations to it; its output is in ${log}.`,
+    failed: `**The copy hook failed on it**; its output is in ${log}. If the branch's own ` +
+      "migration is what failed, a scenario that needs SQL is a FAIL citing a copy of that " +
+      "log in its directory; any other hook failure makes it UNVERIFIED.",
+    none: "No copy hook is configured, so it has the dump's schema without the branch's migrations.",
+  }[copy.hook];
+  return render(SCENARIO_RUNNER_DB_COPY_TPL, { container: copy.container, dumpDate: copy.dumpDate, hook });
 }
 
 // The thread condenser (#217): its contract, then the issue it classifies, as
@@ -1002,6 +1091,7 @@ export type ReviewerSlotRender = BranchSlotRender & {
   readonly promptExtension?: PromptExtension;
   readonly priorRounds: readonly PriorReviewRound[];
   readonly scope: ReviewScope;
+  readonly productionData: boolean;
   // As for a quality review, anchored at the scope's head.
   readonly changedSinceStat: string | null;
 };
@@ -1051,6 +1141,7 @@ export function renderReviewerSlot(inputs: ReviewerSlotRender): string {
     historyScope: anchor === null
       ? REVIEWER_FULL_HISTORY_TPL
       : render(REVIEWER_SINCE_HISTORY_TPL, { anchor }),
+    dbNotice: section(inputs.productionData ? REVIEWER_DB_NOTICE_TPL : ""),
   });
 }
 

@@ -385,6 +385,49 @@ describe("run event reducer", () => {
     expect(state.events[0]?.text).toBe(expected);
   });
 
+  const runner = { kind: "scenario-runner", issue: 2, attempt: 1, round: 1, provider: "claude",
+    model: "opus", effort: "high", durationMs: 4 } as const;
+  const outcomes = [
+    { id: "S1", outcome: "pass" },
+    { id: "S2", outcome: "fail" },
+    { id: "S3", outcome: "unverified", reason: "no-db-copy" },
+  ] as const;
+  it.each([
+    [{ ...runner, invocation: 1, result: "completed", outcomes }, "scenarios: 3 run, 1 failed, 1 unverified", "bad"],
+    [{ ...runner, invocation: 1, result: "completed", outcomes: [outcomes[0]] }, "scenarios: 1 run, 0 failed, 0 unverified", "dim"],
+    [{ ...runner, invocation: 1, result: "completed" }, "scenario runner 1 · format nudge", "dim"],
+    [
+      { ...runner, invocation: 2, result: "failed", outcomes: [{ id: "S1", outcome: "unverified", reason: "not-reported" }] },
+      "scenarios: 1 run, 0 failed, 1 unverified · runner failed",
+      "warn",
+    ],
+    [{ ...runner, invocation: 1, result: "quota" }, "scenario runner quota", "warn"],
+    [{ ...runner, invocation: 1, result: "wrote" }, "scenario runner wrote", "bad"],
+    [
+      { kind: "scenario-runner", issue: 2, attempt: 1, round: 1, invocation: 0, result: "completed",
+        outcomes: [{ id: "S1", outcome: "unverified", reason: "app-hook-failed" }] },
+      "scenarios: 1 run, 0 failed, 1 unverified",
+      "dim",
+    ],
+    [
+      { kind: "review-round", issue: 2, attempt: 1, round: 1, head: "abc", quality: "APPROVED",
+        qualityRounds: 0, gateOk: true, correctness: "APPROVED", rejectingPass: "scenarios",
+        scenarios: { selected: 3, pass: 1, fail: 1, unverified: 1 }, gateFailures: 0,
+        correctnessFailures: 1, durationMs: 8 },
+      "round 1 · scenarios changes requested",
+      "bad",
+    ],
+  ] as const)("projects the scenario runner's %j (#238)", (event, text, tone) => {
+    const state = reduceRunEvents([
+      at(1, "2026-09-07T09:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 1, pid: 1,
+      }),
+      at(2, "2026-09-07T09:01:00Z", event),
+    ], { now: new Date("2026-09-07T09:02:00Z"), pidAlive: true });
+    expect(state.events[0]).toMatchObject({ text, tone });
+  });
+
   it("limits recent feed rows to 200 without changing the total", () => {
     const events = [at(1, "2026-09-07T09:00:00Z", {
       kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,

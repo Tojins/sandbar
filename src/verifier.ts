@@ -47,6 +47,10 @@ import { stripVerdictTokens } from "./verdict-parser.js";
 // under `run/`, and the failing scenarios' evidence is restaged in `findings/`.
 export const VERIFIER_MOUNT = "/sandbar/verifier";
 
+// The `beforeScenarioRun` hook's output, in `run/` beside the evidence it
+// is archived with.
+export const APP_HOOK_LOG = "before-scenario-run.log";
+
 // Why a scenario ended unverified. `runner` is the runner's own call, with its
 // words kept for the run directory; every other reason is the host's.
 export type UnverifiedReason =
@@ -224,6 +228,11 @@ function scenarioUnit(
       `[scenario ${id}] failed — scenario and evidence withheld; on the sandbar host under ${pointer}`,
   };
 }
+
+// What a write's detail says in place of a transcript that may quote a
+// scenario or its evidence: the detail reaches GitHub.
+export const withheldTranscript = (filename: string): string =>
+  `(withheld; ${filename} in the issue's run log directory on the sandbar host)`;
 
 // Said beside a failing scenario when the white-box review produced nothing:
 // the report is no code review's.

@@ -93,7 +93,7 @@ defaults.
 | `partitionCheck` | `true` | Ask whether an issue is too big before starting it. |
 | `uiPrototypeCheck` | `true` | Ask whether an issue needs a UI prototype first. |
 | `condenseAboveChars` | `20000` | Condense issue threads longer than this; `null` turns it off. |
-| `scenarioWriter` | `true` | Write hidden test scenarios for each issue beside its first attempt. |
+| `scenarioWriter` | `true` | Write hidden test scenarios for each issue beside its first attempt; the verifier runs them. |
 | `maxContextChars` | `600000` | Context budget per role (prompt plus diff). |
 | `maxQualityRounds` | `3` | See [Budgets](#budgets). |
 | `maxGateRounds` | `4` | See [Budgets](#budgets). |
@@ -126,10 +126,12 @@ export default { /* ... */ env, ...routing };
 - **Routing** keys `SANDBAR_<ROLE>_AGENT`, `_MODEL_ID` and `_EFFORT` choose the
   agent CLI, model and effort per role. Roles: `IMPLEMENTER`, `UI_CHECK`,
   `REVIEWER`, `REVIEWER_QUALITY`, `ADJUDICATOR`, `CONDENSER`, `SCENARIO_WRITER`,
+  `SCENARIO_RUNNER`,
   `MERGER`, and
   `npm run reflect`'s `REFLECT_TAGGER` and `REFLECT_SYNTHESIZER`. They never enter a
   sandbox. Defaults are claude with `opus` at `high` for the implementer and
-  reviewer (and so the adjudicator), `sonnet` at `high` for the UI check,
+  reviewer (and so the adjudicator and the scenario runner), `sonnet` at
+  `high` for the UI check,
   `sonnet` at `medium` for the quality pass and the reflect tagger, `opus`
   at `medium` for the merger and `opus` at `high` for the reflect
   synthesizer. The condenser follows the quality pass's CLI, on `sonnet` when
@@ -249,7 +251,8 @@ hostile input, regressions and the cheapest wrong way to satisfy it. It runs in
 its own container on a read-only copy of the code before the work started, and
 never sees the implementer's branch. The set lands in the run's issue log
 directory as `scenarios-<k>.json`; the implementer never sees it, and nothing
-posts it to GitHub. The first attempt never waits for it; the verifier does.
+posts it to GitHub. The first attempt never waits for it; the verifier waits
+and runs it (see [Rounds](#rounds)).
 If the writer fails, that is recorded and nothing else changes. It runs once
 per admission, routed by `scenarioWriter*` and
 `promptExtensions.scenarioWriter`.
@@ -267,8 +270,14 @@ Each round after the implementer reports done:
 2. **Automatic tests** (gate-1): the gate stack, run once on the result.
 3. **Verifier**, only if the tests are green: a read-only code review of the
    branch's logic and its conformance to the issue. From its second round on it
-   reviews only the change since the last head it reviewed. The implementer can
-   dispute a rejection; an adjudicator rules.
+   reviews only the change since the last head it reviewed. Beside it, when the
+   scenario writer wrote scenarios, a read-only scenario runner runs every one
+   of them against the app, the services and the issue's database copy, and
+   reports each as passed, failed with evidence, or unverified with a reason.
+   Either can reject: the implementer gets each failing scenario and its
+   evidence under `/sandbar/verifier/findings/`, never the passing ones, and
+   GitHub gets only the failing scenario's id. Unverified never rejects. The
+   implementer can dispute a rejection; an adjudicator rules.
 
 Red tests and rejections go back to the implementer. Quality findings never
 do. The implementer reads the same coding standards as guidance, from its own
@@ -279,6 +288,12 @@ Role routing: the quality roles use `reviewerQuality*` and
 `promptExtensions.reviewerQuality`, defaulting to claude whatever the
 reviewer runs on; the verifier's code review uses `reviewer*` and
 `promptExtensions.reviewer`, and the adjudicator defaults to that routing.
+The scenario runner uses `scenarioRunner*` and
+`promptExtensions.scenarioRunner`; it follows the reviewer's CLI, and its
+model and effort too while it runs that CLI. Before each round that runs
+scenarios, `sandboxHooks.sandbox.beforeScenarioRun` runs in the sandbox (after
+`onDbCopyReady`) so the app it drives is served from the head under review;
+if it fails, the scenarios that need the UI or the API are unverified.
 
 ### Coding standards
 

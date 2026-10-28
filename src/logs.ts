@@ -30,7 +30,9 @@
 // numbered per issue: `scenarios-<k>.json`, the one file a written set lives
 // in, beside the `scenario-writer-<n>.log` invocations that produced it. The
 // writer answers with its path. No sandbox mounts this directory, so the
-// scenarios stay hidden from the implementer.
+// scenarios stay hidden from the implementer. The verifier's scenario runner
+// (#238) logs as `attempt-<n>-scenario-runner-<k>.log`, and each round that
+// ran scenarios has its evidence archived under `verifier/round-<n>/`.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -50,6 +52,9 @@ export type AttemptLogger = {
   startInvocationCycle(): AgentInvocationSequence;
   writeIssueSnapshot(issue: IssueJson): Promise<string>;
   writeScenarios(set: ScenarioSet): Promise<string>;
+  // Where a verifier round's evidence is archived, by the name the sequence
+  // gave it (`verifier-round`).
+  verifierRoundDir(name: string): string;
 };
 
 // The `gate` role is not an agent invocation, but it is an artefact OF one
@@ -74,8 +79,12 @@ export type AgentInvocationIdentity =
       readonly invocation: number;
     }
   | { readonly role: "reviewer"; readonly attempt: number; readonly invocation: number }
+  | { readonly role: "scenario-runner"; readonly attempt: number; readonly invocation: number }
   | { readonly role: "adjudicator"; readonly attempt: number; readonly invocation: number }
   | { readonly role: "gate"; readonly attempt: number }
+  // Not a file: the directory a verifier round's scenario evidence is
+  // archived in, numbered like the round's other artefacts.
+  | { readonly role: "verifier-round"; readonly attempt: number }
   | { readonly role: PreAttemptRole; readonly invocation: number };
 
 // Roles that run before attempt 1 and number only their own invocations.
@@ -107,10 +116,14 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
       return `attempt-${identity.attempt}-${identity.role}-${identity.fixRound}-${identity.invocation}.log`;
     case "reviewer":
       return `attempt-${identity.attempt}-reviewer-${identity.invocation}.log`;
+    case "scenario-runner":
+      return `attempt-${identity.attempt}-scenario-runner-${identity.invocation}.log`;
     case "adjudicator":
       return `attempt-${identity.attempt}-adjudicator-${identity.invocation}.log`;
     case "gate":
       return `attempt-${identity.attempt}-gate.log`;
+    case "verifier-round":
+      return join("verifier", `round-${identity.attempt}`);
     case "anchor-condense":
     case "ui-check":
     case "partition-check":
@@ -251,6 +264,7 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
       await writeFile(join(dir, filename), `${JSON.stringify(issue, null, 2)}\n`, { flag: "wx" });
       return filename;
     },
+    verifierRoundDir: (name) => join(dir, name),
     async writeScenarios(set) {
       const path = join(dir, `scenarios-${nextScenarios++}.json`);
       await writeFile(path, `${JSON.stringify(set, null, 2)}\n`, { flag: "wx" });

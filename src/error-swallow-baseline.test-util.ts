@@ -82,4 +82,8 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // The HTTP request boundary maps record/reducer failures to a 500 response
   // for the polling page (#132).
   "ui-server.ts": 1,
+  // The verifier's scenario runner (#238): a run's write parks it, a closed
+  // provider and a dead egress proxy are rethrown, and every other failure is
+  // the runner's harness failing, which leaves its scenarios unverified.
+  "verifier-run.ts": 1,
 };

@@ -26,7 +26,10 @@
 // the thread fell back uncondensed.
 // The scenario writer (#203) is one feed row per invocation: how many
 // scenarios it wrote, or how it failed. Waiting for it before the verifier is
-// the round's `scenarios` step, a review span like the others.
+// the round's `scenarios` step, a review span like the others. The verifier's
+// scenario runner (#238) is a feed row per invocation too: the round's
+// scenarios run, failed and unverified on the one that decided, warning when
+// the runner itself failed.
 // A `deploy` verdict (#198) is a feed line; a red one this process filed is
 // also a header complaint, because the bug issue waits on a human.
 // An `egress-refused` event (#202) is a warning feed line, never a complaint:
@@ -413,6 +416,21 @@ function feedText(event: RunEvent): FeedEvent | null {
           : `scenarios written: ${event.scenarios}`;
       tone = SCENARIO_WRITER_TONE[event.result];
       break;
+    case "scenario-runner": {
+      const outcomes = event.outcomes ?? [];
+      const failed = outcomes.filter((o) => o.outcome === "fail").length;
+      const unverified = outcomes.filter((o) => o.outcome === "unverified").length;
+      const ran = `scenarios: ${outcomes.length} run, ${failed} failed, ${unverified} unverified`;
+      text = event.outcomes === undefined
+        ? event.result === "completed"
+          ? `scenario runner ${event.invocation} · format nudge`
+          : `scenario runner ${event.result}`
+        : event.result === "completed" ? ran : `${ran} · runner ${event.result}`;
+      tone = event.result === "wrote" || failed > 0
+        ? "bad"
+        : event.result === "completed" ? "dim" : "warn";
+      break;
+    }
     case "partition-check":
       text = `partition check ${event.invocation} · ${event.result}`;
       tone = event.result === "PARTITION" || event.result === "input-too-large"
