@@ -7,6 +7,7 @@ import {
   parseAgentProviderName,
 } from "./agent-providers.js";
 import type { SandboxHooks } from "./agent-sandbox.js";
+import type { DeployWatchSettings } from "./deploy-watch.js";
 import { SandbarError } from "./errors.js";
 import { DEFAULT_LANE, type Lane } from "./lanes.js";
 import { ALL_BRANCH_INFIXES, BRANCH_PREFIX } from "./naming.js";
@@ -591,6 +592,23 @@ export type ResolvedMergeMode =
       readonly openPullRequest: boolean;
     };
 
+// The deploy watch (#198, `deploy-watch.ts`): the consumer's own deploy
+// workflow, watched on every poll; a red run that deployed a sandbar merge
+// files one `ready-for-human` bug issue carrying `label` and @-mentions
+// `notifyLogin` in it. Preflight refuses a workflow or label the repository
+// does not have (#8: sandbar never creates a label) and a `notifyLogin` that
+// is the token's own login, which GitHub would not notify.
+export type DeployWatchConfig = {
+  // The workflow FILE name, e.g. "deploy.yml".
+  readonly workflow: string;
+  readonly notifyLogin: string;
+  // Default: "deploy-red".
+  readonly label?: string;
+  // How long a landing may go without a concluded run covering it before it
+  // is reported unverified. Default: one hour.
+  readonly timeoutMs?: number;
+};
+
 // RunConfig is DEVIATIONS-ONLY by design. A consumer should write down two
 // kinds of thing and nothing else:
 //
@@ -879,6 +897,10 @@ export type RunConfig = {
   // without re-checking (a deploy on push, a release job).
   readonly mergeMode?: MergeModeConfig;
 
+  // Watch the consumer's deploy workflow and file a bug for a red run (#198).
+  // Default: unset, no watch.
+  readonly deployWatch?: DeployWatchConfig;
+
   // Which landing lane an issue takes when it carries no `auto-land` label
   // (#57, §1 of #54): "auto" — the gate is the last word, what sandbar has
   // always done — or "review", where a human looks before the work lands.
@@ -945,16 +967,18 @@ export type RunConfig = {
 // After resolution every defaultable field is concrete except values whose
 // absence IS their default: `requiresSandbar`, the per-role effort flags (absent
 // for a role not routed to claude), and
-// `maxConcurrentGates` (unlimited). The other three are re-declared rather than
+// `maxConcurrentGates` (unlimited). The others are re-declared rather than
 // merely `Required<>`d because resolution changes their TYPE, not just their
 // presence: `labels` widens from Partial to the fully-populated vocabulary,
-// `gateStack` and `mergeMode` become their resolved-and-validated forms.
+// `gateStack` and `mergeMode` become their resolved-and-validated forms, and
+// `deployWatch` is null when the watch is off.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
     | "labels"
     | "gateStack"
     | "mergeMode"
+    | "deployWatch"
     | "requiresSandbar"
     | "implementerEffort"
     | "uiCheckEffort"
@@ -986,6 +1010,7 @@ export type ResolvedConfig = Required<
   readonly labels: LabelConfig;
   readonly gateStack: ResolvedStackSource;
   readonly mergeMode: ResolvedMergeMode;
+  readonly deployWatch: DeployWatchSettings | null;
 };
 
 export const DEFAULT_CWD = (): string => process.cwd();
@@ -1043,6 +1068,9 @@ export const DEFAULT_INTEGRATION_BRANCH = "sandbar/integration";
 export const DEFAULT_CHECK_TIMEOUT_MS = 20 * 60_000;
 export const DEFAULT_CHECK_POLL_INTERVAL_MS = 15_000;
 export const DEFAULT_NO_CHECKS_GRACE_MS = 120_000;
+export const DEFAULT_DEPLOY_WATCH_LABEL = "deploy-red";
+// Outdoor's deploy runs take two to four minutes; its slowest red took 29.
+export const DEFAULT_DEPLOY_WATCH_TIMEOUT_MS = 60 * 60_000;
 
 // Non-negative, finite, real number. `> 0` alone lets NaN and Infinity through:
 // NaN fails every comparison, so `elapsed >= NaN` is never true and the check
@@ -1050,10 +1078,10 @@ export const DEFAULT_NO_CHECKS_GRACE_MS = 120_000;
 // same by construction. A host computing a timeout from `Number(process.env.X)`
 // on an unset var produces exactly NaN, so this is the likely typo, not an
 // exotic one.
-function requirePositiveMs(label: string, value: number): number {
+function requirePositiveMs(field: string, value: number): number {
   if (!Number.isFinite(value) || value <= 0) {
     throw new SandbarError(
-      `config.mergeMode: ${label} must be a positive, finite number of ` +
+      `config.${field} must be a positive, finite number of ` +
         `milliseconds (got ${String(value)}).`,
     );
   }
@@ -1197,15 +1225,15 @@ export function resolveMergeMode(
     );
   }
   const checkTimeoutMs = requirePositiveMs(
-    "checkTimeoutMs",
+    "mergeMode.checkTimeoutMs",
     mode.checkTimeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS,
   );
   const pollIntervalMs = requirePositiveMs(
-    "pollIntervalMs",
+    "mergeMode.pollIntervalMs",
     mode.pollIntervalMs ?? DEFAULT_CHECK_POLL_INTERVAL_MS,
   );
   const noChecksGraceMs = requirePositiveMs(
-    "noChecksGraceMs",
+    "mergeMode.noChecksGraceMs",
     mode.noChecksGraceMs ?? DEFAULT_NO_CHECKS_GRACE_MS,
   );
   if (noChecksGraceMs >= checkTimeoutMs) {
@@ -1232,6 +1260,51 @@ export function resolveMergeMode(
     pollIntervalMs,
     noChecksGraceMs,
     openPullRequest: mode.openPullRequest ?? false,
+  };
+}
+
+// `.mjs` is type-checked by nothing, so every field is checked here. The
+// workflow is a file name because `gh run list --workflow` also accepts a
+// display name, which a rename of the workflow would silently stop matching.
+export function resolveDeployWatch(
+  watch: DeployWatchConfig | undefined,
+): DeployWatchSettings | null {
+  if (watch === undefined) return null;
+  if (!isRecord(watch)) {
+    throw new SandbarError(
+      "config.deployWatch must be { workflow, notifyLogin, label?, timeoutMs? }.",
+    );
+  }
+  const { workflow, notifyLogin } = watch;
+  if (typeof workflow !== "string" || !/^[\w.-]+\.ya?ml$/.test(workflow)) {
+    throw new SandbarError(
+      "config.deployWatch.workflow must be the workflow's file name, e.g. " +
+        `"deploy.yml" (got ${JSON.stringify(workflow)}).`,
+    );
+  }
+  if (
+    typeof notifyLogin !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(notifyLogin)
+  ) {
+    throw new SandbarError(
+      "config.deployWatch.notifyLogin must be a GitHub login " +
+        `(got ${JSON.stringify(notifyLogin)}).`,
+    );
+  }
+  const label = watch.label ?? DEFAULT_DEPLOY_WATCH_LABEL;
+  if (typeof label !== "string" || label.trim() === "") {
+    throw new SandbarError(
+      `config.deployWatch.label must be a non-empty label name (got ${JSON.stringify(label)}).`,
+    );
+  }
+  return {
+    workflow,
+    notifyLogin,
+    label: label.trim(),
+    timeoutMs: requirePositiveMs(
+      "deployWatch.timeoutMs",
+      watch.timeoutMs ?? DEFAULT_DEPLOY_WATCH_TIMEOUT_MS,
+    ),
   };
 }
 
@@ -2680,6 +2753,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     labels: { ...DEFAULT_LABELS, ...config.labels },
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
+    deployWatch: resolveDeployWatch(config.deployWatch),
     defaultLane: requireLane(config.defaultLane),
   };
 }
