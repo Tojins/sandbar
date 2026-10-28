@@ -227,7 +227,10 @@ describe.runIf(available)("gate stack against real podman", () => {
               {
                 name: "read-marker",
                 in: "runner",
-                command: ["cat", "marker.txt"],
+                // As for `boom` below: without the drain, remote podman's
+                // `exec` can drop the output of a process that exits the
+                // instant it writes, while still reporting it green.
+                command: ["sh", "-c", "cat marker.txt; sleep 1"],
               },
               // Both halves of #154 against real podman: `CI` arrives through
               // `stepExecArgs`' file on the `exec`, `GATE_SECRET` through
