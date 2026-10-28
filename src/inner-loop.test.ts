@@ -3781,6 +3781,34 @@ describe("runInnerLoop context terminals (#158)", () => {
       ]);
     });
 
+    it("creates the sandbox log directory under the janitor's own log name", async () => {
+      const logsDir = await mkdtemp(join(tmpdir(), "janitor-logs-"));
+      try {
+        const { opts } = harness(routine, {
+          layout: { repoDir: "/repo", worktreesDir: "/worktrees", logsDir, anchorCacheDir: "/anchor-cache" },
+        } as never);
+        const stackSource = {
+          path: null,
+          forHead: async () => ({
+            stack: {
+              containers: [{ name: "app", image: "app", inSandbox: true }],
+              steps: [],
+            },
+            attachments: { env: {}, mounts: [] },
+            classification: { kind: "same" },
+            tipBlob: null,
+          }),
+        } as unknown as typeof opts.stackSource;
+
+        await runInnerLoop(janitorIssue, { ...opts, stackSource, janitor });
+
+        expect(await readdir(join(logsDir, "janitor-tidy"))).toContain("sandbox-logs");
+        expect(await readdir(logsDir)).not.toContain("issue-janitor-tidy");
+      } finally {
+        await rm(logsDir, { recursive: true, force: true });
+      }
+    });
+
     it("tears the cycle down once on an abort mid-implementer and rejects unretried", async () => {
       const controller = new AbortController();
       let removed: (err: Error) => void = () => undefined;
