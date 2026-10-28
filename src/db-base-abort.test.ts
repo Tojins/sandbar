@@ -4,12 +4,16 @@
 // `podman unshare`, as in db-base-fs.test.ts.
 
 import { execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { gzipSync } from "node:zlib";
 import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { SandbarError } from "./errors.js";
 import { assertDatabaseCopiesTarget, resolveDatabaseCopies, resolveGateStack } from "./config.js";
 import { type UsernsRun, dbBaseLayout, readImportStatus, runDbBaseJob } from "./db-base.js";
 import type { BoundedResult } from "./gate-stack.js";
@@ -19,6 +23,12 @@ const mocks = vi.hoisted(() => ({
   ready: vi.fn<() => Promise<void>>(),
   disposables: [] as Array<() => Promise<void>>,
   withdrawn: vi.fn(),
+  spawn: vi.fn(),
+}));
+
+vi.mock("node:child_process", async (original) => ({
+  ...(await original<typeof import("node:child_process")>()),
+  spawn: (...args: unknown[]) => mocks.spawn(...args),
 }));
 
 vi.mock("./gate-stack.js", async (original) => ({
@@ -69,6 +79,13 @@ beforeEach(async () => {
   mocks.podman.mockReset().mockResolvedValue(ok);
   mocks.ready.mockReset().mockResolvedValue(undefined);
   mocks.withdrawn.mockReset();
+  // The mariadb client that takes the whole dump and exits 0.
+  mocks.spawn.mockReset().mockImplementation(() => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stderr: new PassThrough() });
+    child.stdin.resume();
+    child.stdin.on("finish", () => setImmediate(() => child.emit("close", 0, null)));
+    return child;
+  });
   mocks.disposables.length = 0;
 });
 afterEach(async () => {
@@ -137,5 +154,34 @@ describe("runDbBaseJob failure paths", () => {
     expect(await readImportStatus(layout)).toMatchObject({ outcome: "import-failed", detail: "interrupted" });
     expect(await readdir(layout.bases)).toEqual([]);
     await expect(readdir(root)).resolves.not.toContain("current");
+  });
+
+  describe("after the dump is loaded", () => {
+    beforeEach(async () => {
+      await writeFile(join(root, "drop/app-latest.sql.gz"), gzipSync("SELECT 1;"));
+    });
+
+    it.each([
+      ["the slow-shutdown call fails", "exec", result(1)],
+      ["the stop fails", "stop", result(125)],
+      ["the exit code cannot be inspected", "inspect", result(125)],
+      ["the server exited non-zero", "inspect", result(0, { stdout: "137\n" })],
+    ])("records shutdown-failed and removes the base when %s", async (_what, verb, answer) => {
+      mocks.podman.mockImplementation(async (args) => {
+        const slowShutdown = args.includes("SET GLOBAL innodb_fast_shutdown=0");
+        return args[0] === verb && (verb !== "exec" || slowShutdown) ? answer : ok;
+      });
+      await expect(job()).resolves.toBe("import-failed");
+      expect(await readImportStatus(layout)).toMatchObject({ outcome: "import-failed", detail: "shutdown-failed" });
+      expect(await readdir(layout.bases)).toEqual([]);
+      await expect(readdir(root)).resolves.not.toContain("current");
+    });
+
+    it("rejects with a SandbarError and leaves current unset when du prints garbage", async () => {
+      mocks.podman.mockImplementation(async (args) => (args[0] === "inspect" ? result(0, { stdout: "0\n" }) : ok));
+      const garbageDu: UsernsRun = async (argv) => (argv[0] === "du" ? "garbage\n" : plainFs(argv));
+      await expect(job(garbageDu)).rejects.toBeInstanceOf(SandbarError);
+      await expect(readdir(root)).resolves.not.toContain("current");
+    });
   });
 });
