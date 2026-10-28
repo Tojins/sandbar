@@ -24,8 +24,10 @@
 // that completed. A pass's rejection rate is over the runs that reached a
 // verdict: gate-1 over its gates, the quality lister and verify over their
 // APPROVED or CHANGES-REQUESTED verdicts, correctness over `review-round`s that
-// were APPROVED or CHANGES-REQUESTED. A review invocation's row carries its
-// round's correctness verdict, so a rejecting round is found without prose.
+// were APPROVED or CHANGES-REQUESTED. A completed review invocation's row
+// carries the correctness verdict of the next `review-round` in its cycle, so a
+// rejecting round is found without prose; attempt numbers repeat after a
+// HARD-ERROR retry, so they cannot pair a round with its invocations.
 //
 // Absent is structural (#82): every aggregate is `Agg`, whose `of` is the
 // population and `n` the measured part of it, and an aggregate of nothing
@@ -264,6 +266,9 @@ type Cycle = {
   qualityRounds: number;
   reviewRounds: number;
   readonly rows: Row[];
+  // Completed review invocations since the cycle's last `review-round`: the
+  // round that closes next is theirs. Attempt numbers repeat inside a cycle.
+  readonly unjudged: Row[];
 };
 
 const outcomeOf = (cycle: Cycle): Outcome => cycle.ended?.terminal ?? "interrupted";
@@ -369,6 +374,7 @@ export function computeStats(input: StatsInput): StatsReport {
           qualityRounds: 0,
           reviewRounds: 0,
           rows: [],
+          unjudged: [],
         };
         cycles.push(cycle);
         latest.set(event.issue, cycle);
@@ -381,6 +387,7 @@ export function computeStats(input: StatsInput): StatsReport {
         const row = invocationRow(run, event, input.withProse ? prose : null);
         invocations.push(row);
         cycle?.rows.push(row);
+        if (row.role === "review" && row.result === "completed") cycle?.unjudged.push(row);
       }
       switch (event.kind) {
         case "terminal":
@@ -412,15 +419,13 @@ export function computeStats(input: StatsInput): StatsReport {
         case "review-pass":
           if (cycle !== undefined && event.result === "completed") cycle.reviewRounds += 1;
           break;
-        case "review-round":
+        case "review-round": {
+          const judged = cycle?.unjudged.splice(0) ?? [];
           if (!VERDICTS.has(event.correctness)) break;
           count(passes.correctness, event.correctness === "CHANGES-REQUESTED");
-          for (const row of cycle?.rows ?? []) {
-            if (row.role === "review" && row.attempt === event.attempt && row.result === "completed") {
-              row.verdict = event.correctness;
-            }
-          }
+          for (const row of judged) row.verdict = event.correctness;
           break;
+        }
         case "adjudication":
           adjudication[event.pass].rulings += 1;
           if (event.ruling === "OVERRULED") adjudication[event.pass].overruled += 1;

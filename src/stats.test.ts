@@ -194,6 +194,33 @@ describe("computeStats passes and context (#194)", () => {
     ]);
   });
 
+  it("keeps each round's verdict on its own invocations when a HARD-ERROR retry reuses the attempt", () => {
+    const pass = (invocation: number) => ev({
+      kind: "review-pass", issue: 1, attempt: 1, round: 1, invocation, provider: "codex",
+      model: "m", effort: null, result: "completed", durationMs: 1,
+      transcript: `attempt-${invocation}-reviewer-1.log`,
+    });
+    const round = (correctness: string) => ev({
+      kind: "review-round", issue: 1, attempt: 1, round: 1, head: "h", gateOk: true,
+      correctness, rejectingPass: correctness === "CHANGES-REQUESTED" ? "correctness" : null,
+      gateFailures: 0, correctnessFailures: 0, durationMs: 1,
+    });
+    // The retry's restarted attempt 1 runs in the same cycle: its `admitted`
+    // is dropped (inner-loop.ts), and a round that reached no verdict leaves
+    // its invocation unattributed rather than open to the next round.
+    const report = computeStats(input([run("run-1", [
+      admitted(1),
+      pass(1), round("CHANGES-REQUESTED"),
+      pass(2), round("HARNESS-FAILED"),
+      pass(3), round("APPROVED"),
+    ])]));
+    expect(report.invocations.map((row) => [row.transcript, row.verdict])).toEqual([
+      ["attempt-1-reviewer-1.log", "CHANGES-REQUESTED"],
+      ["attempt-2-reviewer-1.log", null],
+      ["attempt-3-reviewer-1.log", "APPROVED"],
+    ]);
+  });
+
   it("reports a Codex invocation's first-command depth as absent, not zero", () => {
     const report = computeStats(input([run("run-1", [
       admitted(1),
