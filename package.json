@@ -1,6 +1,6 @@
 {
   "name": "sandbar",
-  "version": "0.55.6",
+  "version": "0.55.7",
   "description": "Self-hosted issue-tracker-driven coding agent orchestrator.",
   "type": "module",
   "main": "dist/index.js",
@@ -34,7 +34,8 @@
     "prepare": "npm run build",
     "preversion": "npm run check && npm test",
     "postversion": "git push --follow-tags",
-    "stats": "node dist/stats-cli.js"
+    "stats": "node dist/stats-cli.js",
+    "reflect": "node dist/reflect-cli.js"
   },
   "dependencies": {
     "proper-lockfile": "^4.1.2"

@@ -15,8 +15,9 @@
 
 import { parseArgs } from "node:util";
 
+import { isParseArgsError } from "./errors.js";
 import { computeStats, renderStatsTables } from "./stats.js";
-import { DEFAULT_STATS_WINDOW, readStatsInput, type StatsWindow } from "./stats-record.js";
+import { parseStatsWindow, readStatsInput, type StatsWindow } from "./stats-record.js";
 
 const USAGE =
   "usage: stats-cli.js [--logs <dir>] [--last N | --since YYYY-MM-DD] [--json] [--with-prose]";
@@ -27,11 +28,6 @@ type StatsArgs = {
   readonly json: boolean;
   readonly withProse: boolean;
 };
-
-// How parseArgs names an unknown or malformed flag.
-const isParseArgsError = (err: unknown): err is TypeError =>
-  err instanceof TypeError && "code" in err &&
-  String(err.code).startsWith("ERR_PARSE_ARGS_");
 
 function parseStatsArgs(argv: readonly string[]): StatsArgs | { readonly error: string } {
   let values;
@@ -52,18 +48,8 @@ function parseStatsArgs(argv: readonly string[]): StatsArgs | { readonly error: 
     if (!isParseArgsError(err)) throw err;
     return { error: err.message };
   }
-  if (values.last !== undefined && values.since !== undefined) {
-    return { error: "--last and --since are exclusive" };
-  }
-  let window = DEFAULT_STATS_WINDOW;
-  if (values.last !== undefined) {
-    if (!/^[1-9][0-9]*$/.test(values.last)) return { error: `--last wants a positive count, not ${values.last}` };
-    window = { last: Number(values.last) };
-  }
-  if (values.since !== undefined) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(values.since)) return { error: `--since wants YYYY-MM-DD, not ${values.since}` };
-    window = { since: values.since };
-  }
+  const window = parseStatsWindow(values);
+  if ("error" in window) return window;
   return { logs: values.logs, window, json: values.json, withProse: values["with-prose"] };
 }
 
