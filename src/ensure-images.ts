@@ -187,9 +187,6 @@ async function imageExists(tag: string): Promise<boolean> {
   }
 }
 
-// The fingerprint an existing image was built from, or null when it is absent
-// or carries no such label. `image exists` names absence; inspect failures do
-// not establish either condition and propagate (#99).
 // A null recording would leave the tag out of `participating` in
 // `createBranchImages`, where "unknown provenance" would then mean "never
 // rebuild" rather than "always". So it is recorded as a fingerprint no tree can
@@ -198,6 +195,9 @@ function baselineOf(recorded: string | null): string {
   return recorded ?? UNKNOWN_PROVENANCE;
 }
 
+// The fingerprint an existing image was built from, or null when it is absent
+// or carries no such label. `image exists` names absence; inspect failures do
+// not establish either condition and propagate (#99).
 async function readExistingInputsLabel(tag: string): Promise<string | null> {
   const { stdout } = await exec(
     RUNTIME,
