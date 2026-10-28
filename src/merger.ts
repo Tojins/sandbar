@@ -2783,6 +2783,9 @@ export type RealAdapterDeps = {
   // Host cache used as the source for issue refs (#98) and refreshed after a
   // chunk push so planning never trails sandbar's own origin write (#175).
   readonly cacheDir: string;
+  // The condenser's answers (#217): the resolve prompt's issue anchor is
+  // condensed when the inner loop condensed this exact thread.
+  readonly anchorCacheDir: string;
   // The run's podman namespace (#28), for the one container this module starts
   // — the resolve agent's. It was ANONYMOUS until #67, which meant a container
   // that died at startup could not even be named in the failure it caused; and
@@ -3506,7 +3509,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // Throws (SandbarError) on fetch failure: a resolve agent reasoning
       // about the branch's intent without its issue spec is worse than a
       // halted merge phase.
-      return fetchIssueText(issueId, deps.repo);
+      return fetchIssueText(issueId, deps.repo, deps.anchorCacheDir);
     },
     async getIssueData(issueId) {
       return fetchIssueData(issueId, deps.repo);

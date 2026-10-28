@@ -97,6 +97,9 @@ export type RepoLayout = {
   readonly worktreesDir: string;
   readonly sourceWorktree: string;
   readonly logsDir: string;
+  // The thread condenser's answers, one file per issue (#217). Disposable, but
+  // outside `logs/` because it has to outlive the run a deploy restarts.
+  readonly anchorCacheDir: string;
 };
 
 export function repoLayout(hostCwd: string, workDir: string): RepoLayout {
@@ -109,6 +112,7 @@ export function repoLayout(hostCwd: string, workDir: string): RepoLayout {
     worktreesDir,
     sourceWorktree: join(worktreesDir, SOURCE_WORKTREE_NAME),
     logsDir: join(stateDir, "logs"),
+    anchorCacheDir: join(stateDir, "anchor-cache"),
   };
 }
 

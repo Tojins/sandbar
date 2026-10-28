@@ -2643,6 +2643,7 @@ export async function run(
           const adapter = realAdapter({
             cwd: mergerWorktree.path,
             cacheDir: layout.repoDir,
+            anchorCacheDir: layout.anchorCacheDir,
             scope,
             repo,
             sourceBranch: config.sourceBranch,

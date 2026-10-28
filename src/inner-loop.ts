@@ -1183,6 +1183,7 @@ async function runSandboxCycle(
     const anchorOpts = {
       repo: config.repo,
       repoDir: config.layout.repoDir,
+      anchorCacheDir: config.layout.anchorCacheDir,
       claudeMdPath: config.claudeMdPath,
       contextMdPath: config.contextMdPath,
       adrDir: config.adrDir,
@@ -1552,6 +1553,7 @@ export async function runPartitionCheck(
   const basePrompt = await buildPartitionCheckPrompt(
     issue.id,
     config.repo,
+    config.layout.anchorCacheDir,
     config.maxContextChars,
   );
   const size = contextChars(
@@ -1688,7 +1690,11 @@ export async function runUiCheck(
   Extract<LoopEvent, { kind: "ui-check-result" | "ui-checker-wrote" }>
 > {
   const { issue, sandbox, opts, config } = ctx;
-  const basePrompt = await buildUiCheckPrompt(issue.id, config.repo);
+  const basePrompt = await buildUiCheckPrompt(
+    issue.id,
+    config.repo,
+    config.layout.anchorCacheDir,
+  );
   let prompt = basePrompt;
 
   // One correction at most. Neither invocation owns a completion signal:
@@ -1828,6 +1834,7 @@ const branchRoleInputs = (
 ): ReviewerPromptInputs => ({
   issue: ctx.issue,
   repo: ctx.config.repo,
+  anchorCacheDir: ctx.config.layout.anchorCacheDir,
   repoDir: ctx.config.layout.repoDir,
   worktreePath: ctx.sandbox.worktreePath,
   sourceBranch: ctx.config.sourceBranch,
