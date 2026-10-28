@@ -24,6 +24,9 @@
 // The anchor step (#217) is a pre-attempt phase like the UI check: no lane
 // span, and a feed row naming how it ended and what it dropped, warning when
 // the thread fell back uncondensed.
+// The scenario writer (#203) is one feed row per invocation: how many
+// scenarios it wrote, or how it failed. Waiting for it before the verifier is
+// the round's `scenarios` step, a review span like the others.
 // A `deploy` verdict (#198) is a feed line; a red one this process filed is
 // also a header complaint, because the bug issue waits on a human.
 
@@ -31,6 +34,7 @@ import type {
   GateStepEvent,
   HeldReason,
   IssueAnchorResult,
+  ScenarioWriterResult,
   RecomputeWaiting,
   RunEvent,
   WaitingReason,
@@ -381,6 +385,14 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = `UI check ${event.invocation} · ${event.result ?? "finished"}`;
       tone = "dim";
       break;
+    case "scenario-writer":
+      text = event.result !== "completed"
+        ? `scenario writer failed: ${event.result}`
+        : event.scenarios === undefined
+          ? `scenario writer ${event.invocation} · format nudge`
+          : `scenarios written: ${event.scenarios}`;
+      tone = SCENARIO_WRITER_TONE[event.result];
+      break;
     case "partition-check":
       text = `partition check ${event.invocation} · ${event.result}`;
       tone = event.result === "PARTITION" || event.result === "input-too-large"
@@ -444,6 +456,17 @@ const ANCHOR_TONE = {
   wrote: "bad",
 } as const satisfies Record<IssueAnchorResult, FeedEvent["tone"]>;
 
+// A writer failure changes nothing for the issue; a write parks it.
+const SCENARIO_WRITER_TONE = {
+  completed: "dim",
+  failed: "warn",
+  "input-too-large": "warn",
+  quota: "warn",
+  credential: "warn",
+  aborted: "dim",
+  wrote: "bad",
+} as const satisfies Record<ScenarioWriterResult, FeedEvent["tone"]>;
+
 function finishRunningSpan(issue: MutableIssue, at: string): void {
   const last = issue.spans.at(-1);
   if (last?.to === null) {
@@ -451,7 +474,7 @@ function finishRunningSpan(issue: MutableIssue, at: string): void {
   }
 }
 
-const REVIEW_PHASES: ReadonlySet<string> = new Set(["quality", "gate-1", "review"]);
+const REVIEW_PHASES: ReadonlySet<string> = new Set(["quality", "gate-1", "scenarios", "review"]);
 
 function deployText(event: Extract<RunEvent, { kind: "deploy" }>): string {
   const run = event.runId === null

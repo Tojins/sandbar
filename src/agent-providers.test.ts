@@ -188,6 +188,23 @@ describe("billingPrecedenceWarnings", () => {
 });
 
 describe("requiredAgentProviders", () => {
+  it("adds the scenario writer's provider only while it is on (#203)", () => {
+    const roles = {
+      uiPrototypeCheck: true,
+      condenseAboveChars: null,
+      condenserAgent: "claude",
+      implementerAgent: "claude",
+      uiCheckAgent: "claude",
+      reviewerAgent: "claude",
+      reviewerQualityAgent: "claude",
+      adjudicatorAgent: "claude",
+      mergerAgent: "claude",
+      scenarioWriterAgent: "codex",
+    } as const;
+    expect(requiredAgentProviders({ ...roles, scenarioWriter: true })).toEqual(["claude", "codex"]);
+    expect(requiredAgentProviders({ ...roles, scenarioWriter: false })).toEqual(["claude"]);
+  });
+
   it("is just claude for the default routing", () => {
     expect(
       requiredAgentProviders({

@@ -31,6 +31,8 @@ const innerLoopMocks = vi.hoisted(() => ({
   symbolicHeadRef: vi.fn(async () => "refs/heads/sandbar/issue-126" as string | null),
   settleQualityResidue: vi.fn(),
   revParse: vi.fn(async () => "seed-sha"),
+  forkPoint: vi.fn(async () => "fork-sha"),
+  createScenarioWriterTask: vi.fn(),
   isAncestor: vi.fn(async (_cwd: string, _ancestor: string, _descendant: string) => true),
   fetchIssueAnchor: vi.fn(async (): Promise<IssueAnchor> => ({
     text: "Issue #1: Issue",
@@ -83,7 +85,13 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   branchCommitsSinceSeed: innerLoopMocks.branchCommitsSinceSeed,
   ensureIssueBranch: innerLoopMocks.ensureIssueBranch,
   revParse: innerLoopMocks.revParse,
+  forkPoint: innerLoopMocks.forkPoint,
   isAncestor: innerLoopMocks.isAncestor,
+}));
+
+vi.mock("./scenario-writer-run.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./scenario-writer-run.js")>()),
+  createScenarioWriterTask: innerLoopMocks.createScenarioWriterTask,
 }));
 
 vi.mock("./issue-anchor.js", async (importOriginal) => ({
@@ -143,7 +151,12 @@ import {
 } from "./issue-anchor.js";
 import type { EventInput } from "./events.js";
 import type { GateResult } from "./gate.js";
-import { type ReviewerResult, initialState } from "./inner-loop-machine.js";
+import {
+  type ReviewerResult,
+  type ScenarioWriterOutcome,
+  type ScenarioWriterStatus,
+  initialState,
+} from "./inner-loop-machine.js";
 import { combineVerifier } from "./verifier.js";
 import { parsePromise } from "./promise-parser.js";
 import { loadTemplate } from "./prompts.js";
@@ -3302,6 +3315,130 @@ describe("runInnerLoop context terminals (#158)", () => {
   // #188: a fresh sandbox cycle credits the work its branch already carries.
   // Real git for the branch seed, the clone and the commit evidence; the
   // agent is fake and says COMPLETE with nothing new to add.
+  // #203: a fake task stands for scenario-writer-run.ts.
+  describe("the scenario writer (#203)", () => {
+    const fakeWriter = (outcome: Promise<ScenarioWriterOutcome>) => {
+      let status: ScenarioWriterStatus = { kind: "pending" };
+      return {
+        status: vi.fn(() => status),
+        start: vi.fn(() => {
+          status = { kind: "running" };
+        }),
+        settled: vi.fn(() => outcome),
+        abort: vi.fn(async () => undefined),
+      };
+    };
+    const names = (sandbox: Sandbox) =>
+      vi.mocked(sandbox.run).mock.calls.map(([options]) => options.name ?? "");
+    const routine = async (options: Parameters<Sandbox["run"]>[0]) =>
+      /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : completeRun;
+
+    beforeEach(() => {
+      innerLoopMocks.createScenarioWriterTask.mockReset();
+      innerLoopMocks.forkPoint.mockReset().mockResolvedValue("fork-sha");
+    });
+
+    it("dispatches attempt 1 without waiting for it, and joins it before the verifier", async () => {
+      const outcome = deferred<ScenarioWriterOutcome>();
+      const writer = fakeWriter(outcome.promise);
+      innerLoopMocks.createScenarioWriterTask.mockReturnValue(writer);
+      const { sandbox, opts, events } = harness(routine, { scenarioWriter: true });
+
+      const done = runInnerLoop(issue, opts);
+      await vi.waitFor(() => expect(writer.settled).toHaveBeenCalled());
+      expect(names(sandbox)).toEqual(["implementer-158-attempt-1", "quality-list-158-attempt-1"]);
+      expect(writer.start).toHaveBeenCalledWith({
+        imageName: "sandbox-image",
+        seedRef: "origin/main",
+        seedSha: "fork-sha",
+      });
+      expect(innerLoopMocks.forkPoint).toHaveBeenCalledWith("/repo", "origin/main", issue.branch);
+      outcome.resolve({ kind: "none", reason: "docs" });
+
+      await expect(done).resolves.toMatchObject({ type: "DONE" });
+      expect(names(sandbox).at(-1)).toBe("reviewer-158-round-1");
+      expect(innerLoopMocks.createScenarioWriterTask).toHaveBeenCalledWith(expect.objectContaining({
+        issue,
+        config: opts.config,
+      }));
+      // The start has no phase of its own; the join does.
+      expect(events.flatMap((event) => event.kind === "phase" ? [event.phases] : [])).toEqual([
+        ["anchor"], ["implementer"], ["quality"], ["gate-1"], ["scenarios"], ["review"], [],
+      ]);
+    });
+
+    it("is not started again by a fresh HARD-ERROR cycle", async () => {
+      const writer = fakeWriter(Promise.resolve({ kind: "none", reason: "docs" }));
+      innerLoopMocks.createScenarioWriterTask.mockReturnValue(writer);
+      let attempts = 0;
+      const { opts, events } = harness(async (options) => {
+        if ((options.name ?? "").startsWith("implementer-") && (attempts += 1) === 1) {
+          throw new Error("podman exec died");
+        }
+        return routine(options);
+      }, { scenarioWriter: true });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(events).toContainEqual(expect.objectContaining({ kind: "hard-error", retry: 1 }));
+      expect(innerLoopMocks.createScenarioWriterTask).toHaveBeenCalledTimes(1);
+      expect(writer.start).toHaveBeenCalledTimes(1);
+      expect(writer.settled).toHaveBeenCalledTimes(1);
+    });
+
+    it("is aborted when the admission ends before the join", async () => {
+      const writer = fakeWriter(new Promise(() => undefined));
+      innerLoopMocks.createScenarioWriterTask.mockReturnValue(writer);
+      const { opts } = harness(async () => ({
+        ...completeRun,
+        stdout: "<promise>NEEDS-INFO</promise><questions>Which API?</questions>",
+        commits: [],
+      }), { scenarioWriter: true });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
+      expect(writer.start).toHaveBeenCalledTimes(1);
+      expect(writer.settled).not.toHaveBeenCalled();
+      expect(writer.abort).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports a writer that fails while aborting, and keeps the terminal", async () => {
+      const writer = fakeWriter(new Promise(() => undefined));
+      writer.abort.mockRejectedValue(new Error("EEXIST"));
+      innerLoopMocks.createScenarioWriterTask.mockReturnValue(writer);
+      const { opts, events } = harness(async () => ({
+        ...completeRun,
+        stdout: "<promise>NEEDS-INFO</promise><questions>Which API?</questions>",
+        commits: [],
+      }), { scenarioWriter: true });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "NEEDS-INFO" });
+      expect(events).toContainEqual({
+        kind: "complaint",
+        severity: "error",
+        message: "issue=158 scenario writer failed: EEXIST",
+      });
+    });
+
+    it("parks a writer that wrote, at the join", async () => {
+      innerLoopMocks.createScenarioWriterTask.mockReturnValue(
+        fakeWriter(Promise.resolve({ kind: "wrote", detail: "HEAD moved" })),
+      );
+      const { sandbox, opts } = harness(routine, { scenarioWriter: true });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "scenario-writer-wrote",
+        latestReviewerProse: "HEAD moved",
+      });
+      expect(names(sandbox)).not.toContain("reviewer-158-round-1");
+    });
+
+    it("creates no task when it is off", async () => {
+      const { opts } = harness(routine, { scenarioWriter: false });
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(innerLoopMocks.createScenarioWriterTask).not.toHaveBeenCalled();
+    });
+  });
+
   describe("a branch already ahead of its seed (#188)", () => {
     const exec = promisify(execFile);
     const git = (cwd: string, ...args: string[]) =>

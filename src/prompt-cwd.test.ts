@@ -43,6 +43,7 @@ import {
   buildProjectAnchor,
   buildCorrectnessPrompt,
   buildQualityReviewPrompt,
+  buildScenarioWriterPrompt,
   buildUiCheckPrompt,
 } from "./prompt.js";
 
@@ -227,6 +228,26 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     expect(prompt).toContain("# UI prototype check");
     expect(prompt).not.toContain("Last 10 commits");
     expect(prompt).not.toContain("Coding standards");
+  });
+
+  it("builds the scenario writer from the issue anchor, its contract and an extension the snapshot holds (#203)", async () => {
+    const anchor = {
+      issueSource: ghIssueSource(CONFIGURED),
+      repo: CONFIGURED,
+      anchorCacheDir: join(target, "anchor-cache"),
+    };
+    await writeFile(join(target, "SCENARIOS.md"), "Prefer SQL.\n");
+    const prompt = await buildScenarioWriterPrompt("1", anchor, target, { path: "SCENARIOS.md" });
+    expect(prompt).toContain("Issue #1: acme/app");
+    expect(prompt).toContain("# Scenario writer");
+    expect(prompt).toMatch(/Read and follow @SCENARIOS\.md\.$/);
+    expect(prompt).not.toContain("Last 10 commits");
+    expect(prompt).not.toContain("Coding standards");
+    // Probed in the snapshot it is given, not in the launch directory.
+    expect(await buildScenarioWriterPrompt("1", anchor, launchedFrom, { path: "SCENARIOS.md" }))
+      .toMatch(/<scenario-none-reason>` block\.$/);
+    expect(await buildScenarioWriterPrompt("1", anchor, launchedFrom, { text: "Keep it to SQL." }))
+      .toMatch(/### Project prompt extension\n\nKeep it to SQL\.$/);
   });
 
   it("assembles adjudication from both anchors and only the rejected report", async () => {

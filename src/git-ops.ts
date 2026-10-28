@@ -39,6 +39,8 @@
 //
 // `revParse` is exported for the inner loop's `admitted.seedSha` (#195): the
 // commit the symbolic seed ref named when the issue was admitted.
+// `forkPoint` is where the issue branch left its seed ref, the commit the
+// scenario writer's snapshot is checked out at (#203).
 //
 // `gitStdout` is the one "run git in this directory, hand back stdout" call,
 // with an optional stdin, for the callers that have no richer need (replay,
@@ -302,6 +304,13 @@ export const gitStdout = async (
 
 export const revParse = async (cwd: string, ref: string): Promise<string> =>
   (await exec("git", ["rev-parse", "--verify", "--quiet", ref], { cwd })).stdout.trim();
+
+export const forkPoint = async (
+  cwd: string,
+  seedRef: string,
+  branch: string,
+): Promise<string> =>
+  (await exec("git", ["merge-base", seedRef, `refs/heads/${branch}`], { cwd })).stdout.trim();
 
 export const isAncestor = async (
   cwd: string,

@@ -26,6 +26,11 @@
 // `issue-snapshot-<n>.json`, create-only, numbered by its own per-issue
 // sequence so a later admission in the same run never overwrites an earlier
 // one. The writer answers with the filename, which `admitted` records.
+// The scenario writer's output (#203) is filed the same way, create-only and
+// numbered per issue: `scenarios-<k>.json`, the one file a written set lives
+// in, beside the `scenario-writer-<n>.log` invocations that produced it. The
+// writer answers with its path. No sandbox mounts this directory, so the
+// scenarios stay hidden from the implementer.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -36,6 +41,7 @@ import { join } from "node:path";
 import type { ResolveAttemptRecord } from "./resolve-loop.js";
 import type { AgentInvocationRecord } from "./agent-sandbox.js";
 import type { IssueJson } from "./issue-anchor.js";
+import type { ScenarioSet } from "./scenario-parser.js";
 import { formatContainerResources } from "./container-resources.js";
 
 export type AttemptLogger = {
@@ -43,6 +49,7 @@ export type AttemptLogger = {
   writeGate(filename: string, gate: AttemptGateRecord): Promise<void>;
   startInvocationCycle(): AgentInvocationSequence;
   writeIssueSnapshot(issue: IssueJson): Promise<string>;
+  writeScenarios(set: ScenarioSet): Promise<string>;
 };
 
 // The `gate` role is not an agent invocation, but it is an artefact OF one
@@ -70,6 +77,7 @@ const PRE_ATTEMPT_ROLES = {
   "anchor-condense": true,
   "ui-check": true,
   "partition-check": true,
+  "scenario-writer": true,
 } as const;
 type PreAttemptRole = keyof typeof PRE_ATTEMPT_ROLES;
 const isPreAttempt = (
@@ -100,6 +108,7 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
     case "anchor-condense":
     case "ui-check":
     case "partition-check":
+    case "scenario-writer":
       return `${identity.role}-${identity.invocation}.log`;
   }
 }
@@ -112,6 +121,7 @@ export function createAgentInvocationSequencer(): {
     "anchor-condense": 1,
     "ui-check": 1,
     "partition-check": 1,
+    "scenario-writer": 1,
   };
   return {
     startCycle() {
@@ -226,6 +236,7 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
   await mkdir(dir, { recursive: true });
   const invocationSequencer = createAgentInvocationSequencer();
   let nextSnapshot = 1;
+  let nextScenarios = 1;
   return {
     dir,
     startInvocationCycle: () => invocationSequencer.startCycle(),
@@ -233,6 +244,11 @@ async function makeIssueLogger(runDir: string, issueId: string): Promise<IssueLo
       const filename = `issue-snapshot-${nextSnapshot++}.json`;
       await writeFile(join(dir, filename), `${JSON.stringify(issue, null, 2)}\n`, { flag: "wx" });
       return filename;
+    },
+    async writeScenarios(set) {
+      const path = join(dir, `scenarios-${nextScenarios++}.json`);
+      await writeFile(path, `${JSON.stringify(set, null, 2)}\n`, { flag: "wx" });
+      return path;
     },
     async writeInvocation(filename, record) {
       const resources = formatContainerResources(record);

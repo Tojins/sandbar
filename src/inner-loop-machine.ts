@@ -13,6 +13,18 @@
 // first enabled; a condenser that wrote parks the issue like any read-only
 // role.
 //
+// The scenario writer (#203) is a background task around two synchronous
+// steps. Wherever the machine first moves to the implementer in a sandbox
+// cycle — after the anchor, partition and UI steps clear — a `pending` writer
+// routes through `start-scenario-writer` first, whose `scenario-writer-started`
+// dispatches attempt 1 at once: nothing waits for the writer. The join is
+// `await-scenario-writer`, in front of the verifier slot: a green gate-1 with
+// the writer still `running` waits for its result. A write parks the issue
+// like any read-only role; any other outcome is recorded as `settled` and the
+// verifier runs. The runner passes the task's status into every cycle's
+// initial state, so a fresh HARD-ERROR cycle never starts a second writer. No
+// budget is touched, and a writer outcome is never a verdict about the branch.
+//
 // After a clean, on-branch COMPLETE the round is SERIAL (#185, #187): the
 // quality pass, then gate-1 ONCE on the head it left, then the verifier only
 // on a green gate there. A red gate goes back to the implementer; a failing
@@ -102,6 +114,7 @@ import type { ParseSignal } from "./promise-parser.js";
 import type { UiCheckResult } from "./ui-check-parser.js";
 import type { PartitionCheckResult } from "./partition-check-parser.js";
 import { loadTemplate } from "./prompts.js";
+import type { ScenarioSet } from "./scenario-parser.js";
 import type { StackChange } from "./stack-change.js";
 import {
   type VerifierOutcome,
@@ -158,6 +171,25 @@ export type QualityOutcome = {
   readonly rounds: number;
 };
 
+// How the scenario writer's one run per admission ended (#203). `failed`
+// covers every harness failure and an answer still malformed after its nudge.
+export type ScenarioWriterOutcome =
+  | { readonly kind: "written"; readonly set: ScenarioSet }
+  | { readonly kind: "none"; readonly reason: string }
+  | { readonly kind: "failed"; readonly detail: string }
+  | { readonly kind: "wrote"; readonly detail: string };
+
+// The writer as the machine sees it. A write never settles: the join hears it
+// and parks.
+export type ScenarioWriterStatus =
+  | { readonly kind: "off" }
+  | { readonly kind: "pending" }
+  | { readonly kind: "running" }
+  | {
+      readonly kind: "settled";
+      readonly outcome: Exclude<ScenarioWriterOutcome, { readonly kind: "wrote" }>;
+    };
+
 export const HARD_ERROR_MAX_RETRIES = 2;
 export const REVIEWER_HARNESS_FAILURE_LIMIT = 2;
 
@@ -165,11 +197,13 @@ export type LoopPhase =
   | "needs-anchor"
   | "needs-partition-check"
   | "needs-ui-check"
+  | "needs-scenario-writer-start"
   | "needs-implementer"
   | "needs-quality-list"
   | "needs-quality-fix"
   | "needs-quality-verify"
   | "needs-gate"
+  | "needs-scenario-writer-result"
   | "needs-verifier"
   | "needs-adjudicator"
   | "terminated";
@@ -230,6 +264,7 @@ export type LoopState = {
     | null;
   readonly uiPrototypeCheck: boolean;
   readonly partitionCheck: boolean;
+  readonly scenarioWriter: ScenarioWriterStatus;
   readonly phase: LoopPhase;
 };
 
@@ -332,7 +367,8 @@ export type Verdict =
         | "adjudicator-wrote"
         | "ui-checker-wrote"
         | "partition-checker-wrote"
-        | "anchor-condenser-wrote";
+        | "anchor-condenser-wrote"
+        | "scenario-writer-wrote";
     }
   | {
       // The branch changes its gate stack beyond container env (#186). `gate`
@@ -358,6 +394,7 @@ export type LoopAction =
   | { readonly kind: "run-anchor-condense" }
   | { readonly kind: "run-partition-check" }
   | { readonly kind: "run-ui-check" }
+  | { readonly kind: "start-scenario-writer" }
   | {
       readonly kind: "run-implementer";
       readonly attempt: number;
@@ -392,6 +429,7 @@ export type LoopAction =
       // whatever the pass ended with.
       readonly quality: QualityOutcome;
     }
+  | { readonly kind: "await-scenario-writer" }
   | { readonly kind: "run-verifier"; readonly attempt: number }
   | {
       readonly kind: "run-adjudicator";
@@ -419,6 +457,7 @@ export function visiblePhases(
   | "implementer"
   | "quality"
   | "gate-1"
+  | "scenarios"
   | "review"
   | "adjudication"
 )[] {
@@ -426,12 +465,15 @@ export function visiblePhases(
     case "run-anchor-condense": return ["anchor"];
     case "run-partition-check": return ["partition-check"];
     case "run-ui-check": return ["ui-check"];
+    // Returns at once; attempt 1 is the phase that follows.
+    case "start-scenario-writer": return [];
     case "run-implementer": return ["implementer"];
     case "run-quality-list":
     case "run-quality-fix":
     case "run-quality-verify":
       return ["quality"];
     case "run-gate": return ["gate-1"];
+    case "await-scenario-writer": return ["scenarios"];
     case "run-verifier": return ["review"];
     case "run-adjudicator": return ["adjudication"];
     case "terminate": return [];
@@ -450,6 +492,8 @@ export type LoopEvent =
   | { readonly kind: "partition-checker-wrote"; readonly detail: string }
   | { readonly kind: "ui-check-result"; readonly result: UiCheckResult }
   | { readonly kind: "ui-checker-wrote"; readonly detail: string }
+  | { readonly kind: "scenario-writer-started" }
+  | { readonly kind: "scenario-writer-result"; readonly outcome: ScenarioWriterOutcome }
   | {
       readonly kind: "context-over-budget";
       readonly slot: ContextSlot;
@@ -557,6 +601,8 @@ export type InitialStateOptions = {
   readonly maxReviewRounds: number;
   readonly uiPrototypeCheck: boolean;
   readonly partitionCheck: boolean;
+  // The admission's writer task as it stands at this cycle's start.
+  readonly scenarioWriter: ScenarioWriterStatus;
 };
 
 export function initialState(opts: InitialStateOptions): LoopState {
@@ -593,9 +639,16 @@ export function initialState(opts: InitialStateOptions): LoopState {
     adjudicating: null,
     uiPrototypeCheck: opts.uiPrototypeCheck,
     partitionCheck: opts.partitionCheck,
+    scenarioWriter: opts.scenarioWriter,
     phase: "needs-anchor",
   };
 }
+
+// Attempt 1, behind the scenario writer's start when it is still pending.
+const toImplementer = (state: LoopState): LoopPhase =>
+  state.scenarioWriter.kind === "pending"
+    ? "needs-scenario-writer-start"
+    : "needs-implementer";
 
 // The first enabled pre-attempt check after the anchor, else the implementer.
 const afterAnchor = (state: LoopState): LoopPhase =>
@@ -603,12 +656,13 @@ const afterAnchor = (state: LoopState): LoopPhase =>
     ? "needs-partition-check"
     : state.uiPrototypeCheck
       ? "needs-ui-check"
-      : "needs-implementer";
+      : toImplementer(state);
 
 export function initialAction(state: LoopState): LoopAction {
   if (state.phase === "needs-anchor") return { kind: "run-anchor-condense" };
   if (state.phase === "needs-partition-check") return { kind: "run-partition-check" };
   if (state.phase === "needs-ui-check") return { kind: "run-ui-check" };
+  if (state.phase === "needs-scenario-writer-start") return { kind: "start-scenario-writer" };
   return {
     kind: "run-implementer",
     attempt: state.attempt,
@@ -628,6 +682,8 @@ const EVENT_PHASE: Readonly<Record<
   "partition-checker-wrote": "needs-partition-check",
   "ui-check-result": "needs-ui-check",
   "ui-checker-wrote": "needs-ui-check",
+  "scenario-writer-started": "needs-scenario-writer-start",
+  "scenario-writer-result": "needs-scenario-writer-result",
   "implementer-result": "needs-implementer",
   "quality-fix-result": "needs-quality-fix",
   "gate-result": "needs-gate",
@@ -715,7 +771,7 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
       }
       const afterPartition: LoopState = {
         ...state,
-        phase: state.uiPrototypeCheck ? "needs-ui-check" : "needs-implementer",
+        phase: state.uiPrototypeCheck ? "needs-ui-check" : toImplementer(state),
       };
       return { state: afterPartition, action: initialAction(afterPartition) };
     }
@@ -735,9 +791,30 @@ export function step(state: LoopState, event: LoopEvent): StepResult {
           strandedHead: null,
         });
       }
-      const nextState: LoopState = { ...state, phase: "needs-implementer" };
+      const nextState: LoopState = { ...state, phase: toImplementer(state) };
       return { state: nextState, action: initialAction(nextState) };
     }
+
+    case "scenario-writer-started": {
+      const started: LoopState = {
+        ...state,
+        scenarioWriter: { kind: "running" },
+        phase: "needs-implementer",
+      };
+      return { state: started, action: initialAction(started) };
+    }
+
+    case "scenario-writer-result":
+      return event.outcome.kind === "wrote"
+        ? terminate(state, {
+            type: "NEEDS-HUMAN-REVIEW",
+            cause: "scenario-writer-wrote",
+            latestReviewerProse: event.outcome.detail,
+          })
+        : toVerifier({
+            ...state,
+            scenarioWriter: { kind: "settled", outcome: event.outcome },
+          });
 
     case "implementer-result":
       return onImplementerResult(state, event);
@@ -1238,16 +1315,12 @@ function toGate(
 
 function onGateResult(state: LoopState, gate: Gate1Result): StepResult {
   if (gate.ok) {
-    return {
-      state: {
-        ...state,
-        gateFailures: 0,
-        lastFailureTrace: "",
-        lastFailedStep: null,
-        phase: "needs-verifier",
-      },
-      action: { kind: "run-verifier", attempt: state.attempt },
-    };
+    return toVerifier({
+      ...state,
+      gateFailures: 0,
+      lastFailureTrace: "",
+      lastFailedStep: null,
+    });
   }
   const redState: LoopState = {
     ...state,
@@ -1277,6 +1350,20 @@ function onGateResult(state: LoopState, gate: Gate1Result): StepResult {
     extraReprompt: state.extraReprompt,
     latestReviewerFeedback: state.latestReviewerFeedback,
   });
+}
+
+// The verifier slot, behind the scenario writer's join while it still runs.
+function toVerifier(state: LoopState): StepResult {
+  if (state.scenarioWriter.kind === "running") {
+    return {
+      state: { ...state, phase: "needs-scenario-writer-result" },
+      action: { kind: "await-scenario-writer" },
+    };
+  }
+  return {
+    state: { ...state, phase: "needs-verifier" },
+    action: { kind: "run-verifier", attempt: state.attempt },
+  };
 }
 
 function onVerifierResult(

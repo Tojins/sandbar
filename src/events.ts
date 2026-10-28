@@ -77,6 +77,18 @@
 // covered within the deadline has null `runId` and `attempt`, and `sha` is
 // its merge commit. A new kind, so no bump.
 //
+// `scenario-writer` (#203) is one invocation of the cold role that writes an
+// admission's hidden scenarios, with the standard agent fields; `durationMs`
+// is absent only on a size refusal measured before any run. Its `result` says
+// how the invocation ended: `completed` (with `scenarios`, the set's size and
+// 0 for NONE, on the one that decided it; without, on a run whose answer
+// earned the format nudge), `failed` (a harness failure, or an answer still
+// malformed after the nudge), `wrote`, `input-too-large`, `quota`,
+// `credential`, or `aborted` when the admission ended before the join. No
+// event carries scenario text; the set is `scenarios-<k>.json` beside the
+// invocation logs. The `scenarios` phase is the join that waits for it. A
+// new kind, so no bump.
+//
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
@@ -145,8 +157,18 @@ export type IssuePhase =
   | "implementer"
   | "quality"
   | "gate-1"
+  | "scenarios"
   | "review"
   | "adjudication";
+
+export type ScenarioWriterResult =
+  | "completed"
+  | "failed"
+  | "wrote"
+  | "input-too-large"
+  | "quota"
+  | "credential"
+  | "aborted";
 
 export type HeldReason = ChunkBlockReason | "drifted-branches";
 
@@ -337,6 +359,7 @@ export type EventInput =
   | (EventIssue & { readonly kind: "setup"; readonly durationMs: number; readonly worktreeMs?: number; readonly sandboxMs?: number; readonly stackMs?: number; readonly detail?: string })
   | (EventIssue & ContainerResources & { readonly kind: "issue-anchor"; readonly result: IssueAnchorResult; readonly rawChars: number; readonly tracedChars: number; readonly anchorChars: number; readonly comments: number; readonly dropped: number; readonly provider?: string; readonly model?: string; readonly effort?: string | null; readonly durationMs?: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "scenario-writer"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs?: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly result: ScenarioWriterResult; readonly scenarios?: number; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "partition-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly result: "CLEAR" | "PARTITION" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits?: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & { readonly kind: "gate-stack"; readonly gate: "gate-1"; readonly tipBlob: string | null; readonly classification: StackClassification["kind"]; readonly containers?: readonly string[] })

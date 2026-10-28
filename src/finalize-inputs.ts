@@ -35,6 +35,7 @@ const READ_ONLY_WRITER = {
   "ui-checker-wrote": "UI checker",
   "partition-checker-wrote": "partition checker",
   "anchor-condenser-wrote": "anchor condenser",
+  "scenario-writer-wrote": "scenario writer",
 } as const;
 
 export type IssueOutcome = {

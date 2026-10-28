@@ -89,6 +89,11 @@ export default {
   // thread changes. null turns it off.
   // condenseAboveChars: 20000,
 
+  // Once per admission, beside attempt 1, a cold read-only agent writes hidden
+  // Given/When/Then scenarios into the issue's log directory. Nothing waits
+  // for it until the verifier, and its failure changes nothing.
+  // scenarioWriter: true,
+
   // Useful-context budget: rendered prompt plus the seed-anchored net diff a
   // role is told to inspect on demand. Oversize work parks for partitioning.
   // maxContextChars: 600000,

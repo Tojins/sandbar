@@ -7,6 +7,8 @@ import {
   type LoopState,
   type Gate1Result,
   type InitialStateOptions,
+  type ScenarioWriterOutcome,
+  type ScenarioWriterStatus,
   type ReviewerResult,
   type Verdict,
   decideAfterTerminal,
@@ -30,6 +32,7 @@ const defaultOpts = {
   maxReviewRounds: 3,
   uiPrototypeCheck: false,
   partitionCheck: false,
+  scenarioWriter: { kind: "off" },
 } as const;
 
 // Every loop opens on the anchor step (#217); most cases start past it.
@@ -810,6 +813,145 @@ describe("inner-loop-machine — issue partition check (#158)", () => {
       kind: "terminate",
       verdict: { type: "NEEDS-HUMAN-REVIEW", cause: "partition-checker-wrote" },
     });
+  });
+});
+
+describe("inner-loop-machine — the scenario writer (#203)", () => {
+  const pending = { kind: "pending" } as const;
+  const writerResult = (outcome: ScenarioWriterOutcome): LoopEvent => ({
+    kind: "scenario-writer-result",
+    outcome,
+  });
+  const written: ScenarioWriterOutcome = {
+    kind: "written",
+    set: {
+      version: 1,
+      issue: 1,
+      seed: { ref: "origin/main", sha: "seed" },
+      writer: { provider: "claude", model: "opus", effort: null },
+      scenarios: [],
+    },
+  };
+  const counters = (state: LoopState) => ({
+    attempt: state.attempt,
+    gateFailures: state.gateFailures,
+    correctnessFailures: state.correctnessFailures,
+    qualityFailures: state.qualityFailures,
+    reviewerHarnessFailures: state.reviewerHarnessFailures,
+  });
+
+  it.each([
+    [{ partitionCheck: false, uiPrototypeCheck: false }, []],
+    [{ partitionCheck: true, uiPrototypeCheck: false }, ["run-partition-check"]],
+    [{ partitionCheck: false, uiPrototypeCheck: true }, ["run-ui-check"]],
+    [{ partitionCheck: true, uiPrototypeCheck: true }, ["run-partition-check", "run-ui-check"]],
+  ] as const)("starts after the pre-attempt checks %o clear, then dispatches attempt 1", (checks, before) => {
+    const cleared: Record<string, LoopEvent> = {
+      "run-partition-check": {
+        kind: "partition-check-result",
+        result: { kind: "CLEAR" },
+        size: 1,
+        budget: 600_000,
+      },
+      "run-ui-check": { kind: "ui-check-result", result: { kind: "CLEAR" } },
+    };
+    let state = initialState({ ...defaultOpts, ...checks, scenarioWriter: pending });
+    let result = step(state, { kind: "anchor-ready" });
+    const kinds: string[] = [];
+    while (result.action.kind !== "start-scenario-writer") {
+      kinds.push(result.action.kind);
+      result = step(result.state, cleared[result.action.kind]!);
+    }
+    expect(kinds).toEqual(before);
+    expect(visiblePhases(result.action)).toEqual([]);
+    state = result.state;
+    const startedWriter = step(state, { kind: "scenario-writer-started" });
+    expect(startedWriter.action).toMatchObject({ kind: "run-implementer", attempt: 1 });
+    expect(startedWriter.state.scenarioWriter).toEqual({ kind: "running" });
+  });
+
+  it.each([
+    [{ kind: "off" }],
+    [{ kind: "running" }],
+    [{ kind: "settled", outcome: { kind: "failed", detail: "idle" } }],
+  ] as const)("does not start when the writer is %o", (scenarioWriter: ScenarioWriterStatus) => {
+    expect(initialAction(started({ ...defaultOpts, scenarioWriter })))
+      .toMatchObject({ kind: "run-implementer", attempt: 1 });
+  });
+
+  it("does not start after PARTITION or PROTOTYPE-NEEDED", () => {
+    const partitioned = step(
+      started({ ...defaultOpts, partitionCheck: true, scenarioWriter: pending }),
+      {
+        kind: "partition-check-result",
+        result: { kind: "PARTITION", reason: "two outcomes" },
+        size: 1,
+        budget: 1,
+      },
+    );
+    expect(partitioned.action).toMatchObject({ kind: "terminate", verdict: { type: "NEEDS-PARTITION" } });
+    const prototyped = step(
+      started({ ...defaultOpts, uiPrototypeCheck: true, scenarioWriter: pending }),
+      { kind: "ui-check-result", result: { kind: "PROTOTYPE-NEEDED", uiImpact: "a screen" } },
+    );
+    expect(prototyped.action).toMatchObject({ kind: "terminate", verdict: { type: "NEEDS-UI-PROTOTYPE" } });
+  });
+
+  it("awaits a running writer at a green gate, then runs the verifier", () => {
+    const running = started({ ...defaultOpts, scenarioWriter: { kind: "running" } });
+    const gated1 = stepAll(running, [impl(complete), ...round(gate1Ok)]);
+    expect(gated1.action).toEqual({ kind: "await-scenario-writer" });
+    expect(visiblePhases(gated1.action)).toEqual(["scenarios"]);
+    const joined = step(gated1.state, writerResult(written));
+    expect(joined.action).toEqual({ kind: "run-verifier", attempt: 1 });
+    expect(joined.state.scenarioWriter).toEqual({ kind: "settled", outcome: written });
+  });
+
+  it("goes straight to the verifier once the writer has settled, and never waits on a red gate", () => {
+    const failed = { kind: "failed", detail: "quota" } as const;
+    const running = started({ ...defaultOpts, scenarioWriter: { kind: "running" } });
+    const red = stepAll(running, [impl(complete), ...round(gate1Red("boom"))]);
+    expect(red.action).toMatchObject({ kind: "run-implementer", attempt: 2 });
+    const joined = stepAll(red.state, [impl(complete), ...round(gate1Ok), writerResult(failed)]);
+    expect(joined.action).toEqual({ kind: "run-verifier", attempt: 2 });
+    const rejected = stepAll(joined.state, [reviewed(changes("fix it"))]);
+    const second = stepAll(rejected.state, [impl(complete), ...round(gate1Ok)]);
+    expect(second.action).toEqual({ kind: "run-verifier", attempt: 3 });
+    expect(stepAll(started({
+      ...defaultOpts,
+      scenarioWriter: { kind: "settled", outcome: { kind: "none", reason: "docs" } },
+    }), [impl(complete), ...round(gate1Ok)]).action).toEqual({ kind: "run-verifier", attempt: 1 });
+  });
+
+  it("parks a writer that wrote, at the join", () => {
+    const running = started({ ...defaultOpts, scenarioWriter: { kind: "running" } });
+    const gated1 = stepAll(running, [impl(complete), ...round(gate1Ok)]);
+    expect(step(gated1.state, writerResult({ kind: "wrote", detail: "HEAD moved" })).action).toEqual({
+      kind: "terminate",
+      verdict: {
+        type: "NEEDS-HUMAN-REVIEW",
+        cause: "scenario-writer-wrote",
+        latestReviewerProse: "HEAD moved",
+      },
+    });
+  });
+
+  it("changes no budget on any writer event", () => {
+    const state = started({ ...defaultOpts, scenarioWriter: pending });
+    const startedWriter = step(state, { kind: "scenario-writer-started" });
+    expect(counters(startedWriter.state)).toEqual(counters(state));
+    for (const outcome of [written, { kind: "none", reason: "r" }, { kind: "failed", detail: "d" }] as const) {
+      const gated1 = stepAll(startedWriter.state, [impl(complete), ...round(gate1Ok)]);
+      const joined = step(gated1.state, writerResult(outcome));
+      expect(counters(joined.state)).toEqual(counters(gated1.state));
+    }
+  });
+
+  it("refuses writer events outside their phases", () => {
+    expect(() => step(started(defaultOpts), { kind: "scenario-writer-started" }))
+      .toThrow(/scenario-writer-started event in phase needs-implementer/);
+    expect(() => step(started(defaultOpts), writerResult(written)))
+      .toThrow(/scenario-writer-result event in phase needs-implementer/);
   });
 });
 
