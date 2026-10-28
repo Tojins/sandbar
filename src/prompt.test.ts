@@ -242,13 +242,16 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
       ...(promptExtension ? { promptExtension } : {}),
     });
 
-  it("withholds the reviewer's built-in standards but carries the host extension", () => {
+  it("carries the quality pass's built-in standards verbatim and host extension", () => {
     const implementer = renderImplementer({ path: "docs/CODING_STANDARDS.md" });
     const codingStandards = loadTemplate("coding-standards");
 
-    expect(implementer).not.toContain(codingStandards);
-    expect(implementer).not.toContain("## Coding standards");
-    expect(implementer).not.toMatch(/coding standard/i);
+    expect(implementer).toContain(codingStandards);
+    expect(implementer).toMatch(
+      /The following is the text the quality pass applies to this branch after you;/,
+    );
+    expect(implementer).toMatch(/Your work is what these\s+standards are applied to\./);
+    expect(implementer).toContain("Check the diff against every coding standard above.");
     expect(implementer).toContain("@docs/CODING_STANDARDS.md");
     expect(implementer).toContain("@CLAUDE.md (and @AGENTS.md if it exists)");
     expect(implementer).toContain("git diff origin/main...HEAD");
@@ -258,8 +261,9 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
     expect(implementer).toContain("list its stated requirements");
   });
 
-  it("references no standards file without an optional host extension", () => {
+  it("keeps built-in standards without an optional host extension", () => {
     const slot = renderImplementer();
+    expect(slot).toContain("## Coding standards");
     expect(slot).not.toContain("### Project prompt extension");
     expect(slot).not.toContain("CODING_STANDARDS.md");
   });
@@ -275,9 +279,12 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
     expect(slot).not.toContain("package.json");
   });
 
-  it("places self-review between commit discipline and done signal", () => {
+  it("places standards and self-review between commit discipline and done signal", () => {
     const slot = renderImplementer();
     expect(slot.indexOf("## Commit discipline")).toBeLessThan(
+      slot.indexOf("## Coding standards"),
+    );
+    expect(slot.indexOf("## Coding standards")).toBeLessThan(
       slot.indexOf("## Pre-promise review"),
     );
     expect(slot.indexOf("## Pre-promise review")).toBeLessThan(

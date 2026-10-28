@@ -3,9 +3,9 @@
 // (issue-anchor.ts), and a per-attempt slot (implementer: attempt state,
 // commit list + diff stat (progressive disclosure, #158), the quality fixer's
 // commits since the last attempt (#185), sandbox-stack report #44, gate trace,
-// the latest correctness rejection, and a live pre-promise diff checklist
-// (#78) — deliberately WITHOUT the built-in coding standards, which are the
-// quality pass's bar alone. The quality pass (#187): its lister gets diff
+// the latest correctness rejection, and the same built-in coding standards
+// the quality pass applies plus a live pre-promise diff checklist (#78).
+// The quality pass (#187): its lister gets diff
 // stat + commits, the exhaustive listing text and, once a quality pass has
 // approved a head, a stat of what changed since that head as its only review
 // surface, plus every quality report an adjudicator overruled with its
@@ -720,6 +720,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     reviewerFeedback: section(reviewerFeedback),
     orchestratorNote: section(orchestratorNote),
     escalation: section(escalation),
+    codingStandards: CODING_STANDARDS,
     projectStandards: promptExtensionSlot(inputs.promptExtension),
     conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
     baseRef: base.ref,

@@ -27,17 +27,24 @@ branch's commit list and diff stat, while uncommitted changes are
 left behind unexplained. Small, frequent commits make an interrupted attempt
 cheap to resume.
 
+The following is the text the quality pass applies to this branch after you;
+read it before writing as well as before promising. Your work is what these
+standards are applied to.
+
+{{codingStandards}}
+
 {{projectStandards}}## Pre-promise review
 
 Before emitting the done signal, inspect everything you are about to promise
 with `git diff {{baseRef}}...HEAD` and `git log {{baseRef}}..HEAD`, then:
 
-1. Re-read {{conventionsRef}} and update prose your commits falsified.
-2. Check every per-commit ritual those conventions require, including version
+1. Check the diff against every coding standard above.
+2. Re-read {{conventionsRef}} and update prose your commits falsified.
+3. Check every per-commit ritual those conventions require, including version
    bumps and changelog entries.
-3. Check that the diff does not contradict settled choices recorded in those
+4. Check that the diff does not contradict settled choices recorded in those
    conventions.
-4. Re-read the issue, list its stated requirements, tick each against the diff,
+5. Re-read the issue, list its stated requirements, tick each against the diff,
    and delete anything the issue did not ask for.
 
 ## The quality pass
