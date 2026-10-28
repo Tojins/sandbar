@@ -650,6 +650,9 @@ export type DatabaseCopiesConfig = {
 
 export type DatabaseCopiesSettings = Required<DatabaseCopiesConfig>;
 
+// A container `assertDatabaseCopiesTarget` accepted.
+export type DbCopyTarget = ResolvedStackContainer & { readonly readiness: Readiness };
+
 // RunConfig is DEVIATIONS-ONLY by design. A consumer should write down two
 // kinds of thing and nothing else:
 //
@@ -1475,7 +1478,7 @@ export function assertDatabaseCopiesTarget(
   stack: ResolvedGateStack,
   dbc: DatabaseCopiesSettings,
   label = INLINE_STACK_LABEL,
-): ResolvedStackContainer {
+): DbCopyTarget {
   const name = dbc.container;
   const target = stack.containers.find((c) => c.name === name);
   const refuse = (why: string) =>
@@ -1487,7 +1490,7 @@ export function assertDatabaseCopiesTarget(
   if (stack.containers.some((c) => c.name === `${name}-dbcopy`)) {
     throw refuse(`cannot be used while a container is named '${name}-dbcopy', the name its copy runs under`);
   }
-  return target;
+  return { ...target, readiness: target.readiness };
 }
 
 // Podman container-name grammar, and also what makes `sandbar-<id>-<name>`

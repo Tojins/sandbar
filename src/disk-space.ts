@@ -61,15 +61,20 @@ type StatFs = (path: string) => Promise<{
 
 const defaultStatFs: StatFs = (path) => statfs(path, { bigint: true });
 
+// What an unprivileged writer may still use on the filesystem holding `path`.
+export async function freeBytes(
+  path: string,
+  read: StatFs = defaultStatFs,
+): Promise<bigint> {
+  const stats = await read(path);
+  return stats.bavail * stats.bsize;
+}
+
 export async function graphRootSpace(
   graphRoot: string,
   read: StatFs = defaultStatFs,
 ): Promise<GraphRootSpace> {
-  const stats = await read(graphRoot);
-  return {
-    graphRoot,
-    availableBytes: stats.bavail * stats.bsize,
-  };
+  return { graphRoot, availableBytes: await freeBytes(graphRoot, read) };
 }
 
 export function graphRootSpaceIsLow(space: GraphRootSpace): boolean {
