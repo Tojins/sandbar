@@ -335,7 +335,11 @@ describe.runIf(available)("gate stack against real podman", () => {
               {
                 name: "boom",
                 in: "runner",
-                command: ["sh", "-c", "echo nope >&2; exit 3"],
+                // The sleep lets the write drain before the exit: over a remote
+                // podman socket (CONTAINER_HOST, as the gate runs) `exec` can
+                // drop the stderr of a process that exits the instant it writes,
+                // while still reporting its exit code.
+                command: ["sh", "-c", "echo nope >&2; sleep 1; exit 3"],
               },
               // Must NOT run: later steps read what earlier ones build, so
               // running them buries the real failure under derived ones.
