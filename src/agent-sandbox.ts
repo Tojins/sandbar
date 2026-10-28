@@ -34,7 +34,8 @@
 // informational `tool_call` carries, for Claude, the context depth of the
 // message that issued it — read from that message's own usage, so the agent is
 // never asked to report it — and the invocation record lists every one
-// uncapped as `commands`. Codex's exec stream has no per-turn usage, so its
+// uncapped as `commands`; the first one's depth rides out as `firstContext`
+// beside `peakContext` (#194). Codex's exec stream has no per-turn usage, so its
 // commands carry none (absent, not zero). A third,
 // `background_tasks`, carries the count Claude's last `background_tasks_changed`
 // listed: it holds off the completion grace while tasks are pending (#192)
@@ -180,7 +181,7 @@ import {
   normalizeCodexContextDepth,
   normalizeCodexUsage,
 } from "./agent-usage.js";
-import type { AgentUsage } from "./agent-usage.js";
+import type { AgentRunMeasurement, AgentUsage } from "./agent-usage.js";
 import { classifyAgentRunEnd } from "./agent-run-end.js";
 import type { AgentFailure, RateLimitMeasurement } from "./agent-run-end.js";
 import {
@@ -307,6 +308,7 @@ export type AgentSpeechAccumulator = {
   readonly usage: AgentUsage | undefined;
   readonly toolCalls: number;
   readonly peakContext: number | undefined;
+  readonly firstContext: number | undefined;
   readonly rateLimit: RateLimitMeasurement | undefined;
   readonly backgroundTasks: number | undefined;
 };
@@ -318,6 +320,9 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
   let usage: AgentUsage | undefined;
   let toolCalls = 0;
   let peakContext: number | undefined;
+  // The depth the first command was issued at (#194), fixed by that command
+  // even when its provider reported none.
+  let firstCommand: { readonly contextTokens?: number } | undefined;
   let rateLimit: RateLimitMeasurement | undefined;
   let backgroundTasks: number | undefined;
   return {
@@ -334,6 +339,7 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
         else if (event.type === "context_depth") {
           peakContext = maxContextDepth(peakContext, event.tokens);
         }
+        else if (event.type === "tool_call") firstCommand ??= event;
         else if (event.type === "rate_limit") rateLimit = event.measurement;
         else if (event.type === "background_tasks") backgroundTasks = event.count;
       }
@@ -355,6 +361,9 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
     },
     get peakContext() {
       return peakContext;
+    },
+    get firstContext() {
+      return firstCommand?.contextTokens;
     },
     get rateLimit() {
       return rateLimit;
@@ -563,6 +572,7 @@ export type SandboxRunResult = ContainerResources & {
   readonly usage?: AgentUsage;
   readonly toolCalls: number;
   readonly peakContext?: number;
+  readonly firstContext?: number;
   readonly rateLimit?: RateLimitMeasurement;
   // How many background tasks the run's last `background_tasks_changed` still
   // listed (#191). Absent when the provider reported none (Codex never does).
@@ -734,12 +744,10 @@ export function agentFailureMessage(
 // EPIPE on stdin) and those must carry the output too. Nothing is mutated and
 // no property name can collide with one the thrown error already has.
 const AGENT_PARTIAL_OUTPUT = new WeakMap<object, string>();
-const AGENT_PARTIAL_USAGE = new WeakMap<object, {
-  usage?: AgentUsage;
-  toolCalls: number;
-  peakContext?: number;
-  rateLimit?: RateLimitMeasurement;
-}>();
+type AgentPartialMeasurement = AgentRunMeasurement & {
+  readonly rateLimit?: RateLimitMeasurement;
+};
+const AGENT_PARTIAL_USAGE = new WeakMap<object, AgentPartialMeasurement>();
 const AGENT_PARTIAL_RESOURCES = new WeakMap<object, ContainerResources>();
 const AGENT_PARTIAL_DURATION_MS = new WeakMap<object, number>();
 
@@ -750,12 +758,13 @@ export const withPartialOutput = (
   toolCalls: number,
   peakContext: number | undefined,
   rateLimit: RateLimitMeasurement | undefined,
+  firstContext?: number,
 ): unknown => {
   if (partial !== "" && typeof err === "object" && err !== null) {
     AGENT_PARTIAL_OUTPUT.set(err, partial);
   }
   if (typeof err === "object" && err !== null) {
-    AGENT_PARTIAL_USAGE.set(err, { usage, toolCalls, peakContext, rateLimit });
+    AGENT_PARTIAL_USAGE.set(err, { usage, toolCalls, peakContext, firstContext, rateLimit });
   }
   return err;
 };
@@ -769,7 +778,7 @@ export const agentPartialOutput = (err: unknown): string => {
 };
 export const agentPartialUsage = (
   err: unknown,
-): { usage?: AgentUsage; toolCalls?: number; peakContext?: number; rateLimit?: RateLimitMeasurement } =>
+): AgentPartialMeasurement =>
   typeof err === "object" && err !== null
     ? AGENT_PARTIAL_USAGE.get(err) ?? {}
     : {};
@@ -2492,6 +2501,7 @@ type InvokeAgentResult = {
   usage?: AgentUsage;
   toolCalls: number;
   peakContext?: number;
+  firstContext?: number;
   rateLimit?: RateLimitMeasurement;
   backgroundTasks?: number;
 };
@@ -2570,6 +2580,7 @@ const invokeAgent = async (
         speech.toolCalls,
         speech.peakContext,
         speech.rateLimit,
+        speech.firstContext,
       ));
     };
     const recordEnd = async (
@@ -2823,6 +2834,7 @@ const invokeAgent = async (
         ...(signalMs === undefined ? {} : { signalMs }),
         ...(speech.usage === undefined ? {} : { usage: speech.usage }),
         ...(speech.peakContext === undefined ? {} : { peakContext: speech.peakContext }),
+        ...(speech.firstContext === undefined ? {} : { firstContext: speech.firstContext }),
         ...(speech.rateLimit === undefined ? {} : { rateLimit: speech.rateLimit }),
         ...(speech.backgroundTasks === undefined
           ? {}
@@ -3191,7 +3203,8 @@ export const createSandbox = async (
       );
     }
     const {
-      result, signalMs, maxGapMs, endedBy, usage, toolCalls, peakContext, rateLimit, silent,
+      result, signalMs, maxGapMs, endedBy, usage, toolCalls, peakContext, firstContext, rateLimit,
+      silent,
       backgroundTasks,
     } = invoked;
 
@@ -3206,6 +3219,7 @@ export const createSandbox = async (
       ...(signalMs === undefined ? {} : { signalMs }),
       ...(usage === undefined ? {} : { usage }),
       ...(peakContext === undefined ? {} : { peakContext }),
+      ...(firstContext === undefined ? {} : { firstContext }),
       ...(rateLimit === undefined ? {} : { rateLimit }),
       ...(backgroundTasks === undefined ? {} : { backgroundTasks }),
       toolCalls,
@@ -3271,6 +3285,7 @@ export const createSandbox = async (
         ...(iter.signalMs === undefined ? {} : { signalMs: iter.signalMs }),
         ...(iter.usage === undefined ? {} : { usage: iter.usage }),
         ...(iter.peakContext === undefined ? {} : { peakContext: iter.peakContext }),
+        ...(iter.firstContext === undefined ? {} : { firstContext: iter.firstContext }),
         ...(iter.rateLimit === undefined ? {} : { rateLimit: iter.rateLimit }),
         ...(iter.backgroundTasks === undefined ? {} : { backgroundTasks: iter.backgroundTasks }),
         toolCalls: iter.toolCalls,

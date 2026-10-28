@@ -329,6 +329,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       kind: "implementer", issue: 124, title: "Issue 124", attempt: 1,
       signal: "NEEDS-INFO", commits: 0, provider: "claude", model: "model",
       effort: null, durationMs: expect.any(Number), signalMs: 1, maxGapMs: 1,
+      transcript: "attempt-1.log",
       usage: { toolCalls: 3, peakContext: 41, contextChars: 9 },
     }]);
   });
@@ -440,6 +441,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(events.filter((event) => event.kind === "ui-check")).toEqual([{
       kind: "ui-check", issue: 127, title: "Issue 127", invocation: 1,
       provider: "claude", model: "model", effort: null,
+      transcript: "ui-check-1.log",
       durationMs: expect.any(Number), result: "quota", usage: { quota: measurement },
     }]);
 
@@ -473,6 +475,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     expect(events.filter((event) => event.kind === "ui-check")).toEqual([{
       kind: "ui-check", issue: 134, title: "Issue 134", invocation: 1,
       provider: "codex", model: "model", effort: null,
+      transcript: "ui-check-1.log",
       durationMs: expect.any(Number), result: "credential",
     }]);
     expect(state.get("codex")).toEqual({ cause: "credential", detail });
@@ -482,7 +485,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     const events: EventInput[] = [];
     const reviewerFailure = new Error("reviewer disconnected");
     seams.partialUsage.set(reviewerFailure, {
-      usage: { inputTokens: 7 }, toolCalls: 2, peakContext: 52,
+      usage: { inputTokens: 7 }, toolCalls: 2, peakContext: 52, firstContext: 15,
     });
     seams.sandboxRun
       .mockResolvedValueOnce({
@@ -496,7 +499,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
         peakContext: 23,
         commits: [{ sha: "implemented-sha" }],
       })
-      .mockResolvedValueOnce(listerRun)
+      .mockResolvedValueOnce({ ...listerRun, firstContext: 30 })
       .mockRejectedValueOnce(reviewerFailure)
       .mockResolvedValueOnce({
         stdout: "<verdict>APPROVED</verdict>",
@@ -504,6 +507,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
         maxGapMs: 2,
         toolCalls: 4,
         peakContext: 73,
+        firstContext: 16,
         commits: [],
       });
 
@@ -518,20 +522,23 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       provider: "claude", model: "model", effort: null, result: "completed",
       verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>",
       durationMs: 5, maxGapMs: 1,
-      usage: { toolCalls: 2, peakContext: 40, contextChars: 14 },
+      transcript: "attempt-1-quality-list-1.log",
+      usage: { toolCalls: 2, peakContext: 40, firstContext: 30, contextChars: 14 },
     }]);
     expect(events.filter((event) => event.kind === "review-pass")).toEqual([
       {
         kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
         invocation: 1, provider: "claude", model: "model",
         effort: null, result: "failed", durationMs: expect.any(Number),
-        usage: { inputTokens: 7, toolCalls: 2, peakContext: 52, contextChars: 18 },
+        transcript: "attempt-1-reviewer-1.log",
+        usage: { inputTokens: 7, toolCalls: 2, peakContext: 52, firstContext: 15, contextChars: 18 },
       },
       {
         kind: "review-pass", issue: 125, title: "Issue 125", attempt: 1, round: 1,
         invocation: 2, provider: "claude", model: "model",
         effort: null, result: "completed", durationMs: 31, maxGapMs: 2,
-        usage: { toolCalls: 4, peakContext: 73, contextChars: 18 },
+        transcript: "attempt-1-reviewer-2.log",
+        usage: { toolCalls: 4, peakContext: 73, firstContext: 16, contextChars: 18 },
       },
     ]);
     expect(events.filter((event) => event.kind === "phase")).toEqual([
@@ -573,6 +580,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       kind: "implementer", issue: 109, title: "Issue 109", attempt: 1,
       signal: "QUOTA", provider: "claude", model: "model",
       effort: null, durationMs: expect.any(Number),
+      transcript: "attempt-1.log",
       usage: { quota: measurement, contextChars: 9 },
     }]);
 
@@ -627,6 +635,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       kind: "implementer", issue: 134, title: "Issue 134", attempt: 1,
       signal: "CREDENTIAL", provider: "codex", model: "model",
       effort: null, durationMs: expect.any(Number), usage: { contextChars: 9 },
+      transcript: "attempt-1.log",
     }]);
 
     await expect(runInnerLoop(issue("135"), {
@@ -729,6 +738,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
       invocation: 1, mode: "list", scope: "full",
       provider: "codex", model: "model", effort: null, result: "credential",
       verdict: null, prose: "", durationMs: expect.any(Number), usage: { contextChars: 14 },
+      transcript: "attempt-1-quality-list-1.log",
     }]);
     expect(state.get("codex")).toEqual({ cause: "credential", detail });
   });

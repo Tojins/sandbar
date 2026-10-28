@@ -234,6 +234,7 @@ describe("runUiCheck (#126)", () => {
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
       durationMs: expect.any(Number), maxGapMs: 3, result: "CLEAR",
+      transcript: "ui-check-1.log",
       usage: { toolCalls: 1 },
     }]);
   });
@@ -261,6 +262,7 @@ describe("runUiCheck (#126)", () => {
       },
       toolCalls: 7,
       peakContext: 8,
+      firstContext: 3,
       peakMemoryBytes: 344_000_000,
       oomKilled: true,
       rateLimit: {
@@ -275,10 +277,11 @@ describe("runUiCheck (#126)", () => {
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
       durationMs: 17, endedBy: "result-then-silence", maxGapMs: 9, result: "CLEAR",
+      transcript: "ui-check-1.log",
       peakMemoryBytes: 344_000_000, oomKilled: true,
       usage: { inputTokens: 1, cachedInputTokens: 2, cacheWriteInputTokens: 3,
         outputTokens: 4, reasoningTokens: 5, apiMs: 6, resolvedModel: "resolved",
-        models: 2, terminalReason: "end_turn", toolCalls: 7, peakContext: 8,
+        models: 2, terminalReason: "end_turn", toolCalls: 7, peakContext: 8, firstContext: 3,
         quota: { status: "allowed_warning", window: "five_hour", utilization: 0.9,
           resetsAt: 42 } },
     }]);
@@ -294,6 +297,7 @@ describe("runUiCheck (#126)", () => {
           13,
           14,
           { status: "rejected", window: "weekly", utilization: 1 },
+          10,
         ),
         { peakMemoryBytes: 512_000_000, oomKilled: true },
       ),
@@ -321,9 +325,9 @@ describe("runUiCheck (#126)", () => {
     expect(failureEvents).toEqual([{
       kind: "ui-check", issue: 126, title: "ui check", invocation: 1,
       provider: "codex", model: "gpt-5.6-sol", effort: "low",
-      durationMs: 19, result: "failed",
+      durationMs: 19, result: "failed", transcript: "ui-check-1.log",
       peakMemoryBytes: 512_000_000, oomKilled: true,
-      usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14,
+      usage: { inputTokens: 11, outputTokens: 12, toolCalls: 13, peakContext: 14, firstContext: 10,
         quota: { status: "rejected", window: "weekly", utilization: 1 } },
     }]);
   });
@@ -504,7 +508,25 @@ describe("runPartitionCheck (#158)", () => {
     expect(events).toEqual([expect.objectContaining({
       kind: "partition-check",
       result: "input-too-large",
+      transcript: "partition-check-1.log",
     })]);
+  });
+
+  // #194: a completed and a failed invocation each name their log.
+  it("names each invocation's log as its event's transcript", async () => {
+    const { ctx, sandbox, events } = context("<partition-check>NO-SIGNAL</partition-check>");
+    vi.mocked(sandbox.run).mockRejectedValueOnce(new Error("provider failed"));
+    await runPartitionCheck({ kind: "run-partition-check" }, ctx).catch(() => undefined);
+    const { ctx: completedCtx, events: completedEvents } = context(
+      "<partition-check>CLEAR</partition-check>",
+    );
+    await runPartitionCheck({ kind: "run-partition-check" }, completedCtx);
+    expect(completedEvents).toEqual([expect.objectContaining({
+      kind: "partition-check", result: "CLEAR", transcript: "partition-check-1.log",
+    })]);
+    expect(events[0]).toMatchObject({
+      kind: "partition-check", result: "failed", transcript: "partition-check-1.log",
+    });
   });
 });
 
@@ -773,6 +795,34 @@ describe("silent implementer attempt policy (#116)", () => {
     await expect(pending).rejects.toThrow("nudge exited 137");
     expect(lines.at(-1)).toMatchObject({
       kind: "implementer", signal: "FAILED", commits: 2,
+    });
+  });
+
+  // #194: the attempt's first-command depth is its first run's, and a nudge
+  // supplies it only when the first run measured none.
+  it.each([
+    ["the nudge when the first run reports none", undefined, 7, 7],
+    ["the first run when both report one", 4, 7, 4],
+  ])("takes the first-command depth from %s", async (_name, first, nudge, expected) => {
+    const { pending, lines } = runPath(
+      { ...sandboxResult("no signal", false), ...(first === undefined ? {} : { firstContext: first }) },
+      { ...sandboxResult("<promise>COMPLETE</promise>", false), firstContext: nudge },
+    );
+    await expect(pending).resolves.toMatchObject({ kind: "implementer-result" });
+    expect(lines.at(-1)).toMatchObject({
+      kind: "implementer",
+      usage: { firstContext: expected },
+    });
+  });
+
+  it("keeps the first run's first-command depth when the nudge fails", async () => {
+    const { pending, lines } = runPath(
+      { ...sandboxResult("no signal", false, ["a"]), firstContext: 4 },
+      { error: new Error("nudge exited 1"), resources: {}, durationMs: 9 },
+    );
+    await expect(pending).rejects.toThrow("nudge exited 1");
+    expect(lines.at(-1)).toMatchObject({
+      kind: "implementer", signal: "FAILED", usage: { firstContext: 4 },
     });
   });
 
@@ -1154,6 +1204,21 @@ describe("runVerifier (#121, #180, #185)", () => {
       ),
     };
   };
+
+  // #194: each invocation's event names the log it was written to.
+  it("names each invocation's log as its event's transcript", async () => {
+    const { ctx, filenames, run } = scripted([
+      { output: "", error: new Error("review provider failed"), durationMs: 11, resources: {} },
+      { output: "<verdict>APPROVED</verdict>", error: null, durationMs: 33, resources: {} },
+    ]);
+    await run();
+    const transcripts = vi.mocked(ctx.opts.onEvent).mock.calls
+      .map(([event]) => event)
+      .filter((event) => event.kind === "review-pass")
+      .map((event) => event.transcript);
+    expect(transcripts).toEqual(filenames);
+    expect(filenames).toHaveLength(2);
+  });
 
   it("records failed and retried invocations separately and keeps the verdict", async () => {
     const { ctx, filenames, sandbox, run } = scripted([
@@ -1604,6 +1669,36 @@ describe("runQualityFix (#185, #187)", () => {
     }));
   });
 
+  // #194: the event names the fixer's log and carries the first command's depth.
+  it("names its log and its first command's depth on the quality-pass event", async () => {
+    const { sandbox, events, run } = fixer({ kind: "exit" });
+    vi.mocked(sandbox.run).mockImplementationOnce(async () => ({
+      stdout: "fixed", commits: [], durationMs: 7, silent: false, maxGapMs: 2,
+      toolCalls: 3, firstContext: 21, peakContext: 40,
+    })) as never;
+    await run();
+    expect(events).toEqual([expect.objectContaining({
+      kind: "quality-pass",
+      transcript: "attempt-3-quality-fix-2-1.log",
+      usage: expect.objectContaining({ firstContext: 21, peakContext: 40 }),
+    })]);
+  });
+
+  it("keeps a failed fixer's partial first-command depth", async () => {
+    const { events, run } = fixer({
+      kind: "error",
+      error: withPartialOutput(
+        new AgentError("codex exited with code 1"), "", undefined, 2, 30, undefined, 12,
+      ),
+    });
+    await run();
+    expect(events.filter((event) => event.kind === "quality-pass")[0]).toMatchObject({
+      result: "failed",
+      transcript: "attempt-3-quality-fix-2-1.log",
+      usage: { firstContext: 12 },
+    });
+  });
+
   it("settles what it left from the head it was handed, publishes, and reports its commits", async () => {
     const { ctx, sandbox, events, run } = fixer({ kind: "exit" });
     await expect(run()).resolves.toEqual({
@@ -1871,11 +1966,41 @@ describe("runAdjudicator (#167)", () => {
     }));
     expect(events.find((event) => event.kind === "adjudication")).toMatchObject({
       pass: "correctness",
+      transcript: "attempt-2-adjudicator-1.log",
     });
     expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenLastCalledWith(
       expect.objectContaining({ pass: "correctness" }),
     );
     expect(ctx.quality.overrules).toEqual([]);
+  });
+
+  // #194: the first-command depth is the first invocation's, even when that
+  // one failed and a later one ruled.
+  it("keeps the first invocation's first-command depth across a retry", async () => {
+    unchangedAdjudicatorSnapshot();
+    const events: EventInput[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn()
+        .mockRejectedValueOnce(
+          withPartialOutput(new Error("adjudicator failed"), "", undefined, 1, 5, undefined, 11),
+        )
+        .mockResolvedValueOnce({
+          stdout: "reasons\n<ruling>UPHELD</ruling>",
+          commits: [],
+          durationMs: 3,
+          silent: false,
+          maxGapMs: 1,
+          toolCalls: 2,
+          firstContext: 99,
+        }),
+    } as unknown as Sandbox;
+    await runAdjudicator(action, context(sandbox, events));
+    expect(events.find((event) => event.kind === "adjudication")).toMatchObject({
+      ruling: "UPHELD",
+      transcript: "attempt-2-adjudicator-2.log",
+      usage: { firstContext: 11 },
+    });
   });
 
   // #187: a quality ruling is named for its fixer round, and an overrule is
@@ -1929,6 +2054,7 @@ describe("runAdjudicator (#167)", () => {
     );
     expect(events).toContainEqual(expect.objectContaining({
       kind: "adjudication", pass: "quality", round: 2, ruling: "OVERRULED",
+      transcript: "attempt-2-quality-adjudicator-2-1.log",
     }));
     expect(ctx.quality.overrules).toEqual([{
       round: 2, head: "head123", report: "### Tests\nmissing", ruling: "the test exists",

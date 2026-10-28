@@ -1,0 +1,1421 @@
+{
+  "statsSchema": 1,
+  "window": {
+    "last": 10
+  },
+  "runs": [
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "schemaVersion": 5,
+      "driver": "sandbar 0.49.12"
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "schemaVersion": 5,
+      "driver": "sandbar 0.49.13"
+    }
+  ],
+  "skipped": [],
+  "ignoredKinds": {},
+  "outcomes": {
+    "byLane": {
+      "auto": {
+        "DONE": 2,
+        "NEEDS-INFO": 0,
+        "NEEDS-UI-PROTOTYPE": 0,
+        "NEEDS-PARTITION": 0,
+        "NEEDS-HUMAN": 0,
+        "NEEDS-HUMAN-REVIEW": 0,
+        "HARD-ERROR": 0,
+        "QUOTA": 0,
+        "CREDENTIAL": 0,
+        "REJECTED": 0,
+        "interrupted": 1
+      },
+      "review": {
+        "DONE": 0,
+        "NEEDS-INFO": 0,
+        "NEEDS-UI-PROTOTYPE": 0,
+        "NEEDS-PARTITION": 1,
+        "NEEDS-HUMAN": 0,
+        "NEEDS-HUMAN-REVIEW": 0,
+        "HARD-ERROR": 0,
+        "QUOTA": 0,
+        "CREDENTIAL": 0,
+        "REJECTED": 0,
+        "interrupted": 0
+      }
+    },
+    "byCause": {
+      "DONE:-": 2,
+      "interrupted:-": 1,
+      "NEEDS-PARTITION:-": 1
+    },
+    "tokens": {
+      "DONE": {
+        "input": 2560700,
+        "cached": 8020000,
+        "cacheWrite": 223000,
+        "output": 102500,
+        "reasoning": 23500
+      },
+      "NEEDS-INFO": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "NEEDS-UI-PROTOTYPE": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "NEEDS-PARTITION": {
+        "input": 12,
+        "cached": 30000,
+        "cacheWrite": 9000,
+        "output": 800,
+        "reasoning": null
+      },
+      "NEEDS-HUMAN": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "NEEDS-HUMAN-REVIEW": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "HARD-ERROR": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "QUOTA": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "CREDENTIAL": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "REJECTED": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "interrupted": {
+        "input": 40,
+        "cached": 500000,
+        "cacheWrite": null,
+        "output": 3000,
+        "reasoning": null
+      }
+    }
+  },
+  "issues": [
+    {
+      "issue": 41,
+      "title": "Room labels overlap",
+      "lane": "auto",
+      "outcome": "DONE",
+      "cause": null,
+      "cycles": 1,
+      "interrupted": 0,
+      "attempts": 2,
+      "rounds": {
+        "gate": 2,
+        "quality": 2,
+        "review": 2
+      },
+      "specGaps": null,
+      "tokensByRole": {
+        "implementer": {
+          "input": 400,
+          "cached": 3300000,
+          "cacheWrite": 118000,
+          "output": 27000,
+          "reasoning": null
+        },
+        "quality-fix": {
+          "input": 710000,
+          "cached": 600000,
+          "cacheWrite": null,
+          "output": 13000,
+          "reasoning": 4000
+        },
+        "review": {
+          "input": 1000000,
+          "cached": 780000,
+          "cacheWrite": null,
+          "output": 22000,
+          "reasoning": 13000
+        }
+      },
+      "durationMs": 1749000
+    },
+    {
+      "issue": 42,
+      "title": "Export to SVG",
+      "lane": "auto",
+      "outcome": "DONE",
+      "cause": null,
+      "cycles": 2,
+      "interrupted": 1,
+      "attempts": 2,
+      "rounds": {
+        "gate": 2,
+        "quality": 2,
+        "review": 1
+      },
+      "specGaps": null,
+      "tokensByRole": {
+        "implementer": {
+          "input": 270,
+          "cached": 2500000,
+          "cacheWrite": 90000,
+          "output": 20000,
+          "reasoning": null
+        },
+        "quality-fix": {
+          "input": 350000,
+          "cached": 300000,
+          "cacheWrite": null,
+          "output": 7000,
+          "reasoning": null
+        },
+        "review": {
+          "input": 500000,
+          "cached": 420000,
+          "cacheWrite": null,
+          "output": 11000,
+          "reasoning": 6500
+        },
+        "adjudicator:correctness": {
+          "input": 30,
+          "cached": 120000,
+          "cacheWrite": 15000,
+          "output": 2500,
+          "reasoning": null
+        },
+        "resolve": {
+          "input": null,
+          "cached": null,
+          "cacheWrite": null,
+          "output": null,
+          "reasoning": null
+        }
+      },
+      "durationMs": 1274000
+    },
+    {
+      "issue": 43,
+      "title": "Rewrite the plan store",
+      "lane": "review",
+      "outcome": "NEEDS-PARTITION",
+      "cause": null,
+      "cycles": 1,
+      "interrupted": 0,
+      "attempts": 0,
+      "rounds": {
+        "gate": 0,
+        "quality": 0,
+        "review": 0
+      },
+      "specGaps": null,
+      "tokensByRole": {
+        "partition-check": {
+          "input": 12,
+          "cached": 30000,
+          "cacheWrite": 9000,
+          "output": 800,
+          "reasoning": null
+        }
+      },
+      "durationMs": 43000
+    }
+  ],
+  "perDoneIssue": {
+    "attempts": {
+      "of": 2,
+      "n": 2,
+      "sum": 4,
+      "median": 2,
+      "p90": 2,
+      "max": 2
+    },
+    "gateRounds": {
+      "of": 2,
+      "n": 2,
+      "sum": 4,
+      "median": 2,
+      "p90": 2,
+      "max": 2
+    },
+    "qualityRounds": {
+      "of": 2,
+      "n": 2,
+      "sum": 4,
+      "median": 2,
+      "p90": 2,
+      "max": 2
+    },
+    "reviewRounds": {
+      "of": 2,
+      "n": 2,
+      "sum": 3,
+      "median": 1,
+      "p90": 2,
+      "max": 2
+    },
+    "tokensByRole": {
+      "partition-check": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "ui-check": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "implementer": {
+        "of": 2,
+        "n": 2,
+        "sum": 6055670,
+        "median": 2610270,
+        "p90": 3445400,
+        "max": 3445400
+      },
+      "quality-list": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "quality-fix": {
+        "of": 2,
+        "n": 2,
+        "sum": 1980000,
+        "median": 657000,
+        "p90": 1323000,
+        "max": 1323000
+      },
+      "quality-verify": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "review": {
+        "of": 2,
+        "n": 2,
+        "sum": 2733000,
+        "median": 931000,
+        "p90": 1802000,
+        "max": 1802000
+      },
+      "adjudicator:quality": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "adjudicator:correctness": {
+        "of": 1,
+        "n": 1,
+        "sum": 137530,
+        "median": 137530,
+        "p90": 137530,
+        "max": 137530
+      },
+      "adjudicator:scenarios": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "scenario-writer": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "scenario-runner": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "condenser": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "resolve": {
+        "of": 1,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    }
+  },
+  "passes": {
+    "gate-1": {
+      "runs": 4,
+      "rejected": 1
+    },
+    "quality-list": {
+      "runs": 0,
+      "rejected": 0
+    },
+    "quality-verify": {
+      "runs": 0,
+      "rejected": 0
+    },
+    "correctness": {
+      "runs": 3,
+      "rejected": 2
+    },
+    "scenarios": {
+      "runs": 0,
+      "rejected": 0
+    }
+  },
+  "adjudication": {
+    "quality": {
+      "rulings": 0,
+      "overruled": 0
+    },
+    "correctness": {
+      "rulings": 1,
+      "overruled": 1
+    },
+    "scenarios": {
+      "rulings": 0,
+      "overruled": 0
+    }
+  },
+  "context": {
+    "partition-check": {
+      "first": {
+        "of": 1,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 1,
+        "n": 1,
+        "sum": 39000,
+        "median": 39000,
+        "p90": 39000,
+        "max": 39000
+      },
+      "contextChars": {
+        "of": 1,
+        "n": 1,
+        "sum": 31000,
+        "median": 31000,
+        "p90": 31000,
+        "max": 31000
+      },
+      "toolCalls": {
+        "of": 1,
+        "n": 1,
+        "sum": 3,
+        "median": 3,
+        "p90": 3,
+        "max": 3
+      }
+    },
+    "ui-check": {
+      "first": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "contextChars": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "toolCalls": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    },
+    "implementer": {
+      "first": {
+        "of": 5,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 5,
+        "n": 4,
+        "sum": 389000,
+        "median": 96000,
+        "p90": 118000,
+        "max": 118000
+      },
+      "contextChars": {
+        "of": 5,
+        "n": 5,
+        "sum": 248000,
+        "median": 51000,
+        "p90": 61000,
+        "max": 61000
+      },
+      "toolCalls": {
+        "of": 5,
+        "n": 5,
+        "sum": 146,
+        "median": 18,
+        "p90": 64,
+        "max": 64
+      }
+    },
+    "quality-list": {
+      "first": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "contextChars": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "toolCalls": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    },
+    "quality-fix": {
+      "first": {
+        "of": 4,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 4,
+        "n": 3,
+        "sum": 174000,
+        "median": 58000,
+        "p90": 61000,
+        "max": 61000
+      },
+      "contextChars": {
+        "of": 4,
+        "n": 3,
+        "sum": 170000,
+        "median": 58000,
+        "p90": 62000,
+        "max": 62000
+      },
+      "toolCalls": {
+        "of": 4,
+        "n": 3,
+        "sum": 51,
+        "median": 17,
+        "p90": 22,
+        "max": 22
+      }
+    },
+    "quality-verify": {
+      "first": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "contextChars": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "toolCalls": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    },
+    "review": {
+      "first": {
+        "of": 3,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 3,
+        "n": 3,
+        "sum": 207000,
+        "median": 69000,
+        "p90": 70000,
+        "max": 70000
+      },
+      "contextChars": {
+        "of": 3,
+        "n": 3,
+        "sum": 181000,
+        "median": 60000,
+        "p90": 63000,
+        "max": 63000
+      },
+      "toolCalls": {
+        "of": 3,
+        "n": 3,
+        "sum": 83,
+        "median": 28,
+        "p90": 30,
+        "max": 30
+      }
+    },
+    "adjudicator:quality": {
+      "first": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "contextChars": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "toolCalls": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    },
+    "adjudicator:correctness": {
+      "first": {
+        "of": 1,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 1,
+        "n": 1,
+        "sum": 47000,
+        "median": 47000,
+        "p90": 47000,
+        "max": 47000
+      },
+      "contextChars": {
+        "of": 1,
+        "n": 1,
+        "sum": 45000,
+        "median": 45000,
+        "p90": 45000,
+        "max": 45000
+      },
+      "toolCalls": {
+        "of": 1,
+        "n": 1,
+        "sum": 6,
+        "median": 6,
+        "p90": 6,
+        "max": 6
+      }
+    },
+    "adjudicator:scenarios": {
+      "first": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "contextChars": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "toolCalls": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    },
+    "scenario-writer": {
+      "first": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "contextChars": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "toolCalls": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    },
+    "scenario-runner": {
+      "first": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "contextChars": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "toolCalls": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    },
+    "condenser": {
+      "first": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "contextChars": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "toolCalls": {
+        "of": 0,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    },
+    "resolve": {
+      "first": {
+        "of": 1,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "peak": {
+        "of": 1,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "contextChars": {
+        "of": 1,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      },
+      "toolCalls": {
+        "of": 1,
+        "n": 0,
+        "sum": null,
+        "median": null,
+        "p90": null,
+        "max": null
+      }
+    }
+  },
+  "landedThenBroken": {
+    "gate2": {
+      "runs": 3,
+      "red": 1
+    },
+    "deploy": {
+      "watched": 0,
+      "green": 0,
+      "red": 0,
+      "unverified": 0
+    }
+  },
+  "scenarios": {
+    "issues": 0,
+    "perIssue": {
+      "of": 0,
+      "n": 0,
+      "sum": null,
+      "median": null,
+      "p90": null,
+      "max": null
+    },
+    "pass": 0,
+    "fail": 0,
+    "unverified": 0,
+    "writerFailed": 0
+  },
+  "qualityGroups": {},
+  "dbCopies": {
+    "copies": 0,
+    "peakConcurrent": 0,
+    "uniqueBytes": {
+      "of": 0,
+      "n": 0,
+      "sum": null,
+      "median": null,
+      "p90": null,
+      "max": null
+    },
+    "volumeUsedBytesMax": null,
+    "peakMemoryBytes": {
+      "of": 0,
+      "n": 0,
+      "sum": null,
+      "median": null,
+      "p90": null,
+      "max": null
+    }
+  },
+  "anchors": {
+    "issues": 0,
+    "raw": {
+      "of": 0,
+      "n": 0,
+      "sum": null,
+      "median": null,
+      "p90": null,
+      "max": null
+    },
+    "afterTraceDrop": {
+      "of": 0,
+      "n": 0,
+      "sum": null,
+      "median": null,
+      "p90": null,
+      "max": null
+    },
+    "condensed": {
+      "of": 0,
+      "n": 0,
+      "sum": null,
+      "median": null,
+      "p90": null,
+      "max": null
+    },
+    "condenser": {}
+  },
+  "janitor": {
+    "runs": 0,
+    "byTask": {}
+  },
+  "invocations": [
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "role": "implementer",
+      "attempt": 1,
+      "round": null,
+      "invocation": null,
+      "provider": "claude",
+      "model": "claude-opus-4-7",
+      "effort": "high",
+      "result": "COMPLETE",
+      "verdict": null,
+      "durationMs": 612000,
+      "tokens": {
+        "input": 310,
+        "cached": 2400000,
+        "cacheWrite": 88000,
+        "output": 21000,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": 118000,
+      "contextChars": 52000,
+      "toolCalls": 64,
+      "peakMemoryBytes": 1900000000,
+      "oomKilled": false,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "role": "quality-fix",
+      "attempt": 1,
+      "round": 1,
+      "invocation": null,
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "medium",
+      "result": "completed",
+      "verdict": null,
+      "durationMs": 201000,
+      "tokens": {
+        "input": 410000,
+        "cached": 350000,
+        "cacheWrite": null,
+        "output": 9000,
+        "reasoning": 4000
+      },
+      "firstContext": null,
+      "peakContext": 61000,
+      "contextChars": 58000,
+      "toolCalls": 22,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "role": "review",
+      "attempt": 1,
+      "round": 1,
+      "invocation": 1,
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "high",
+      "result": "completed",
+      "verdict": "CHANGES-REQUESTED",
+      "durationMs": 240000,
+      "tokens": {
+        "input": 520000,
+        "cached": 400000,
+        "cacheWrite": null,
+        "output": 12000,
+        "reasoning": 7000
+      },
+      "firstContext": null,
+      "peakContext": 70000,
+      "contextChars": 60000,
+      "toolCalls": 30,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "role": "implementer",
+      "attempt": 2,
+      "round": null,
+      "invocation": null,
+      "provider": "claude",
+      "model": "claude-opus-4-7",
+      "effort": "high",
+      "result": "COMPLETE",
+      "verdict": null,
+      "durationMs": 180000,
+      "tokens": {
+        "input": 90,
+        "cached": 900000,
+        "cacheWrite": 30000,
+        "output": 6000,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": 96000,
+      "contextChars": 61000,
+      "toolCalls": 18,
+      "peakMemoryBytes": 1700000000,
+      "oomKilled": false,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "role": "quality-fix",
+      "attempt": 2,
+      "round": 2,
+      "invocation": null,
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "medium",
+      "result": "completed",
+      "verdict": null,
+      "durationMs": 120000,
+      "tokens": {
+        "input": 300000,
+        "cached": 250000,
+        "cacheWrite": null,
+        "output": 4000,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": 55000,
+      "contextChars": 62000,
+      "toolCalls": 12,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 41,
+      "role": "review",
+      "attempt": 2,
+      "round": 2,
+      "invocation": 1,
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "high",
+      "result": "completed",
+      "verdict": "APPROVED",
+      "durationMs": 200000,
+      "tokens": {
+        "input": 480000,
+        "cached": 380000,
+        "cacheWrite": null,
+        "output": 10000,
+        "reasoning": 6000
+      },
+      "firstContext": null,
+      "peakContext": 68000,
+      "contextChars": 63000,
+      "toolCalls": 25,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-01T10-00-00-000Z",
+      "issue": 42,
+      "role": "implementer",
+      "attempt": 1,
+      "round": null,
+      "invocation": null,
+      "provider": "claude",
+      "model": "claude-opus-4-7",
+      "effort": "high",
+      "result": "FAILED",
+      "verdict": null,
+      "durationMs": 300000,
+      "tokens": {
+        "input": 40,
+        "cached": 500000,
+        "cacheWrite": null,
+        "output": 3000,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": 71000,
+      "contextChars": 40000,
+      "toolCalls": 9,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 43,
+      "role": "partition-check",
+      "attempt": null,
+      "round": null,
+      "invocation": 1,
+      "provider": "claude",
+      "model": "claude-opus-4-7",
+      "effort": "high",
+      "result": "PARTITION",
+      "verdict": null,
+      "durationMs": 41000,
+      "tokens": {
+        "input": 12,
+        "cached": 30000,
+        "cacheWrite": 9000,
+        "output": 800,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": 39000,
+      "contextChars": 31000,
+      "toolCalls": 3,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "role": "implementer",
+      "attempt": 1,
+      "round": null,
+      "invocation": null,
+      "provider": "claude",
+      "model": "claude-opus-4-7",
+      "effort": "high",
+      "result": "COMPLETE",
+      "verdict": null,
+      "durationMs": 420000,
+      "tokens": {
+        "input": 200,
+        "cached": 1800000,
+        "cacheWrite": 70000,
+        "output": 15000,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": 104000,
+      "contextChars": 44000,
+      "toolCalls": 41,
+      "peakMemoryBytes": 2100000000,
+      "oomKilled": false,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "role": "quality-fix",
+      "attempt": 1,
+      "round": 1,
+      "invocation": null,
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "medium",
+      "result": "completed",
+      "verdict": null,
+      "durationMs": 150000,
+      "tokens": {
+        "input": 350000,
+        "cached": 300000,
+        "cacheWrite": null,
+        "output": 7000,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": 58000,
+      "contextChars": 50000,
+      "toolCalls": 17,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "role": "implementer",
+      "attempt": 2,
+      "round": null,
+      "invocation": null,
+      "provider": "claude",
+      "model": "claude-opus-4-7",
+      "effort": "high",
+      "result": "COMPLETE",
+      "verdict": null,
+      "durationMs": 160000,
+      "tokens": {
+        "input": 70,
+        "cached": 700000,
+        "cacheWrite": 20000,
+        "output": 5000,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": null,
+      "contextChars": 51000,
+      "toolCalls": 14,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "role": "quality-fix",
+      "attempt": 2,
+      "round": 2,
+      "invocation": null,
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "medium",
+      "result": "failed",
+      "verdict": null,
+      "durationMs": 60000,
+      "tokens": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": null,
+      "contextChars": null,
+      "toolCalls": null,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "role": "review",
+      "attempt": 2,
+      "round": 2,
+      "invocation": 1,
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "effort": "high",
+      "result": "completed",
+      "verdict": "CHANGES-REQUESTED",
+      "durationMs": 210000,
+      "tokens": {
+        "input": 500000,
+        "cached": 420000,
+        "cacheWrite": null,
+        "output": 11000,
+        "reasoning": 6500
+      },
+      "firstContext": null,
+      "peakContext": 69000,
+      "contextChars": 58000,
+      "toolCalls": 28,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "role": "adjudicator:correctness",
+      "attempt": 2,
+      "round": 2,
+      "invocation": null,
+      "provider": "claude",
+      "model": "claude-opus-4-7",
+      "effort": "high",
+      "result": "OVERRULED",
+      "verdict": "OVERRULED",
+      "durationMs": 95000,
+      "tokens": {
+        "input": 30,
+        "cached": 120000,
+        "cacheWrite": 15000,
+        "output": 2500,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": 47000,
+      "contextChars": 45000,
+      "toolCalls": 6,
+      "peakMemoryBytes": null,
+      "oomKilled": null,
+      "transcript": null
+    },
+    {
+      "run": "run-2026-09-02T08-30-00-000Z",
+      "issue": 42,
+      "role": "resolve",
+      "attempt": 1,
+      "round": null,
+      "invocation": null,
+      "provider": null,
+      "model": null,
+      "effort": null,
+      "result": "exit",
+      "verdict": null,
+      "durationMs": 130000,
+      "tokens": {
+        "input": null,
+        "cached": null,
+        "cacheWrite": null,
+        "output": null,
+        "reasoning": null
+      },
+      "firstContext": null,
+      "peakContext": null,
+      "contextChars": null,
+      "toolCalls": null,
+      "peakMemoryBytes": 800000000,
+      "oomKilled": null,
+      "transcript": null
+    }
+  ]
+}

@@ -5,6 +5,7 @@ import { AgentQuotaError } from "./agent-sandbox.js";
 import {
   decideOriginLockWake,
   selectTerminalExit,
+  terminalEventFields,
   terminalReason,
   verifyFinalizedTrackerState,
 } from "./run.js";
@@ -54,6 +55,33 @@ describe("terminal event reasons (#132)", () => {
 
   it.each(terminals)("keeps structured terminal detail", (terminal, reason) => {
     expect(terminalReason(terminal)).toBe(reason);
+  });
+});
+
+describe("terminal event facts (#194)", () => {
+  it("records the machine's typed cause and the spec-gap count", () => {
+    expect(terminalEventFields({
+      type: "NEEDS-HUMAN",
+      cause: "gate-red",
+      failureTrace: "trace",
+      latestReviewerProse: null,
+      budgetExhausted: null,
+      strandedHead: null,
+      specGaps: [{ round: 1, text: "a" }, { round: 2, text: "b" }],
+    })).toEqual({
+      terminal: "NEEDS-HUMAN",
+      reason: "gate-red: trace",
+      cause: "gate-red",
+      specGaps: 2,
+    });
+  });
+
+  it("records no cause for a terminal the machine gives none", () => {
+    expect(terminalEventFields({ type: "DONE", commits: [], specGaps: [] })).toEqual({
+      terminal: "DONE",
+      reason: null,
+      specGaps: 0,
+    });
   });
 });
 

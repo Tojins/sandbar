@@ -715,6 +715,33 @@ describe("parseCodexJsonLine", () => {
     expect(speech.spoken).toBe("");
   });
 
+  // The depth at the first command (#194): fixed by that command, so a later
+  // command's depth never replaces it, and absent when there was none or its
+  // provider reported none (Codex's exec stream carries no per-turn usage).
+  it("keeps the first command's context depth as firstContext", () => {
+    const speech = createAgentSpeechAccumulator();
+    speech.ingest([
+      { type: "context_depth", tokens: 12 },
+      { type: "tool_call", name: "Bash", args: "ls", contextTokens: 12 },
+      { type: "context_depth", tokens: 30 },
+      { type: "tool_call", name: "Bash", args: "npm test", contextTokens: 30 },
+    ]);
+    expect(speech.firstContext).toBe(12);
+    expect(speech.peakContext).toBe(30);
+  });
+
+  it.each([
+    ["no command", [{ type: "context_depth", tokens: 12 }]],
+    ["a Codex command", [
+      { type: "tool_call", name: "command_execution", args: "ls" },
+      { type: "tool_call", name: "Bash", args: "npm test", contextTokens: 30 },
+    ]],
+  ] as const)("leaves firstContext absent for %s", (_name, events) => {
+    const speech = createAgentSpeechAccumulator();
+    speech.ingest(events);
+    expect(speech.firstContext).toBeUndefined();
+  });
+
   // Reasoning is the model's own thinking, not its speech. Folded into the
   // accumulated output it would let an agent that merely CONSIDERED emitting
   // the completion tag end the run by talking about it — and that output is
@@ -2893,6 +2920,7 @@ describe("createSandbox integration (local provider)", () => {
         expect(records[0]?.commands).toEqual([
           { name: "Bash", args: "ls", contextTokens: 1_007 },
         ]);
+        expect(run.firstContext).toBe(1_007);
         expect(await reaped("accepted")).toBe(true);
       } finally {
         await sandbox.close();

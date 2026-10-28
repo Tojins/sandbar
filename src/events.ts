@@ -40,11 +40,27 @@
 // the filename of the issue JSON filed in the issue's log directory. Both are
 // optional, without a schema bump, because records written before them lack
 // them.
+// The run scorecard (#194, `stats.ts`) reads four more facts off the record.
+// `usage.firstContext` is the context depth at the invocation's first
+// command, beside `peakContext`. `transcript` names the invocation log an
+// agent-role event came from, relative to the issue's log directory; an event
+// that folds several invocations names the one that decided it. A `terminal`
+// carries the machine's typed `cause` and its `specGaps` count, so parked
+// issues group without parsing `reason`. A `resolve-attempt` carries its
+// provider, model and usage.
+//
+// Additive changes do not bump EVENT_SCHEMA_VERSION (#194). Additive means a
+// new kind, a new optional field or a new union member; a field that earlier
+// records lack is optional. A bump is reserved for removing a field or
+// changing an existing field's meaning, because each bump strands every
+// earlier run for the UI.
 //
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
 // immediately, rather than being guessed into a state they never recorded.
+// `parseEventLines` is the version-blind half of that read; the scorecard's
+// per-version normalisers (`stats-record.ts`) start from it.
 
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -53,7 +69,7 @@ import type { ChunkBlockReason } from "./chunks.js";
 import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
 import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
-import type { QualityOutcome } from "./inner-loop-machine.js";
+import type { QualityOutcome, Verdict } from "./inner-loop-machine.js";
 import type { AgentRunEndedBy } from "./agent-sandbox.js";
 import type { ContainerResources } from "./container-resources.js";
 import {
@@ -157,6 +173,7 @@ export type UsageFields = {
   readonly terminalReason?: string;
   readonly toolCalls?: number;
   readonly peakContext?: number;
+  readonly firstContext?: number;
   readonly contextChars?: number;
   readonly quota?: {
     readonly status: "allowed" | "allowed_warning" | "rejected";
@@ -165,6 +182,10 @@ export type UsageFields = {
     readonly resetsAt?: number;
   };
 };
+
+// The machine's typed reason for a parking terminal (`Verdict`), recorded
+// beside its prose `reason`.
+export type TerminalCause = Extract<Verdict, { readonly cause: string }>["cause"];
 
 export type GateStepEvent = ContainerResources & {
   readonly ok: boolean;
@@ -264,21 +285,21 @@ export type EventInput =
   | (EventIssue & { readonly kind: "origin-sync"; readonly outcome: IssueBranchOriginSync["kind"]; readonly detail: string })
   | (EventIssue & { readonly kind: "phase"; readonly attempt: number; readonly phases: readonly IssuePhase[] })
   | (EventIssue & { readonly kind: "setup"; readonly durationMs: number; readonly worktreeMs?: number; readonly sandboxMs?: number; readonly stackMs?: number; readonly detail?: string })
-  | (EventIssue & ContainerResources & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
-  | (EventIssue & ContainerResources & { readonly kind: "partition-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly result: "CLEAR" | "PARTITION" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
-  | (EventIssue & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits?: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "ui-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly result: "CLEAR" | "PROTOTYPE-NEEDED" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "partition-check"; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly result: "CLEAR" | "PARTITION" | "NO-SIGNAL" | "wrote" | "input-too-large" | "quota" | "credential" | "failed"; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits?: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventIssue & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
-  | (EventIssue & ContainerResources & QualityReviewEvent & { readonly kind: "quality-review"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly maxGapMs?: number; readonly usage?: UsageFields })
-  | (EventIssue & ContainerResources & QualityPassEvent & { readonly kind: "quality-pass"; readonly attempt: number; readonly round: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly maxGapMs?: number; readonly usage?: UsageFields })
-  | (EventIssue & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly maxGapMs?: number; readonly usage?: UsageFields })
-  | (EventIssue & ContainerResources & { readonly kind: "adjudication"; readonly pass: "quality" | "correctness"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly maxGapMs?: number; readonly usage?: UsageFields })
-  | (EventIssue & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number })
+  | (EventIssue & ContainerResources & QualityReviewEvent & { readonly kind: "quality-review"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & QualityPassEvent & { readonly kind: "quality-pass"; readonly attempt: number; readonly round: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "adjudication"; readonly pass: "quality" | "correctness"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventIssue & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields })
   | (ContainerResources & { readonly kind: "container"; readonly stack: "gate" | "sandbox"; readonly name: string; readonly container: string; readonly lifecycle: "issue" | "attempt"; readonly durationMs: number; readonly issue?: number; readonly title?: string })
   | (EventIssue & { readonly kind: "review-round"; readonly attempt: number; readonly round: number; readonly head: string; readonly quality: QualityOutcome["verdict"]; readonly qualityRounds: number; readonly gateOk: boolean; readonly correctness: "APPROVED" | "CHANGES-REQUESTED" | "SKIPPED" | "HARNESS-FAILED"; readonly rejectingPass: "correctness" | null; readonly gateFailures: number; readonly correctnessFailures: number; readonly durationMs: number })
   | (EventIssue & { readonly kind: "repair"; readonly attempt: number; readonly action: "fast-forward" | "re-prompt" | "promise-nudge"; readonly detail: string })
   | (EventIssue & { readonly kind: "hard-error"; readonly retry: number; readonly max: number; readonly reason: string })
-  | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-PARTITION" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "HARD-ERROR" | "QUOTA" | "CREDENTIAL" | "REJECTED"; readonly reason: string | null; readonly durationMs: number })
+  | (EventIssue & { readonly kind: "terminal"; readonly terminal: "DONE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NEEDS-PARTITION" | "NEEDS-HUMAN" | "NEEDS-HUMAN-REVIEW" | "HARD-ERROR" | "QUOTA" | "CREDENTIAL" | "REJECTED"; readonly reason: string | null; readonly cause?: TerminalCause; readonly specGaps?: number; readonly durationMs: number })
   | (EventIssue & { readonly kind: "landed"; readonly outcome: "merged" | "chunk-landed" | "skipped"; readonly branch: string; readonly target: string | null; readonly reason: string | null; readonly durationMs: number })
   | ({ readonly kind: "landed"; readonly outcome: "chunk-on-source"; readonly branch: string; readonly target: string; readonly reason: null; readonly durationMs: number } & ChunkLandingEvent)
   | ({ readonly kind: "landed"; readonly outcome: "chunk-parked" | "chunk-deferred"; readonly branch: string; readonly target: null; readonly reason: string; readonly durationMs: number } & ChunkLandingEvent)
@@ -363,7 +384,23 @@ export async function startEventRecord(
 }
 
 export async function readEventsFile(path: string): Promise<readonly RunEvent[]> {
-  const body = await readFile(path, "utf8");
+  const { schemaVersion, events } = parseEventLines(await readFile(path, "utf8"), path);
+  if (schemaVersion !== EVENT_SCHEMA_VERSION) {
+    throw new UnsupportedEventSchemaError(path, schemaVersion);
+  }
+  return events as readonly RunEvent[];
+}
+
+// One record's committed lines as objects, with the line, run-start and
+// sequence checks every reader shares. Which schema `schemaVersion` names,
+// and so what the objects are, is the caller's to judge.
+export function parseEventLines(
+  body: string,
+  path: string,
+): {
+  readonly schemaVersion: unknown;
+  readonly events: readonly Readonly<Record<string, unknown>>[];
+} {
   // A live reader may overlap the append syscall. Only newline-terminated
   // records are committed; an unterminated tail is either that instant or the
   // last interrupted write of a crashed run, and the prior events remain the
@@ -385,14 +422,11 @@ export async function readEventsFile(path: string): Promise<readonly RunEvent[]>
     if (typeof value !== "object" || value === null) {
       throw new EventRecordReadError(`Invalid event object at line ${index + 1} of ${path}`);
     }
-    return value as RunEvent;
+    return value as Readonly<Record<string, unknown>>;
   });
   const first = events[0];
   if (!first || first.kind !== "run-start") {
     throw new EventRecordReadError(`Run record ${path} does not begin with run-start`);
-  }
-  if (first.schemaVersion !== EVENT_SCHEMA_VERSION) {
-    throw new UnsupportedEventSchemaError(path, first.schemaVersion);
   }
   for (let i = 0; i < events.length; i += 1) {
     if (events[i]?.seq !== i + 1) {
@@ -401,5 +435,5 @@ export async function readEventsFile(path: string): Promise<readonly RunEvent[]>
       );
     }
   }
-  return events;
+  return { schemaVersion: first.schemaVersion, events };
 }
