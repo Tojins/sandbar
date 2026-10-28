@@ -245,7 +245,7 @@ describe("mine: outliers", () => {
 });
 
 describe("extractRules (#182 Decision 4)", () => {
-  it("reads R1–R6 from sandbar's coding standards", () => {
+  it("reads R1–R7 from sandbar's coding standards", () => {
     expect(extractRules(loadTemplate("coding-standards"))).toEqual([
       { label: "R1", title: "Complexity that doesn't pay for itself." },
       { label: "R2", title: "Spaghetti control flow." },
@@ -253,6 +253,7 @@ describe("extractRules (#182 Decision 4)", () => {
       { label: "R4", title: "Logic in the wrong layer." },
       { label: "R5", title: "Loose contracts." },
       { label: "R6", title: "Non-atomic orchestration." },
+      { label: "R7", title: "Wrong or idle prose." },
     ]);
   });
 
