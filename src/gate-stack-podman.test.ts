@@ -613,17 +613,27 @@ describe.runIf(available)("gate stack against real podman", () => {
       // gating whatever source it started with.
       expect(await idOf("runner")).not.toBe(runnerIdBefore);
 
-      const { stdout } = await exec(RUNTIME, [
-        "exec",
-        cName("runner"),
-        "mariadb",
-        "-h",
-        "127.0.0.1",
-        "-uroot",
-        "app",
-        "-e",
-        "SHOW TABLES",
-      ]);
+      // Under a loaded remote podman `exec` occasionally returns an empty
+      // capture (as for boom above). A lost table stays lost on a re-query, so
+      // re-asking only on empty output weakens nothing.
+      const showTables = async (): Promise<string> =>
+        (
+          await exec(RUNTIME, [
+            "exec",
+            cName("runner"),
+            "mariadb",
+            "-h",
+            "127.0.0.1",
+            "-uroot",
+            "app",
+            "-e",
+            "SHOW TABLES",
+          ])
+        ).stdout;
+      let stdout = await showTables();
+      for (let attempt = 1; attempt < 5 && stdout === ""; attempt += 1) {
+        stdout = await showTables();
+      }
       expect(stdout).toContain("persisted");
     },
     240_000,
