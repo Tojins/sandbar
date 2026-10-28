@@ -185,7 +185,7 @@ export type EgressHandle = {
 };
 
 // The complete lines of the proxy's log past `offset`, and where they end.
-async function readLogFrom(
+export async function readLogFrom(
   path: string,
   offset: number,
 ): Promise<{ readonly lines: readonly string[]; readonly end: number }> {
@@ -247,9 +247,14 @@ export async function startEgress(opts: {
     }
   };
 
+  // Before the first resource exists, so a signal during bringup still
+  // removes whatever was created (#55). `stop` is a hoisted declaration.
+  const dispose = registerDisposable(async () => {
+    await stop();
+  });
+
   let stopping: Promise<EgressSummary> | null = null;
   const teardown = async (): Promise<EgressSummary> => {
-    dispose();
     const resources = await readContainerResources(
       name,
       systemContainerResourceDeps(boundedPodman),
@@ -283,17 +288,20 @@ export async function startEgress(opts: {
       ...resources,
     };
   };
-  const stop = (): Promise<EgressSummary> => (stopping ??= teardown());
-  // Before the first resource exists, so a signal during bringup still
-  // removes whatever was created (#55).
-  const dispose = registerDisposable(async () => {
-    await stop();
-  });
+  function stop(): Promise<EgressSummary> {
+    if (stopping === null) {
+      dispose();
+      stopping = teardown();
+    }
+    return stopping;
+  }
 
   const waitReady = async (): Promise<void> => {
     const deadline = Date.now() + CONTROL_TIMEOUT_MS;
+    let readOffset = 0;
     for (;;) {
-      const { lines } = await readLogFrom(logPath, 0);
+      const { lines, end } = await readLogFrom(logPath, readOffset);
+      readOffset = end;
       if (lines.some((line) => parseEgressLogLine(line).t === "ready")) return;
       const state = await containerState(name);
       if (state === "stopped" || state === "gone") {

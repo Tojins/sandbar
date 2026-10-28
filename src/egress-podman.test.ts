@@ -17,8 +17,14 @@ import { promisify } from "node:util";
 
 import { afterAll, beforeAll, describe, it } from "vitest";
 
-import { EGRESS_BASE_IMAGE, type EgressHandle, ensureEgressImage, startEgress } from "./egress.js";
-import { type EgressPolicy, proxyIpInspectArgs } from "./egress-policy.js";
+import {
+  EGRESS_BASE_IMAGE,
+  type EgressHandle,
+  currentEgressImageTag,
+  ensureEgressImage,
+  startEgress,
+} from "./egress.js";
+import { type EgressPolicy, internalNetworkCreateArgs, proxyIpInspectArgs } from "./egress-policy.js";
 import type { ImageBuildRecord } from "./ensure-images.js";
 import {
   egressProxyNameFor,
@@ -226,6 +232,50 @@ describe.runIf(available)("egress proxy against real podman", () => {
       await exec(RUNTIME, ["pod", "rm", "-f", "-t", "0", pod]);
       await proxy.stop();
       expect(await exists("network", sandboxNetworkNameFor(SCOPE, token))).toBe(false);
+    },
+    300_000,
+  );
+
+  it.concurrent("names the image the reconciler keeps live", async ({ expect }) => {
+    expect(await currentEgressImageTag(SCOPE)).toBe(await ensureEgressImage(SCOPE));
+  });
+
+  it.concurrent(
+    "reports a dead proxy, and stop is idempotent",
+    async ({ expect, task }) => {
+      const token = podmanTestStackId("egress-alive", task.id);
+      const proxy = await proxyFor(token, ENFORCE);
+      await expect(proxy.assertAlive()).resolves.toBeUndefined();
+      await exec(RUNTIME, ["rm", "-f", "-t", "0", egressProxyNameFor(SCOPE, `sbx-${token}`)]);
+      await expect(proxy.assertAlive()).rejects.toThrow(/died \(gone\)/);
+      const first = proxy.stop();
+      const second = proxy.stop();
+      expect(second).toBe(first);
+      expect(await first).toBe(await second);
+      expect(await exists("network", sandboxNetworkNameFor(SCOPE, token))).toBe(false);
+    },
+    300_000,
+  );
+
+  it.concurrent(
+    "leaves a network it did not create in place",
+    async ({ expect, task }) => {
+      const token = podmanTestStackId("egress-own-net", task.id);
+      const network = sandboxNetworkNameFor(SCOPE, token);
+      await exec(RUNTIME, internalNetworkCreateArgs(network));
+      const proxy = await startEgress({
+        scope: SCOPE,
+        owner: `sbx-${token}`,
+        networkName: network,
+        createNetwork: false,
+        image,
+        policy: ENFORCE,
+        logDir: join(fixtureDir, "egress"),
+      });
+      await proxy.stop();
+      expect(await exists("container", egressProxyNameFor(SCOPE, `sbx-${token}`))).toBe(false);
+      expect(await exists("network", network)).toBe(true);
+      await exec(RUNTIME, ["network", "rm", "-f", network]);
     },
     300_000,
   );
