@@ -12,6 +12,14 @@
 // posts through the same operator account the human uses. Quoted or inline
 // occurrences stay human-authored because they do not start the trimmed body.
 //
+// Sandbar's own comments are rendered without their traces (#197): every
+// `<details>` block and every QUOTED_OPEN…QUOTED_CLOSE span (finalize.ts) is
+// replaced by a one-line stub, so no role reads a gate trace or an earlier
+// round's reviewer prose as specification. Their current versions reach the
+// implementer through its own prompt layers. Comments posted before the fences
+// existed are cut by their known lead-in lines instead (LEGACY_QUOTE_LEAD_IN).
+// Human comments and the body are never touched.
+//
 // That boundary is exported as `fetchIssueSnapshot` so the inner loop can file
 // the issue as it stood at admission beside the run's logs (#195).
 //
@@ -22,7 +30,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { SandbarError } from "./errors.js";
-import { BOT_COMMENT_PREFIX } from "./finalize.js";
+import { BOT_COMMENT_PREFIX, QUOTED_CLOSE, QUOTED_OPEN } from "./finalize.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
@@ -44,10 +52,66 @@ export type IssueData = {
   readonly body: string;
 };
 
+const isSandbarComment = (body: string): boolean =>
+  body.trim().startsWith(BOT_COMMENT_PREFIX);
+
+// Sandbar never nests `<details>`, so the first `</details>` closes the block.
+const DETAILS_BLOCK = /<details><summary>([\s\S]*?)<\/summary>[\s\S]*?<\/details>/g;
+// The markers carry no regex metacharacters, so they are spliced in verbatim.
+const QUOTED_SPAN = new RegExp(`${QUOTED_OPEN}[\\s\\S]*?${QUOTED_CLOSE}`, "g");
+const QUOTE_OMITTED = "_(quoted review omitted.)_";
+
+// Every lead-in finalize.ts put before reviewer prose before the fences, as
+// whole lines. A paragraph starting with one is cut up to the next line
+// LEGACY_QUOTE_END matches: a stub left by DETAILS_BLOCK, a block it missed, or
+// the action line.
+const LEGACY_QUOTE_LEAD_IN = new RegExp(
+  "^(?:" +
+    [
+      "Latest quality review from the red round",
+      "Latest correctness review \\(an earlier round\\)",
+      "Latest (?:quality|correctness) reviewer report",
+      "Latest verifier report(?: \\(an earlier round\\))?",
+      "Earlier-round reviewer report \\(not a verdict on the current commits\\)",
+      "Read-only .+ output",
+    ].join("|") +
+    "):$",
+);
+const LEGACY_QUOTE_END = /^(?:_\(|<details>|Action:)/;
+
+function dropLegacyQuotes(text: string): string {
+  const out: string[] = [];
+  let quoting = false;
+  for (const line of text.split("\n")) {
+    if (quoting) {
+      if (!LEGACY_QUOTE_END.test(line)) continue;
+      quoting = false;
+      out.push("");
+    } else if (LEGACY_QUOTE_LEAD_IN.test(line) && (out.at(-1) ?? "") === "") {
+      quoting = true;
+      out.push(QUOTE_OMITTED);
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+// Pure: a comment body as every role reads it. Anything but a sandbar comment
+// is returned unchanged.
+export function dropSandbarTraces(body: string): string {
+  if (!isSandbarComment(body)) return body;
+  return dropLegacyQuotes(
+    body
+      .replace(DETAILS_BLOCK, (_, summary: string) => `_(${summary} omitted.)_`)
+      .replace(QUOTED_SPAN, QUOTE_OMITTED),
+  );
+}
+
 // Pure renderer: title line, body, then the comment thread (when present) with
-// author/timestamp headers. No "# Issue anchor" heading here — callers own the
-// surrounding structure (prompt.ts adds the layer heading; the resolve loop
-// embeds these under its own primary/related-issue headings).
+// author/timestamp headers and sandbar's traces dropped. No "# Issue anchor"
+// heading here — callers own the surrounding structure (prompt.ts adds the
+// layer heading; the resolve loop embeds it under its primary-issue heading).
 export function renderIssueText(issueId: string, issue: IssueJson): string {
   const lines = [
     `Issue #${issueId}: ${issue.title ?? "(no title)"}`,
@@ -58,8 +122,8 @@ export function renderIssueText(issueId: string, issue: IssueJson): string {
   if (comments.length > 0) {
     lines.push("", "## Comments");
     for (const c of comments) {
-      const body = (c.body ?? "").trim();
-      const author = body.startsWith(BOT_COMMENT_PREFIX)
+      const body = dropSandbarTraces((c.body ?? "").trim());
+      const author = isSandbarComment(body)
         ? "Sandbar (orchestrator, not a human)"
         : (c.author?.login ?? "(unknown)");
       const when = c.createdAt ? ` — ${c.createdAt}` : "";
