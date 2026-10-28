@@ -37,6 +37,9 @@
 // (#188): the work its branch already carries beyond the seed, so a retry or a
 // resumed branch is not told it made no commits.
 //
+// `readFileAtRef` reads one file as a ref has it, without a worktree: the
+// quality standards at the source tip (standards-groups.ts, #204).
+//
 // `revParse` is exported for the inner loop's `admitted.seedSha` (#195): the
 // commit the symbolic seed ref named when the issue was admitted.
 //
@@ -54,7 +57,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { type ChunkTarget } from "./chunks.js";
-import { hasExitCode, isExitCode } from "./errors.js";
+import { SandbarError, hasExitCode, isExitCode } from "./errors.js";
 
 const exec = promisify(execFile);
 
@@ -302,6 +305,29 @@ export const gitStdout = async (
 
 export const revParse = async (cwd: string, ref: string): Promise<string> =>
   (await exec("git", ["rev-parse", "--verify", "--quiet", ref], { cwd })).stdout.trim();
+
+// `<path>` as `<ref>` has it, read in `repoDir` (a bare cache works); null
+// when the ref has no such path. A ref that does not resolve is an error, not
+// an absent file, and so is a directory at the path, named as one rather than
+// failing as a bad object (as stack-source.ts does).
+export async function readFileAtRef(
+  repoDir: string,
+  ref: string,
+  path: string,
+): Promise<string | null> {
+  const object = await revParseOrNull(repoDir, `${ref}:${path}`);
+  if (object !== null) {
+    const type = (await gitStdout(repoDir, ["cat-file", "-t", object])).trim();
+    if (type !== "blob") {
+      throw new SandbarError(`cannot read ${path} at ${ref}: it is a ${type}, not a file.`);
+    }
+    return await gitStdout(repoDir, ["cat-file", "blob", object]);
+  }
+  if (await revParseOrNull(repoDir, `${ref}^{commit}`) === null) {
+    throw new SandbarError(`cannot read ${path} at ${ref}: ${ref} does not resolve in ${repoDir}.`);
+  }
+  return null;
+}
 
 export const isAncestor = async (
   cwd: string,

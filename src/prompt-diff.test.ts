@@ -34,6 +34,8 @@ import {
   measureNetDiffChars,
   readGit,
 } from "./prompt.js";
+import { loadTemplate } from "./prompts.js";
+import { combineStandards, parseStandards } from "./standards-groups.js";
 import { repoLayout, worktreePathFor } from "./repo-cache.js";
 import { ensureRepoCache } from "./repo-cache.js";
 
@@ -158,8 +160,12 @@ const correctnessInputs = (
   priorRounds: [],
   scope,
 });
-const listerInputs = (approvedHead: string | null = null) => ({
+const qualityInputs = () => ({
   ...reviewerInputs(),
+  standards: combineStandards(parseStandards(loadTemplate("coding-standards"), "sandbar"), null),
+});
+const listerInputs = (approvedHead: string | null = null) => ({
+  ...qualityInputs(),
   mode: {
     kind: "list",
     scope: approvedHead === null ? { kind: "full" } : { kind: "since", sha: approvedHead },
@@ -167,10 +173,10 @@ const listerInputs = (approvedHead: string | null = null) => ({
   },
 } as const);
 const verifyInputs = (anchor: string) => ({
-  ...reviewerInputs(),
+  ...qualityInputs(),
   mode: { kind: "verify", anchor, report: "### Tests\nmissing" },
 } as const);
-const fixerInputs = () => ({ ...reviewerInputs(), report: "### Tests\nmissing", ruling: null });
+const fixerInputs = () => ({ ...qualityInputs(), report: "### Tests\nmissing", ruling: null });
 
 describe("prompt slots resolve their base ref in a worktree of the bare cache (#40)", () => {
   // The local head namespace is the whole bug in one assertion: `main` is not

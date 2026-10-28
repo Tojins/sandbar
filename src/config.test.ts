@@ -533,6 +533,27 @@ describe("resolveConfig", () => {
     });
   });
 
+  // The quality roles read this path out of a commit (standards-groups.ts),
+  // where `./` is git's relative-path syntax and fails outside a worktree.
+  it("normalizes a reviewerQuality path to the repository-relative form git reads", () => {
+    expect(resolveConfig({
+      ...minimal,
+      promptExtensions: { reviewerQuality: { path: "./docs/./STANDARDS.md" }, implementer: { path: "./RULES.md" } },
+    }).promptExtensions).toEqual({
+      reviewerQuality: { path: "docs/STANDARDS.md" }, implementer: { path: "./RULES.md" },
+    });
+  });
+
+  it.each([
+    ["an empty path", ""],
+    ["an absolute path", "/etc/STANDARDS.md"],
+    ["a path out of the repository", "../STANDARDS.md"],
+    ["a path through a parent", "docs/../../STANDARDS.md"],
+  ])("refuses %s as the reviewerQuality standards file", (_label, path) => {
+    expect(() => resolveConfig({ ...minimal, promptExtensions: { reviewerQuality: { path } } }))
+      .toThrow(/config\.promptExtensions\.reviewerQuality\.path/);
+  });
+
   it.each([
     ["a non-object collection", "merger", /must be an object keyed by agent role/],
     ["an array collection", [], /must be an object keyed by agent role/],

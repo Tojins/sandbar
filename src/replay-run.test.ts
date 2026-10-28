@@ -204,7 +204,12 @@ const replay = async (
 const sessionOf = (label: string): string => join(replayLayout(config()).stateDir, "sessions", label);
 const manifestOf = async (label: string) => JSON.parse(await readFile(join(sessionOf(label), "replay.json"), "utf8"));
 
-describe("replay run (#195)", () => {
+// Each test drives a whole session over real git (clones, worktrees, a lock):
+// about a second alone, but past the 5s default under the full suite's load,
+// and a timed-out session goes on writing into the root afterEach removes.
+const SESSION_TIMEOUT = { timeout: 30_000 };
+
+describe("replay run (#195)", SESSION_TIMEOUT, () => {
   it("records every case × repeat into a session the scorecard reads", async () => {
     process.env.GH_TOKEN = "secret";
 
@@ -340,7 +345,7 @@ describe("replay run (#195)", () => {
   });
 });
 
-describe("replay report (#195)", () => {
+describe("replay report (#195)", SESSION_TIMEOUT, () => {
   // A case file whose #7 names an earlier session's first run as its original.
   async function casesWithOriginal(): Promise<string> {
     await expect(replay("orig", 1)).resolves.toBe(0);

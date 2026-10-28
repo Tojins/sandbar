@@ -65,7 +65,9 @@ and the gate stack (`config.gateStack`, #24).
    above `condenseAboveChars`, once per thread change, falls back
    uncondensed), partition check (#158), UI check (#126), then implementer
    attempts → quality pass (read-only lister →
-   fixer that writes commits → read-only verify, #187) → gate-1 → verifier
+   fixer that writes commits → read-only verify, #187; graded by the
+   standards' rule groups as the source tip has them, `standards-groups.ts`,
+   #204) → gate-1 → verifier
    (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
    patch-scoped from round 2) → adjudicator on dispute of either pass (#167).
    Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`. Read-only
