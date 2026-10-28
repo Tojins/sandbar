@@ -7,9 +7,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { EventInput } from "./events.js";
 import { loadTemplate } from "./prompts.js";
+import type { ReviewerResult } from "./inner-loop-machine.js";
 import {
   type ParsedStandards,
   type RuleGroup,
+  combineGroupReviews,
   combineStandards,
   janitorStandards,
   parseStandards,
@@ -187,6 +189,45 @@ describe("renderStandards (#204)", () => {
   it("renders one group with the preamble and Leave alone for a group lens", () => {
     expect(renderStandards(standards, { kind: "group", group: standards.groups[2]! }))
       .toBe(`Intro.\n\n## Naming\n\ny\n\n${leaveAlone}`);
+  });
+});
+
+describe("combineGroupReviews (#204)", () => {
+  const sandbar = BUILTIN.groups[0]!;
+  const naming = group("naming", "Naming", "y");
+  const tests = group("tests", "Tests", "x");
+  const approved: ReviewerResult = { kind: "reviewer-result", verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" };
+  const requested = (finding: string): ReviewerResult =>
+    ({ kind: "reviewer-result", verdict: "CHANGES-REQUESTED", prose: `\n${finding}\n<verdict>CHANGES-REQUESTED</verdict>\n` });
+  const failed = (detail: string): ReviewerResult => ({ kind: "reviewer-harness-failed", detail });
+  const wrote = (detail: string): ReviewerResult => ({ kind: "reviewer-wrote", detail });
+
+  it.each<[string, readonly ReviewerResult[], ReviewerResult]>([
+    ["every group approved approves", [approved, approved, approved],
+      { kind: "reviewer-result", verdict: "APPROVED", prose: "" }],
+    ["a write anywhere is a write, tagged per writing group", [wrote("a.ts"), requested("x"), wrote("b.ts")],
+      { kind: "reviewer-wrote", detail: "[group: sandbar] a.ts\n\n[group: tests] b.ts" }],
+    ["a write outranks a harness failure", [failed("dead"), wrote("a.ts"), approved],
+      { kind: "reviewer-wrote", detail: "[group: naming] a.ts" }],
+    ["requests concatenate in group order, verdict tokens stripped", [requested("s1"), approved, requested("t1")],
+      { kind: "reviewer-result", verdict: "CHANGES-REQUESTED",
+        prose: `[group: sandbar] ${sandbar.name}\n\ns1\n\n[group: tests] Tests\n\nt1` }],
+    ["a request names each group that produced no review", [failed("dead"), requested("n1"), failed("gone")],
+      { kind: "reviewer-result", verdict: "CHANGES-REQUESTED",
+        prose: "[group: naming] Naming\n\nn1\n\n[group: sandbar] produced no review this pass." +
+          "\n\n[group: tests] produced no review this pass." }],
+    ["a harness failure beside approvals is no review", [approved, failed("dead"), approved],
+      { kind: "reviewer-harness-failed", detail: "[group: naming] dead" }],
+    ["harness failures alone are no review, tagged", [failed("dead"), failed("gone"), approved],
+      { kind: "reviewer-harness-failed", detail: "[group: sandbar] dead\n\n[group: naming] gone" }],
+  ])("%s", (_name, results, expected) => {
+    const groups = [sandbar, naming, tests];
+    const reviews = results.map((review, i) => ({ group: groups[i]!, review }));
+    expect(combineGroupReviews(reviews)).toEqual(expected);
+  });
+
+  it("refuses an empty fan-out rather than approving it", () => {
+    expect(() => combineGroupReviews([])).toThrow(/no group reviews/);
   });
 });
 

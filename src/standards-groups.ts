@@ -27,6 +27,14 @@
 //
 // The built-in file is exactly one group plus Leave alone (a test pins it).
 //
+// ONE LISTER PER GROUP. The quality pass runs one read-only lister per group
+// in parallel (inner-loop.ts), and `combineGroupReviews` folds their results
+// into the one result the state machine reads. Findings are concatenated
+// verbatim, each under a `[group: <id>]` line, and never merged by a model:
+// a write anywhere is a write; any CHANGES-REQUESTED is one, naming each group
+// that produced no review; all APPROVED approves; otherwise the pass produced
+// no review, so no approved head is recorded and the next pass lists again.
+//
 // THE GRADER COMES FROM THE SOURCE TIP. `readQualityStandards` reads a `{ path }`
 // extension from the bare cache's `origin/<sourceBranch>` as last fetched, the
 // rule stack-source.ts applies to the gate stack (#186): a branch that edits
@@ -38,7 +46,9 @@
 import type { PromptExtension } from "./config.js";
 import type { EventInput } from "./events.js";
 import { readFileAtRef } from "./git-ops.js";
+import type { ReviewerResult } from "./inner-loop-machine.js";
 import { loadTemplate } from "./prompts.js";
+import { stripVerdictTokens } from "./verdict-parser.js";
 
 export type RuleGroup = {
   // "sandbar" for the built-in group, otherwise the name's slug, deduplicated.
@@ -73,6 +83,9 @@ export type QualityStandards = {
 export type QualityLens =
   | { readonly kind: "group"; readonly group: RuleGroup }
   | { readonly kind: "all" };
+
+// One group's lister result.
+export type GroupReview = { readonly group: RuleGroup; readonly review: ReviewerResult };
 
 const HEADING = /^## +(.*?)(?: +#+)? *$/;
 const FLAGS = /\s*\{([^}]*)\}$/;
@@ -205,6 +218,36 @@ export function renderStandards(s: QualityStandards, lens: QualityLens): string 
     ...groups.map((group) => `## ${group.name}\n\n${group.body}`),
     s.leaveAlone.length === 0 ? "" : `## Leave alone\n\n${s.leaveAlone.join("\n\n")}`,
   ].filter((part) => part !== "").join("\n\n");
+}
+
+const groupTag = (group: RuleGroup): string => `[group: ${group.id}]`;
+
+// The listers' results, in group order, as the one result of the pass.
+export function combineGroupReviews(reviews: readonly GroupReview[]): ReviewerResult {
+  if (reviews.length === 0) throw new Error("a quality pass combined no group reviews");
+  const tagged = (kind: "reviewer-wrote" | "reviewer-harness-failed"): string[] =>
+    reviews.flatMap(({ group, review }) =>
+      review.kind === kind ? [`${groupTag(group)} ${review.detail}`] : []);
+  const wrote = tagged("reviewer-wrote");
+  if (wrote.length > 0) return { kind: "reviewer-wrote", detail: wrote.join("\n\n") };
+  const requested = reviews.flatMap(({ group, review }) =>
+    review.kind === "reviewer-result" && review.verdict === "CHANGES-REQUESTED"
+      ? [`${groupTag(group)} ${group.name}\n\n${stripVerdictTokens(review.prose).trim()}`]
+      : []);
+  const failed = reviews.filter(({ review }) => review.kind === "reviewer-harness-failed");
+  if (requested.length > 0) {
+    return {
+      kind: "reviewer-result",
+      verdict: "CHANGES-REQUESTED",
+      prose: [
+        ...requested,
+        ...failed.map(({ group }) => `${groupTag(group)} produced no review this pass.`),
+      ].join("\n\n"),
+    };
+  }
+  return failed.length === 0
+    ? { kind: "reviewer-result", verdict: "APPROVED", prose: "" }
+    : { kind: "reviewer-harness-failed", detail: tagged("reviewer-harness-failed").join("\n\n") };
 }
 
 // The groups the consumer exposed to the janitor (#205), rendered as one set;
