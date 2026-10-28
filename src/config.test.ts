@@ -1646,57 +1646,30 @@ describe("resolveConfig — egress (#202)", () => {
   });
 });
 
-describe("egressStartupWarning (#202)", () => {
-  const withCopies = { databaseCopies: { container: "db" } } as Partial<RunConfig>;
-
-  it("says nothing without databaseCopies", () => {
-    expect(egressStartupWarning(resolveConfig(minimal))).toBeNull();
-  });
-
-  it("warns about open egress beside databaseCopies", () => {
-    expect(egressStartupWarning(resolveConfig({ ...minimal, ...withCopies })))
-      .toMatch(/^egress is open while databaseCopies is configured: prod data can leave the sandbox/);
-  });
-
-  it("warns about report mode beside databaseCopies", () => {
-    expect(egressStartupWarning(resolveConfig({
-      ...minimal,
-      ...withCopies,
-      egress: { mode: "report", allow: [] },
-    }))).toMatch(/report mode while databaseCopies is configured/);
-  });
-
-  it("is quiet when an allowlist is enforced", () => {
-    expect(egressStartupWarning(resolveConfig({
-      ...minimal,
-      ...withCopies,
-      egress: { allow: [] },
-    }))).toBeNull();
-  });
-});
-
-describe("resolveConfig — databaseCopies (#201)", () => {
-  const dbc = {
-    dump: "/srv/sandbar-db/drops/widgets/widgets-latest.sql.gz",
-    root: "/srv/sandbar-db/installations/widgets",
-    container: "db",
-    database: "widgets",
-  };
-  // `minimal`'s db, made a sandbox sibling so it can take a copy.
+const dbc = {
+  dump: "/srv/sandbar-db/drops/widgets/widgets-latest.sql.gz",
+  root: "/srv/sandbar-db/installations/widgets",
+  container: "db",
+  database: "widgets",
+};
+// `minimal`'s db, made a sandbox sibling so it can take a copy.
+const withDb = (db: Partial<StackContainer>): GateStackConfig => {
   const stack = minimal.gateStack as GateStackConfig;
-  const withDb = (db: Partial<StackContainer>): GateStackConfig => ({
+  return {
     ...stack,
     containers: stack.containers.map((c) =>
       c.name === "db" ? { ...c, inSandbox: true, ...db } : c),
-  });
-  const valid = { ...minimal, gateStack: withDb({}), databaseCopies: dbc };
+  };
+};
+const withDbCopies = { ...minimal, gateStack: withDb({}), databaseCopies: dbc };
 
+describe("resolveConfig — databaseCopies (#201)", () => {
   it("is off by default", () => {
     expect(resolveConfig(minimal).databaseCopies).toBeNull();
   });
 
   it("applies every default", () => {
-    expect(resolveConfig(valid).databaseCopies).toEqual({
+    expect(resolveConfig(withDbCopies).databaseCopies).toEqual({
       ...dbc,
       datadir: "/var/lib/mysql",
       bufferPoolBytes: 256 * 1024 * 1024,
@@ -1708,7 +1681,7 @@ describe("resolveConfig — databaseCopies (#201)", () => {
 
   it("keeps what the config names, with its paths normalised", () => {
     const r = resolveConfig({
-      ...valid,
+      ...withDbCopies,
       databaseCopies: {
         ...dbc,
         root: "/srv/db//widgets/",
@@ -1745,7 +1718,7 @@ describe("resolveConfig — databaseCopies (#201)", () => {
     ["a NaN import timeout", { ...dbc, importTimeoutMs: Number.NaN }, /databaseCopies\.importTimeoutMs/],
     ["a zero stale threshold", { ...dbc, staleAfterMs: 0 }, /databaseCopies\.staleAfterMs/],
   ])("refuses %s", (_, databaseCopies, message) => {
-    const resolve = () => resolveConfig({ ...valid, databaseCopies: databaseCopies as never });
+    const resolve = () => resolveConfig({ ...withDbCopies, databaseCopies: databaseCopies as never });
     expect(resolve).toThrow(message);
     expect(resolve).toThrow(SandbarError);
   });
@@ -1775,7 +1748,32 @@ describe("resolveConfig — databaseCopies (#201)", () => {
 
   // A stack file states its containers only at the tip: the stack source asks.
   it("does not ask the target of a stack file at load", () => {
-    expect(resolveConfig({ ...valid, gateStack: { path: "gate/stack.json" } }).databaseCopies)
+    expect(resolveConfig({ ...withDbCopies, gateStack: { path: "gate/stack.json" } }).databaseCopies)
       .not.toBeNull();
+  });
+});
+
+describe("egressStartupWarning (#202)", () => {
+  it("says nothing without databaseCopies", () => {
+    expect(egressStartupWarning(resolveConfig(minimal))).toBeNull();
+  });
+
+  it("warns about open egress beside databaseCopies", () => {
+    expect(egressStartupWarning(resolveConfig(withDbCopies)))
+      .toMatch(/^egress is open while databaseCopies is configured: prod data can leave the sandbox/);
+  });
+
+  it("warns about report mode beside databaseCopies", () => {
+    expect(egressStartupWarning(resolveConfig({
+      ...withDbCopies,
+      egress: { mode: "report", allow: [] },
+    }))).toMatch(/report mode while databaseCopies is configured/);
+  });
+
+  it("is quiet when an allowlist is enforced", () => {
+    expect(egressStartupWarning(resolveConfig({
+      ...withDbCopies,
+      egress: { allow: [] },
+    }))).toBeNull();
   });
 });

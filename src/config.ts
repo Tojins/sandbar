@@ -1593,10 +1593,9 @@ export function resolveEgress(
 }
 
 // Prod data with open egress is never silent (#202): the startup warning when
-// `databaseCopies` (#201) is configured and no allowlist is enforced. Read by
-// presence only, because the key and its shape belong to #201.
+// `databaseCopies` (#201) is configured and no allowlist is enforced.
 export function egressStartupWarning(config: ResolvedConfig): string | null {
-  if (!("databaseCopies" in config) || config.databaseCopies === undefined) return null;
+  if (config.databaseCopies === null) return null;
   if (config.egress.kind === "open") {
     return "egress is open while databaseCopies is configured: prod data can leave the " +
       "sandbox. Set config.egress to enforce an allowlist.";
