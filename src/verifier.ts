@@ -38,6 +38,7 @@
 // head is still an ancestor of HEAD. Earlier conclusions about unchanged hunks
 // stand, and #88's history carries them.
 
+import type { RejectingPass } from "./events.js";
 import type { ReviewerResult, ReviewScope } from "./inner-loop-machine.js";
 import type { PriorReviewRound } from "./prompt.js";
 import { type Scenario, type ScenarioNeed, type ScenarioSet, renderClauses } from "./scenario-parser.js";
@@ -115,6 +116,8 @@ export type VerifierOutcome =
       readonly kind: "rejected";
       readonly units: readonly VerifierUnit[];
       readonly whiteBox: WhiteBoxVerdict;
+      // The passes that rejected, the white-box review's first.
+      readonly rejectingPasses: readonly RejectingPass[];
     };
 
 // A round's scenarios, as `review-round` records them.
@@ -189,6 +192,10 @@ export function combineVerifier(
         ...failing.map((o) => scenarioUnit(scenarioOf(set, o.id), o, evidencePointer(o.id))),
       ],
       whiteBox: verdict,
+      rejectingPasses: [
+        ...(verdict === "CHANGES-REQUESTED" ? ["correctness" as const] : []),
+        ...(failing.length > 0 ? ["scenarios" as const] : []),
+      ],
     };
   }
   if (whiteBox.kind === "reviewer-harness-failed") {

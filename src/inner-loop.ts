@@ -356,6 +356,7 @@ import type { RepoLayout } from "./repo-cache.js";
 import type { RepoRef } from "./repo-ref.js";
 import {
   VERIFIER_MOUNT,
+  type RunnerEnvironment,
   type ScenarioTally,
   type WhiteBoxVerdict,
   combineVerifier,
@@ -1833,10 +1834,7 @@ export function closedReviewRound(event: LoopEvent): {
         ? "HARNESS-FAILED"
         : null;
   if (correctness === null) return null;
-  const rejectingPasses: RejectingPass[] = [
-    ...(correctness === "CHANGES-REQUESTED" ? ["correctness" as const] : []),
-    ...(scenarios !== null && scenarios.fail > 0 ? ["scenarios" as const] : []),
-  ];
+  const rejectingPasses = outcome.kind === "rejected" ? outcome.rejectingPasses : [];
   return { head: event.head, gateOk: true, correctness, rejectingPasses, scenarios };
 }
 
@@ -3392,11 +3390,17 @@ export async function runVerifier(
   const { issue, sandbox, opts, config } = ctx;
   const head = await requireIssueTip(ctx, "before the verifier");
   const selected = action.scenarios?.scenarios ?? [];
-  const workspace = selected.length === 0 ? null : requireVerifierWorkspace(ctx);
-  const appHook = workspace === null
-    ? "none"
-    : await clearRunDir(workspace).then(() =>
-        runAppHook(sandbox, opts.hooks.sandbox?.beforeScenarioRun ?? [], workspace));
+  // The workspace exists whenever the scenario writer's task does, and so
+  // whenever a set was written.
+  const workspace = selected.length === 0 ? null : ctx.verifierWorkspace;
+  if (selected.length > 0 && workspace === null) {
+    throw new Error("scenarios to run without a verifier workspace");
+  }
+  let appHook: RunnerEnvironment["appHook"] = "none";
+  if (workspace !== null) {
+    await clearRunDir(workspace);
+    appHook = await runAppHook(sandbox, opts.hooks.sandbox?.beforeScenarioRun ?? [], workspace);
+  }
   const plan = prepass(selected, {
     dbCopies: ctx.dbCopy.kind === "none" ? "off" : ctx.dbCopy.kind,
     appHook,
@@ -3535,15 +3539,6 @@ export async function runVerifier(
     ),
     scenarios: tallyScenarios(runner),
   };
-}
-
-// The workspace a round that runs scenarios needs; it exists whenever the
-// scenario writer's task does, and so whenever a set was written.
-function requireVerifierWorkspace(ctx: ExecuteActionCtx): string {
-  if (ctx.verifierWorkspace === null) {
-    throw new Error("scenarios to run without a verifier workspace");
-  }
-  return ctx.verifierWorkspace;
 }
 
 // One invocation of a read-only review, as its pass records it.

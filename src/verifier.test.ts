@@ -82,6 +82,7 @@ describe("combineVerifier — the white-box review alone (#180)", () => {
       kind: "rejected",
       units: [{ id: "white-box", text: WHITE_BOX_TEXT, publicText: WHITE_BOX_TEXT }],
       whiteBox: "CHANGES-REQUESTED",
+      rejectingPasses: ["correctness"],
     });
   });
 });
@@ -133,6 +134,7 @@ describe("combineVerifier — beside the scenario runner (#238)", () => {
     expect(outcome).toEqual({
       kind: "rejected",
       whiteBox: "APPROVED",
+      rejectingPasses: ["scenarios"],
       units: [{
         id: "S2",
         text: [
@@ -168,6 +170,18 @@ describe("combineVerifier — beside the scenario runner (#238)", () => {
     expect(outcome.units.map((unit) => unit.id)).toEqual(["S1"]);
     expect(renderRejection(outcome, "text").endsWith(`\n\n${WHITE_BOX_NO_REVIEW}`)).toBe(true);
     expect(renderRejection(outcome, "publicText").endsWith(`\n\n${WHITE_BOX_NO_REVIEW}`)).toBe(true);
+    expect(outcome.rejectingPasses).toEqual(["scenarios"]);
+  });
+
+  it("keeps scenario text out of a public rendering that says the white-box review produced nothing", () => {
+    const outcome = combineVerifier(harnessFailed, reported(fail("S1")), SET, pointer);
+    if (outcome.kind !== "rejected") throw new Error("expected a rejection");
+    const publicText = renderRejection(outcome, "publicText");
+    expect(publicText).toContain(WHITE_BOX_NO_REVIEW);
+    expect(publicText).not.toContain(SENTINEL);
+    expect(publicText).not.toContain("Observed");
+    expect(publicText).not.toContain("Given");
+    expect(outcome.units.map((unit) => unit.publicText).join("\n")).not.toContain("observed");
   });
 
   it("never puts scenario text, observations or evidence in the public rendering", () => {

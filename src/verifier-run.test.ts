@@ -20,13 +20,15 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 }));
 
 import {
+  AgentCredentialError,
   AgentError,
   AgentInputTooLargeError,
   AgentQuotaError,
   type RunOptions,
 } from "./agent-sandbox.js";
+import { EgressProxyDiedError } from "./egress.js";
 import type { EventInput } from "./events.js";
-import { createRunProviderState } from "./inner-loop.js";
+import { agentFailureResult, createRunProviderState } from "./inner-loop.js";
 import { createAgentInvocationSequencer } from "./logs.js";
 import type { Scenario } from "./scenario-parser.js";
 import {
@@ -232,11 +234,18 @@ describe("runScenarioRunner (#238)", () => {
     }]);
   });
 
-  it("records and rethrows a closed provider", async () => {
-    const quota = new AgentQuotaError("claude", "5h", "rate limited");
-    const h = await harness([async () => { throw quota; }]);
-    await expect(h.run()).rejects.toBe(quota);
-    expect(h.runnerEvents()).toEqual([expect.objectContaining({ invocation: 1, result: "quota" })]);
+  it.each([
+    ["a closed quota", new AgentQuotaError("claude", "5h", "rate limited")],
+    ["a refused credential", new AgentCredentialError("expired")],
+    ["a dead egress proxy", new EgressProxyDiedError("proxy exited")],
+  ])("records and rethrows %s", async (_name, error) => {
+    const h = await harness([async () => { throw error; }]);
+    await expect(h.run()).rejects.toBe(error);
+    expect(h.runnerEvents()).toEqual([expect.objectContaining({
+      invocation: 1,
+      result: agentFailureResult(error),
+      usage: expect.objectContaining({ contextChars: "runner prompt".length }),
+    })]);
   });
 
   it("parks a write, naming its transcript rather than quoting it", async () => {
@@ -253,6 +262,17 @@ describe("runScenarioRunner (#238)", () => {
     expect(h.sandbox.preserveWorktree).toHaveBeenCalledWith(
       expect.stringContaining("scenario runner changed the repository"),
     );
+    expect(h.runnerEvents()).toEqual([expect.objectContaining({ invocation: 1, result: "wrote" })]);
+  });
+});
+
+describe("a runner that wrote and then died (#238)", () => {
+  it("parks rather than leaving its scenarios unverified", async () => {
+    const h = await harness([async () => {
+      mocks.dirtyWorktreePaths.mockResolvedValue([" M src/app.ts"]);
+      throw new AgentError("idle");
+    }]);
+    await expect(h.run()).resolves.toMatchObject({ kind: "wrote" });
     expect(h.runnerEvents()).toEqual([expect.objectContaining({ invocation: 1, result: "wrote" })]);
   });
 });
