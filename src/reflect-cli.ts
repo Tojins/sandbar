@@ -87,13 +87,16 @@ if ("error" in args) {
   const layout = repoLayout(config.cwd, config.workDir);
   const logsDir = resolve(args.logs ?? layout.logsDir);
   const stats = computeStats(await readStatsInput(logsDir, args.window, { withProse: true }));
+  const mining = mine(stats, { quality: loadTemplate("coding-standards") });
   const report = renderReport({
     stats,
-    mining: mine(stats, { quality: loadTemplate("coding-standards") }),
+    clusters: mining.structured,
     // Only a tagged bucket can show a rule unused, and no agent ran.
     candidates: [],
+    outliers: mining.outliers,
     logsDir,
     repo: repoSlug({ owner: config.ghOwner, name: config.ghRepo }),
+    agents: null,
   });
   const dir = join(layout.stateDir, "reflect");
   await mkdir(dir, { recursive: true });

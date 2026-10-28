@@ -80,6 +80,9 @@ export type Outlier = {
   readonly reason: string | null;
 };
 
+// How the synthesizer cites an outlier issue.
+export const outlierKey = (outlier: Pick<Outlier, "issue">): string => `outlier:${outlier.issue}`;
+
 export type Mining = {
   readonly structured: readonly Cluster[];
   readonly buckets: readonly Bucket[];
