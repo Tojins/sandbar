@@ -12,6 +12,9 @@
 // knob. Ten GiB leaves room for one of the measured multi-GB sandbox builds
 // plus its id-mapped copy and transient build layers without pretending to be
 // capacity management.
+//
+// The database volume (#201) has a floor of the same size and kind, which a
+// base import must leave intact (`importSpaceNeeded`, db-copy-policy.ts).
 
 import { execFile } from "node:child_process";
 import { statfs } from "node:fs/promises";
@@ -25,6 +28,7 @@ const exec = promisify(execFile);
 const GIB = 1024n * 1024n * 1024n;
 
 export const MIN_GRAPHROOT_FREE_BYTES = 10n * GIB;
+export const MIN_DB_VOLUME_FREE_BYTES = 10n * GIB;
 export const DISK_QUERY_TIMEOUT_MS = 30_000;
 
 const defaultExec: RuntimeExec = (args) => exec(RUNTIME, [...args], {

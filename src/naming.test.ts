@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  dbImportContainerName,
   gateScope,
   reflectScope,
   isScopedResourceName,
@@ -323,6 +324,16 @@ describe("gate-stack resource names (#24)", () => {
     expect(sandboxContainerNameFor(S, "42", "db")).toContain(
       scopedResourcePrefix(S),
     );
+  });
+
+  // #201: `sandbar db-base` holds no run lock. Its scope comes from the base
+  // root, so the daemon of a workdir sweeps nothing of it, while the name is
+  // still a scoped one the debris report stays silent about.
+  it("scopes the database import container by its root", () => {
+    const root = runScope("/srv/sandbar-db/installations/app");
+    expect(dbImportContainerName(root)).toBe(`sandbar-${root}-db-import`);
+    expect(dbImportContainerName(root).startsWith(scopedResourcePrefix(S))).toBe(false);
+    expect(isScopedResourceName(dbImportContainerName(root))).toBe(true);
   });
 
   it("keeps the merger's stack disjoint from every issue's", () => {
