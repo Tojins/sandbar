@@ -117,7 +117,10 @@
 // branch can introduce the instructions it is expected to follow (#78, #91).
 // The quality pass is the exception (#204): its standards are the grader, so
 // each lister reads them at the source tip (`readQualityStandards`) and that
-// pass's fixer and verify reuse the same read.
+// pass's fixer and verify reuse the same read. The lister reads, beside them,
+// the rules a step of the tip's gate stack settles (#183,
+// `stackSource.current`), and each implementer attempt reads them again: a
+// settled rule's prose is left out of those prompts.
 // Successful white-box rounds accumulate here beside the commits they judged
 // and are handed to the next white-box prompt (#88), which from then on reads
 // only the change since the last of those heads that HEAD still contains
@@ -206,10 +209,12 @@ import type { AgentRunMeasurement, AgentUsage } from "./agent-usage.js";
 
 import type { ChunkTarget } from "./chunks.js";
 import type { CodexAuthMount } from "./codex-auth.js";
-import type {
-  PromptExtensions,
-  ResolvedCopyToWorktreeEntry,
-  SandboxGateAttachments,
+import {
+  type PromptExtensions,
+  type ResolvedCopyToWorktreeEntry,
+  type SandboxGateAttachments,
+  type SettledRule,
+  settledRules,
 } from "./config.js";
 import {
   AgentToolsImageError,
@@ -298,7 +303,7 @@ import {
   startSandboxStack,
 } from "./sandbox-stack.js";
 import { stackChangeOf, type StackChange } from "./stack-change.js";
-import { type QualityStandards, readQualityStandards } from "./standards-groups.js";
+import { readQualityStandards } from "./standards-groups.js";
 import {
   type BoundStack,
   type HeadStack,
@@ -326,6 +331,7 @@ import {
   type IssueAnchorOptions,
   type PromptAnchorOptions,
   type PriorReviewRound,
+  type QualityGrader,
   type QualityOverrule,
   type QualityReviewMode,
   type ReviewerPromptInputs,
@@ -1001,7 +1007,7 @@ async function runSandboxCycle(
     sinceImplementer: [],
     overrules: [],
     openRound: null,
-    standards: null,
+    grader: null,
   };
   const specGaps: SpecGap[] = [];
   let preparedWorktreePath: string | null = null;
@@ -1374,6 +1380,7 @@ async function runSandboxCycle(
         ),
         ...stackFileInput(opts.stackSource),
         egressEnforced: config.egress?.policy.mode === "enforce",
+        settled: settledRules(setupStack.stack),
       }, anchorOpts);
       const size = contextChars(
         admissionPrompt,
@@ -1671,16 +1678,22 @@ export type QualityLedger = {
     readonly timer: () => number;
     quality: QualityOutcome | null;
   } | null;
-  // What the latest lister read at the source tip (#204): its fixer and
-  // verify grade by the same version, so one pass is one grader.
-  standards: QualityStandards | null;
+  // What the latest lister read at the source tip (#204, #183): its fixer
+  // and verify grade by the same version, so one pass is one grader.
+  grader: QualityGrader | null;
 };
 
-function passStandards(quality: QualityLedger): QualityStandards {
-  if (quality.standards === null) {
+function passGrader(quality: QualityLedger): QualityGrader {
+  if (quality.grader === null) {
     throw new Error("a quality fixer or verify ran before any lister read the standards");
   }
-  return quality.standards;
+  return quality.grader;
+}
+
+// The rules the source tip's gate stack settles (#183), read from the source
+// the gate reads, where a round starts.
+async function tipSettledRules(stackSource: StackSource): Promise<ReadonlySet<SettledRule>> {
+  return settledRules((await stackSource.current()).stack);
 }
 
 // The round a gate-1 or verifier result closes, for the `review-round`
@@ -2198,18 +2211,22 @@ export async function runQualityReview(
     : { kind: "verify", anchor: action.anchor, report: action.report };
   if (mode.kind === "list") {
     quality.openRound = { attempt: action.attempt, timer: startTimer(), quality: null };
-    quality.standards = await readQualityStandards({
-      repoDir: config.layout.repoDir,
-      sourceBranch: config.sourceBranch,
-      extension: config.promptExtensions?.reviewerQuality,
-      onEvent: opts.onEvent,
-    });
+    const [standards, settled] = await Promise.all([
+      readQualityStandards({
+        repoDir: config.layout.repoDir,
+        sourceBranch: config.sourceBranch,
+        extension: config.promptExtensions?.reviewerQuality,
+        onEvent: opts.onEvent,
+      }),
+      tipSettledRules(opts.stackSource),
+    ]);
+    quality.grader = { standards, settled };
   }
   const role = mode.kind === "list" ? "lister" : "verify";
   const head = await requireIssueTip(ctx, `before the quality ${role}`);
   const prompt = await buildQualityReviewPrompt({
     ...branchRoleInputs(ctx),
-    standards: passStandards(quality),
+    ...passGrader(quality),
     mode,
   });
   const measuredContextChars = contextChars(
@@ -2315,7 +2332,7 @@ export async function runQualityFix(
     // branch picture is read from the head it left.
     const prompt = await buildQualityFixPrompt({
       ...branchRoleInputs(ctx),
-      standards: passStandards(quality),
+      ...passGrader(quality),
       report: action.report,
       ruling: action.ruling,
     });
@@ -2478,6 +2495,7 @@ export async function runImplementer(
       ),
       ...stackFileInput(opts.stackSource),
       egressEnforced: config.egress?.policy.mode === "enforce",
+      settled: await tipSettledRules(opts.stackSource),
     },
     anchorOpts,
   );

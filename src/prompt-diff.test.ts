@@ -138,6 +138,7 @@ const implementerInputs = (base = sourceBranchBase("main")) => ({
   worktreePath: worktree,
   lastFailureTrace: "",
   base,
+  settled: new Set<never>(),
 });
 
 const reviewerInputs = (base = sourceBranchBase("main"), sourceBranch = "main") => ({
@@ -163,6 +164,7 @@ const correctnessInputs = (
 const qualityInputs = () => ({
   ...reviewerInputs(),
   standards: combineStandards(parseStandards(loadTemplate("coding-standards"), "sandbar"), null),
+  settled: new Set<never>(),
 });
 const listerInputs = (approvedHead: string | null = null) => ({
   ...qualityInputs(),

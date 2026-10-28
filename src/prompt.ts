@@ -18,6 +18,12 @@
 // runner read them at the source tip (standards-groups.ts, #204), never an
 // @ref into the branch they grade; the implementer keeps the built-in text
 // plus its extension's @ref into its own worktree.
+// Four fragments of rule prose render only while no gate step settles their
+// rule (#183, `config.ts` `settles`): `missing-tests` drops the lister's
+// uncovered-line clause and the fixer's missing-test instruction,
+// `commit-ritual` the fixer's and the implementer's per-commit ritual. The
+// settled set is the caller's, read from the stack source where the round
+// starts.
 // The verifier's white-box review (#180): diff stat + commits plus every
 // earlier white-box round (#88), a defect a round raised counting as addressed
 // only once it is gone from every site (#181); the lister's overrule history
@@ -72,7 +78,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { SandbarError, isErrno, isExitCode } from "./errors.js";
-import type { PromptExtension } from "./config.js";
+import type { PromptExtension, SettledRule } from "./config.js";
 import type { IssueBranchBase } from "./git-ops.js";
 import type { ReviewScope, ReviewPass } from "./inner-loop-machine.js";
 import {
@@ -129,6 +135,10 @@ const IMPLEMENTER_STACK_FILE_TPL = loadTemplate("implementer-stack-file");
 const IMPLEMENTER_SANDBOX_EGRESS_TPL = loadTemplate("implementer-sandbox-egress");
 const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
 const ADJUDICATOR_TPL = loadTemplate("adjudicator");
+const QUALITY_TESTS_MISSING_LISTER_TPL = loadTemplate("quality-tests-missing-lister");
+const QUALITY_TESTS_MISSING_FIXER_TPL = loadTemplate("quality-tests-missing-fixer");
+const COMMIT_RITUAL_FIXER_TPL = loadTemplate("commit-ritual-fixer");
+const COMMIT_RITUAL_IMPLEMENTER_TPL = loadTemplate("commit-ritual-implementer");
 
 // Attempt at which the implementer prompt starts surfacing the escalation block.
 const ESCALATION_ATTEMPT = 6;
@@ -208,6 +218,17 @@ export async function readGit(
 // templates can place optional sections back-to-back without managing spacing.
 function section(body: string): string {
   return body ? `${body}\n\n` : "";
+}
+
+// A fragment of rule prose, and what separates it from the text after it, or
+// "" while a gate step of the stack in effect settles its rule (#183).
+function unlessSettled(
+  settled: ReadonlySet<SettledRule>,
+  rule: SettledRule,
+  fragment: string,
+  separator: string,
+): string {
+  return settled.has(rule) ? "" : fragment + separator;
 }
 
 export type ProjectAnchorOptions = {
@@ -291,6 +312,9 @@ export type PromptInputs = {
   // Whether this sandbox's egress allowlist refuses what it does not list
   // (#202). Report mode refuses nothing, so it says nothing.
   readonly egressEnforced?: boolean;
+  // The rules a step of the gate stack in effect settles (#183): their prose
+  // is left out of this attempt's pre-promise review.
+  readonly settled: ReadonlySet<SettledRule>;
 };
 
 export type ReviewerPromptInputs = {
@@ -362,10 +386,14 @@ export type QualityReviewMode =
     };
 
 // What every quality role grades by: the built-in standards plus
-// `promptExtensions.reviewerQuality` as the source tip has it, inline (#204).
-export type QualityPromptInputs = ReviewerPromptInputs & {
+// `promptExtensions.reviewerQuality` as the source tip has it, inline (#204),
+// less the prose of the rules a gate step of the tip's stack settles (#183).
+export type QualityGrader = {
   readonly standards: QualityStandards;
+  readonly settled: ReadonlySet<SettledRule>;
 };
+
+export type QualityPromptInputs = ReviewerPromptInputs & QualityGrader;
 
 export type QualityReviewPromptInputs = QualityPromptInputs & {
   readonly mode: QualityReviewMode;
@@ -827,6 +855,9 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     projectStandards: promptExtensionSlot(inputs.promptExtension),
     conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
     baseRef: base.ref,
+    commitRitual: unlessSettled(
+      inputs.settled, "commit-ritual", COMMIT_RITUAL_IMPLEMENTER_TPL, "\n",
+    ),
   });
 }
 
@@ -946,8 +977,7 @@ export type ReviewerSlotRender = BranchSlotRender & {
   readonly changedSinceStat: string | null;
 };
 
-export type QualityReviewSlotRender = BranchSlotRender & {
-  readonly standards: QualityStandards;
+export type QualityReviewSlotRender = BranchSlotRender & QualityGrader & {
   readonly mode: QualityReviewMode;
   // `git diff --stat <anchor>..HEAD`; null exactly when the mode has no
   // anchor (`qualityReviewAnchor`). "" means git said nothing changed, never
@@ -968,8 +998,7 @@ function renderChangedSince(anchor: string | null, stat: string | null): string 
     (stat ? `\`\`\`\n${stat}\n\`\`\`` : `(empty — no changes since \`${anchor}\`)`);
 }
 
-export type QualityFixSlotRender = BranchSlotRender & {
-  readonly standards: QualityStandards;
+export type QualityFixSlotRender = BranchSlotRender & QualityGrader & {
   readonly report: string;
   readonly ruling: string | null;
 };
@@ -1023,6 +1052,9 @@ export function renderQualityReviewSlot(inputs: QualityReviewSlotRender): string
     priorRounds: section(priorRounds),
     changedSince: section(changedSince),
     qualityMode: section(qualityMode),
+    testsMissing: unlessSettled(
+      inputs.settled, "missing-tests", QUALITY_TESTS_MISSING_LISTER_TPL, " ",
+    ),
   });
 }
 
@@ -1030,6 +1062,17 @@ export function renderQualityFixSlot(inputs: QualityFixSlotRender): string {
   return render(QUALITY_FIXER_TPL, {
     ...branchSlotVars(inputs),
     standards: renderStandards(inputs.standards, { kind: "all" }),
+    testsMissing: unlessSettled(
+      inputs.settled, "missing-tests", QUALITY_TESTS_MISSING_FIXER_TPL, " ",
+    ),
+    commitRitual: unlessSettled(
+      inputs.settled,
+      "commit-ritual",
+      render(COMMIT_RITUAL_FIXER_TPL, {
+        conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
+      }),
+      " ",
+    ),
     report: reportProse(inputs.report),
     ruling: inputs.ruling === null
       ? ""

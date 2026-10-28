@@ -158,6 +158,12 @@ describe("classifyStackChange", () => {
       config({ steps: [{ ...test, timeoutMs: 1000 }] }),
       [{ where: "step 'test'", what: "timeoutMs" }],
     ],
+    // A branch could otherwise drop its own prompts' rule prose (#183).
+    [
+      "a step's settled rules",
+      config({ steps: [{ ...test, settles: ["missing-tests"] }] }),
+      [{ where: "step 'test'", what: "settles" }],
+    ],
     [
       "an added step",
       config({ steps: [test, { name: "lint", in: "app", command: ["npm", "run", "lint"] }] }),

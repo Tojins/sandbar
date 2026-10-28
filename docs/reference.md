@@ -459,6 +459,7 @@ loses `land`, and either gets a comment listing what differs.
 | `in` | Container to `podman exec` in. |
 | `command` | Argv. Exit 0 is green. |
 | `timeoutMs` | Default `900000` (15 min). A timeout fails the step. |
+| `settles` | Rules this step checks mechanically: `"missing-tests"`, `"commit-ritual"`. While a step settles a rule, the agents' prompts leave out the prose that asks for it. Default `[]`. |
 
 ### Readiness
 

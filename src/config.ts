@@ -214,6 +214,10 @@ export const DEFAULT_LABELS: LabelConfig = {
 // validated — just invoked later, with messages labelled by where the text
 // came from instead of `config.gateStack`.
 //
+// A step may claim to settle rules (`settles`, #183): the prompts drop the
+// prose of every rule a step of the stack in effect settles, so the claim
+// comes and goes with its step and, for a file, from the same source tip.
+//
 // This replaces the single `dbSidecar` + two fixed `gateCommands` of #20/#15.
 // The sidecar dissolved into `containers[]` the moment the pod removed the need
 // for a pinned IP: with every container sharing one namespace, the address the
@@ -440,7 +444,27 @@ export type GateStep = {
   // a footgun worth more than the ergonomic win of writing 900 instead of
   // 900_000.
   readonly timeoutMs?: number;
+  // The rules this step checks mechanically (#183). While a step of the stack
+  // in effect settles a rule, the prompts leave out the prose that asks an
+  // agent for it (prompt.ts), so no lister or fixer spends tokens on it and
+  // its red reaches the implementer as a gate trace. The claim lives on the
+  // step rather than in a top-level flag so that removing the step brings the
+  // prose back. Sandbar cannot see whether the step checks what it claims: a
+  // step that settles a rule it does not check opens a hole of the consumer's
+  // own. Default: [].
+  readonly settles?: readonly SettledRule[];
 };
+
+// The closed set of rules a gate step may settle (#183). `missing-tests`: a
+// changed production line no test covers or pins. `commit-ritual`: the
+// per-commit rituals the conventions require, a version bump for one.
+export const SETTLED_RULES = ["missing-tests", "commit-ritual"] as const;
+export type SettledRule = (typeof SETTLED_RULES)[number];
+
+// The rules some step of `stack` settles.
+export function settledRules(stack: ResolvedGateStack): ReadonlySet<SettledRule> {
+  return new Set(stack.steps.flatMap((step) => step.settles));
+}
 
 // An image sandbar builds before the run, if it isn't already present.
 export type BuiltImage = {
@@ -546,6 +570,9 @@ export type ResolvedGateStep = {
   readonly in: string;
   readonly command: readonly string[];
   readonly timeoutMs: number;
+  // Deduplicated, in `SETTLED_RULES` order, so a reordered list is not a
+  // stack change (stack-change.ts).
+  readonly settles: readonly SettledRule[];
 };
 
 export type ResolvedGateStack = {
@@ -1840,6 +1867,7 @@ const STEP_REQUIRED: FieldShapes<GateStep, true> = {
 };
 const STEP_OPTIONAL: FieldShapes<GateStep, false> = {
   timeoutMs: [isNumber, "a number"],
+  settles: [isStrings, "a list of strings"],
 };
 
 function checkFieldShapes(
@@ -2003,11 +2031,26 @@ export function resolveGateStack(
           "holding the single-instance lock.",
       );
     }
+    // Checked for an inline stack too, which is a program no shape table
+    // reads: a misspelled rule would otherwise leave its prose in every prompt
+    // with nothing to say so.
+    const settles = step.settles ?? [];
+    const unknown = settles.filter(
+      (rule) => !(SETTLED_RULES as readonly string[]).includes(rule),
+    );
+    if (unknown.length > 0) {
+      throw new SandbarError(
+        `${label}: step '${step.name}' settles ` +
+          `${unknown.map((rule) => `'${rule}'`).join(", ")}, which sandbar ` +
+          `does not know (have: ${SETTLED_RULES.join(", ")}).`,
+      );
+    }
     steps.push({
       name: step.name,
       in: step.in,
       command: step.command,
       timeoutMs,
+      settles: SETTLED_RULES.filter((rule) => settles.includes(rule)),
     });
   }
 

@@ -7,6 +7,7 @@ import {
   type ResolvedStackContainer,
   resolveGateStack,
   resolveImages,
+  settledRules,
 } from "./config.js";
 import {
   buildArgv,
@@ -1431,6 +1432,47 @@ describe("resolveGateStack validation", () => {
       ).toThrow(/timeoutMs/);
     },
   );
+
+  // #183. The set is closed, so a misspelled rule is a config error rather
+  // than prose that silently stays in every prompt.
+  it("settles nothing by default and the union of what its steps settle", () => {
+    expect(settledRules(resolveGateStack(ok))).toEqual(new Set());
+    expect(settledRules(resolveGateStack({
+      ...ok,
+      steps: [
+        { name: "version", in: "app", command: ["v"], settles: ["commit-ritual"] },
+        { name: "test", in: "app", command: ["t"] },
+        { name: "structure", in: "app", command: ["s"], settles: ["missing-tests", "commit-ritual"] },
+      ],
+    }))).toEqual(new Set(["commit-ritual", "missing-tests"]));
+  });
+
+  it("resolves a step's settled rules deduplicated, in the closed set's order", () => {
+    const resolved = resolveGateStack({
+      ...ok,
+      steps: [{
+        name: "test",
+        in: "app",
+        command: ["t"],
+        settles: ["commit-ritual", "missing-tests", "commit-ritual"],
+      }],
+    });
+    expect(resolved.steps.map((s) => s.settles)).toEqual([["missing-tests", "commit-ritual"]]);
+  });
+
+  it("refuses a rule outside the closed set, naming it and the step", () => {
+    expect(() =>
+      resolveGateStack({
+        ...ok,
+        steps: [{
+          name: "lint",
+          in: "app",
+          command: ["l"],
+          settles: ["missing-tests", "file-size"] as never,
+        }],
+      }),
+    ).toThrow(/step 'lint' settles 'file-size', which sandbar does not know \(have: missing-tests, commit-ritual\)/);
+  });
 
   it("refuses a step targeting an undeclared container", () => {
     expect(() =>

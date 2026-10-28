@@ -195,6 +195,13 @@ const deferred = <T,>() => {
 // What a quality pass's lister read; the builders are mocked, so its shape is
 // all that matters.
 const passStandards: QualityStandards = { groups: [], preamble: "", leaveAlone: [], warnings: [] };
+const passGrader = { standards: passStandards, settled: new Set<never>() };
+
+// An inline stack source whose stack settles nothing (#183).
+const inlineStackSource = {
+  path: null,
+  current: async () => ({ stack: { containers: [], steps: [] } }),
+};
 
 describe("runAnchorCondense (#217)", () => {
   const thread: IssueJson = {
@@ -436,7 +443,7 @@ describe("runUiCheck (#126)", () => {
         issue: { id: "126", title: "ui check", branch: "sandbar/issue-126" },
         sandbox,
         opts: {
-          stackSource: { path: null },
+          stackSource: inlineStackSource,
           attemptLogger: {
             writeInvocation: vi.fn(async (filename) => writes.push(filename)),
           },
@@ -684,7 +691,7 @@ describe("runPartitionCheck (#158)", () => {
       sandbox,
       base: { ref: "origin/main", sha: "base" },
       opts: {
-        stackSource: { path: null },
+        stackSource: inlineStackSource,
         attemptLogger: { writeInvocation: vi.fn() },
         onEvent: (event: EventInput) => events.push(event),
       },
@@ -869,7 +876,7 @@ describe("silent implementer attempt policy (#116)", () => {
     latestReviewerFeedback: Parameters<
       typeof runImplementer
     >[0]["latestReviewerFeedback"] = null,
-    quality: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, standards: null },
+    quality: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: null },
   ) => {
     innerLoopMocks.headMismatch.mockReset().mockResolvedValue(mismatch);
     innerLoopMocks.fastForwardOffBranchHead.mockReset().mockImplementation(
@@ -920,7 +927,7 @@ describe("silent implementer attempt policy (#116)", () => {
       issue: { id: "116", title: "silent", branch: "sandbar/issue-116-silent" },
       sandbox,
       opts: {
-        stackSource: { path: null },
+        stackSource: inlineStackSource,
         attemptLogger: {
           writeInvocation: vi.fn(async (_filename, record) => writes.push(record.speech)),
         },
@@ -1119,6 +1126,26 @@ describe("silent implementer attempt policy (#116)", () => {
     );
   });
 
+  it("hands the implementer prompt the rules the source tip's gate stack settles (#183)", async () => {
+    innerLoopMocks.buildPrompt.mockClear();
+    const current = vi.spyOn(inlineStackSource, "current").mockResolvedValueOnce({
+      stack: {
+        containers: [],
+        steps: [{ name: "tests-structure", settles: ["missing-tests"] }] as never[],
+      },
+    });
+    try {
+      const { pending } = runPath(sandboxResult("done", false), sandboxResult("unused", false));
+      await pending;
+    } finally {
+      current.mockRestore();
+    }
+    expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ settled: new Set(["missing-tests"]) }),
+      expect.anything(),
+    );
+  });
+
   it("forwards the retained correctness rejection to the implementer prompt", async () => {
     innerLoopMocks.buildPrompt.mockClear();
     const { pending } = runPath(
@@ -1143,7 +1170,7 @@ describe("silent implementer attempt policy (#116)", () => {
       sinceImplementer: ["q1", "q2"],
       overrules: [],
       openRound: null,
-      standards: null,
+      grader: null,
     };
     const { pending } = runPath(
       sandboxResult("done", false),
@@ -1302,7 +1329,7 @@ describe("role prompt-extension wiring (#91)", () => {
     issue: { id: "91", title: "extensions", branch: "sandbar/issue-91" },
     sandbox: { worktreePath: "/worktree" },
     worktreePath: "/worktree",
-    opts: { stackSource: { path: null } },
+    opts: { stackSource: inlineStackSource },
     config: {
       issueSource: innerLoopMocks.issueSource,
       repo: { owner: "owner", name: "repo" },
@@ -1319,7 +1346,7 @@ describe("role prompt-extension wiring (#91)", () => {
     base: { ref: "origin/main" },
     accumulated: [{ sha: "abc123" }],
     priorReviewRounds: [],
-    quality: { sinceImplementer: [], overrules: [], openRound: null, standards: passStandards },
+    quality: { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader },
   });
 
   // The lister reads its own extension (#204: as standards text, with the
@@ -1351,7 +1378,7 @@ describe("role prompt-extension wiring (#91)", () => {
       ctxWith() as unknown as Parameters<typeof runQualityFix>[1],
     )).rejects.toBe(stop);
     expect(innerLoopMocks.buildQualityFixPrompt).toHaveBeenCalledWith(
-      expect.objectContaining({ standards: passStandards }),
+      expect.objectContaining(passGrader),
     );
   });
 
@@ -1432,7 +1459,7 @@ describe("runVerifier (#121, #180, #185)", () => {
       sandbox,
       worktreePath: "/worktree",
       opts: {
-        stackSource: { path: null },
+        stackSource: inlineStackSource,
         attemptLogger: {
           writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
         },
@@ -1620,7 +1647,7 @@ describe("runVerifier (#121, #180, #185)", () => {
 describe("runQualityReview (#187)", () => {
   const reviewer = (
     outputs: readonly (string | Error)[],
-    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, standards: passStandards },
+    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader },
   ) => {
     innerLoopMocks.buildQualityReviewPrompt.mockReset().mockResolvedValue("quality review prompt");
     innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
@@ -1664,7 +1691,7 @@ describe("runQualityReview (#187)", () => {
       sandbox,
       worktreePath: "/worktree",
       opts: {
-        stackSource: { path: null },
+        stackSource: inlineStackSource,
         attemptLogger: {
           writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
         },
@@ -1706,7 +1733,7 @@ describe("runQualityReview (#187)", () => {
     const overrule = { round: 1, head: "h0", report: "r", ruling: "fine" };
     const { ctx, sandbox, events, filenames, run } = reviewer(
       ["### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>"],
-      { sinceImplementer: [], overrules: [overrule], openRound: null, standards: null },
+      { sinceImplementer: [], overrules: [overrule], openRound: null, grader: null },
     );
     await expect(run(listAction)).resolves.toEqual({
       kind: "quality-review-result",
@@ -1719,9 +1746,9 @@ describe("runQualityReview (#187)", () => {
       },
     });
     expect(ctx.quality.openRound).toMatchObject({ attempt: 3, quality: null });
-    expect(ctx.quality.standards?.groups.map((group) => group.body)).toContain("quality only");
+    expect(ctx.quality.grader?.standards.groups.map((group) => group.body)).toContain("quality only");
     expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
-      standards: ctx.quality.standards,
+      ...ctx.quality.grader,
       mode: { kind: "list", scope: { kind: "full" }, overrules: [overrule] },
     }));
     const invocation = vi.mocked(sandbox.run).mock.calls[0]![0];
@@ -1755,23 +1782,51 @@ describe("runQualityReview (#187)", () => {
     expect(events).toEqual([expect.objectContaining({ scope: "since:approved-head" })]);
   });
 
-  it("verifies by the standards its lister read, never re-reading the source tip", async () => {
-    const sentinel: QualityStandards = { groups: [], preamble: "sentinel", leaveAlone: [], warnings: [] };
+  it("lists by the rules a step of the source tip's gate stack settles (#183)", async () => {
     const { ctx, run } = reviewer(
       ["<verdict>APPROVED</verdict>"],
-      { sinceImplementer: [], overrules: [], openRound: null, standards: sentinel },
+      { sinceImplementer: [], overrules: [], openRound: null, grader: null },
     );
+    const current = vi.fn(async () => ({
+      stack: {
+        containers: [],
+        steps: [
+          { name: "check", settles: [] },
+          { name: "version", settles: ["commit-ritual"] },
+        ],
+      },
+    }));
+    ctx.opts.stackSource = { path: null, current } as unknown as typeof inlineStackSource;
+    await run(listAction);
+    expect(current).toHaveBeenCalledOnce();
+    expect(ctx.quality.grader?.settled).toEqual(new Set(["commit-ritual"]));
+    expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      settled: new Set(["commit-ritual"]),
+    }));
+  });
+
+  it("verifies by the standards its lister read, never re-reading the source tip", async () => {
+    const sentinel: QualityStandards = { groups: [], preamble: "sentinel", leaveAlone: [], warnings: [] };
+    const settled = new Set(["missing-tests"] as const);
+    const { ctx, run } = reviewer(
+      ["<verdict>APPROVED</verdict>"],
+      { sinceImplementer: [], overrules: [], openRound: null, grader: { standards: sentinel, settled } },
+    );
+    const current = vi.fn();
+    ctx.opts.stackSource = { path: null, current } as unknown as typeof inlineStackSource;
     await run(verifyAction);
-    expect(ctx.quality.standards).toBe(sentinel);
+    expect(current).not.toHaveBeenCalled();
+    expect(ctx.quality.grader?.standards).toBe(sentinel);
     expect(innerLoopMocks.buildQualityReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({
       standards: sentinel,
+      settled,
     }));
   });
 
   it("rejects a verify that runs before any lister read the standards", async () => {
     const { run } = reviewer(
       ["<verdict>APPROVED</verdict>"],
-      { sinceImplementer: [], overrules: [], openRound: null, standards: null },
+      { sinceImplementer: [], overrules: [], openRound: null, grader: null },
     );
     await expect(run(verifyAction)).rejects.toThrow(/before any lister read the standards/);
   });
@@ -1851,7 +1906,7 @@ describe("runQualityFix (#185, #187)", () => {
     | { readonly kind: "error"; readonly error: Error };
   const fixer = (
     outcomes: Outcome | readonly Outcome[],
-    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, standards: passStandards },
+    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader },
   ) => {
     const queue = Array.isArray(outcomes) ? [...outcomes] : null;
     innerLoopMocks.buildQualityFixPrompt.mockReset().mockResolvedValue("quality fix prompt");
@@ -1905,7 +1960,7 @@ describe("runQualityFix (#185, #187)", () => {
       sandbox,
       worktreePath: "/worktree",
       opts: {
-        stackSource: { path: null },
+        stackSource: inlineStackSource,
         attemptLogger: {
           writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
         },
@@ -1946,7 +2001,7 @@ describe("runQualityFix (#185, #187)", () => {
   it("rejects a fixer that runs before any lister read the standards", async () => {
     const { run } = fixer(
       { kind: "exit" },
-      { sinceImplementer: [], overrules: [], openRound: null, standards: null },
+      { sinceImplementer: [], overrules: [], openRound: null, grader: null },
     );
     await expect(run()).rejects.toThrow(/before any lister read the standards/);
   });
@@ -2196,7 +2251,7 @@ describe("runAdjudicator (#167)", () => {
     issue: { id: "167", title: "adjudicate", branch: "sandbar/issue-167" },
     sandbox,
     opts: {
-      stackSource: { path: null },
+      stackSource: inlineStackSource,
       attemptLogger: { writeInvocation: vi.fn() },
       onEvent: async (event: EventInput) => { events.push(event); },
     },
@@ -2211,7 +2266,7 @@ describe("runAdjudicator (#167)", () => {
       adjudicatorModelId: "judge-model",
     },
     base: { ref: "origin/main" },
-    quality: { sinceImplementer: [], overrules: [], openRound: null, standards: null },
+    quality: { sinceImplementer: [], overrules: [], openRound: null, grader: null },
     invocationSequence: createAgentInvocationSequencer().startCycle(),
   } as unknown as Parameters<typeof runAdjudicator>[1]);
 
@@ -2851,7 +2906,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         ...overrides,
       },
       stackSource: {
-        path: null,
+        ...inlineStackSource,
         forHead: async () => ({
           stack: { containers: [], steps: [] },
           attachments: sandboxGateAttachments,
@@ -3026,7 +3081,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       });
     const withFile = {
       ...opts,
-      stackSource: { path: "gate/stack.json", forHead },
+      stackSource: { ...inlineStackSource, path: "gate/stack.json", forHead },
     } as unknown as Parameters<typeof runInnerLoop>[1];
 
     await expect(runInnerLoop(issue, withFile)).resolves.toMatchObject({

@@ -15,6 +15,7 @@ import {
   renderReviewerSlot,
   renderSandboxStackSlot,
 } from "./prompt.js";
+import { SETTLED_RULES, type SettledRule } from "./config.js";
 import { parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
 import { loadTemplate } from "./prompts.js";
@@ -42,6 +43,7 @@ const projectStandards = parseStandards(
 const qualityInputs = {
   ...baseInputs,
   standards: combineStandards(builtinStandards, projectStandards),
+  settled: new Set(),
 } as const;
 
 const implementerInputs = {
@@ -54,6 +56,7 @@ const implementerInputs = {
   commits: "",
   stat: "",
   qualityCommitLog: "",
+  settled: new Set(),
 } as const;
 
 describe("renderAttemptSlot — unbounded attempt sequence (#129)", () => {
@@ -342,6 +345,62 @@ describe("renderAttemptSlot — implementer standards and pre-promise review (#7
   });
 });
 
+// Each fragment of rule prose leaves its prompt exactly when a gate step
+// settles its rule, and only its own rule's (#183).
+describe("rule prose a gate step settles (#183)", () => {
+  const branch = { commits: "a1 first", stat: " x | 1 +" } as const;
+  const listMode = { kind: "list", scope: { kind: "full" }, overrules: [] } as const;
+  const render = {
+    implementer: (settled: ReadonlySet<SettledRule>) =>
+      renderAttemptSlot({ ...implementerInputs, settled }),
+    lister: (settled: ReadonlySet<SettledRule>) =>
+      renderQualityReviewSlot({ ...qualityInputs, ...branch, mode: listMode, settled }),
+    fixer: (settled: ReadonlySet<SettledRule>) =>
+      renderQualityFixSlot({ ...qualityInputs, ...branch, report: "r", ruling: null, settled }),
+  };
+  const fragments = [
+    {
+      rule: "missing-tests",
+      prompt: "lister",
+      text: "either a production line no test covers, or",
+      settledReads: "leaves the suite green: a test line whose deletion changes",
+    },
+    {
+      rule: "missing-tests",
+      prompt: "fixer",
+      text: "Write the tests the report says are missing.",
+      settledReads: "2. Tests. Rewrite the tests the report says test nothing.",
+    },
+    {
+      rule: "commit-ritual",
+      prompt: "fixer",
+      text: "Give it every per-commit ritual the conventions in @CLAUDE.md require",
+      settledReads: "Make ONE commit for this\npass. If nothing needs fixing, commit nothing.",
+    },
+    {
+      rule: "commit-ritual",
+      prompt: "implementer",
+      text: "5. Check every per-commit ritual those conventions require",
+      settledReads: "did not ask for.\n\n## The quality pass",
+    },
+  ] as const;
+
+  it.each(fragments)("$prompt carries the $rule fragment while nothing settles it", ({ prompt, text }) => {
+    expect(render[prompt](new Set())).toContain(text);
+  });
+
+  it.each(fragments)("$prompt drops the $rule fragment once a step settles it", ({ rule, prompt, text, settledReads }) => {
+    const slot = render[prompt](new Set([rule]));
+    expect(slot).not.toContain(text);
+    expect(slot).toContain(settledReads);
+  });
+
+  it.each(fragments)("$prompt keeps the $rule fragment when only the other rule is settled", ({ rule, prompt, text }) => {
+    const other = SETTLED_RULES.filter((r) => r !== rule);
+    expect(render[prompt](new Set(other))).toContain(text);
+  });
+});
+
 describe("renderReviewerSlot", () => {
   // The verifier's first white-box round (#180) is the correctness review as
   // it was before the verifier, byte for byte.
@@ -602,8 +661,8 @@ describe("renderQualityFixSlot (#185, #187)", () => {
 
   it("defines missing and bad tests by what the suite can detect", () => {
     const slot = renderFix();
-    expect(slot).toMatch(/production line the branch\s+changes could be deleted and the suite would stay green/);
-    expect(slot).toMatch(/the test itself could be deleted and the suite would stay green/);
+    expect(slot).toMatch(/production line the branch\s+changes could be deleted and the suite would stay\s+green/);
+    expect(slot).toMatch(/the test itself could be deleted and the suite would stay\s+green/);
   });
 
   // A failing test is the one channel the fixer has for a correctness defect;

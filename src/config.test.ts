@@ -276,6 +276,16 @@ describe("resolveStackFile (#186)", () => {
       /steps\[0\] needs 'command' as a list of strings/,
     ],
     [
+      "a step's settles that is not a list of strings",
+      JSON.stringify({ ...stack, steps: [{ ...stack.steps[0], settles: "missing-tests" }] }),
+      /steps\[0\] has 'settles' that is not a list of strings/,
+    ],
+    [
+      "a step settling an unknown rule",
+      JSON.stringify({ ...stack, steps: [{ ...stack.steps[0], settles: ["coverage"] }] }),
+      /^gate\/stack\.json at origin\/main: step '.+' settles 'coverage'/,
+    ],
+    [
       "an unknown lifecycle",
       JSON.stringify({ ...stack, containers: [{ ...stack.containers[0], lifecycle: "run" }] }),
       /has 'lifecycle' that is not "issue" or "attempt"/,

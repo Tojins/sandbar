@@ -23,10 +23,9 @@ and the verifier reads the branch after a green gate there.
 
 1. Read. Open the code each finding names, and read the branch's hunks around
    it with `git diff {{baseRef}}...HEAD -- <file>`.
-2. Tests. Write the tests the report says are missing and rewrite the ones it
-   says test nothing. A test is missing when a production line the branch
-   changes could be deleted and the suite would stay green. A test is bad when
-   the test itself could be deleted and the suite would stay green.
+2. Tests. {{testsMissing}}Rewrite the tests the report says test nothing. A
+   test is bad when the test itself could be deleted and the suite would stay
+   green.
 3. Standards. Fix each violation of the coding standards above and of the
    conventions in {{conventionsRef}} that the report names. Change production
    code only to meet a standard.
@@ -44,9 +43,7 @@ gate-1 hands its failure to the implementer.
 
 Commit on `{{branch}}` and stay on it: do not detach HEAD, create branches, or
 rewrite, reorder or drop the commits already on it. Make ONE commit for this
-pass, and give it every per-commit ritual the conventions in {{conventionsRef}}
-require (a version bump or changelog entry, for example). If nothing needs
-fixing, commit nothing.
+pass. {{commitRitual}}If nothing needs fixing, commit nothing.
 
 Do not push. Leave the worktree clean when you exit: anything uncommitted is
 discarded, HEAD is put back on `{{branch}}`, and commits you removed from the
