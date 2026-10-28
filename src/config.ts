@@ -2702,7 +2702,8 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   if (databaseCopies !== null && gateStack.kind === "inline") {
     assertDatabaseCopiesTarget(gateStack.stack, databaseCopies);
   }
-  if (databaseCopies === null && config.sandboxHooks.sandbox?.onDbCopyReady !== undefined) {
+  // `sandboxHooks` is required by the type, but an imported config may omit it.
+  if (databaseCopies === null && config.sandboxHooks?.sandbox?.onDbCopyReady !== undefined) {
     throw new SandbarError(
       "config.sandboxHooks.sandbox.onDbCopyReady needs config.databaseCopies: " +
         "without it there is no copy for the hook to prepare.",

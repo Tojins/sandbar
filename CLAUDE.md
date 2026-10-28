@@ -85,7 +85,13 @@ holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 With `config.deployWatch`, polls and landings also kick the deploy watch
 (`deploy-watch.ts`, #198), which never blocks the loop.
 With `config.databaseCopies`, every recompute reads the base import's outcome
-(`createDbBaseWatch`, #201) into `db-base` events and stale/failed complaints.
+(`createDbBaseWatch`, #201) into `db-base` events and stale/failed complaints,
+and measures the database volume into the same storage latch as the
+graphroot; startup and quiescence sweep the run's copies.
+`db-copy.ts` makes one reflink copy of the base per issue and a slot swaps it
+into the sandbox stack beside its target sibling (`swapDbCopyIn`/`Out`),
+then runs `onDbCopyReady` (`Sandbox.runHooks`); not yet wired into the
+inner loop.
 
 ## Invariants — where they live
 
