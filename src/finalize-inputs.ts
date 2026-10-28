@@ -154,6 +154,15 @@ export function terminalFinalizeInputs(
           });
         }
         break;
+      case "NEEDS-STACK-CHANGE":
+        inputs.push({
+          kind: "stack-change",
+          issue: o.issue,
+          stackChange: t.stackChange,
+          gate: t.gate,
+          specGaps: t.specGaps,
+        });
+        break;
       case "HARD-ERROR":
         inputs.push({
           kind: "hard-error",

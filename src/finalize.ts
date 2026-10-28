@@ -67,7 +67,8 @@
 // auto-created — a missing/misconfigured label is a host config error. Every
 // agent-failure terminal (merge-conflict, merge-gate-red, forge-unverified,
 // chunk-refresh-failed, silent-noop-exhausted, needs-human,
-// review-budget-exhausted) parks the issue under the single `agentStuck` label;
+// review-budget-exhausted, stack-change) parks the issue under the single
+// `agentStuck` label;
 // the *reason* lives in the bot comment. A chunk-refresh failure is the one
 // pre-execution handoff: it posts the merger's branch/conflict-or-gate evidence
 // and flips the dependent directly, without inventing or reclaiming an issue
@@ -101,10 +102,11 @@ import { SandbarError, isExitCode } from "./errors.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { IssueRef } from "./merger.js";
 import type { SpecGap } from "./inner-loop.js";
-import type { ContextSlot } from "./inner-loop-machine.js";
+import type { ContextSlot, Gate1Result } from "./inner-loop-machine.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import { type RepoLayout, worktreePathFor } from "./repo-cache.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
+import { type StackChange, renderStackDifferences } from "./stack-change.js";
 import {
   classifyPushError,
   type LocalBranchRecovery,
@@ -299,6 +301,41 @@ export const NEEDS_HUMAN_COMMENT_TEMPLATE = (
   `${BOT_COMMENT_PREFIX} ${gateRedStop(failedStep, roundsUsed)}\n\n` +
   `${needsHumanGateExplanation(failureTrace, latestReviewerProse)}\n\n` +
   handoffAction(branch, stuckLabel, readyLabel, "push a fix");
+
+// #186: the branch edits its gate stack beyond container env. Gate-1 ran once
+// on the source branch's stack, and its verdict tells the human whether the
+// edit has to land before the branch can.
+const stackChangeStop = (path: string): string =>
+  `stopped: this branch changes \`${path}\` beyond container \`env\`, and a ` +
+  "branch never changes its own gate.";
+
+const stackChangeExplanation = (
+  stackChange: StackChange,
+  gate: Gate1Result,
+): string =>
+  `${renderStackDifferences(stackChange.differences)}\n\n` +
+  (gate.ok
+    ? "Gate-1 is green on the source branch's stack."
+    : `Gate-1 is red on the source branch's stack` +
+      `${gate.failedStep === null ? "" : ` at step \`${gate.failedStep}\``}.\n\n` +
+      `<details><summary>Gate trace</summary>\n\n` +
+      `\`\`\`\n${gate.failureTrace}\n\`\`\`\n\n</details>`);
+
+export const STACK_CHANGE_COMMENT_TEMPLATE = (
+  branch: string,
+  stackChange: StackChange,
+  gate: Gate1Result,
+  stuckLabel: string,
+  readyLabel: string,
+): string =>
+  `${BOT_COMMENT_PREFIX} ${stackChangeStop(stackChange.path)}\n\n` +
+  `${stackChangeExplanation(stackChange, gate)}\n\n` +
+  handoffAction(
+    branch,
+    stuckLabel,
+    readyLabel,
+    "land the stack change on the source branch by hand",
+  );
 
 // The gate budget counts attempts that never reached a green gate-1, red or
 // ungateable alike (#185), so the stop lines speak of attempts, not reds.
@@ -603,6 +640,14 @@ type FinalizeKindInput =
       readonly strandedHead: StrandedHead | null;
     }
   | {
+      // #186 — the branch edits its gate stack beyond container env. The
+      // branch is pushed so the human can take the stack edit from it.
+      readonly kind: "stack-change";
+      readonly issue: IssueRef;
+      readonly stackChange: StackChange;
+      readonly gate: Gate1Result;
+    }
+  | {
       readonly kind: "review-budget-exhausted";
       readonly issue: IssueRef;
       readonly roundsUsed: number;
@@ -748,6 +793,7 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "needs-ui-prototype",
   "needs-partition",
   "needs-human",
+  "stack-change",
   "review-budget-exhausted",
   "read-only-agent-wrote",
   "silent-noop-exhausted",
@@ -1292,6 +1338,33 @@ export async function finalizeOne(
       });
       if (refused) return refused;
       await adapter.postComment(n, comments.published);
+      const r = await adapter.editLabels(
+        n,
+        [READY_FOR_AGENT_LABEL],
+        [labels.agentStuck],
+      );
+      requireFlip(r, n);
+      return { kind: "pushed" };
+    }
+    case "stack-change": {
+      const n = issueNumberOf(input.issue);
+      await adapter.reclaimIssueClone(input.issue.branch);
+      const refused = await pushBranchOrPark(input, adapter, labels, {
+        context:
+          `${stackChangeStop(input.stackChange.path)}\n\n` +
+          stackChangeExplanation(input.stackChange, input.gate),
+      });
+      if (refused) return refused;
+      await adapter.postComment(
+        n,
+        STACK_CHANGE_COMMENT_TEMPLATE(
+          input.issue.branch,
+          input.stackChange,
+          input.gate,
+          labels.agentStuck,
+          READY_FOR_AGENT_LABEL,
+        ),
+      );
       const r = await adapter.editLabels(
         n,
         [READY_FOR_AGENT_LABEL],

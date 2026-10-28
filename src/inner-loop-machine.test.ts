@@ -16,6 +16,7 @@ import {
   step,
   visiblePhases,
 } from "./inner-loop-machine.js";
+import type { StackChange } from "./stack-change.js";
 import { DEFAULT_MAX_GATE_ROUNDS } from "./config.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
@@ -157,10 +158,15 @@ const fixed = (
 // A quality pass whose lister approves outright.
 const quality: LoopEvent = listed(approved());
 const qualityApproved = { verdict: "APPROVED", rounds: 0 } as const;
-const gated = (gate: Gate1Result, head = "head"): LoopEvent => ({
+const gated = (
+  gate: Gate1Result,
+  head = "head",
+  stackChange: StackChange | null = null,
+): LoopEvent => ({
   kind: "gate-result",
   gate,
   head,
+  stackChange,
 });
 // The verifier is its white-box review alone until #180's runner joins it.
 const reviewed = (reviewer: ReviewerResult, head = "head"): LoopEvent => ({
@@ -841,6 +847,42 @@ describe("inner-loop-machine — gate-1 red re-prompts", () => {
   it("maxGateRounds=1 with one gate-1 red surfaces NEEDS-HUMAN", () => {
     const { verdict } = drive({ maxGateRounds: 1 }, [impl(complete), ...round(gate1Red("boom"))]);
     expect(verdict).toMatchObject({ type: "NEEDS-HUMAN", cause: "gate-red" });
+  });
+});
+
+// #186: a branch that edits its gate stack beyond env parks on gate-1's
+// result, whichever way the tip's stack judged it.
+describe("inner-loop-machine — a stack change beyond env", () => {
+  const stackChange: StackChange = {
+    path: "gate/stack.json",
+    differences: [{ where: "container 'db'", what: "mounts" }],
+  };
+
+  it.each([
+    ["green", gate1Ok],
+    ["red", gate1Red("boom")],
+  ])("terminates NEEDS-STACK-CHANGE on a %s gate without charging a budget", (_, gate) => {
+    const r = stepAll(initialState(defaultOpts), [
+      impl(complete),
+      quality,
+      gated(gate, "head", stackChange),
+    ]);
+    expect(r.action).toEqual({
+      kind: "terminate",
+      verdict: { type: "NEEDS-STACK-CHANGE", stackChange, gate },
+    });
+    expect(r.state.gateFailures).toBe(0);
+  });
+
+  it("parks on the first gate-1 that carries one, after earlier reds", () => {
+    const { verdict } = drive(defaultOpts, [
+      impl(complete),
+      ...round(gate1Red("red")),
+      impl(complete),
+      quality,
+      gated(gate1Ok, "head", stackChange),
+    ]);
+    expect(verdict).toEqual({ type: "NEEDS-STACK-CHANGE", stackChange, gate: gate1Ok });
   });
 });
 

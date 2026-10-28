@@ -8,11 +8,10 @@
   trace over your own run when the two disagree.
 - **You are not given a container runtime, and that is deliberate.** These
   containers are your neighbours, not yours to start, stop or rebuild. A
-  service that is missing or wrong is a change to the project's `gateStack`,
-  and that is not a change you can make take effect here: the stack this issue
-  runs against was resolved once, when the run started, from the host's
-  configuration as it stood then. Commit the change if it belongs to this issue
-  — it takes effect for later issues, not this one — and say in your report that
-  this issue ran without it. What you must not do is work around it: neither by
-  installing a database into this container, nor by shaping the branch's code
-  around the stack you were handed.
+  service that is missing or wrong is a change to the project's gate stack,
+  and that is not a change you can make take effect here: these neighbours
+  were resolved once, when this sandbox started. Commit the change if it
+  belongs to this issue — this sandbox does not pick it up — and say in your
+  report that you worked without it. What you must not do is work around it:
+  neither by installing a database into this container, nor by shaping the
+  branch's code around the stack you were handed.

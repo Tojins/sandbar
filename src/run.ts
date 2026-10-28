@@ -336,6 +336,7 @@ import {
   repoLayout,
   worktreePathFor,
 } from "./repo-cache.js";
+import { renderStackDifferences } from "./stack-change.js";
 import { type StackSource, openStackSource } from "./stack-source.js";
 import { startUiServer, UiPortInUseError } from "./ui-server.js";
 
@@ -446,6 +447,10 @@ export function terminalReason(terminal: Terminal): string | null {
       return `${terminal.cause} ${terminal.slot} ${terminal.size}/${terminal.budget}: ${terminal.detail}`;
     case "NEEDS-HUMAN": return `${terminal.cause}: ${terminal.failureTrace}`;
     case "NEEDS-HUMAN-REVIEW": return `${terminal.cause}: ${terminal.latestReviewerProse}`;
+    case "NEEDS-STACK-CHANGE":
+      return `${terminal.stackChange.path} changed beyond env (gate-1 ` +
+        `${terminal.gate.ok ? "green" : "red"} on the source tip's stack):\n` +
+        renderStackDifferences(terminal.stackChange.differences);
     case "HARD-ERROR": return terminal.reason;
     case "QUOTA": return `${terminal.provider} ${terminal.window}`;
     case "CREDENTIAL": return `${terminal.provider}: ${terminal.detail}`;

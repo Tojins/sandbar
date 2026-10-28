@@ -143,6 +143,20 @@ describe("renderAttemptSlot — the quality pass (#185)", () => {
   });
 });
 
+// #186: a stack file's env edits reach the gate; anything else parks.
+describe("renderAttemptSlot — the stack file (#186)", () => {
+  it("names the file and the env-only rule when the stack is a file", () => {
+    expect(renderAttemptSlot({ ...implementerInputs, stackFile: "gate/stack.json" })).toContain(
+      "Only container `env` changes in `gate/stack.json` take effect on your gate; " +
+        "any other change to it parks the issue for a human.\n\n",
+    );
+  });
+
+  it("says nothing for an inline stack", () => {
+    expect(renderAttemptSlot(implementerInputs)).not.toContain("take effect on your gate");
+  });
+});
+
 describe("adjudication prompt contracts (#167)", () => {
   it("tells an unchanged implementer attempt how to dispute a false finding", () => {
     const slot = renderAttemptSlot({

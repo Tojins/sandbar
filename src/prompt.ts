@@ -103,6 +103,7 @@ const IMPLEMENTER_SANDBOX_GATE_ACCESS_ATTACHED_TPL = loadTemplate(
   "implementer-sandbox-gate-access-attached",
 );
 const IMPLEMENTER_CHUNK_BASE_TPL = loadTemplate("implementer-chunk-base");
+const IMPLEMENTER_STACK_FILE_TPL = loadTemplate("implementer-stack-file");
 const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
 const ADJUDICATOR_TPL = loadTemplate("adjudicator");
 
@@ -246,6 +247,9 @@ export type PromptInputs = {
   // Whether the gate step containers contributed any env or mounts to this
   // sandbox (#166). Relevant only when sandboxStack makes the section visible.
   readonly sandboxHasGateAttachments?: boolean;
+  // The gate stack file the branch may edit only the container env of (#186).
+  // Absent for an inline stack, which no branch reaches.
+  readonly stackFile?: string;
 };
 
 export type ReviewerPromptInputs = {
@@ -723,6 +727,10 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     inputs.sandboxHasGateAttachments ?? false,
   );
 
+  const stackFile = inputs.stackFile === undefined
+    ? ""
+    : render(IMPLEMENTER_STACK_FILE_TPL, { path: inputs.stackFile });
+
   const orchestratorNote = extraReprompt
     ? `## Orchestrator note\n\n${extraReprompt}`
     : "";
@@ -743,6 +751,7 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     workDone: section(workDone),
     qualityCommits: section(qualityCommitsSection),
     sandboxStack: section(sandboxStack),
+    stackFile: section(stackFile),
     gateFailure: section(gateFailure),
     reviewerFeedback: section(reviewerFeedback),
     orchestratorNote: section(orchestratorNote),
