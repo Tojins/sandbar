@@ -37,6 +37,7 @@
 // in-flight issue would park on a change it never made, and an env-only one
 // would be reverted by the branch's stale env. The fork is asked of the tree
 // `forHead` is handed, whose remote-tracking ref only has to reach the fork.
+// Landing asks the same of every merge result, at the merger worktree's HEAD.
 //
 // `sandbar gate` and `pulled-images` read the file from a tree on disk
 // (`readStackFrom`): they have no cache and are run by a human, and a CI job

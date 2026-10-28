@@ -31,14 +31,24 @@
 //   git merge --no-ff <branch>
 //     conflict   → runResolveLoop({conflict, ...}, cycleIssues)
 //                  abandon  → merge --abort OR reset --hard preMergeSha + skip
-//                  resolved → fall through to merged.push (loop already gated)
-//     clean      → npm install
+//                  resolved → stack check, then merged.push (loop already gated)
+//     clean      → stack check
+//                  → npm install
 //                    fail  → reset --hard preMergeSha + skip (unchanged)
 //                  → runGate
 //                    green → merged.push
 //                    red   → runResolveLoop({gate-red, ...}, cycleIssues)
 //                            abandon  → reset --hard preMergeSha + skip
-//                            resolved → merged.push (loop already gated)
+//                            resolved → stack check, then merged.push
+//
+// Gate-2 runs on the stack in effect for the merge result at HEAD (#186,
+// stack-source.ts): the source tip's, with the result's container `env` laid
+// over it when that is all it changed in the stack file. The STACK CHECK
+// refuses anything else: a result that changes the file beyond env is reset
+// to preMergeSha and skipped as `stack-change`, since a landing never changes
+// the gate it is graded by. Gate-1 has already parked a branch's own such
+// edit, so what reaches the check is mostly a resolve agent's edit or a
+// reviewed chunk's.
 //
 // The resolve loop lists *all* other issues in this cycle (number, title,
 // branch; the agent reads title and body with `gh issue view --json
@@ -348,6 +358,7 @@ import {
   CHUNK_LAND_DEFERRED_PR_COMMENT,
   CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT,
   CHUNK_LAND_ABANDONED_PR_COMMENT,
+  CHUNK_LAND_STACK_CHANGE_PR_COMMENT,
   type ChunkLandTarget,
   type ChunkBranchRetirement,
   type ChunkWrapup,
@@ -444,6 +455,7 @@ import {
   runResolveLoop,
 } from "./resolve-loop.js";
 import type { PromptExtension } from "./config.js";
+import { type StackChange, renderLandingStackChange } from "./stack-change.js";
 import {
   type Clock as TimingClock,
   durationField,
@@ -519,6 +531,24 @@ export function buildInstallFailedComment(target: MergeTarget): string {
     "the merged tree failed — the post-merge gate could not run. The merge has been " +
     "reverted and `ready-for-agent` removed; please investigate the dependency change " +
     "before re-labelling."
+  );
+}
+
+// #186: the merge result changes the gate stack beyond env, so it was reverted.
+// Gate-1 parks a branch's own such edit before it gets here; what reaches a
+// landing is a resolve agent's edit or one the branch gained since.
+export function buildStackChangeComment(args: {
+  readonly stackChange: StackChange;
+  readonly target: MergeTarget;
+  readonly branch: string;
+  readonly stuckLabel: string;
+}): string {
+  return (
+    `**Sandbar:** merge into ${describeMergeTarget(args.target)} stopped: ` +
+    `${renderLandingStackChange(args.stackChange)}\n\n` +
+    "Action: land the stack change on the source branch by hand, or remove " +
+    `it from \`${args.branch}\`; drop \`${args.stuckLabel}\` and re-apply ` +
+    `\`${READY_FOR_AGENT_LABEL}\`.`
   );
 }
 
@@ -683,7 +713,7 @@ export type MergeUnit = {
 };
 
 // What one `attemptMerge` did to the worktree, with the tracker deliberately
-// untouched. `install-failed` and `abandon` have both already been reverted.
+// untouched. Every outcome but `merged` has already been reverted.
 type AbandonedMergeAttempt = {
   readonly kind: "abandon";
   readonly reason: string;
@@ -710,7 +740,36 @@ type MergeAttempt = (
       // deliberately do not, because their paths are the actionable evidence.
       readonly gateTrace: string;
     })
+  // The merge result changes the gate stack beyond env (#186).
+  | { readonly kind: "stack-change"; readonly stackChange: StackChange }
 ) & { readonly durationMs: number };
+
+// Why a refresh stopped, and the evidence under it.
+function chunkRefreshStop(
+  outcome: Exclude<MergeAttempt, { readonly kind: "merged" }>,
+): { readonly stopped: string; readonly details: string } {
+  switch (outcome.kind) {
+    case "install-failed":
+      return {
+        stopped: "`npm install` failed before gate-2 could run.",
+        details: "No resolve attempt ran.",
+      };
+    case "stack-change":
+      return { stopped: renderLandingStackChange(outcome.stackChange), details: "" };
+    case "abandon":
+      return {
+        stopped: outcome.mode === "conflict"
+          ? `the merge stopped on conflicts after ${outcome.attempts.length} resolve attempt${outcome.attempts.length === 1 ? "" : "s"}.`
+          : `gate-2 stayed red after ${outcome.attempts.length} fix attempt${outcome.attempts.length === 1 ? "" : "s"}.`,
+        details: [
+          outcome.mode === "conflict"
+            ? formatConflictPaths(outcome.conflictPaths)
+            : `<details><summary>Gate trace</summary>\n\n\`\`\`\n${outcome.gateTrace}\n\`\`\`\n\n</details>`,
+          formatResolveAttempts(outcome.attempts),
+        ].filter((part) => part.length > 0).join("\n\n"),
+      };
+  }
+}
 
 export function buildChunkRefreshFailedComment(args: {
   readonly chunkBranch: string;
@@ -718,23 +777,10 @@ export function buildChunkRefreshFailedComment(args: {
   readonly outcome: Exclude<MergeAttempt, { readonly kind: "merged" }>;
   readonly stuckLabel: string;
 }): string {
-  const { outcome } = args;
-  const stopped = outcome.kind === "install-failed"
-    ? "`npm install` failed before gate-2 could run."
-    : outcome.mode === "conflict"
-    ? `the merge stopped on conflicts after ${outcome.attempts.length} resolve attempt${outcome.attempts.length === 1 ? "" : "s"}.`
-    : `gate-2 stayed red after ${outcome.attempts.length} fix attempt${outcome.attempts.length === 1 ? "" : "s"}.`;
-  const details = outcome.kind === "install-failed"
-    ? "No resolve attempt ran."
-    : [
-        outcome.mode === "conflict"
-          ? formatConflictPaths(outcome.conflictPaths)
-          : `<details><summary>Gate trace</summary>\n\n\`\`\`\n${outcome.gateTrace}\n\`\`\`\n\n</details>`,
-        formatResolveAttempts(outcome.attempts),
-      ].filter((part) => part.length > 0).join("\n\n");
+  const { stopped, details } = chunkRefreshStop(args.outcome);
   return (
     `**Sandbar:** refresh of chunk branch \`${args.chunkBranch}\` stopped because ${stopped}\n\n` +
-    `${details}\n\n` +
+    (details ? `${details}\n\n` : "") +
     `Action: merge \`${args.sourceBranch}\` into \`${args.chunkBranch}\`, then drop ` +
     `\`${args.stuckLabel}\` and re-apply \`${READY_FOR_AGENT_LABEL}\`.`
   );
@@ -789,6 +835,9 @@ export type MergerAdapter = ResolveAdapter & {
   abortMerge(): Promise<void>;
   getHeadSha(): Promise<string>;
   resetHardSha(sha: string): Promise<void>;
+  // What the merge result at HEAD changes in the gate stack file beyond
+  // container `env` (#186), or null when the landing may keep it.
+  stackChange(): Promise<StackChange | null>;
   commentOnIssue(issueNum: number, msg: string): Promise<void>;
   removeLabel(issueNum: number, label: string): Promise<void>;
   closeIssue(issueNum: number, comment: string): Promise<void>;
@@ -905,7 +954,10 @@ export type SkipReason =
   // is intact, but no commit landed on the source branch. Orchestrator
   // decides whether to re-enqueue for a fresh implementer attempt (under
   // the per-issue retry cap) or escalate to human attention.
-  | "silent-noop";
+  | "silent-noop"
+  // The merge result changes the gate stack file beyond container env (#186),
+  // so it was reverted: a landing never changes the gate it is graded by.
+  | "stack-change";
 
 // Wired here rather than in `chunk-land.ts` because the merge phase is what
 // consumes it: `chunkLanding` present ⇒ this cycle may land reviewed chunks on
@@ -979,7 +1031,8 @@ export type ChunkLandSkipReason =
   | "conflict"
   | "gate-red"
   | "install-failed"
-  | "forge-unverified";
+  | "forge-unverified"
+  | "stack-change";
 
 export type SkippedChunkLand = {
   readonly target: ChunkLandTarget;
@@ -1421,6 +1474,27 @@ async function attemptMerge(
     beforeGate: () => deps.onProgress?.(args.gateKey, "gate-2"),
     onGate,
   };
+  const merged = async (how: string): Promise<MergeAttempt> => {
+    const durationMs = unitTimer();
+    await emit(`merged ${label}${how} ${durationField(durationMs)}`);
+    return { kind: "merged", durationMs };
+  };
+  // A merge result that changes the gate stack file beyond container env is
+  // reverted, never kept (#186). Asked of every new result: a clean merge
+  // before its gate-2, since a red there would send the resolve agent after a
+  // merge the landing refuses anyway, and whatever a resolve loop leaves,
+  // since its agent can edit the file too. The gates in between run on the
+  // source tip's stack (`RealAdapterDeps.runStackGate`).
+  const stackChangeRefusal = async (): Promise<MergeAttempt | null> => {
+    const stackChange = await adapter.stackChange();
+    if (stackChange === null) return null;
+    await adapter.resetHardSha(preMergeSha);
+    await emit(
+      `stack-change ${label} ${stackChange.path}: ` +
+        stackChange.differences.map((d) => `${d.where} ${d.what}`).join("; "),
+    );
+    return { kind: "stack-change", stackChange, durationMs: unitTimer() };
+  };
   const m = await adapter.mergeNoFf(unit);
 
   // The version collision is settled mechanically first (#68); only what it
@@ -1455,12 +1529,11 @@ async function attemptMerge(
         durationMs: unitTimer(),
       };
     }
-    const durationMs = unitTimer();
-    await emit(
-      `merged ${label} (via resolve-loop) ${durationField(durationMs)}`,
-    );
-    return { kind: "merged", durationMs };
+    return (await stackChangeRefusal()) ?? merged(" (via resolve-loop)");
   }
+
+  const refused = await stackChangeRefusal();
+  if (refused !== null) return refused;
 
   // `npm install` runs on every clean merge and on every resolve attempt, and
   // whether that is seconds or a minute decides #77 §3.F43/F45. Reported on the
@@ -1526,17 +1599,11 @@ async function attemptMerge(
         durationMs: unitTimer(),
       };
     }
-    const durationMs = unitTimer();
-    await emit(
-      `merged ${label} (gate-red recovered via resolve-loop) ` +
-        durationField(durationMs),
-    );
-    return { kind: "merged", durationMs };
+    return (await stackChangeRefusal()) ??
+      merged(" (gate-red recovered via resolve-loop)");
   }
 
-  const durationMs = unitTimer();
-  await emit(`merged ${label} ${durationField(durationMs)}`);
-  return { kind: "merged", durationMs };
+  return merged("");
 }
 
 export async function runMergerWithAdapter(
@@ -1720,18 +1787,38 @@ export async function runMergerWithAdapter(
       );
       if (outcome.kind === "merged") return outcome.durationMs;
 
-      if (outcome.kind === "install-failed") {
-        await adapter.commentOnIssue(n, buildInstallFailedComment(target));
+      // Commented on and taken off the queue; finalise applies the handoff.
+      const park = async (
+        reason: Exclude<SkipReason, "silent-noop">,
+        comment: string,
+        logDetail: string,
+      ): Promise<null> => {
+        await adapter.commentOnIssue(n, comment);
         await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
-        skipped.push({ issue, reason: "install-failed" });
+        skipped.push({ issue, reason });
         await opts.observations.onOutcome({
           kind: "skipped",
           issue,
-          reason: "install-failed",
+          reason,
           durationMs: outcome.durationMs,
         });
-        await emit(`skip #${n} reason=install-failed`);
+        await emit(`skip #${n} reason=${reason}${logDetail}`);
         return null;
+      };
+      if (outcome.kind === "install-failed") {
+        return await park("install-failed", buildInstallFailedComment(target), "");
+      }
+      if (outcome.kind === "stack-change") {
+        return await park(
+          "stack-change",
+          buildStackChangeComment({
+            stackChange: outcome.stackChange,
+            target,
+            branch: issue.branch,
+            stuckLabel: opts.agentStuckLabel,
+          }),
+          "",
+        );
       }
       if (outcome.silent) {
         // Silent abandon: no comment, no label flip. The orchestrator's
@@ -1748,8 +1835,8 @@ export async function runMergerWithAdapter(
         await emit(`skip #${n} reason=silent-noop: ${outcome.reason}`);
         return null;
       }
-      await adapter.commentOnIssue(
-        n,
+      return await park(
+        outcome.mode,
         buildAbandonComment({
           mode: outcome.mode,
           reason: outcome.reason,
@@ -1759,19 +1846,8 @@ export async function runMergerWithAdapter(
           branch: issue.branch,
           stuckLabel: opts.agentStuckLabel,
         }),
+        ` resolve-abandon: ${outcome.reason}`,
       );
-      await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
-      skipped.push({ issue, reason: outcome.mode });
-      await opts.observations.onOutcome({
-        kind: "skipped",
-        issue,
-        reason: outcome.mode,
-        durationMs: outcome.durationMs,
-      });
-      await emit(
-        `skip #${n} reason=${outcome.mode} resolve-abandon: ${outcome.reason}`,
-      );
-      return null;
     } catch (err) {
       // Not a hypothetical throw site: `getIssueBody` throws by design when
       // `gh` fails (see realAdapter below), and `runGate` throws — rather than
@@ -2192,6 +2268,19 @@ export async function runMergerWithAdapter(
         if (outcome.kind === "merged") {
           onHead.push({ ...unit, durationMs: outcome.durationMs });
           await opts.observations.onProgress?.(`chunk-${request.root}`, "push");
+          continue;
+        }
+        if (outcome.kind === "stack-change") {
+          await parkChunk(
+            request,
+            CHUNK_LAND_STACK_CHANGE_PR_COMMENT({
+              chunkBranch: request.branch,
+              sourceBranch: pending.sourceBranch,
+              stackChange: outcome.stackChange,
+            }),
+            "stack-change",
+            outcome.durationMs,
+          );
           continue;
         }
         await parkChunk(
@@ -2723,10 +2812,14 @@ export type RealAdapterDeps = {
   readonly env: EnvReader;
   // Shared with issue sandboxes when the run uses ChatGPT auth (#134).
   readonly codexAuthMount?: CodexAuthMount;
-  // Gate-2, already bound to the merger worktree's stack. The merger does not
-  // build the stack itself: run.ts owns the stack's lifecycle for the whole
-  // merge phase, so a single bringup covers every branch in the cycle.
+  // Gate-2 on the stack in effect for the merger worktree's HEAD (#186): the
+  // source tip's, with the merge result's container env laid over it when
+  // that is all it changed. The merger does not build the stack itself:
+  // run.ts owns the stack's lifecycle for the whole merge phase, so a single
+  // bringup covers every branch in the cycle until the spec in effect changes.
   readonly runStackGate: () => Promise<AdmittedGate<GateResult>>;
+  // `MergerAdapter.stackChange`, read from the same stack source.
+  readonly stackChange: () => Promise<StackChange | null>;
   // Daemon ownership barrier (#139), immediately before each origin/tracker
   // write.
   readonly beforeOriginWrite: OriginWriteBarrier;
@@ -3425,6 +3518,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     async resetHardSha(sha) {
       await exec("git", ["reset", "--hard", sha], { cwd });
     },
+    stackChange: deps.stackChange,
     async abortMerge() {
       try {
         await exec("git", ["merge", "--abort"], { cwd });

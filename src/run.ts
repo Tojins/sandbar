@@ -284,7 +284,6 @@ import {
   type MergerWorktree,
   createMergerWorktree,
 } from "./merger-worktree.js";
-import { type Stack, startStack } from "./gate-stack.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
 import { containerResourcesOf } from "./container-resources.js";
 import { usageFields } from "./agent-usage.js";
@@ -339,8 +338,13 @@ import {
   repoLayout,
   worktreePathFor,
 } from "./repo-cache.js";
-import { renderStackDifferences } from "./stack-change.js";
-import { type StackSource, openStackSource } from "./stack-source.js";
+import { renderStackDifferences, stackChangeOf } from "./stack-change.js";
+import {
+  type BoundStack,
+  type StackSource,
+  bindStack,
+  openStackSource,
+} from "./stack-source.js";
 import { startUiServer, UiPortInUseError } from "./ui-server.js";
 
 
@@ -2601,21 +2605,20 @@ export async function run(
         // from it (#20). createMergerWorktree and
         // startStack each register their own teardown as a disposable (#55); we
         // also tear both down in the finally below. One stack serves gate-2 for
-        // every branch in the landing batch — its issue-lifecycle containers start once.
+        // every branch in the landing batch — its issue-lifecycle containers
+        // start once, and again only when a merge result's env overlay changes
+        // the spec in effect (#186).
         let mergerWorktree: MergerWorktree | null = null;
-        let mergerStack: Stack | null = null;
+        let mergerStack: BoundStack | null = null;
         try {
           mergerWorktree = await createMergerWorktree({
             layout,
             sourceBranch: config.sourceBranch,
           });
           const mergerWorktreePath = mergerWorktree.path;
-          mergerStack = await startStack({
+          mergerStack = await bindStack({
             stackId: MERGER_STACK_ID,
             scope,
-            // Once per landing: the tip moves with every merge in it, and
-            // the next landing reads the stack again.
-            spec: (await stackSource.current()).stack,
             worktreePath: mergerWorktree.path,
             hideWorktreeGit: true,
             onNotice: (message) => runRecord.emit({
@@ -2631,8 +2634,12 @@ export async function run(
             // the lockfile compose into a third lockfile. Resolved per gate
             // run, so each merge in the landing is gated against its own.
             images: (only) => landingImages.branchImages.resolve(mergerWorktreePath, only),
-          });
+          }, (await stackSource.current()).stack);
           const stackForGate2 = mergerStack;
+          // What the merge result at HEAD makes of the stack file, asked
+          // afresh at every gate-2 and every keep-or-revert decision: HEAD
+          // moves with each merge, revert and resolve attempt in the landing.
+          const headStack = () => stackSource.forHead(mergerWorktreePath, "HEAD");
           const adapter = realAdapter({
             cwd: mergerWorktree.path,
             cacheDir: layout.repoDir,
@@ -2648,7 +2655,11 @@ export async function run(
             sandboxImage: landingImages.agentImages.declaredTag,
             env,
             ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
-            runStackGate: () => gateSemaphore.run(() => stackForGate2.runGate()),
+            runStackGate: async () => {
+              const stack = await stackForGate2.ensure((await headStack()).stack);
+              return gateSemaphore.run(() => stack.runGate());
+            },
+            stackChange: async () => stackChangeOf((await headStack()).classification),
             beforeOriginWrite: renewOriginLease,
           });
 

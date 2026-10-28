@@ -28,7 +28,8 @@
 // Nothing here reads git: stack-source.ts reads both files and calls
 // `stackInEffect`. What a non-env change does to the issue — gate-1 runs once
 // on the tip's stack and the issue parks with NEEDS-STACK-CHANGE — is the
-// state machine's and finalize's.
+// state machine's and finalize's; at landing, where the merge result is the
+// head, the merger reverts it with skip reason `stack-change`.
 
 import { canonicalSha256 } from "./canonical-json.js";
 import {
@@ -217,4 +218,12 @@ export function renderStackDifferences(
   differences: readonly StackDifference[],
 ): string {
   return differences.map((d) => `- ${d.where}: ${d.what}`).join("\n");
+}
+
+// Why a landing refused a merge result, for the issue, the chunk's pull
+// request and a refresh's dependents alike.
+export function renderLandingStackChange(change: StackChange): string {
+  return `the merge result changes \`${change.path}\` beyond container ` +
+    "`env`, and a landing never changes the gate it is graded by.\n\n" +
+    renderStackDifferences(change.differences);
 }

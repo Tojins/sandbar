@@ -268,6 +268,7 @@ describe("finalizeKindForSkip", () => {
     expect(finalizeKindForSkip("conflict")).toBe("merge-conflict");
     expect(finalizeKindForSkip("gate-red")).toBe("merge-gate-red");
     expect(finalizeKindForSkip("install-failed")).toBe("merge-gate-red");
+    expect(finalizeKindForSkip("stack-change")).toBe("merge-gate-red");
     expect(finalizeKindForSkip("forge-unverified")).toBe("forge-unverified");
     expect(finalizeKindForSkip("push-refused")).toBe("landing-push-refused");
   });

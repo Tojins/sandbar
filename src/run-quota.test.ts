@@ -16,6 +16,7 @@ const seams = vi.hoisted(() => ({
   stackSourceOverride: null as null | {
     current: () => Promise<unknown>;
     accepted: () => unknown;
+    forHead?: (worktree: string, head: string) => Promise<unknown>;
   },
   mergerStackStop: vi.fn(async () => undefined),
   mergerWorktreeRemove: vi.fn(async () => undefined),
@@ -2426,6 +2427,62 @@ describe("run quota orchestration (#109)", () => {
       .map(([opts]) => opts)
       .find((opts) => opts.stackId === "merger");
     expect(merger?.spec).toBe(landed.stack);
+  });
+
+  it("gates a landing on the merge result's stack in effect and answers its stack change (#186)", async () => {
+    const done = issue("1");
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "abc" }] });
+    const tip = { stack: config.gateStack, attachments: {} };
+    const overlaid = {
+      stack: {
+        ...config.gateStack,
+        containers: [{ ...config.gateStack.containers[0]!, env: { TZ: "Europe/Brussels" } }],
+      },
+      attachments: {},
+    };
+    const change = {
+      path: "gate/stack.json",
+      differences: [{ where: "container 'app'", what: "image" }],
+    };
+    const inEffect = [
+      { ...overlaid, classification: { kind: "env-only", containers: ["app"] }, tipBlob: "b" },
+      { ...tip, classification: { kind: "non-env", ...change }, tipBlob: "b" },
+    ];
+    const heads: string[][] = [];
+    seams.stackSourceOverride = {
+      accepted: () => tip,
+      current: async () => tip,
+      forHead: async (worktree, head) => {
+        heads.push([worktree, head]);
+        return inEffect[heads.length - 1];
+      },
+    };
+    seams.mergerStackRunGate.mockResolvedValue({
+      ok: true, stdout: "", stderr: "", exitCode: 0, failedStep: null,
+      durationMs: 7, steps: [], containerLogs: "",
+    });
+    seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => {
+      const adapterDeps = vi.mocked(realAdapter).mock.calls[0]?.[0];
+      if (adapterDeps === undefined) throw new Error("merger adapter was not created");
+      await adapterDeps.runStackGate();
+      await expect(adapterDeps.stackChange()).resolves.toEqual(change);
+      return summary(batch);
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(heads).toEqual([["/tmp/merger", "HEAD"], ["/tmp/merger", "HEAD"]]);
+    // Started on the tip's stack, then restarted for the merge result's env.
+    expect(vi.mocked(startStack).mock.calls
+      .map(([opts]) => opts)
+      .filter((opts) => opts.stackId === "merger")
+      .map((opts) => opts.spec)).toEqual([tip.stack, overlaid.stack]);
+    expect(seams.mergerStackRunGate).toHaveBeenCalledOnce();
   });
 
   it("records a rejected issue task as its terminal outcome", async () => {
