@@ -1,0 +1,11 @@
+# Every 15 minutes, so a dump is imported soon after it lands (#201);
+# `Persistent=true` catches up on a tick missed while the box was down.
+[Unit]
+Description=Import a new database dump for {{ sandbar_project }} into a base
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

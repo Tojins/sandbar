@@ -53,7 +53,8 @@ For every `sandbar_installations` entry the role provides:
 - `sandbar.service` and `sandbar-ui.service` in that user's systemd session;
 - when `sandbar_db_volume` is declared, its own directory on the database
   volume and, with `dump_drop`, the account prod pushes its nightly dump to
-  (see *The database volume and dump drops*).
+  and the `sandbar-db-base.timer` that imports it (see *The database volume
+  and dump drops*).
 
 Unit names can remain identical because systemd user sessions are separate.
 
@@ -351,11 +352,29 @@ names prod's address in this public repository. Rotate by changing the line;
 revoke by emptying it, which leaves an empty `authorized_keys`. Removing a
 `dump_drop` entry does not delete the account, so empty the key first.
 
-For #201: the dump is `/srv/sandbar-db/drops/<user>/outdoor-latest.sql.gz`,
-readable by `<user>` through its group and replaced only by rename (watch its
-mtime or inode). Read it on the host and stream it into the import container;
-do not bind-mount it, since its owner is outside the user namespace and would
-show as `nobody`. The disk floor watches `/srv/sandbar-db`.
+### The nightly base import
+
+The dump is `/srv/sandbar-db/drops/<user>/outdoor-latest.sql.gz`, readable by
+`<user>` through its group and replaced only by rename. An installation with
+`dump_drop` also gets `sandbar-db-base.service` and its timer in the user's
+systemd session: every 15 minutes (`Persistent=true`) it runs
+`sandbar db-base --config ~/installation/sandbar.config.mjs`, which imports a
+dump it has not attempted yet into `installations/<user>/bases/<id>/` and
+swaps `installations/<user>/current` to it (#201, `src/db-base.ts`). The
+installation config's `databaseCopies` names both paths, which
+`deploy-unit.test.ts` holds to this layout. The unit is not part of
+`sandbar.service`, so a deploy restart neither kills nor waits for an import.
+Its outcome is `installations/<user>/import-status.json`, which the daemon
+reports in the run UI; the journal has the job's own lines:
+
+```sh
+journalctl --user -u sandbar-db-base.service     # as <user>
+systemctl --user start sandbar-db-base.service   # import now
+node /opt/sandbar/current/dist/cli.js db-base --force \
+  --config ~/installation/sandbar.config.mjs     # retry a failed dump
+```
+
+A dump that failed is not retried until the next one lands, or `--force`.
 
 ## Bootstrapping a fresh box, and secrets
 

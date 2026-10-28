@@ -1,6 +1,6 @@
 // The per-installation systemd units, the convergence timer, the operator VPN,
-// the database volume and dump drops, and the host-global role shipped by
-// deploy/ansible (#149, #155, #146, #200). Tests
+// the database volume, dump drops and base import, and the host-global role
+// shipped by deploy/ansible (#149, #155, #146, #200, #201). Tests
 // parse the committed group_vars, render the units, the Caddy site, the index
 // page and the VPN server from the real entries, and inspect bounded Ansible
 // tasks so deleting one loop or include cannot be hidden by a later task with
@@ -23,6 +23,9 @@ const ROLE = new URL("../deploy/ansible/roles/sandbar/", import.meta.url);
 const DEPLOY_ROOT = new URL("../deploy/ansible/", import.meta.url);
 const daemonTemplate = readFileSync(new URL("templates/sandbar.service.j2", ROLE), "utf8");
 const uiTemplate = readFileSync(new URL("templates/sandbar-ui.service.j2", ROLE), "utf8");
+const dbBaseServiceTemplate = readFileSync(new URL("templates/sandbar-db-base.service.j2", ROLE), "utf8");
+const dbBaseTimerTemplate = readFileSync(new URL("templates/sandbar-db-base.timer.j2", ROLE), "utf8");
+const dbBaseTasks = readFileSync(new URL("tasks/db-base.yml", ROLE), "utf8");
 const pullServiceTemplate = readFileSync(new URL("templates/sandbar-pull.service.j2", ROLE), "utf8");
 const pullTimerTemplate = readFileSync(new URL("templates/sandbar-pull.timer.j2", ROLE), "utf8");
 const pullScriptTemplate = readFileSync(new URL("templates/sandbar-pull.sh.j2", ROLE), "utf8");
@@ -1809,5 +1812,67 @@ describe("the database volume and dump drops (#200)", () => {
     expect(refusal).toContain("{{ sandbar_db_mount }}/installations/{{ sandbar_user }}");
     expect(userTasks.indexOf("Check for the installation's files on the database volume"))
       .toBeLessThan(userTasks.indexOf("Refuse to move a subordinate id range under existing podman storage"));
+  });
+});
+
+describe("the nightly base import (#201)", () => {
+  // A config's `databaseCopies` paths, as the committed text spells them.
+  const databaseCopiesOf = (config: string) => {
+    const block = config.match(/^\s*databaseCopies: \{\n([\s\S]*?)\n\s*\},$/m)?.[1];
+    if (block === undefined) return null;
+    const field = (name: string) => block.match(new RegExp(`^\\s*${name}: "([^"]+)",$`, "m"))?.[1];
+    return { dump: field("dump"), root: field("root"), container: field("container") };
+  };
+
+  it.each(installations)("renders $project's import as a oneshot outside the daemon's unit", (row) => {
+    const unit = render(dbBaseServiceTemplate, varsFor(row));
+    expect(unit).not.toMatch(/\{\{|\}\}/);
+    expect(values(unit, "Type")).toEqual(["oneshot"]);
+    expect(values(unit, "WorkingDirectory")).toEqual([`/home/${row.user}/${row.project}`]);
+    expect(values(unit, "ExecStart")).toEqual([
+      `/usr/bin/node ${DRIVER_CURRENT}/dist/cli.js db-base --config /home/${row.user}/installation/sandbar.config.mjs`,
+    ]);
+    expect(values(unit, "TimeoutStartSec")).toEqual(["5h"]);
+    // A deploy restart of the daemon must neither kill nor wait on an import.
+    expect(values(unit, "PartOf")).toEqual([]);
+    expect(values(unit, "Requires")).toEqual([]);
+    expect(values(unit, "WantedBy")).toEqual([]);
+  });
+
+  it("runs every 15 minutes and catches up after downtime", () => {
+    const timer = render(dbBaseTimerTemplate, { sandbar_project: "outdoor" });
+    expect(values(timer, "OnCalendar")).toEqual(["*:0/15"]);
+    expect(values(timer, "Persistent")).toEqual(["true"]);
+    expect(values(timer, "WantedBy")).toEqual(["timers.target"]);
+  });
+
+  it("installs and starts the timer only for an installation with a dump drop", () => {
+    const include = taskNamed(installationTasks, "Install the database base import timer");
+    expect(include).toContain("ansible.builtin.include_tasks: db-base.yml");
+    expect(include).toContain("when: sandbar_installation.dump_drop is defined");
+    const install = taskNamed(dbBaseTasks, "Install the database base import unit and its timer");
+    expect(install).toContain("- sandbar-db-base.service");
+    expect(install).toContain("- sandbar-db-base.timer");
+    expect(install).toContain('dest: "{{ sandbar_home }}/.config/systemd/user/{{ item }}"');
+    const enable = taskNamed(dbBaseTasks, "Enable and start the database base import timer");
+    expect(enable).toContain("name: sandbar-db-base.timer");
+    expect(enable).toContain("scope: user");
+    expect(enable).toContain("state: started");
+    // The daemon's own unit is never started by the play (#146).
+    expect(dbBaseTasks).not.toContain("sandbar.service");
+  });
+
+  it.each(installations)("points $project's databaseCopies at its own drop and volume dir, or sets none", (row) => {
+    const mount = roleDefault("sandbar_db_mount");
+    const dbc = databaseCopiesOf(installationConfigs.get(row.user)!);
+    if (row.dump_drop === undefined) {
+      expect(dbc).toBeNull();
+      return;
+    }
+    expect(dbc).toEqual({
+      dump: `${mount}/drops/${row.user}/outdoor-latest.sql.gz`,
+      root: `${mount}/installations/${row.user}`,
+      container: "db",
+    });
   });
 });
