@@ -164,12 +164,13 @@ describe("runDbBaseJob failure paths", () => {
     it.each([
       ["the slow-shutdown call fails", "exec", result(1)],
       ["the stop fails", "stop", result(125)],
-      ["the exit code cannot be inspected", "inspect", result(125)],
+      ["the exit code cannot be inspected", "inspect", result(125, { stdout: "0\n" })],
       ["the server exited non-zero", "inspect", result(0, { stdout: "137\n" })],
     ])("records shutdown-failed and removes the base when %s", async (_what, verb, answer) => {
       mocks.podman.mockImplementation(async (args) => {
         const slowShutdown = args.includes("SET GLOBAL innodb_fast_shutdown=0");
-        return args[0] === verb && (verb !== "exec" || slowShutdown) ? answer : ok;
+        if (args[0] === verb && (verb !== "exec" || slowShutdown)) return answer;
+        return args[0] === "inspect" ? result(0, { stdout: "0\n" }) : ok;
       });
       await expect(job()).resolves.toBe("import-failed");
       expect(await readImportStatus(layout)).toMatchObject({ outcome: "import-failed", detail: "shutdown-failed" });
