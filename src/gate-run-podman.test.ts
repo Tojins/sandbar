@@ -158,7 +158,10 @@ describe.runIf(available)("sandbar gate against real podman", () => {
           {
             name: "boom",
             in: "runner",
-            command: ["sh", "-c", "echo NOPE >&2; exit 3"],
+            // The sleep lets the write drain before the exit: over a remote
+            // podman socket `exec` can drop the stderr of a process that
+            // exits the instant it writes.
+            command: ["sh", "-c", "echo NOPE >&2; sleep 1; exit 3"],
           },
         ]),
         { worktree: repo, keep: false, ...sink },

@@ -298,7 +298,10 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
             {
               name: "chatty",
               in: "runner",
-              command: ["sh", "-c", "echo out-line; echo err-line >&2"],
+              // The sleep lets the writes drain before the exit: over a remote
+              // podman socket (CONTAINER_HOST, as the gate runs) `exec` can drop
+              // the output of a process that exits the instant it writes.
+              command: ["sh", "-c", "echo out-line; echo err-line >&2; sleep 1"],
             },
           ],
         }),
