@@ -185,6 +185,10 @@ describe("reflect (#182, #208)", () => {
     await expect(run(dir, logs, stub())).rejects.toThrow(/is not JSON; delete it/);
     await writeFile(path, JSON.stringify({ usage: {} }));
     await expect(run(dir, logs, stub())).rejects.toThrow(/is not a cached answer; delete it/);
+    for (const usage of ["many", null]) {
+      await writeFile(path, JSON.stringify({ answer: "x", usage }));
+      await expect(run(dir, logs, stub())).rejects.toThrow(/is not a cached answer; delete it/);
+    }
   });
 
   it("closes the invoker and removes the workspace, and throws the step's error, when a call rejects", async () => {
