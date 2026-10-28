@@ -71,6 +71,14 @@ const available = podmanTestsEnabled({
   image: BASE,
 });
 
+// Gate runners share one remote Buildah cache, and another runner's cleanup can
+// remove a cache image after this build selected it but before it read the top
+// layer ("layer not known"). A fixture recipe opens with a process-private
+// LABEL so none of its layers is ever another runner's cache hit; the builds
+// within this process still share their own cache.
+const privateFrom = (base: string): string =>
+  `FROM ${base}\nLABEL sandbar.test.cache=${SCOPE}\n`;
+
 const sha256 = async (path: string): Promise<string> =>
   createHash("sha256").update(await readFile(path)).digest("hex");
 
@@ -163,7 +171,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
     };
     await writeFile(
       join(root, "Containerfile"),
-      `FROM ${BASE}\nCOPY package-lock.json /lock.json\n`,
+      `${privateFrom(BASE)}COPY package-lock.json /lock.json\n`,
     );
     await writeFile(join(root, "package-lock.json"), '{"v":1}\n');
     onTestFinished(() => rm(root, { recursive: true, force: true }), 60_000);
@@ -190,7 +198,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       const context = await mkdtemp(join(tmpdir(), "sandbar-generated-context-"));
       onTestFinished(() => rm(context, { recursive: true, force: true }), 60_000);
       await writeFile(join(context, "Containerfile"),
-        `FROM ${BASE}\nCOPY --chmod=0755 payload /usr/local/bin/payload\n`);
+        `${privateFrom(BASE)}COPY --chmod=0755 payload /usr/local/bin/payload\n`);
       await writeFile(join(context, "payload"), "generated-context\n");
       await buildImage({ tag, containerfile: "<generated>" }, {
         scope: SCOPE, root: "", contextRoot: context, capture: true,
@@ -440,7 +448,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
         );
         await writeFile(
           join(context, "Containerfile"),
-          `FROM scratch\nCOPY --chmod=0755 codex-${selectedVariant} /usr/local/bin/codex\n`,
+          `${privateFrom("scratch")}COPY --chmod=0755 codex-${selectedVariant} /usr/local/bin/codex\n`,
         );
         await buildImage({ tag: toolsTag, containerfile: "<generated>" }, {
           scope: SCOPE, root: "", contextRoot: context, capture: true, timeoutMs: 600_000,
@@ -486,7 +494,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       onTestFinished(() => rm(baseContext, { recursive: true, force: true }), 60_000);
       await writeFile(
         join(baseContext, "Containerfile"),
-        "FROM docker.io/library/alpine:3.22\nRUN adduser -D -u 1000 -h /home/node node\n",
+        `${privateFrom("docker.io/library/alpine:3.22")}RUN adduser -D -u 1000 -h /home/node node\n`,
       );
       await buildImage({ tag: uidBaseTag, containerfile: "<generated>" }, {
         scope: SCOPE, root: "", contextRoot: baseContext, capture: true,
@@ -505,7 +513,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       );
       await writeFile(
         join(context, "Containerfile"),
-        "FROM scratch\n" +
+        privateFrom("scratch") +
           "COPY --chmod=0755 codex-static /usr/local/bin/codex\n" +
           "COPY --chmod=0755 codex-code-mode-host-static /usr/local/bin/codex-code-mode-host\n",
       );
@@ -568,7 +576,7 @@ describe.runIf(available)("ensureImages against real podman", () => {
       // Containerfile, and that also never entered the tag-only cache key.
       await writeFile(
         join(root, "Containerfile"),
-        `FROM ${BASE}\nCOPY package-lock.json /lock.json\nRUN true\n`,
+        `${privateFrom(BASE)}COPY package-lock.json /lock.json\nRUN true\n`,
       );
       const fourth = await ensureImages([image], root, { scope: SCOPE });
       expect(fourth.get(TAG)).not.toBe(third.get(TAG));
