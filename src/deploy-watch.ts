@@ -64,9 +64,6 @@
 // distinct message), and a lease lost to terminal cleanup abandons the tick.
 // Nothing else is caught: a bug propagates as the tick's rejection.
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import {
   SandbarError,
   hasExitCode,
@@ -78,8 +75,10 @@ import type { EventInput } from "./events.js";
 import { BOT_COMMENT_PREFIX } from "./finalize.js";
 import {
   type ExecFn,
+  MAX_BUFFER,
   PASSING_CONCLUSIONS,
   buildForgeRedTrace,
+  defaultExec,
   fetchJobFailedLog,
   pushErrorReason,
 } from "./forge-verify.js";
@@ -89,8 +88,6 @@ import {
   type OriginWriteBarrier,
 } from "./origin-lock.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
-
-const execFileAsync = promisify(execFile);
 
 // Runs listed per tick. Outdoor deploys about ten times a day, so the window
 // covers days of downtime.
@@ -105,7 +102,6 @@ export const BUG_BODY_MAX_CHARS = 60_000;
 export const READY_FOR_HUMAN_LABEL = "ready-for-human";
 
 const EXEC_TIMEOUT_MS = 60_000;
-const MAX_BUFFER = 50 * 1024 * 1024;
 const TRUNCATED_NOTE = "\n\n(truncated)";
 
 // ---------------------------------------------------------------------------
@@ -536,20 +532,23 @@ function parseJson(stdout: string, what: string): unknown {
   }
 }
 
+function prop(o: unknown, key: string): unknown {
+  return typeof o === "object" && o !== null ? (o as Record<string, unknown>)[key] : undefined;
+}
+
 function field<T>(
   o: unknown,
   key: string,
   is: (v: unknown) => v is T,
   what: string,
 ): T {
-  const v = typeof o === "object" && o !== null ? (o as Record<string, unknown>)[key] : undefined;
+  const v = prop(o, key);
   if (!is(v)) throw new DeployWatchReadError(`${what} has no readable \`${key}\``);
   return v;
 }
 
 const isNumber = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
 const isString = (v: unknown): v is string => typeof v === "string";
-const isArray = (v: unknown): v is unknown[] => Array.isArray(v);
 
 function arrayOf(json: unknown, what: string): unknown[] {
   if (!Array.isArray(json)) throw new DeployWatchReadError(`${what} is not a list`);
@@ -584,8 +583,6 @@ export function readRangeLog(stdout: string): RangeCommit[] {
       };
     });
 }
-
-const defaultExec: ExecFn = (file, args, opts) => execFileAsync(file, [...args], opts);
 
 export function realDeployWatchAdapter(deps: RealDeployWatchAdapterDeps): DeployWatchAdapter {
   const repoFlag = repoSlug(deps.repo);
@@ -653,12 +650,12 @@ export function realDeployWatchAdapter(deps: RealDeployWatchAdapterDeps): Deploy
         await gh(["run", "view", String(runId), "--repo", repoFlag, "--json", "jobs"]),
         "gh run view",
       );
-      const jobs = field(view, "jobs", isArray, "gh run view").map((j) => ({
+      const jobs = arrayOf(prop(view, "jobs"), "gh run view jobs").map((j) => ({
         id: field(j, "databaseId", isNumber, "a run job"),
         name: field(j, "name", isString, "a run job"),
         url: field(j, "url", isString, "a run job"),
         conclusion: field(j, "conclusion", isString, "a run job"),
-        steps: field(j, "steps", isArray, "a run job"),
+        steps: arrayOf(prop(j, "steps"), "a run job steps"),
       }));
       // A job concluded like a run: cancelled and skipped jobs did not fail.
       const failed = jobs.filter((j) => classifyConclusion("completed", j.conclusion) === "red");
@@ -727,7 +724,7 @@ export function realDeployWatchAdapter(deps: RealDeployWatchAdapterDeps): Deploy
         await gh(["issue", "view", String(issue), "--repo", repoFlag, "--json", "comments"]),
         "gh issue view",
       );
-      return field(view, "comments", isArray, "gh issue view").some((c) => {
+      return arrayOf(prop(view, "comments"), "gh issue view comments").some((c) => {
         const marker = parseRunMarker(field(c, "body", isString, "an issue comment"));
         return marker !== null && marker.runId === runId &&
           (attempt === null || marker.attempt === attempt);

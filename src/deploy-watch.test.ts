@@ -7,7 +7,9 @@ import {
   type DeployWatchAdapter,
   type DeployWatchEvent,
   type ExaminedRange,
+  type RedJobs,
   type Landing,
+  DeployWatchReadError,
   type TickInput,
   attributeCommits,
   classifyConclusion,
@@ -15,6 +17,7 @@ import {
   decideTick,
   deployRanges,
   parseRunMarker,
+  readRangeLog,
   rangesDue,
   realDeployWatchAdapter,
   renderAttemptComment,
@@ -492,6 +495,26 @@ describe("realDeployWatchAdapter argv", () => {
     expect(await adapter.landingsBetween(sha("a4"), sha("a5"))).toBeNull();
     expect(await adapter.landingsBetween(sha("a3"), sha("a5"))).toEqual({ landings: [], otherCommits: 0 });
   });
+
+  it.each([
+    ["non-JSON stdout", () => "not json", /gh run list is not JSON/],
+    ["a non-list result", () => "{}", /gh run list is not a list/],
+    ["a run missing databaseId", () => JSON.stringify([{ headSha: "x" }]), /no readable `databaseId`/],
+  ])("fails loudly on %s", async (_name, answer, message) => {
+    const { adapter } = fake(answer);
+    const failure = await adapter.listRuns().catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(DeployWatchReadError);
+    expect((failure as Error).message).toMatch(message);
+  });
+
+  it("fails loudly on a git log line with fewer than four fields", () => {
+    expect(() => readRangeLog("abc\0def\n")).toThrow(DeployWatchReadError);
+  });
+
+  it("fails loudly when gh answers an issue URL it cannot read", async () => {
+    const { adapter } = fake(() => "https://github.com/o/r/pull/3\n");
+    await expect(adapter.createIssue("t", "b")).rejects.toThrow(DeployWatchReadError);
+  });
 });
 
 describe("createDeployWatcher", () => {
@@ -643,5 +666,112 @@ describe("createDeployWatcher", () => {
     const { w } = watcher(adapter);
     w.kick();
     await expect(w.stop()).rejects.toThrow("a bug");
+  });
+
+  it("reports an uncovered landing past the deadline once, and stays quiet while seeding", async () => {
+    const uncovered = landing(9, { committedAtMs: 1_000 });
+    let since: Landing[] = [];
+    const adapter = fakeAdapter({
+      listRuns: vi.fn(async () => [run(1), run(2)]),
+      landingsSince: vi.fn(async () => ({ landings: since, otherCommits: 0 })),
+    });
+    const { w, events, tick } = watcher(adapter);
+    await tick();
+    since = [uncovered];
+    await tick();
+    await tick();
+    await w.stop();
+    expect(events).toEqual([{
+      kind: "deploy",
+      outcome: "unverified",
+      workflow: "deploy.yml",
+      runId: null,
+      attempt: null,
+      sha: uncovered.sha,
+      issues: [9],
+      bugIssue: null,
+      filed: false,
+    }]);
+
+    const seeding = fakeAdapter({
+      listRuns: vi.fn(async () => [run(1), run(2)]),
+      landingsSince: vi.fn(async () => ({ landings: [uncovered], otherCommits: 0 })),
+    });
+    const quiet = watcher(seeding);
+    await quiet.tick();
+    await quiet.tick();
+    await quiet.w.stop();
+    expect(quiet.events).toEqual([]);
+  });
+
+  it("dedupes against an existing bug by markers, and comments once per rerun attempt", async () => {
+    let runs = [run(1), run(2, { conclusion: "failure" })];
+    const comments: [number, string][] = [];
+    const adapter = fakeAdapter({
+      listRuns: vi.fn(async () => runs),
+      listBugs: vi.fn(async () => [{ issue: 90, runId: 2, filedAttempt: 1 }]),
+      hasMarker: vi.fn(async (issue: number, _runId: number, attempt: number | null) =>
+        comments.some(([i]) => i === issue) || (attempt === null && issue === 7)),
+      comment: vi.fn(async (issue: number, body: string) => {
+        comments.push([issue, body]);
+      }),
+    });
+    const { w, tick } = watcher(adapter);
+    await tick();
+    expect(adapter.createIssue).not.toHaveBeenCalled();
+    expect(comments.map(([i]) => i)).toEqual([8]);
+    runs = [run(1), run(2, { conclusion: "failure", attempt: 2 })];
+    await tick();
+    expect(comments.map(([i]) => i)).toEqual([8, 90]);
+    await tick();
+    await w.stop();
+    expect(comments.map(([i]) => i)).toEqual([8, 90]);
+    expect(adapter.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("files nothing and marks nothing handled while the cache lacks the range's commits", async () => {
+    let cached = false;
+    const adapter = fakeAdapter({
+      landingsBetween: vi.fn(async () =>
+        cached ? { landings: [landing(7), landing(8)], otherCommits: 0 } : null),
+    });
+    const { w, events, tick } = watcher(adapter);
+    await tick();
+    expect(adapter.createIssue).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    cached = true;
+    await tick();
+    await w.stop();
+    expect(adapter.createIssue).toHaveBeenCalledTimes(1);
+    expect(events).toHaveLength(1);
+  });
+
+  it("reports an exec timeout as a notice and an unreadable forge answer as one complaint", async () => {
+    let failure: unknown = Object.assign(new Error("timed out"), { killed: true });
+    const adapter = fakeAdapter({
+      listRuns: vi.fn(async () => {
+        throw failure;
+      }),
+    });
+    const { w, events, tick } = watcher(adapter);
+    await tick();
+    failure = new DeployWatchReadError("gh run list is not JSON");
+    await tick();
+    await tick();
+    await w.stop();
+    expect(events.map((e) => e.kind)).toEqual(["notice", "complaint"]);
+    expect(events[1]).toMatchObject({ message: "Deploy watch: gh run list is not JSON" });
+  });
+
+  it("writes nothing when stopped while the failed jobs are being read", async () => {
+    const gate = deferred<RedJobs>();
+    const adapter = fakeAdapter({ failedJobs: vi.fn(() => gate.promise) });
+    const { w, tick } = watcher(adapter);
+    await tick();
+    const stopped = w.stop();
+    gate.resolve({ failed: [], logs: [] });
+    await stopped;
+    expect(adapter.failedJobs).toHaveBeenCalledTimes(1);
+    expect(adapter.createIssue).not.toHaveBeenCalled();
   });
 });

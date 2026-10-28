@@ -141,7 +141,7 @@ import type { RepoRef } from "./repo-ref.js";
 
 const execFileAsync = promisify(execFile);
 
-const MAX_BUFFER = 50 * 1024 * 1024;
+export const MAX_BUFFER = 50 * 1024 * 1024;
 
 // How many push→verify rounds a cycle may spend. Round 1 is the initial
 // verification; each further round costs a full CI wall-clock, so the budget is
@@ -1109,7 +1109,7 @@ export function pushErrorReason(err: unknown): string {
   return parts.join("\n") || e.message || "unknown git error";
 }
 
-const defaultExec: ExecFn = (file, args, opts) =>
+export const defaultExec: ExecFn = (file, args, opts) =>
   execFileAsync(file, [...args], opts);
 
 export type FailedJobLogArgs = {
