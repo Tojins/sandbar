@@ -41,7 +41,9 @@
 // re-renders from what GitHub returned this time.
 //
 // That boundary is exported as `fetchIssueSnapshot` so the inner loop can file
-// the issue as it stood at admission beside the run's logs (#195).
+// the issue as it stood at admission beside the run's logs (#195). The inner
+// loop reads the issue only through an `IssueSource`: `ghIssueSource` for a
+// run, the case file's frozen JSON for a replay, so a replay asks `gh` nothing.
 //
 // Fetch/parse failures THROW (SandbarError): a missing anchor must halt loudly
 // rather than degrade into a placeholder string the agent ignores.
@@ -178,6 +180,40 @@ export type CondensedThread = {
   // The tracker the full thread's pointer names.
   readonly repo: RepoRef;
 };
+
+// Every way `value` is not an `IssueJson` — the fields `renderIssueText`
+// reads, and the ones the replay cutoff reads — as sentences, empty when it is
+// one. For JSON from outside the process: gh's answer and a case file's.
+export function issueJsonErrors(value: unknown): readonly string[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return ["is not an object"];
+  const issue = value as Record<string, unknown>;
+  const errors: string[] = [];
+  const optionalText = (at: string, field: unknown): void => {
+    if (field !== undefined && typeof field !== "string") errors.push(`${at} is not a string`);
+  };
+  optionalText("title", issue.title);
+  optionalText("body", issue.body);
+  if (issue.comments === undefined) return errors;
+  if (!Array.isArray(issue.comments)) return [...errors, "comments is not an array"];
+  issue.comments.forEach((comment: unknown, i) => {
+    if (typeof comment !== "object" || comment === null || Array.isArray(comment)) {
+      errors.push(`comments[${i}] is not an object`);
+      return;
+    }
+    const c = comment as Record<string, unknown>;
+    optionalText(`comments[${i}].body`, c.body);
+    optionalText(`comments[${i}].createdAt`, c.createdAt);
+    const { author } = c;
+    if (author !== undefined) {
+      if (typeof author !== "object" || author === null || Array.isArray(author)) {
+        errors.push(`comments[${i}].author is not an object`);
+      } else {
+        optionalText(`comments[${i}].author.login`, (author as Record<string, unknown>).login);
+      }
+    }
+  });
+  return errors;
+}
 
 // Pure renderer: title line, body, then the comment thread (when present) with
 // author/timestamp headers and sandbar's traces dropped. No "# Issue anchor"
@@ -438,9 +474,9 @@ export async function fetchIssueSnapshot(
       { cause: err },
     );
   }
-  let parsed: IssueJson;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout) as IssueJson;
+    parsed = JSON.parse(stdout);
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err;
     throw new SandbarError(
@@ -448,8 +484,40 @@ export async function fetchIssueSnapshot(
       { cause: err },
     );
   }
-  return parsed;
+  const errors = issueJsonErrors(parsed);
+  if (errors.length > 0) {
+    throw new SandbarError(`gh returned a malformed issue #${issueId} in ${repoSlug(repo)}: ${errors.join("; ")}`);
+  }
+  return parsed as IssueJson;
 }
+
+// When the issue's body was last edited (null: never), for the replay cutoff
+// (#195). `--repo` is not a graphql flag, so the repository is named in the
+// query's variables instead.
+export async function fetchIssueLastEditedAt(issueId: number, repo: RepoRef): Promise<string | null> {
+  const { stdout } = await exec("gh", [
+    "api", "graphql", "-F", `owner=${repo.owner}`, "-F", `repo=${repo.name}`, "-F", `number=${issueId}`,
+    "-f", "query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){lastEditedAt}}}",
+  ]);
+  const field = (value: unknown, key: string): unknown =>
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>)[key] : undefined;
+  const edited = field(field(field(JSON.parse(stdout), "data"), "repository"), "issue");
+  if (edited === undefined || edited === null) {
+    throw new SandbarError(`${repoSlug(repo)} has no issue #${issueId}`);
+  }
+  const lastEditedAt = field(edited, "lastEditedAt");
+  if (lastEditedAt !== null && typeof lastEditedAt !== "string") {
+    throw new SandbarError(`gh returned a malformed lastEditedAt for issue #${issueId} in ${repoSlug(repo)}`);
+  }
+  return lastEditedAt;
+}
+
+// Where the inner loop reads its issue from (#195): every prompt's issue anchor
+// and the admission snapshot go through the one source the loop is given.
+export type IssueSource = (issueId: string) => Promise<IssueJson>;
+
+export const ghIssueSource = (repo: RepoRef): IssueSource =>
+  (issueId) => fetchIssueSnapshot(issueId, repo);
 
 // Structured issue fields for decisions that must not depend on the prompt
 // renderer's prose shape. Comments are deliberately absent: dependency edges
@@ -477,12 +545,16 @@ export type IssueAnchor = {
   readonly tracedChars: number;
 };
 
+// `issueSource` is where the issue is read; `repo` only names the tracker the
+// condensed thread's pointer quotes, so a replay's frozen source asks `gh`
+// nothing.
 export async function fetchIssueAnchor(
   issueId: string,
+  issueSource: IssueSource,
   repo: RepoRef,
   cacheDir: string,
 ): Promise<IssueAnchor> {
-  const json = await fetchIssueSnapshot(issueId, repo);
+  const json = await issueSource(issueId);
   const key = condenseKey(json);
   const comments = json.comments ?? [];
   const cache = await readCondenseCache(cacheDir, issueId, key, comments.length);
@@ -507,8 +579,9 @@ export async function fetchIssueAnchor(
 
 export async function fetchIssueText(
   issueId: string,
+  issueSource: IssueSource,
   repo: RepoRef,
   cacheDir: string,
 ): Promise<string> {
-  return (await fetchIssueAnchor(issueId, repo, cacheDir)).text;
+  return (await fetchIssueAnchor(issueId, issueSource, repo, cacheDir)).text;
 }

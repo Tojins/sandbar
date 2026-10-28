@@ -32,7 +32,6 @@ const innerLoopMocks = vi.hoisted(() => ({
   settleQualityResidue: vi.fn(),
   revParse: vi.fn(async () => "seed-sha"),
   isAncestor: vi.fn(async (_cwd: string, _ancestor: string, _descendant: string) => true),
-  fetchIssueSnapshot: vi.fn(async (): Promise<IssueJson> => ({ title: "Issue", body: "", comments: [] })),
   fetchIssueAnchor: vi.fn(async (): Promise<IssueAnchor> => ({
     text: "Issue #1: Issue",
     json: { title: "Issue", body: "", comments: [] },
@@ -41,6 +40,7 @@ const innerLoopMocks = vi.hoisted(() => ({
     rawChars: 15,
     tracedChars: 15,
   })),
+  issueSource: vi.fn(async (_issueId: string): Promise<IssueJson> => ({ title: "Issue", body: "", comments: [] })),
 }));
 
 vi.mock("./prompt.js", async (importOriginal) => ({
@@ -88,7 +88,6 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 
 vi.mock("./issue-anchor.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./issue-anchor.js")>()),
-  fetchIssueSnapshot: innerLoopMocks.fetchIssueSnapshot,
   fetchIssueAnchor: innerLoopMocks.fetchIssueAnchor,
 }));
 
@@ -411,6 +410,7 @@ describe("runUiCheck (#126)", () => {
         },
         config: {
           layout: { anchorCacheDir: "/anchor-cache" },
+          issueSource: innerLoopMocks.issueSource,
           repo: { owner: "owner", name: "repo" },
           uiCheckAgent: "codex",
           uiCheckModelId: "gpt-5.6-sol",
@@ -656,6 +656,7 @@ describe("runPartitionCheck (#158)", () => {
       },
       config: {
         layout: { anchorCacheDir: "/anchor-cache" },
+        issueSource: innerLoopMocks.issueSource,
         repo: { owner: "owner", name: "repo" },
         implementerAgent: "codex",
         implementerModelId: "gpt-5.6-sol",
@@ -1268,7 +1269,8 @@ describe("role prompt-extension wiring (#91)", () => {
     worktreePath: "/worktree",
     opts: { stackSource: { path: null } },
     config: {
-      repo: "owner/repo",
+      issueSource: innerLoopMocks.issueSource,
+      repo: { owner: "owner", name: "repo" },
       layout: { repoDir: "/repo" },
       sourceBranch: "main",
       claudeMdPath: "CLAUDE.md",
@@ -1393,6 +1395,7 @@ describe("runVerifier (#121, #180, #185)", () => {
         onEvent: vi.fn(),
       },
       config: {
+        issueSource: innerLoopMocks.issueSource,
         repo: { owner: "owner", name: "repo" },
         layout: { repoDir: "/repo" },
         sourceBranch: "main",
@@ -1615,6 +1618,7 @@ describe("runQualityReview (#187)", () => {
         onEvent: (event: EventInput) => events.push(event),
       },
       config: {
+        issueSource: innerLoopMocks.issueSource,
         repo: { owner: "owner", name: "repo" },
         layout: { repoDir: "/repo" },
         sourceBranch: "main",
@@ -1832,6 +1836,7 @@ describe("runQualityFix (#185, #187)", () => {
         onEvent: (event: EventInput) => events.push(event),
       },
       config: {
+        issueSource: innerLoopMocks.issueSource,
         repo: { owner: "owner", name: "repo" },
         layout: { repoDir: "/repo" },
         sourceBranch: "main",
@@ -2112,6 +2117,7 @@ describe("runAdjudicator (#167)", () => {
       onEvent: async (event: EventInput) => { events.push(event); },
     },
     config: {
+      issueSource: innerLoopMocks.issueSource,
       repo: { owner: "owner", name: "repo" },
       layout: { repoDir: "/repo" },
       sourceBranch: "main",
@@ -2730,6 +2736,7 @@ describe("runInnerLoop context terminals (#158)", () => {
           logsDir: "/logs",
           anchorCacheDir: "/anchor-cache",
         },
+        issueSource: innerLoopMocks.issueSource,
         repo: { owner: "owner", name: "repo" },
         sourceBranch: "main",
         env: {},
@@ -3465,7 +3472,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
     try {
       const issueLogger = await (await createTranscriptTree(root)).issue("195");
       const issueJson = { title: "Replay", body: "as admitted", comments: [] };
-      innerLoopMocks.fetchIssueSnapshot.mockReset().mockResolvedValue(issueJson);
+      innerLoopMocks.issueSource.mockReset().mockResolvedValue(issueJson);
       const outcomes = [
         { verdict: { type: "HARD-ERROR" as const, reason: "socket refused" }, accumulatedCommits: [], specGaps: [] },
         { verdict: { type: "DONE" as const, commits: [] }, accumulatedCommits: [], specGaps: [] },
@@ -3483,12 +3490,11 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
         return outcomes.shift()!;
       });
       const events: EventInput[] = [];
-      const repo = { owner: "o", name: "r" };
 
       await expect(runInnerLoop(
         { id: "195", title: "Replay", branch: "sandbar/issue-195-replay" },
         {
-          config: { partitionCheck: false, repo },
+          config: { partitionCheck: false, issueSource: innerLoopMocks.issueSource },
           attemptLogger: issueLogger,
           onEvent: (event) => events.push(event),
         } as unknown as Parameters<typeof runInnerLoop>[1],
@@ -3496,7 +3502,7 @@ describe("runInnerLoop HARD-ERROR logging (#115)", () => {
       )).resolves.toMatchObject({ type: "DONE" });
 
       expect(runCycle).toHaveBeenCalledTimes(2);
-      expect(innerLoopMocks.fetchIssueSnapshot).toHaveBeenCalledExactlyOnceWith("195", repo);
+      expect(innerLoopMocks.issueSource).toHaveBeenCalledExactlyOnceWith("195");
       expect(events.filter((event) => event.kind === "admitted")).toEqual([
         expect.objectContaining({ seedSha: "seed-sha", issueSnapshot: "issue-snapshot-1.json" }),
       ]);

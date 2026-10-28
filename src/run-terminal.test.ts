@@ -5,7 +5,7 @@ import { AgentQuotaError } from "./agent-sandbox.js";
 import {
   decideOriginLockWake,
   selectTerminalExit,
-  terminalEventFields,
+  terminalEventOf,
   terminalReason,
   verifyFinalizedTrackerState,
 } from "./run.js";
@@ -75,9 +75,11 @@ describe("terminal event reasons (#132)", () => {
   });
 });
 
-describe("terminal event facts (#194)", () => {
+describe("terminal event facts (#194, #195)", () => {
+  const issue = { id: "195", title: "Replay" };
+
   it("records the machine's typed cause and the spec-gap count", () => {
-    expect(terminalEventFields({
+    expect(terminalEventOf(issue, {
       type: "NEEDS-HUMAN",
       cause: "gate-red",
       failureTrace: "trace",
@@ -85,19 +87,38 @@ describe("terminal event facts (#194)", () => {
       budgetExhausted: null,
       strandedHead: null,
       specGaps: [{ round: 1, text: "a" }, { round: 2, text: "b" }],
-    })).toEqual({
+    }, 1200)).toEqual({
+      kind: "terminal",
+      issue: 195,
+      title: "Replay",
       terminal: "NEEDS-HUMAN",
       reason: "gate-red: trace",
       cause: "gate-red",
       specGaps: 2,
+      durationMs: 1200,
     });
   });
 
   it("records no cause for a terminal the machine gives none", () => {
-    expect(terminalEventFields({ type: "DONE", commits: [], specGaps: [] })).toEqual({
+    expect(terminalEventOf(issue, { type: "DONE", commits: [], specGaps: [] }, 5)).toEqual({
+      kind: "terminal",
+      issue: 195,
+      title: "Replay",
       terminal: "DONE",
       reason: null,
       specGaps: 0,
+      durationMs: 5,
+    });
+  });
+
+  it("records a rejected loop with its reason and no machine facts", () => {
+    expect(terminalEventOf(issue, { type: "REJECTED", reason: "socket refused" }, 7)).toEqual({
+      kind: "terminal",
+      issue: 195,
+      title: "Replay",
+      terminal: "REJECTED",
+      reason: "socket refused",
+      durationMs: 7,
     });
   });
 });

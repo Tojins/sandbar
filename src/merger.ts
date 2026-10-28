@@ -422,6 +422,7 @@ import {
 import {
   fetchIssueData,
   fetchIssueText,
+  ghIssueSource,
   type IssueData,
 } from "./issue-anchor.js";
 import { parseBlockedBy, readChunkMemberRefs } from "./plan-resolver.js";
@@ -3509,7 +3510,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // Throws (SandbarError) on fetch failure: a resolve agent reasoning
       // about the branch's intent without its issue spec is worse than a
       // halted merge phase.
-      return fetchIssueText(issueId, deps.repo, deps.anchorCacheDir);
+      return fetchIssueText(issueId, ghIssueSource(deps.repo), deps.repo, deps.anchorCacheDir);
     },
     async getIssueData(issueId) {
       return fetchIssueData(issueId, deps.repo);

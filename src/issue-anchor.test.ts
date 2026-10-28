@@ -22,6 +22,7 @@ import {
   condenseKey,
   dropSandbarTraces,
   fetchIssueAnchor,
+  ghIssueSource,
   parseCondenseAnswer,
   readCondenseCache,
   renderCondenserInput,
@@ -548,7 +549,7 @@ describe("fetchIssueAnchor", () => {
   it("renders the uncondensed thread until the cache answers it, then the condensed one", async () => {
     const cacheDir = join(dir, "anchor-cache");
     const plain = renderIssueText("9", thread);
-    const before = await fetchIssueAnchor("9", repo, cacheDir);
+    const before = await fetchIssueAnchor("9", ghIssueSource(repo), repo, cacheDir);
     expect(before).toEqual({
       text: plain,
       json: thread,
@@ -561,7 +562,7 @@ describe("fetchIssueAnchor", () => {
     await writeCondenseCache(cacheDir, "9", {
       key: before.key, answer: condensedAnswer, provider: "claude", model: "sonnet",
     });
-    const after = await fetchIssueAnchor("9", repo, cacheDir);
+    const after = await fetchIssueAnchor("9", ghIssueSource(repo), repo, cacheDir);
     expect(after.cache).toEqual({ kind: "hit", answer: condensedAnswer });
     expect(after.text).toBe(renderIssueText("9", thread, { answer: condensedAnswer, repo }));
     expect(after.tracedChars).toBe(plain.length);
@@ -572,7 +573,7 @@ describe("fetchIssueAnchor", () => {
       "x".repeat(500) + "\n</details>";
     const traced: IssueJson = { ...thread, comments: [{ body: bot }] };
     await writeFile(join(dir, "issue.json"), JSON.stringify(traced));
-    const anchor = await fetchIssueAnchor("9", repo, join(dir, "anchor-cache"));
+    const anchor = await fetchIssueAnchor("9", ghIssueSource(repo), repo, join(dir, "anchor-cache"));
     expect(anchor.tracedChars).toBe(renderIssueText("9", traced).length);
     expect(anchor.rawChars).toBe(anchor.tracedChars + bot.length - dropSandbarTraces(bot).length);
     expect(anchor.rawChars - anchor.tracedChars).toBeGreaterThan(450);

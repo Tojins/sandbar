@@ -4,6 +4,11 @@ Working rules for anything that commits to this repo — Claude Code in a termin
 or a sandbar implementer/reviewer inside its sandbox. Architecture notes are not
 here — those are `CLAUDE.md` and the module headers.
 
+## Never run a replay
+
+Agents never run `npm run replay`: it reruns past issues on real agents and
+spends real tokens, so only a human starts one (#195).
+
 ## Bump the version on every commit
 
 Every commit moves `version` in `package.json`, in the **same commit** as the

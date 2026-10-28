@@ -39,7 +39,6 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
 
 vi.mock("./issue-anchor.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./issue-anchor.js")>(),
-  fetchIssueSnapshot: vi.fn(async () => ({ title: "Issue", body: "", comments: [] })),
   fetchIssueAnchor: vi.fn(async () => ({
     text: "Issue #1: Issue",
     json: { title: "Issue", body: "", comments: [] },
@@ -157,6 +156,7 @@ const config = (
     logsDir: "/tmp/.sandbar/logs",
     anchorCacheDir: "/tmp/.sandbar/anchor-cache",
   },
+  issueSource: async () => ({ title: "Issue", body: "", comments: [] }),
   repo: { owner: "o", name: "r" },
   sourceBranch: "main",
   env: {},

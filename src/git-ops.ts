@@ -40,6 +40,10 @@
 // `revParse` is exported for the inner loop's `admitted.seedSha` (#195): the
 // commit the symbolic seed ref named when the issue was admitted.
 //
+// `gitStdout` is the one "run git in this directory, hand back stdout" call,
+// with an optional stdin, for the callers that have no richer need (replay,
+// #195: its cache is built by `update-ref --stdin`).
+//
 // `hasNonMergeCommitOutside` is the shared safety test for retiring issue
 // branches (#177, #179). Chunk wrap-up applies it to origin's freshly fetched
 // copy; preflight applies it to a CLOSED issue's cache copy. Keeping the git
@@ -285,6 +289,16 @@ const revParseOrNull = async (cwd: string, ref: string): Promise<string | null> 
 
 const errorMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
+
+export const gitStdout = async (
+  cwd: string,
+  args: readonly string[],
+  input?: string,
+): Promise<string> => {
+  const child = exec("git", [...args], { cwd, maxBuffer: 64 * 1024 * 1024 });
+  if (input !== undefined) child.child.stdin?.end(input);
+  return (await child).stdout;
+};
 
 export const revParse = async (cwd: string, ref: string): Promise<string> =>
   (await exec("git", ["rev-parse", "--verify", "--quiet", ref], { cwd })).stdout.trim();

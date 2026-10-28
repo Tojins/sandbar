@@ -187,6 +187,14 @@ async function imageExists(tag: string): Promise<boolean> {
   }
 }
 
+// A null recording would leave the tag out of `participating` in
+// `createBranchImages`, where "unknown provenance" would then mean "never
+// rebuild" rather than "always". So it is recorded as a fingerprint no tree can
+// produce.
+function baselineOf(recorded: string | null): string {
+  return recorded ?? UNKNOWN_PROVENANCE;
+}
+
 // The fingerprint an existing image was built from, or null when it is absent
 // or carries no such label. `image exists` names absence; inspect failures do
 // not establish either condition and propagate (#99).
@@ -548,11 +556,8 @@ export async function ensureImages(
     if (!rebuildInPlace && exists) {
       // The baseline is what the image on disk was built from, not what this
       // context hashes to — see above. A null recording leaves the entry out,
-      // which drops the tag from `participating` in `createBranchImages`… and
-      // that is the one place this needs help, because "unknown provenance"
-      // would then mean "never rebuild" rather than "always". So it is recorded
-      // as a fingerprint no tree can produce.
-      baseFingerprints.set(image.tag, recorded ?? UNKNOWN_PROVENANCE);
+      // which drops the tag from `participating` in `createBranchImages`.
+      baseFingerprints.set(image.tag, baselineOf(recorded));
       await record(false, "rebuild-in-place-suspended");
       continue;
     }
@@ -576,6 +581,29 @@ export async function ensureImages(
     await record(true, recorded === null ? "inputs-unrecorded" : "inputs-changed");
   }
   return baseFingerprints;
+}
+
+// The base fingerprints `ensureImages` would return under
+// `rebuildInPlace: false`, for a caller that may build no declared image at
+// all: replay (#195), whose declared tags are the daemon's, host-global, and
+// would be swapped under it by a rebuild. Every declared tag must exist; a
+// missing one is refused by name rather than built.
+export async function existingBaseFingerprints(
+  images: readonly BuiltImage[],
+): Promise<ReadonlyMap<string, string>> {
+  const present = await Promise.all(images.map((image) => imageExists(image.tag)));
+  const missing = images.filter((_, i) => !present[i]).map((image) => image.tag);
+  if (missing.length > 0) {
+    throw new SandbarError(
+      `Declared image(s) missing in ${RUNTIME}: ${missing.join(", ")}. Replay builds ` +
+        "no declared image; start the daemon once, or build them, first.",
+    );
+  }
+  const participating = images.filter((image) => (image.rebuildOn ?? []).length > 0);
+  return new Map(await Promise.all(participating.map(async (image) => [
+    image.tag,
+    baselineOf(await readExistingInputsLabel(image.tag)),
+  ] as const)));
 }
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,11 @@ that report (`reflect-mine.ts`) into typed clusters and outlier issues, has a
 tagger and a synthesizer (`reflect.ts`, cached, sandboxed in `reflectScope`)
 turn them into proposals, and writes the report (`reflect-report.ts`) under
 `<stateDir>/reflect/`; `--no-agents` stops at the tables.
+`npm run replay` (`src/replay-cli.ts`, args in `replay-args.ts`, #195) is a third, and HUMAN-ONLY: `freeze`
+writes a case file of past issues at their seeds, `run` drives
+`runInnerLoop` over it k times into `<workDir>/replay/sessions/<label>/` with
+no forge credential (`replay-run.ts`; pure layer `replay.ts`); the daemon,
+`cli.ts`, `index.ts`, prompts and reflect never import or name it.
 `scripts/stats-classify.mjs` (#209) classes the `--json --with-prose` report's
 quality findings and fixer commits for #183; plain ESM, not shipped.
 The config is a **program**, imported not parsed; `src/config.ts` is the one

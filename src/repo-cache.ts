@@ -12,7 +12,8 @@
 // `codex login`, which the credential terminal then surfaces loudly.
 // `reflect/` holds the reports `npm run reflect` writes (#182), its answer
 // cache and its throwaway per-process workspaces; the daemon never reads or
-// touches it.
+// touches it. Nor `replay/` (#195): `npm run replay`'s own lock, base cache
+// and sessions, laid out by `replay-run.ts`.
 //
 // `repo.git` being BARE is not tidiness: it is what makes the three
 // genuinely-destructive operations (`branch -D`, `worktree remove --force`,

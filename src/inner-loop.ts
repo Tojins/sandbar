@@ -132,6 +132,8 @@
 // issue snapshot this wrapper files before forwarding it (#195), so the
 // admission can be replayed; a fetch failure throws as the anchor's would, and
 // a HARD-ERROR retry, whose `admitted` is dropped, files no second snapshot.
+// The snapshot and every prompt's issue anchor read `config.issueSource`:
+// `gh` in a run, the frozen case in a replay.
 // Sandbox close defers clone reclamation silently to run.ts's next origin-lease
 // barrier; this is distinct from the human-inspection preservation channel and
 // therefore cannot overwrite or manufacture an operator-facing reason (#139).
@@ -231,9 +233,9 @@ import {
   visiblePhases,
 } from "./inner-loop-machine.js";
 import {
+  type IssueSource,
   droppedComments,
   fetchIssueAnchor,
-  fetchIssueSnapshot,
   parseCondenseAnswer,
   renderIssueText,
   writeCondenseCache,
@@ -271,8 +273,8 @@ import {
   runReviewerInvocations,
 } from "./reviewer-run.js";
 import type { RepoLayout } from "./repo-cache.js";
-import { type VerifierOutcome, combineVerifier, reviewScope } from "./verifier.js";
 import type { RepoRef } from "./repo-ref.js";
+import { type VerifierOutcome, combineVerifier, reviewScope } from "./verifier.js";
 import { startTimer } from "./timing.js";
 import {
   containerResourcesOf,
@@ -280,7 +282,8 @@ import {
   type ContainerResources,
 } from "./container-resources.js";
 import {
-  type ProjectAnchorOptions,
+  type IssueAnchorOptions,
+  type PromptAnchorOptions,
   type PriorReviewRound,
   type QualityOverrule,
   type QualityReviewMode,
@@ -605,10 +608,14 @@ export type InnerLoopConfig = {
   // splitting `cwd` into a repo and a set of paths is what stops it becoming a
   // coincidence of which of two directories a call site happened to mean.
   readonly layout: RepoLayout;
-  // The tracker the issue anchor quotes, named rather than inferred from a
-  // directory's git remotes (#34). Distinct from `layout` on purpose: the
-  // cache's `origin` is copied from the operator's checkout and is not the
-  // configured repository until preflight has confirmed it is.
+  // Where the issue anchor and the admission snapshot read the issue (#195):
+  // `ghIssueSource` naming the configured tracker rather than inferring it
+  // from a directory's git remotes (#34) — distinct from `layout` on purpose,
+  // since the cache's `origin` is copied from the operator's checkout — or a
+  // replay's frozen case.
+  readonly issueSource: IssueSource;
+  // The tracker a condensed thread's pointer names (#217): prose only, never
+  // fetched from, so a replay's frozen source still asks `gh` nothing.
   readonly repo: RepoRef;
   readonly sourceBranch: string;
   // The declared credential record (`config.env`), forwarded to each sandbox.
@@ -767,7 +774,7 @@ export async function runInnerLoop(
       if (event.kind === "admitted") {
         if (admitted) return;
         const issueSnapshot = await opts.attemptLogger.writeIssueSnapshot(
-          await fetchIssueSnapshot(issue.id, opts.config.repo),
+          await opts.config.issueSource(issue.id),
         );
         await opts.onEvent({ ...event, issueSnapshot });
         admitted = true;
@@ -1219,9 +1226,8 @@ async function runSandboxCycle(
     // string, so the mistake type-checks and the prompt-layer tests, which
     // pass their own tree, stay green.
     const anchorOpts = {
-      repo: config.repo,
+      ...issueAnchorOptionsOf(config),
       repoDir: config.layout.repoDir,
-      anchorCacheDir: config.layout.anchorCacheDir,
       claudeMdPath: config.claudeMdPath,
       contextMdPath: config.contextMdPath,
       adrDir: config.adrDir,
@@ -1479,7 +1485,7 @@ type ExecuteActionCtx = {
   readonly sandbox: Sandbox;
   readonly opts: InnerLoopOptions;
   readonly config: InnerLoopConfig;
-  readonly anchorOpts: ProjectAnchorOptions;
+  readonly anchorOpts: PromptAnchorOptions;
   // What `ensureIssueBranch` seeded the branch from, threaded to both prompt
   // builders so the implementer's diff and the reviewer's changeset are the
   // same range (#61).
@@ -1597,7 +1603,12 @@ export async function runAnchorCondense(
   ctx: ExecuteActionCtx,
 ): Promise<Extract<LoopEvent, { kind: "anchor-ready" | "anchor-condenser-wrote" }>> {
   const { issue, sandbox, opts, config } = ctx;
-  const anchor = await fetchIssueAnchor(issue.id, config.repo, config.layout.anchorCacheDir);
+  const anchor = await fetchIssueAnchor(
+    issue.id,
+    config.issueSource,
+    config.repo,
+    config.layout.anchorCacheDir,
+  );
   if (anchor.cache.kind === "miss" && anchor.cache.problem !== null) {
     await opts.onEvent({
       kind: "notice",
@@ -1712,8 +1723,7 @@ export async function runPartitionCheck(
   const { issue, sandbox, opts, config } = ctx;
   const basePrompt = await buildPartitionCheckPrompt(
     issue.id,
-    config.repo,
-    config.layout.anchorCacheDir,
+    issueAnchorOptionsOf(config),
     config.maxContextChars,
   );
   const size = contextChars(
@@ -1844,11 +1854,7 @@ export async function runUiCheck(
   Extract<LoopEvent, { kind: "ui-check-result" | "ui-checker-wrote" }>
 > {
   const { issue, sandbox, opts, config } = ctx;
-  const basePrompt = await buildUiCheckPrompt(
-    issue.id,
-    config.repo,
-    config.layout.anchorCacheDir,
-  );
+  const basePrompt = await buildUiCheckPrompt(issue.id, issueAnchorOptionsOf(config));
   let prompt = basePrompt;
 
   // One correction at most. Neither invocation owns a completion signal:
@@ -1976,13 +1982,19 @@ export async function runUiCheck(
 
 // The anchors and branch range every branch-reading cold role is built from,
 // with that role's own prompt extension.
+// Where every role's issue anchor is read from, and cached condensed.
+const issueAnchorOptionsOf = (config: InnerLoopConfig): IssueAnchorOptions => ({
+  issueSource: config.issueSource,
+  repo: config.repo,
+  anchorCacheDir: config.layout.anchorCacheDir,
+});
+
 const branchRoleInputs = (
   ctx: ExecuteActionCtx,
   promptExtension: PromptExtension | undefined,
 ): ReviewerPromptInputs => ({
   issue: ctx.issue,
-  repo: ctx.config.repo,
-  anchorCacheDir: ctx.config.layout.anchorCacheDir,
+  ...issueAnchorOptionsOf(ctx.config),
   repoDir: ctx.config.layout.repoDir,
   worktreePath: ctx.sandbox.worktreePath,
   sourceBranch: ctx.config.sourceBranch,

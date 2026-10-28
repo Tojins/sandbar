@@ -29,6 +29,7 @@ import {
   ImageBuildError,
   buildImage,
   ensureImages,
+  existingBaseFingerprints,
   readInputsLabel,
 } from "./ensure-images.js";
 import {
@@ -190,6 +191,40 @@ describe.runIf(available)("ensureImages against real podman", () => {
       expect(await readInputsLabel(testImageTag(`absent-${task.id}`))).toBeNull();
     },
     120_000,
+  );
+
+  it.concurrent(
+    "existingBaseFingerprints refuses a missing tag by name without building, and maps only rebuildOn images",
+    async ({ expect, task, onTestFinished }) => {
+      const { root, image } = await fixture(`existing-${task.id}`, onTestFinished);
+      const missing = testImageTag(`missing-${task.id}`);
+      // Nothing is built for a declared tag: an unbuilt one stays absent.
+      await expect(existingBaseFingerprints([image]))
+        .rejects.toThrow(new RegExp(`missing in .*: ${image.tag}\\.`));
+      expect(await readInputsLabel(image.tag)).toBeNull();
+
+      await ensureImages([image], root, { scope: SCOPE });
+      await expect(existingBaseFingerprints([image, { tag: missing, containerfile: "Containerfile" }]))
+        .rejects.toThrow(new RegExp(`missing in .*: ${missing}\\.`));
+      expect(await readInputsLabel(missing)).toBeNull();
+      const recorded = await readInputsLabel(image.tag);
+      expect(recorded).not.toBeNull();
+      // A declared image with no `rebuildOn` takes no part; one that carries
+      // no recorded label falls back to the unknown-provenance fingerprint.
+      const plain = testImageTag(`plain-${task.id}`);
+      const unlabelled = testImageTag(`unlabelled-${task.id}`);
+      for (const tag of [plain, unlabelled]) {
+        await exec(RUNTIME, ["tag", BASE, tag]);
+        onTestFinished(async () => { await exec(RUNTIME, ["rmi", "--force", tag]); }, 60_000);
+      }
+      const fingerprints = await existingBaseFingerprints([
+        image,
+        { tag: plain, containerfile: "Containerfile" },
+        { tag: unlabelled, containerfile: "Containerfile", rebuildOn: ["package-lock.json"] },
+      ]);
+      expect([...fingerprints]).toEqual([[image.tag, recorded], [unlabelled, "unrecorded"]]);
+    },
+    600_000,
   );
 
   it.concurrent(
