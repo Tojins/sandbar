@@ -100,12 +100,14 @@ describe("captureAgentRun (#67)", () => {
 
   // Whatever the agent managed to print before the budget ran out is still
   // captured — a timeout is a spent attempt, and what it printed is the only
-  // record of what it was doing.
+  // record of what it was doing. The budget is seconds, not milliseconds:
+  // the child has to boot node and write before it runs out, and under a full
+  // parallel suite a 300 ms budget killed it before it had printed anything.
   it("keeps the output a timed-out process had already produced", async () => {
     const [file, args] = node(
       `process.stdout.write("partway through"); setTimeout(() => {}, 60_000);`,
     );
-    const run = await captureAgentRun(file, args, "", opts(300));
+    const run = await captureAgentRun(file, args, "", opts(3_000));
     expect(run.end).toBe("timeout");
     expect(run.stdout).toBe("partway through");
   });
