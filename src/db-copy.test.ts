@@ -243,6 +243,7 @@ describe("createDbCopySlot", () => {
   const slotWith = (over: {
     readonly up?: boolean | Error;
     readonly hookOk?: boolean | Error;
+    readonly hookRuns?: () => Promise<void>;
     readonly hooks?: number;
     readonly registry?: DbCopies;
   } = {}) => {
@@ -265,6 +266,7 @@ describe("createDbCopySlot", () => {
       sandbox: {
         runHooks: async (hooks) => {
           ops.push(`hooks ${hooks.map((h) => h.command).join(",")}`);
+          await over.hookRuns?.();
           if (over.hookOk instanceof Error) throw over.hookOk;
           return { ok: over.hookOk ?? true, output: "migrated 3\n" };
         },
@@ -372,6 +374,29 @@ describe("createDbCopySlot", () => {
     expect(await slot.align(null)).toEqual({ kind: "none" });
     expect(await readdir(layout.copies)).toEqual([]);
     expect((await registry.acquire("221", target())).kind).toBe("ok");
+  });
+
+  it("returns none, touching nothing, when align(null) drops the copy while its hook runs", async () => {
+    await publish();
+    let hookStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      hookStarted = resolve;
+    });
+    let finishHook!: () => void;
+    const { slot, events } = slotWith({
+      hookRuns: () => new Promise<void>((resolve) => {
+        finishHook = resolve;
+        hookStarted();
+      }),
+    });
+    const acquiring = slot.align("implementer");
+    await started;
+    expect(await slot.align(null)).toEqual({ kind: "none" });
+    finishHook();
+    expect(await acquiring).toEqual({ kind: "none" });
+    expect(events.map((e) => e.action)).toEqual(["dropped"]);
+    expect(await readdir(logDir)).toEqual([]);
+    expect(await readdir(layout.copies)).toEqual([]);
   });
 });
 

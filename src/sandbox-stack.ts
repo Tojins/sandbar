@@ -78,7 +78,10 @@
 // any sibling, so `stop` removes it joiners-first and records its teardown;
 // its follower appends to the target's log after a `[sandbar] db copy`
 // marker. `swapDbCopyOut` measures and removes it, then starts the target
-// again and follows it from that start, so the file holds nothing twice. A
+// again and follows it from that start, so the file holds nothing twice. On a
+// stack already stopped it only forgets the copy: `stop` measured and removed
+// it and its target, and the cleanup registry can stop a stack before the
+// inner loop's teardown drops the copy (#251). A
 // copy that does not come up is removed and the target restarted: the copy
 // is an aid, so its failure is the caller's to report, never a HARD-ERROR.
 // Recreating the target instead would re-run its prepare hook.
@@ -661,6 +664,7 @@ export async function startSandboxStack(
     if (dbCopy === null) throw new SandbarError(`sandbox stack for issue ${opts.issueId} runs no database copy`);
     const { name, target } = dbCopy;
     dbCopy = null;
+    if (stopped) return;
     await removeCopy(name);
     await note(target, `db copy removed; '${target.name}' restarted`);
     await restartTarget(target);
