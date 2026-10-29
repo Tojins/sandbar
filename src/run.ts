@@ -2049,10 +2049,12 @@ export async function run(
   };
 
   // Whom a landing's gate-2 or resolve attempt is about: an issue by number, or
-  // the idle task a `janitor-<task>` id names (#205).
+  // the idle task a `janitor-<task>` id names (#205). A `chunk-<root>` key has
+  // no subject of its own, so it is filed under its root issue.
   const landingSubject = (id: string): EventSubject => {
     const task = janitorTaskFromStackId(id);
-    return task === null ? { issue: Number(id) } : { janitor: task };
+    if (task !== null) return { janitor: task };
+    return { issue: Number(id.startsWith("chunk-") ? id.slice("chunk-".length) : id) };
   };
 
   const recordLandingOutcome = async (outcome: MergerOutcome): Promise<void> => {
