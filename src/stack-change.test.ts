@@ -164,6 +164,12 @@ describe("classifyStackChange", () => {
       config({ steps: [{ ...test, settles: ["missing-tests"] }] }),
       [{ where: "step 'test'", what: "settles" }],
     ],
+    // A branch could otherwise move its own steps out of gate-1's way (#247).
+    [
+      "a step made standalone",
+      config({ steps: [{ ...test, standalone: true }] }),
+      [{ where: "step 'test'", what: "standalone" }],
+    ],
     [
       "an added step",
       config({ steps: [test, { name: "lint", in: "app", command: ["npm", "run", "lint"] }] }),
@@ -171,6 +177,15 @@ describe("classifyStackChange", () => {
     ],
   ])("is `non-env` for %s", (_, branch, differences) => {
     expect(classify(ok(branch))).toEqual({ kind: "non-env", path: PATH, differences });
+  });
+
+  it("is `non-env` for a step the branch stops marking standalone (#247)", () => {
+    const standaloneTip = resolve(config({ steps: [{ ...test, standalone: true }] }));
+    expect(classifyStackChange(PATH, standaloneTip, ok(config()))).toEqual({
+      kind: "non-env",
+      path: PATH,
+      differences: [{ where: "step 'test'", what: "standalone" }],
+    });
   });
 
   it("is `non-env` when the branch has no stack file, or an invalid one", () => {

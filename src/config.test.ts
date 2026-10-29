@@ -316,6 +316,45 @@ describe("resolveStackFile (#186)", () => {
   });
 });
 
+describe("a standalone step (#247)", () => {
+  const LABEL = "gate/stack.json at origin/main";
+  const stack = minimal.gateStack as GateStackConfig;
+  const withCheck = (check: Record<string, unknown>) => ({
+    ...stack,
+    steps: stack.steps.map((s) => (s.name === "check" ? { ...s, ...check } : s)),
+  });
+  const standaloneOf = (resolved: { readonly steps: readonly { readonly name: string; readonly standalone: boolean }[] }) =>
+    resolved.steps.map((s) => [s.name, s.standalone]);
+
+  it("is not standalone by default, inline or in a stack file", () => {
+    expect(standaloneOf(inlineStack(resolveConfig(minimal)).stack)).toEqual([["check", false], ["test", false]]);
+    expect(standaloneOf(resolveStackFile(JSON.stringify(stack), LABEL, {}).stack))
+      .toEqual([["check", false], ["test", false]]);
+  });
+
+  it("resolves the field inline and from a stack file alike", () => {
+    const inline = resolveConfig({ ...minimal, gateStack: withCheck({ standalone: true }) as GateStackConfig });
+    expect(standaloneOf(inlineStack(inline).stack)).toEqual([["check", true], ["test", false]]);
+    expect(standaloneOf(resolveStackFile(JSON.stringify(withCheck({ standalone: true })), LABEL, {}).stack))
+      .toEqual([["check", true], ["test", false]]);
+  });
+
+  it("refuses a stack file whose standalone is not a boolean", () => {
+    expect(() => resolveStackFile(JSON.stringify(withCheck({ standalone: "yes" })), LABEL, {}))
+      .toThrow(/^gate\/stack\.json at origin\/main: steps\[0\] has 'standalone' that is not a boolean/);
+  });
+
+  it("refuses a standalone step whose container does not mount the worktree", () => {
+    const onDb = {
+      ...stack,
+      steps: [...stack.steps, { name: "ping", in: "db", command: ["true"], standalone: true }],
+    };
+    const message = /step 'ping' is standalone but runs in 'db', which does not set 'mountWorktree'/;
+    expect(() => resolveConfig({ ...minimal, gateStack: onDb })).toThrow(message);
+    expect(() => resolveStackFile(JSON.stringify(onDb), LABEL, {})).toThrow(message);
+  });
+});
+
 describe("resolveCopyToWorktree (#147)", () => {
   const cwd = "/consumer/checkout";
 
