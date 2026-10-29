@@ -5,7 +5,8 @@
 //
 // A chunk refresh (#174) is one more merge unit on this same path, after the
 // pass's source landing: detach at `origin/<chunk>`, merge --no-ff
-// `origin/<sourceBranch>`, mechanically resolve the version collision first,
+// `origin/<sourceBranch>` (or, for a chunk stacked on another, #243, that
+// one's branch), mechanically resolve the version collision first,
 // then use the ordinary resolve loop and gate-2 before directly pushing the
 // existing chunk branch. It never rewrites the branch and never moves member
 // refs, so every landed member remains contained. Moving the PR base and head
@@ -62,7 +63,8 @@
 // A DONE branch lands on the source branch unless its issue carries a CHUNK
 // (`IssueRef.chunk`, put there by the planner), in which case it lands on that
 // chunk's branch — `sandbar/chunk-<root>-<slug>`, created at
-// `origin/<sourceBranch>` the first time a member lands on it. Everything
+// `origin/<sourceBranch>` the first time a member lands on it (a chunk stacked
+// on another, #243, is created at that one's tip while origin has it). Everything
 // between the two paths is the same code: same ephemeral worktree, same
 // per-issue `merge --no-ff`, same resolve loop with the same sibling issue
 // list, same gate-2 on the composition, same `preMergeSha` revert on
@@ -94,7 +96,8 @@
 // with the source branch is part of landing the chunk, not of growing it.
 //
 // EVERY CHUNK PUSH IS FOLLOWED BY A DRAFT PULL REQUEST (#62), created or
-// updated, chunk → source branch: the branch is where the work is, the PR is
+// updated, chunk → source branch (→ the chunk it is stacked on while origin
+// has that, #243, so the diff is its own work): the branch is where the work is, the PR is
 // where a human reviews it, and the review lane produces nothing anyone can act
 // on without it. After the push and after the `chunkLanded` entries, in that
 // order — a PR is a handle on commits origin has, and a failure to open one

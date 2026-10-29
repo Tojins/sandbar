@@ -100,6 +100,10 @@
 //                     authoritative `ready-for-agent` is still in flight, so
 //                     landing waits, keeps `land`, and names that member on
 //                     the PR rather than closing it with feedback unbuilt.
+//   * stacked       — the chunk is stacked on another whose branch is still on
+//                     origin (#243, `ChunkLandTarget.base`). Its branch carries
+//                     that one's commits, which land with it, so `run.ts`
+//                     keeps the request out of the pass and `land` STAYS.
 //   * drifted       — no derived chunk claims this origin branch for its
 //                     encoded root, or origin carries competing branches for
 //                     that root. Since #193 a landed member answers to the
@@ -141,10 +145,11 @@
 // ---------------------------------------------------------------------------
 //
 // Close every member explicitly, drop `needs-review`, take `land` back off the
-// pull request, close it, then atomically delete the chunk branch, its member
-// refs, and each published issue branch that has no non-merge commit outside
-// the landed source tip. An issue branch with unlanded work is kept and named
-// in the durable log and run complaint.
+// pull request, close it, move the pull requests of chunks stacked on this one
+// onto the source branch (#243), then atomically delete the chunk branch, its
+// member refs, and each published issue branch that has no non-merge commit
+// outside the landed source tip. An issue branch with unlanded work is kept and
+// named in the durable log and run complaint.
 //
 // "EVERY MEMBER" MEANS EVERY MEMBER ON THE BRANCH, and that is narrower than
 // every member of the chunk. Both callers hand this wrap-up an already filtered
@@ -206,7 +211,9 @@
 //
 // THE BRANCH DELETE IS LAST AND IT IS CONDITIONAL. Deleting it is what stops
 // reconciliation firing on this chunk again, so a chunk whose members did not
-// all close keeps its branch: the next run finds it contained in the source
+// all close keeps its branch, and so does one whose stacked pull requests
+// could not be retargeted, since GitHub closes a pull request whose base is
+// deleted: the next run finds it contained in the source
 // branch, reconciles it again, and retries exactly the writes that failed. That
 // is why there is no retry loop here — the retry is the next cycle, which is a
 // better one than three `gh` attempts a second apart.
@@ -234,8 +241,8 @@
 // The wrap-up is adapter-driven, and its two callers sit at opposite ends of a
 // cycle: the merge phase passes itself (`MergerAdapter` is a superset of
 // `ChunkWrapupAdapter`), and the plan-time reconciler has no merger to pass.
-// What they need done is nevertheless the same five `gh` calls and one
-// guarded atomic `git push --delete`, so `chunkForgeWrites` below is the one
+// What they need done is nevertheless the same `gh` calls and one guarded
+// atomic `git push --delete`, so `chunkForgeWrites` below is the one
 // place that argv is spelled — the same argument `forge-pr.ts` makes one level
 // up (#62).
 // Duplicated argv is argv that drifts, and this argv CLOSES ISSUES.
@@ -1354,7 +1361,8 @@ export async function wrapUpLandedChunk(
 // BRANCH, not the lines:
 //
 //   * KEPT     — the branch is still on origin, because a member would not
-//                close or the delete itself failed. Something WILL retry
+//                close, a stacked pull request would not retarget, or the
+//                delete itself failed. Something WILL retry
 //                this: the next cycle's reconciler finds the branch contained
 //                in the source branch and does exactly the writes that
 //                failed. Operator-actionable, and honestly described as

@@ -63,8 +63,10 @@ and the gate stack (`config.gateStack`, #24).
 
 1. **Plan** — deterministic, no LLM. `plan-resolver.ts` (queue label, actor
    filter #136, `## Blocked by`), `lanes.ts`, `chunks.ts` (chunks are derived
-   components of review-gated issues), `chunk-follow-up.ts` (PR review →
-   re-queue members, #95), `chunk-reconcile.ts` (finish already-merged chunks).
+   components of review-gated issues; one whose PR carries `land` is frozen,
+   and new connected work stacks on it as `sandbar/chunk-<root>_on_<base>-…`,
+   #243), `chunk-follow-up.ts` (PR review → re-queue members, #95),
+   `chunk-reconcile.ts` (finish already-merged chunks).
 2. **Inner loop** — `inner-loop-machine.ts` (pure state machine) +
    `inner-loop.ts` (I/O). One sandbox per issue: anchor condenser (#217, only
    above `condenseAboveChars`, once per thread change, falls back

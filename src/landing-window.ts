@@ -14,7 +14,9 @@
 //   * a chunk's `land` request is left out of the runnable requests and
 //     reported as deferred; its pull request is told once per closure (per
 //     process: a restart while closed tells it again). The label stays on,
-//     so the first recompute after the window opens lands it.
+//     so the first recompute after the window opens lands it. Meanwhile the
+//     label freezes the chunk, and new connected work stacks on it (#243,
+//     `chunks.ts`).
 //   * a chunk whose pull request carries `land-hotfix` (`chunks.ts`) is not
 //     held at all. It is taken off with `land` when the chunk lands or parks.
 //   * a DONE auto-lane issue — the other way a commit reaches the source

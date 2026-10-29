@@ -68,6 +68,17 @@
 // source-into-chunk refresh; a later recompute admits the member from git
 // containment, never from the issue state alone.
 //
+// A chunk STACKED on another (#243, `chunks.ts`) is built on that one's
+// branch, so a blocker on the base counts as on its own: its members seed
+// from the stacked tip, or the base's before the stacked branch exists. The
+// stacked branch must contain the base's tip before it takes another member,
+// which queues a base-into-chunk refresh the same way (`ChunkRefresh.base`),
+// and when the branch a member seeds from is a FROZEN base lacking the source
+// tip, nothing may refresh it, so the member is held until the base lands. A
+// frozen chunk takes no rework either: it is held (`frozen`) and keeps the
+// chunk's `land` waiting, since only a human can say which of the two they
+// meant.
+//
 // CROSS-CHUNK dependencies stay strict, and nothing about them is relaxed. An
 // blocker present on a DIFFERENT chunk branch has not reached the source
 // branch, so its commits are not under the dependent at all;

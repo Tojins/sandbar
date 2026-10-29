@@ -29,8 +29,11 @@
 //                              that have nowhere to land at all (#61: the ones
 //                              `chunks.ts` could give no chunk) and saying on
 //                              the issue where an `auto-land` label lost to
-//                              inherited gating. A changes-requested review on
-//                              a chunk's pull request is routed to its landed
+//                              inherited gating. The pull requests carrying
+//                              `land`/`land-hotfix` are read first: their
+//                              chunks are FROZEN (#243, `chunks.ts`). A
+//                              changes-requested review on an unfrozen
+//                              chunk's pull request is routed to its landed
 //                              member(s) and re-queues them (#95), and the
 //                              RECONCILER (#64) finishes off any chunk branch
 //                              already contained in origin/<sourceBranch> —
@@ -81,7 +84,9 @@
 //                              `landing-window.ts`), each recompute keeps a
 //                              chunk's `land` request out of the pass (not a
 //                              `land-hotfix` one) and holds a DONE auto-lane
-//                              issue in the pool until it opens.
+//                              issue in the pool until it opens. A chunk
+//                              stacked on another (#243) keeps its `land`
+//                              waiting until that one has landed.
 //   Finalise:                  Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
