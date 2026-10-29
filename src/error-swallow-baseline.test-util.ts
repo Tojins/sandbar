@@ -42,7 +42,8 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // a push refused for a stale lease as a lease failure, and its loop's abort
   // and provider errors as outcomes; anything else is rethrown. The fourth
   // classifies a lease lost to cleanup as cleanup's to record, and records any
-  // other failure of the run before rethrowing it.
+  // other failure as the run's `failed` outcome, its complaint included, as
+  // the pool records a rejected issue.
   "janitor.ts": 4,
   "forge-verify.ts": 6,
   "gate-run.ts": 2,
@@ -77,9 +78,7 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // through `stopAtStartup` like every other post-lock startup fault: the fault
   // is recorded as a complaint and a halted exit, and cleanup releases the
   // origin lease — none of which happens if it escapes `run()` instead.
-  // One more hands a janitor run's rethrown failure (#232) to cleanup's
-  // `exitOnInternalFailure` (the one fatal path, report, drain, exit 1).
-  "run.ts": 12,
+  "run.ts": 11,
   // The scenario writer (#203): a run, and the host steps around it, that
   // failed with anything but sandbar's own SandbarError are its named
   // failures, and that is rethrown; a container that would not close is

@@ -36,7 +36,7 @@
 // the pre-emption, is `pre-empted`; a provider's quota or credential error is
 // `failed` (the run's provider state has already heard it). Anything else
 // propagates to `settleJanitorRun`, which records the run as `failed` and
-// rethrows it to its caller, the daemon's fatal path.
+// settles: the daemon carries on, and `runsPerDay` bounds a repeat.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -303,8 +303,10 @@ export type JanitorRunDeps = {
 };
 
 // A run as the daemon holds it: one that throws is recorded as a complaint and
-// a `failed` run, then rethrown; the caller owns the fatal path. A lease lost
-// to cleanup is cleanup's to record. `onEnd` runs either way.
+// a `failed` run, and that record is its outcome, as a rejected issue's
+// `REJECTED` terminal is the pool's: one janitor run's forge or git failure
+// must not stop the daemon with every issue in flight. A lease lost to cleanup
+// is cleanup's to record. `onEnd` runs either way.
 export async function settleJanitorRun(args: {
   readonly task: string;
   readonly run: () => Promise<unknown>;
@@ -329,7 +331,6 @@ export async function settleJanitorRun(args: {
       scope: [],
       durationMs: args.durationMs(),
     });
-    throw err;
   } finally {
     args.onEnd();
   }

@@ -17,13 +17,13 @@ describe("exitOnInternalFailure", () => {
     });
     onCleanup(() => { order.push("cleanup"); });
     try {
-      await exitOnInternalFailure("Janitor task 'tidy' failed", new Error("boom"));
+      await exitOnInternalFailure("Uncaught exception", new Error("boom"));
     } finally {
       restore();
     }
     expect(exit).toHaveBeenCalledWith(1);
     expect(order).toEqual([
-      "internal-failure: Janitor task 'tidy' failed",
+      "internal-failure: Uncaught exception",
       "cleanup",
       "exit 1",
     ]);

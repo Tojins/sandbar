@@ -1,5 +1,5 @@
 // #205 — a janitor run as the daemon holds it: a failure is recorded and the
-// daemon rethrows, a lease lost to cleanup is cleanup's, and the slot is
+// daemon carries on, a lease lost to cleanup is cleanup's, and the slot is
 // freed either way.
 import { describe, expect, it } from "vitest";
 
@@ -25,11 +25,13 @@ describe("settleJanitorRun (#205)", () => {
     return { settled, events, ended: () => ended };
   };
 
-  it("records a run that throws as a complaint and a failed run, rethrows, and frees the slot", async () => {
+  it("records a run that throws as a complaint and a failed run, settles, and frees the slot", async () => {
     const { settled, events, ended } = settle(async () => {
       throw new Error("boom");
     });
-    await expect(settled).rejects.toThrow("boom");
+    // The record is the run's outcome: a rejection here would stop the daemon,
+    // every issue in flight with it, over one janitor run's forge hiccup.
+    await expect(settled).resolves.toBeUndefined();
     expect(events).toEqual([
       { kind: "complaint", severity: "error", message: expect.stringContaining("Janitor task 'tidy' failed: ") },
       {
