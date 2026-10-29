@@ -30,8 +30,10 @@
 // step is exec'd in stack order and every one runs, since none reads what
 // another built. Each copy is removed before it is created, registered for a
 // signal's cleanup (#35) and for the loop's abort, and removed after its last
-// step with `rm -f -t 0`, which also reaps a step that timed out. A removal
-// that fails is left to the next fan-out's pre-create removal and the sweep.
+// step with `rm -f -t 0`, which also reaps a step that timed out. An abort
+// while it starts execs nothing, and the copy is removed once it has started.
+// A removal that fails is left to the next fan-out's pre-create removal and
+// the sweep.
 // Every podman call is bounded (`boundedRuntime`, #26), a step by its own
 // `timeoutMs`, and every env value travels in an env file (#154).
 //
@@ -236,14 +238,18 @@ async function runInCopy(
   }
 
   const containerName = standaloneContainerNameFor(opts.scope, opts.stackId, container.name);
+  const rm = () => boundedRuntime(CONTAINER_RM_ARGS(containerName), CONTROL_TIMEOUT_MS);
+  // A removal made while the copy starts may run before it exists, so only
+  // one made once it has started stands for every later one.
+  let live = false;
   let removal: Promise<unknown> | null = null;
   const remove = async (): Promise<void> => {
-    await (removal ??= boundedRuntime(CONTAINER_RM_ARGS(containerName), CONTROL_TIMEOUT_MS));
+    await (live ? (removal ??= rm()) : rm());
   };
   const onAbort = (): void => {
     void remove();
   };
-  await boundedRuntime(CONTAINER_RM_ARGS(containerName), CONTROL_TIMEOUT_MS);
+  await rm();
   const withdraw = registerDisposable(remove);
   opts.signal?.addEventListener("abort", onAbort, { once: true });
   try {
@@ -256,6 +262,8 @@ async function runInCopy(
         started.timedOut ? `no answer within ${CONTROL_TIMEOUT_MS}ms` : started.errorMessage
       }`);
     }
+    live = true;
+    if (opts.signal?.aborted === true) return unavailable(image, "the run was aborted");
     const runs: StandaloneStepRun[] = [];
     for (const step of steps) runs.push({ step, image, ...(await execStep(containerName, step)) });
     return runs;

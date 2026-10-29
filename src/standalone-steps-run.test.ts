@@ -118,4 +118,21 @@ describe("runStandaloneSteps over a fake podman (#247)", () => {
     await pending;
     expect(verbs()).toEqual(["rm", "run", "exec", "rm"]);
   });
+
+  it("execs nothing and removes the copy once it has started when the signal aborts while it starts", async () => {
+    let release!: () => void;
+    fake.handler = (args) => args.includes("run")
+      ? new Promise((done) => {
+          release = () => done(result());
+        })
+      : result();
+    const controller = new AbortController();
+    const pending = runWith(["a"], { signal: controller.signal });
+    await vi.waitFor(() => expect(verbs()).toEqual(["rm", "run"]));
+    controller.abort();
+    release();
+    const runs = await pending;
+    expect(runs.map((r) => r.result)).toEqual(["unavailable"]);
+    expect(verbs()).toEqual(["rm", "run", "rm", "rm"]);
+  });
 });
