@@ -2483,6 +2483,26 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
     expect(calls.chunkPrBases).toEqual([base]);
   });
 
+  it("halts, the landing kept, when origin cannot say whether the base is still there", async () => {
+    const base = "sandbar/chunk-10-base";
+    const stacked: IssueRef = {
+      ...issue(50),
+      chunk: { root: 50, branch: "sandbar/chunk-50_on_10-c", base },
+    };
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: { [base]: { kind: "unreadable", detail: "could not read" } },
+    });
+    const halted = await runMergerWithAdapter([stacked], adapter).catch((err: unknown) => err);
+
+    expect(halted).toBeInstanceOf(MergerError);
+    expect((halted as MergerError).message).toContain("could not read");
+    expect((halted as MergerError).partial.chunkLanded.map((l) => l.chunkBranch))
+      .toEqual(["sandbar/chunk-50_on_10-c"]);
+    expect(calls.chunkPrs).toEqual([]);
+  });
+
   it("bases a stacked chunk's pull request on the source once its base has landed", async () => {
     const stacked: IssueRef = {
       ...issue(50),

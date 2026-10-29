@@ -540,7 +540,7 @@ export function resolvePlan(
     const seed = chunk.base === null && chunk.parentless.includes(n) && !isOnDerivedChunk(n)
       ? "source"
       : "tip";
-    const target = { root: chunk.root, branch: chunk.branch, landed, seed } as const;
+    const target: ChunkTarget = { root: chunk.root, branch: chunk.branch, landed, seed };
     return chunk.base === null ? target : { ...target, base: chunk.base };
   };
   // The branch a member of `target`'s chunk is seeded from: its own, or

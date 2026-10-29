@@ -2083,16 +2083,13 @@ export async function runMergerWithAdapter(
     );
     // A stacked chunk is reviewed against its base until the base lands, so
     // its pull request shows only its own work (#243).
-    const prBase = group.base === null
-      ? null
-      : await adapter.fetchChunkRef(group.base).then((found) => {
-        if (found.kind === "unreadable") {
-          throw new SandbarError(
-            `origin's copy of ${group.base}, the base of ${branch}, could not be read: ${found.detail}`,
-          );
-        }
-        return found.kind === "present" ? group.base : null;
-      }).catch(asHalt(`Chunk branch ${branch} is on origin, but its pull request base could not be chosen`));
+    const baseLookup = group.base === null ? null : await adapter.fetchChunkRef(group.base);
+    if (baseLookup?.kind === "unreadable") {
+      asHalt(`Chunk branch ${branch} is on origin, but its pull request base could not be chosen`)(
+        new SandbarError(`origin's copy of ${group.base} could not be read: ${baseLookup.detail}`),
+      );
+    }
+    const prBase = baseLookup?.kind === "present" ? group.base : null;
     const pr = await adapter
       .ensureChunkPullRequest({
         chunkBranch: branch,
