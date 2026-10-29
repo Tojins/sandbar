@@ -321,7 +321,7 @@ export function ledgerHeads(ledger: ScenarioLedger): readonly string[] {
 
 // The round's scenarios, in the set's order. `changedSince` maps each of
 // `ledgerHeads` to the paths changed since it, or "all" for a head HEAD no
-// longer contains.
+// longer contains; a head it lacks counts as "all".
 export function selectScenarios(
   set: ScenarioSet,
   ledger: ScenarioLedger,
@@ -330,8 +330,7 @@ export function selectScenarios(
   const run: Scenario[] = [];
   const reruns: ScenarioRerun[] = [];
   const touched = (scenario: Scenario, head: string): boolean => {
-    const changed = changedSince.get(head);
-    if (changed === undefined) throw new Error(`no change since ${head} to select ${scenario.id} by`);
+    const changed = changedSince.get(head) ?? "all";
     return changed === "all" || scenarioTouched(scenario, changed);
   };
   for (const scenario of set.scenarios) {

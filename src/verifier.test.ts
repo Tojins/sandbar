@@ -340,9 +340,9 @@ describe("the scenario ledger (#239)", () => {
     ]))).toEqual(["h1", "h2"]);
   });
 
-  it("refuses a ledger head it has no change for", () => {
-    expect(() => selectScenarios(set, new Map([["S1", { status: "pass", head: "h1" }]]), new Map()))
-      .toThrow(/h1/);
+  it("reruns a scenario whose head has no recorded change", () => {
+    const { run } = selectScenarios(set, new Map([["S1", { status: "pass", head: "h1" }]]), new Map());
+    expect(run.map((s) => s.id)).toContain("S1");
   });
 
   it("advances only the runner's own verdicts to the round's head", () => {
