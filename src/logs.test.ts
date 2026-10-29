@@ -42,6 +42,11 @@ describe("agent invocation records (#135)", () => {
     [{ role: "adjudicator", attempt: 3, invocation: 1 },
       "attempt-3-adjudicator-1.log"],
     [{ role: "gate", attempt: 3 }, "attempt-3-gate.log"],
+    [{ role: "standalone-steps", attempt: 3, mode: "list" }, "attempt-3-standalone-steps-list.log"],
+    [
+      { role: "standalone-steps", attempt: 3, mode: "verify", fixRound: 2 },
+      "attempt-3-standalone-steps-verify-2.log",
+    ],
     [{ role: "scenario-runner", attempt: 3, invocation: 2 }, "attempt-3-scenario-runner-2.log"],
     [{ role: "verifier-round", attempt: 3 }, join("verifier", "round-3")],
     [{ role: "anchor-condense", invocation: 2 }, "anchor-condense-2.log"],
@@ -192,6 +197,16 @@ describe("raw transcript tree", () => {
       ok: true, stdout: "replacement", stderr: "", failedStep: null,
       exitCode: 0, containerLogs: "",
     })).rejects.toMatchObject({ code: "EEXIST" });
+  });
+
+  it("files each standalone-step fan-out create-only, green or red (#247)", async () => {
+    const tree = await makeRun();
+    const issue = await tree.issue("247");
+    await issue.writeStandaloneSteps("attempt-1-standalone-steps-list.log", "== lint (app) · passed\n");
+    expect(await readFile(join(issue.dir, "attempt-1-standalone-steps-list.log"), "utf8"))
+      .toBe("== lint (app) · passed\n");
+    await expect(issue.writeStandaloneSteps("attempt-1-standalone-steps-list.log", "again"))
+      .rejects.toMatchObject({ code: "EEXIST" });
   });
 
   it("files each admission's issue snapshot create-only, in its own sequence (#195)", async () => {

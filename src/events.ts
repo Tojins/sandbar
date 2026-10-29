@@ -141,6 +141,15 @@
 // closes the round it re-verifies with a second `review-round`. A new value
 // and a new optional field, so no bump.
 //
+// `standalone-step` (#247, standalone-steps.ts) is one early run of a gate
+// step marked `standalone`, beside the quality listers (`mode: list`) or
+// beside a verify (`mode: verify`, with its `fixRound`), in a copy of the
+// step's container at `head`. `result` is `passed`, `failed`, `timed-out` or
+// `unavailable`; `exitCode` is null unless the step exited, and `detail`,
+// why it was unavailable, null otherwise. `log` names the fan-out's one log
+// file. Only a failed run was a finding; none was a verdict. A new kind, so
+// no bump.
+//
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
@@ -160,6 +169,7 @@ import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
 import type { QualityOutcome, Verdict } from "./inner-loop-machine.js";
 import type { RestartDueReason } from "./scheduler.js";
 import type { StackClassification } from "./stack-change.js";
+import type { StandaloneStepOutcome } from "./standalone-steps.js";
 import type { AgentRunEndedBy } from "./agent-sandbox.js";
 import type { ContainerResources } from "./container-resources.js";
 import type { EgressCounts, EgressMode, EgressRefusal } from "./egress-policy.js";
@@ -362,6 +372,21 @@ export type QualityReviewEvent = {
   readonly prose: string;
 };
 
+// One early run of a standalone step (#247), beside the listers or a verify.
+export type StandaloneStepEvent = ContainerResources & {
+  readonly attempt: number;
+  readonly round: number;
+  readonly step: string;
+  readonly container: string;
+  readonly image: string;
+  readonly head: string;
+  readonly result: StandaloneStepOutcome["result"];
+  readonly exitCode: number | null;
+  readonly durationMs: number;
+  readonly detail: string | null;
+  readonly log: string;
+} & ({ readonly mode: "list" } | { readonly mode: "verify"; readonly fixRound: number });
+
 // Which network owner an egress proxy served (#202). A gate stack's subject
 // is absent for the merger's gate-2 stack, as a resolve container's is.
 export type EgressSubject = {
@@ -468,6 +493,7 @@ export type EventInput =
   | (EventSubject & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventIssue & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventSubject & ContainerResources & QualityReviewEvent & { readonly kind: "quality-review"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventSubject & StandaloneStepEvent & { readonly kind: "standalone-step" })
   | (EventSubject & ContainerResources & QualityPassEvent & { readonly kind: "quality-pass"; readonly attempt: number; readonly round: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "adjudication"; readonly pass: "quality" | "correctness" | "scenarios"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly rulings?: readonly UnitRuling[]; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
