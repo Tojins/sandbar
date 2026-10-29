@@ -2992,8 +2992,11 @@ describe("runMergerWithAdapter — landing a janitor branch (#205)", () => {
       { kind: "janitor-on-source", target: janitor, durationMs: expect.any(Number) },
     ]);
     expect(summary.mergedJanitors).toEqual([{ target: janitor, branchDeleted: true, residue: [] }]);
-    expect(calls.order.slice(calls.order.indexOf("pr-unlabel"))).toEqual([
-      "pr-unlabel", "pr-close", "janitor-branch-delete",
+    expect(calls.order.slice(calls.order.indexOf("pr-comment"))).toEqual([
+      "pr-comment", "pr-unlabel", "pr-close", "janitor-branch-delete",
+    ]);
+    expect(calls.prComments).toEqual([
+      { pr: 9, body: expect.stringContaining("`sandbar/janitor-docs` was merged into `main`") },
     ]);
     expect(calls.janitorBranchDeletes).toEqual(["sandbar/janitor-docs"]);
     expect(calls.bodies).toEqual([]);

@@ -262,10 +262,11 @@
 // branch, `sandbar/janitor-<task>`, is a `JanitorLandTarget`. The merger lands
 // it in the same source pass, resolve loop and gate-2 as a chunk, with no
 // members to snapshot, defer on or close, and parks it with the same comments.
-// `wrapUpLandedJanitor` then takes the landing labels off, closes the pull
-// request and deletes the branch under a lease, so the task's next run starts
-// fresh. The reconciler does the same to any janitor branch already contained
-// in the source branch. Its residue is reported and never halts: a kept
+// `wrapUpLandedJanitor` then comments that it landed, takes the landing labels
+// off, closes the pull request and deletes the branch under a lease, so the
+// task's next run starts fresh. The reconciler does the same, its comment
+// saying reconciled, to any janitor branch already contained in the source
+// branch. Its residue is reported and never halts: a kept
 // branch is retried by the next recompute's reconciler.
 
 import { execFile } from "node:child_process";
@@ -622,17 +623,7 @@ export const CHUNK_LANDED_PR_COMMENT = (args: {
 }): string => {
   const list = (ms: readonly ChunkMember[]): string[] =>
     ms.map((m) => `- #${m.number} — ${m.title}`);
-  const lines = [
-    args.provenance === "sandbar"
-      ? `${BOT_COMMENT_PREFIX} landed. \`${args.chunkBranch}\` was merged into ` +
-        `\`${args.sourceBranch}\`, the composition passed the gate, and the result ` +
-        `is pushed.`
-      : `${BOT_COMMENT_PREFIX} reconciled. \`${args.chunkBranch}\` was already ` +
-        `contained in \`${args.sourceBranch}\` — merged by hand, or landed by a run ` +
-        `that stopped before it finished — so sandbar has done the rest of the ` +
-        `bookkeeping.`,
-    "",
-  ];
+  const lines = [landedLead(args.chunkBranch, args.sourceBranch, args.provenance), ""];
   if (args.closed.length > 0) {
     lines.push("Issues closed:", "", ...list(args.closed));
   } else if (args.unclosed.length === 0) {
@@ -661,15 +652,42 @@ export const CHUNK_LANDED_PR_COMMENT = (args: {
   } else {
     lines.push("", "The chunk branch is being deleted.");
   }
-  lines.push(
-    "",
-    `This pull request's commits reached \`${args.sourceBranch}\` through ` +
-      `sandbar's own merge, not through GitHub's merge button. GitHub marks it ` +
-      `merged on its own when that push lands; sandbar closes it otherwise. ` +
-      `Either way there is nothing left for it to do.`,
-  );
+  lines.push("", landedPullRequestTail(args.sourceBranch));
   return lines.join("\n");
 };
+
+// The opening and closing paragraphs of a landed pull request's comment, a
+// chunk's or a janitor task's.
+const landedLead = (branch: string, sourceBranch: string, provenance: LandingProvenance): string =>
+  provenance === "sandbar"
+    ? `${BOT_COMMENT_PREFIX} landed. \`${branch}\` was merged into ` +
+      `\`${sourceBranch}\`, the composition passed the gate, and the result ` +
+      `is pushed.`
+    : `${BOT_COMMENT_PREFIX} reconciled. \`${branch}\` was already ` +
+      `contained in \`${sourceBranch}\` — merged by hand, or landed by a run ` +
+      `that stopped before it finished — so sandbar has done the rest of the ` +
+      `bookkeeping.`;
+
+const landedPullRequestTail = (sourceBranch: string): string =>
+  `This pull request's commits reached \`${sourceBranch}\` through ` +
+  `sandbar's own merge, not through GitHub's merge button. GitHub marks it ` +
+  `merged on its own when that push lands; sandbar closes it otherwise. ` +
+  `Either way there is nothing left for it to do.`;
+
+// Written before the labels come off and the branch is deleted, as the chunk's
+// is and for the same reasons.
+export const JANITOR_LANDED_PR_COMMENT = (args: {
+  readonly branch: string;
+  readonly sourceBranch: string;
+  readonly provenance: LandingProvenance;
+}): string =>
+  [
+    landedLead(args.branch, args.sourceBranch, args.provenance),
+    "",
+    "The idle task's branch is being deleted; its next run starts a fresh one.",
+    "",
+    landedPullRequestTail(args.sourceBranch),
+  ].join("\n");
 
 export const CHUNK_LAND_ABANDONED_PR_COMMENT = (args: {
   readonly chunkBranch: string;
@@ -1452,20 +1470,37 @@ export type JanitorWrapup = {
 };
 
 /**
- * Retire a janitor branch (#205) that is on the source branch: take the
- * landing labels off its pull request, close it (merged counts) and delete the
- * branch under a lease, so the task's next run starts fresh. No issue is
- * written to. Each forge write that fails is residue and the rest still run;
- * a failed log write propagates, as in `wrapUpLandedChunk`.
+ * Retire a janitor branch (#205) that is on the source branch: comment on its
+ * pull request that it landed, take the landing labels off, close it (merged
+ * counts) and delete the branch under a lease, so the task's next run starts
+ * fresh. No issue is written to. Each forge write that fails is residue and
+ * the rest still run; a failed log write propagates, as in `wrapUpLandedChunk`.
  */
 export async function wrapUpLandedJanitor(
   target: JanitorLandTarget,
-  adapter: Pick<ChunkWrapupAdapter, "removePullRequestLabel" | "closePullRequest" | "deleteJanitorBranch">,
-  log: (line: string) => void | Promise<void>,
+  adapter: Pick<
+    ChunkWrapupAdapter,
+    "commentOnPullRequest" | "removePullRequestLabel" | "closePullRequest" | "deleteJanitorBranch"
+  >,
+  opts: {
+    readonly sourceBranch: string;
+    readonly provenance: LandingProvenance;
+    readonly log: (line: string) => void | Promise<void>;
+  },
 ): Promise<JanitorWrapup> {
   const residue: string[] = [];
   if (target.pullRequest > 0) {
     const pr = `the pull request #${target.pullRequest} for ${target.branch}`;
+    await attempt(residue, `${pr} landed but could not be commented on`, () =>
+      adapter.commentOnPullRequest(
+        target.pullRequest,
+        JANITOR_LANDED_PR_COMMENT({
+          branch: target.branch,
+          sourceBranch: opts.sourceBranch,
+          provenance: opts.provenance,
+        }),
+      ),
+    );
     await attempt(residue, `${pr} kept its landing label`, () => removeLandLabels(adapter, target));
     await attempt(residue, `${pr} could not be closed`, () =>
       adapter.closePullRequest(target.pullRequest),
@@ -1477,7 +1512,7 @@ export async function wrapUpLandedJanitor(
       `${target.branch} is kept on origin so the next run retries its delete`,
       () => adapter.deleteJanitorBranch(target.branch),
     )) !== null;
-  if (branchDeleted) await log(`janitor ${target.branch}: deleted on origin`);
+  if (branchDeleted) await opts.log(`janitor ${target.branch}: deleted on origin`);
   return { target, branchDeleted, residue };
 }
 

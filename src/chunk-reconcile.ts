@@ -419,7 +419,14 @@ export async function reconcileLandedChunks(cfg: {
   for (const target of selectJanitorReconciliations(landed, prs)) {
     await log(`reconcile ${target.branch}: already on ${cfg.sourceBranch}`);
     const targetTimer = startTimer(cfg.clock);
-    const janitor = { ...await wrapUpLandedJanitor(target, adapter, log), durationMs: targetTimer() };
+    const janitor = {
+      ...await wrapUpLandedJanitor(target, adapter, {
+        sourceBranch: cfg.sourceBranch,
+        provenance: "reconciled",
+        log,
+      }),
+      durationMs: targetTimer(),
+    };
     await cfg.onJanitorReconciled?.(janitor);
     janitors.push(janitor);
   }

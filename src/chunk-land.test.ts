@@ -21,6 +21,7 @@ import {
   type ChunkWrapupAdapter,
   LAND_HOTFIX_LABEL,
   LAND_LABEL,
+  JANITOR_LANDED_PR_COMMENT,
   JANITOR_RESIDUE_BANNER,
   type JanitorLandTarget,
   type PullRequestSummary,
@@ -780,15 +781,21 @@ describe("janitor branches on the source branch (#205)", () => {
     pullRequest: 9,
     landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL],
   };
+  const wrapupOpts = { sourceBranch: "main", provenance: "sandbar", log: () => undefined } as const;
 
-  it("takes every landing label off, closes the pull request and deletes the branch, writing to no issue", async () => {
-    const { adapter, calls } = makeWrapupAdapter();
+  it("comments that it landed, takes every landing label off, closes the pull request and deletes the branch, writing to no issue", async () => {
+    const { adapter, calls, bodies } = makeWrapupAdapter();
     const log: string[] = [];
 
-    const r = await wrapUpLandedJanitor(janitorTarget, adapter, (line) => { log.push(line); });
+    const r = await wrapUpLandedJanitor(janitorTarget, adapter, {
+      ...wrapupOpts,
+      log: (line) => { log.push(line); },
+    });
 
     expect(r).toEqual({ target: janitorTarget, branchDeleted: true, residue: [] });
+    expect(bodies).toEqual([expect.stringContaining("`sandbar/janitor-docs` was merged into `main`")]);
     expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
+      "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       `removePullRequestLabel 9:${LAND_HOTFIX_LABEL}`,
       "closePullRequest 9",
@@ -799,21 +806,23 @@ describe("janitor branches on the source branch (#205)", () => {
 
   it("still deletes the branch when the pull request writes fail, and reports them as residue", async () => {
     const { adapter, calls } = makeWrapupAdapter({
+      commentOnPullRequest: "gh down",
       removePullRequestLabel: "gh down",
       closePullRequest: "gh down",
     });
 
-    const r = await wrapUpLandedJanitor(janitorTarget, adapter, () => undefined);
+    const r = await wrapUpLandedJanitor(janitorTarget, adapter, wrapupOpts);
 
     expect(r.branchDeleted).toBe(true);
-    expect(r.residue).toHaveLength(2);
+    expect(r.residue).toHaveLength(3);
+    expect(r.residue[0]).toContain("could not be commented on");
     expect(calls.at(-1)).toEqual({ op: "deleteJanitorBranch", arg: "sandbar/janitor-docs" });
   });
 
   it("keeps a branch whose delete failed, so the reconciler retries it", async () => {
     const { adapter } = makeWrapupAdapter({ deleteJanitorBranch: "stale info" });
 
-    const r = await wrapUpLandedJanitor(janitorTarget, adapter, () => undefined);
+    const r = await wrapUpLandedJanitor(janitorTarget, adapter, wrapupOpts);
 
     expect(r.branchDeleted).toBe(false);
     expect(r.residue.join("\n")).toContain("stale info");
@@ -824,7 +833,7 @@ describe("janitor branches on the source branch (#205)", () => {
   it("only deletes a branch with no pull request to act on", async () => {
     const { adapter, calls } = makeWrapupAdapter();
 
-    await wrapUpLandedJanitor({ ...janitorTarget, pullRequest: 0, landLabels: [] }, adapter, () => undefined);
+    await wrapUpLandedJanitor({ ...janitorTarget, pullRequest: 0, landLabels: [] }, adapter, wrapupOpts);
 
     expect(calls).toEqual([{ op: "deleteJanitorBranch", arg: "sandbar/janitor-docs" }]);
   });
@@ -863,6 +872,16 @@ describe("the prose (#64)", () => {
     });
     expect(body).toContain("already contained in");
     expect(body).not.toContain("sandbar merged");
+  });
+
+  it("tells a janitor pull request found on the source branch that it was reconciled, not landed", () => {
+    const body = JANITOR_LANDED_PR_COMMENT({
+      branch: "sandbar/janitor-docs",
+      sourceBranch: "main",
+      provenance: "reconciled",
+    });
+    expect(body).toContain("`sandbar/janitor-docs` was already contained in `main`");
+    expect(body).not.toContain("passed the gate");
   });
 
   it("does not promise a delete the member comment cannot have seen", () => {

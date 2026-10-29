@@ -2502,7 +2502,11 @@ export async function runMergerWithAdapter(
     const mergedJanitors: JanitorWrapup[] = [];
     for (const unit of landsOnHead) {
       if (unit.kind === "janitor") {
-        mergedJanitors.push(await wrapUpLandedJanitor(unit.target, adapter, emit));
+        mergedJanitors.push(await wrapUpLandedJanitor(unit.target, adapter, {
+          sourceBranch: unit.sourceBranch,
+          provenance: "sandbar",
+          log: emit,
+        }));
         continue;
       }
       const wrapup = await wrapUpLandedChunk(unit.target, adapter, {

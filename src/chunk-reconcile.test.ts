@@ -181,6 +181,7 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(r.janitors.map((janitor) => janitor.branchDeleted)).toEqual([true]);
     expect(recorded).toEqual(["docs"]);
     expect(calls).toEqual([
+      { op: "commentOnPullRequest", arg: "9" },
       { op: "removePullRequestLabel", arg: `9:${LAND_LABEL}` },
       { op: "closePullRequest", arg: "9" },
       { op: "deleteJanitorBranch", arg: "sandbar/janitor-docs" },
