@@ -200,7 +200,6 @@ import {
 } from "./containers.js";
 import {
   beginCleanup,
-  exitOnInternalFailure,
   installCleanupTraps,
   onCleanup,
   registerDisposable,
@@ -1662,8 +1661,7 @@ export async function run(
   });
   // A run records its own ending (#82). One that throws is recorded by
   // `settleJanitorRun` as `failed` and the daemon carries on: `runsPerDay`
-  // bounds a repeat. Any other error is a bug and goes to cleanup's fatal path.
-  // Its end wakes the scheduler, which owns what happens next.
+  // bounds a repeat. Its end wakes the scheduler, which owns what happens next.
   const startJanitor = (task: JanitorTask, loop: JanitorRunDeps["loop"]): void => {
     const controller = new AbortController();
     const timer = startTimer();
@@ -1691,8 +1689,6 @@ export async function run(
         janitor.run = null;
         pool.wakeExternal();
       },
-    }).catch((err: unknown) => {
-      void exitOnInternalFailure(`Janitor task '${task.name}' failed`, err);
     });
     janitor.run = { task: task.name, controller, settled };
   };

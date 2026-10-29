@@ -26,12 +26,12 @@ describe("settleJanitorRun (#205)", () => {
     return { settled, events, ended: () => ended };
   };
 
-  it("records a run that throws a forge or git fault as a complaint and a failed run, settles, and frees the slot", async () => {
+  it("records a run that throws as a complaint and a failed run, settles, and frees the slot", async () => {
     const { settled, events, ended } = settle(async () => {
       throw new SandbarError("boom");
     });
     // The record is the run's outcome: a rejection here would stop the daemon,
-    // every issue in flight with it, over one janitor run's forge hiccup.
+    // every issue in flight with it, over one janitor run's failure.
     await expect(settled).resolves.toBeUndefined();
     expect(events).toEqual([
       { kind: "complaint", severity: "error", message: expect.stringContaining("Janitor task 'tidy' failed: ") },
@@ -44,21 +44,22 @@ describe("settleJanitorRun (#205)", () => {
     expect(ended()).toBe(1);
   });
 
-  it("records a failed git child by its exit code", async () => {
-    const { settled, events } = settle(async () => {
-      throw Object.assign(new Error("gh failed"), { code: 1 });
+  // Whatever the run threw, as the pool records a rejected issue loop of any
+  // error type: a failed `git status` in the clone reclaim carries its code on
+  // `exitCode`, an `rm` a string `code`, a child killed by a signal none.
+  it.each([
+    ["a failed gh child", Object.assign(new Error("gh failed"), { code: 1 })],
+    ["a failed git status in the reclaim", Object.assign(new Error("git status failed"), { exitCode: 128 })],
+    ["a failed rm", Object.assign(new Error("rm failed"), { code: "EBUSY" })],
+    ["a child killed by a signal", Object.assign(new Error("gh killed"), { code: null, signal: "SIGTERM" })],
+    ["unparseable gh output", new SyntaxError("Unexpected token")],
+    ["a plain Error", new Error("no commit")],
+  ])("records %s as a failed run, settles, and frees the slot", async (_name, error) => {
+    const { settled, events, ended } = settle(async () => {
+      throw error;
     });
     await expect(settled).resolves.toBeUndefined();
     expect(events.map((e) => e.kind)).toEqual(["complaint", "janitor-run"]);
-  });
-
-  it("rethrows any other error unrecorded, and frees the slot", async () => {
-    const bug = new TypeError("bug");
-    const { settled, events, ended } = settle(async () => {
-      throw bug;
-    });
-    await expect(settled).rejects.toBe(bug);
-    expect(events).toEqual([]);
     expect(ended()).toBe(1);
   });
 
