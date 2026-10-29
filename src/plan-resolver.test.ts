@@ -1735,3 +1735,113 @@ describe("resolvePlan multi-root chunks (#193)", () => {
     ]);
   });
 });
+
+describe("resolvePlan frozen and stacked chunks (#243)", () => {
+  const F = chunkBranchName(10, "Issue 10");
+  const C = chunkBranchName(50, "Issue 50", 10);
+  const chain = [
+    issue(10, ""),
+    issue(11, "## Blocked by\n- #10\n"),
+  ];
+  const resolveWith = (
+    candidates: readonly IssueSummary[],
+    issueFacts: ReadonlyMap<number, IssueFacts>,
+    options: {
+      readonly chunkMembers: ReadonlyMap<string, ReadonlySet<number>>;
+      readonly frozenChunks?: ReadonlySet<string>;
+      readonly chunksContainingBase?: ReadonlySet<string>;
+    },
+  ): PlanResolution =>
+    resolvePlanDecision(candidates, issueFacts, {
+      readyLabelPolicy: "anyone",
+      defaultLane: "review",
+      ...options,
+    });
+
+  it("plans a new issue blocked by a frozen chunk's member onto a chunk stacked on its tip", () => {
+    const r = resolveWith(
+      [...chain, issue(50, "## Blocked by\n- #11\n")],
+      facts({ 10: {}, 11: {} }),
+      { chunkMembers: new Map([[F, new Set([10, 11])]]), frozenChunks: new Set([F]) },
+    );
+    expect(r.plan.map((p) => [p.id, p.chunk])).toEqual([
+      ["50", { root: 50, branch: C, landed: [], seed: "tip", base: F }],
+    ]);
+    expect(r.chunkRefreshes).toEqual([]);
+  });
+
+  it("holds rework of a frozen chunk's member, which keeps its landing waiting", () => {
+    const r = resolveWith(
+      chain,
+      facts({ 10: {}, 11: { labels: ["ready-for-agent"] } }),
+      { chunkMembers: new Map([[F, new Set([10, 11])]]), frozenChunks: new Set([F]) },
+    );
+    expect(r.plan).toEqual([]);
+    expect(r.waiting).toEqual([
+      { issue: 11, title: "Issue 11", reason: { kind: "held", why: "frozen" } },
+    ]);
+    expect(r.landedChunks.map((c) => c.rework)).toEqual([[{ number: 11, title: "Issue 11" }]]);
+  });
+
+  it("refreshes a stacked chunk onto a base that moved before admitting its next member", () => {
+    // #12 landed on the base after `land` came off; #51 needs it and #50.
+    const candidates = [
+      ...chain,
+      issue(12, "## Blocked by\n- #11\n"),
+      issue(50, "## Blocked by\n- #11\n"),
+      issue(51, "## Blocked by\n- #12\n- #50\n"),
+    ];
+    const chunkMembers = new Map([
+      [F, new Set([10, 11, 12])],
+      [C, new Set([10, 11, 50])],
+    ]);
+    const stale = resolveWith(candidates, facts({ 10: {}, 11: {}, 12: {}, 50: {} }), {
+      chunkMembers,
+    });
+    expect(stale.plan).toEqual([]);
+    expect(stale.waiting).toEqual([
+      { issue: 51, title: "Issue 51", reason: { kind: "chunk-refresh", branch: C, by: [] } },
+    ]);
+    expect(stale.chunkRefreshes).toEqual([{
+      root: 50,
+      branch: C,
+      base: F,
+      title: "Issue 50",
+      dependents: [{ number: 51, title: "Issue 51" }],
+    }]);
+
+    const caughtUp = resolveWith(candidates, facts({ 10: {}, 11: {}, 12: {}, 50: {} }), {
+      chunkMembers: new Map([[F, new Set([10, 11, 12])], [C, new Set([10, 11, 12, 50])]]),
+      chunksContainingBase: new Set([C]),
+    });
+    expect(caughtUp.plan.map((p) => [p.id, p.chunk?.branch, p.chunk?.base])).toEqual([
+      ["51", C, F],
+    ]);
+  });
+
+  it("holds a stacked member whose frozen base lacks a blocker that closed since", () => {
+    const r = resolveWith(
+      [...chain, issue(50, "## Blocked by\n- #11\n- #9\n")],
+      facts({ 9: { state: "CLOSED" }, 10: {}, 11: {} }),
+      { chunkMembers: new Map([[F, new Set([10, 11])]]), frozenChunks: new Set([F]) },
+    );
+    expect(r.plan).toEqual([]);
+    expect(r.waiting).toEqual([
+      { issue: 50, title: "Issue 50", reason: { kind: "held", why: "frozen" } },
+    ]);
+    expect(r.chunkRefreshes).toEqual([]);
+  });
+
+  it("reports a stacked chunk's base on what it carries", () => {
+    const r = resolveWith(
+      [...chain, issue(50, "## Blocked by\n- #11\n")],
+      facts({ 10: {}, 11: {}, 50: {} }),
+      { chunkMembers: new Map([[F, new Set([10, 11])], [C, new Set([10, 11, 50])]]) },
+    );
+    expect(r.landedChunks.map((c) => [c.branch, c.base, c.members.map((m) => m.number)])).toEqual([
+      [F, null, [10, 11]],
+      [C, F, [50]],
+    ]);
+    expect(r.chunkNameDrifts).toEqual([]);
+  });
+});

@@ -545,10 +545,12 @@ export function resolvePlan(
 
   // CLOSED means the blocker's work is on the source branch. Membership in the
   // SAME chunk means it is on the branch this issue will be worked on, and so
-  // does membership in a chunk the dependent's is stacked on, once the branch
-  // the dependent is seeded from carries it. Nothing else counts — a blocker
-  // on another chunk branch, or a dependent with no chunk at all, leaves the
-  // issue blocked. Header, "When is a blocker satisfied?" (#59, #243).
+  // does membership in the chunk the dependent's is stacked on: a base
+  // refresh (below) brings it in before admission. A chunk further down the
+  // stack counts once the branch the dependent is seeded from carries it.
+  // Nothing else counts — a blocker on another chunk branch, or a dependent
+  // with no chunk at all, leaves the issue blocked. Header, "When is a blocker
+  // satisfied?" (#59, #243).
   const sameChunkMembership = (blocker: number, dependent: number): boolean => {
     if (!isOnDerivedChunk(blocker)) return false;
     const theirs = chunkOf.get(blocker);
@@ -556,7 +558,8 @@ export function resolvePlan(
     if (theirs === undefined || ours === undefined) return false;
     if (theirs === ours) return true;
     const target = chunkTargetOf(dependent);
-    return target !== null && stacksOn(chunkByRoot.get(ours), theirs) &&
+    if (target?.base === undefined || !stacksOn(chunkByRoot.get(ours), theirs)) return false;
+    return chunkByBranch.get(target.base)?.root === theirs ||
       (chunkMembers.get(tipOf(target))?.has(blocker) ?? false);
   };
   const blockerSatisfied = (blocker: number, dependent: number): boolean => {

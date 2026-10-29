@@ -408,6 +408,126 @@ describe("deriveChunks — stable identity (#193)", () => {
   });
 });
 
+describe("deriveChunks — frozen chunks stack, never join (#243)", () => {
+  const F = "sandbar/chunk-10-a";
+  const frozenF = { originChunks: on({ [F]: [10, 11] }), frozen: new Set([F]) };
+
+  it("stacks a new issue blocked by a frozen chunk's member on that chunk", () => {
+    const d = underway([issue(10), issue(11, [10]), issue(50, [11], "Fix")], frozenF);
+    expect(d.chunks).toEqual([
+      { root: 10, members: [10, 11], parentless: [10], branch: F, base: null },
+      {
+        root: 50,
+        members: [50],
+        parentless: [50],
+        branch: "sandbar/chunk-50_on_10-fix",
+        base: F,
+      },
+    ]);
+    expect(d.blocked).toEqual([]);
+  });
+
+  it("joins the same issue to the chunk once nothing freezes it", () => {
+    const d = underway(
+      [issue(10), issue(11, [10]), issue(50, [11])],
+      { originChunks: on({ [F]: [10, 11] }) },
+    );
+    expect(shape(d)).toEqual([{ root: 10, members: [10, 11, 50] }]);
+  });
+
+  it("stacks the frozen chunk's own queued members, and keeps its in-flight ones", () => {
+    const d = underway(
+      [issue(10), issue(11, [10]), issue(12, [10]), issue(13, [12])],
+      {
+        originChunks: on({ [F]: [10] }),
+        inFlight: flying({ 11: { root: 10, branch: F } }),
+        frozen: new Set([F]),
+      },
+    );
+    expect(d.chunks.map((c) => [c.root, c.members, c.branch, c.base])).toEqual([
+      [10, [10, 11], F, null],
+      [12, [12, 13], "sandbar/chunk-12_on_10-issue-12", F],
+    ]);
+  });
+
+  it("holds the root a frozen chunk is named after while it is not on the branch", () => {
+    // #11, another root of the chunk, landed before #10 did.
+    const d = underway([issue(10), issue(11)], {
+      originChunks: on({ [F]: [11] }),
+      frozen: new Set([F]),
+    });
+    expect(shape(d)).toEqual([{ root: 10, members: [11] }]);
+    expect(d.blocked).toEqual([{ issue: 10, reason: "frozen", blockers: [10] }]);
+  });
+
+  it("does not pull a fresh blocker group into a frozen chunk", () => {
+    const d = underway([issue(5), issue(10), issue(11, [10, 5])], frozenF);
+    expect(d.chunks.map((c) => [c.root, c.members, c.base])).toEqual([
+      [5, [5], null],
+      [10, [10, 11], null],
+    ]);
+  });
+
+  it("answers a member a stacked branch contains to the base", () => {
+    // Root #5 is lower than its base's #10, so "lowest" alone would hand
+    // #10 and #11 to the stacked chunk.
+    const C = "sandbar/chunk-5_on_10-c";
+    const d = underway(
+      [issue(5, [11]), issue(10), issue(11, [10])],
+      { originChunks: on({ [F]: [10, 11], [C]: [5, 10, 11] }), frozen: new Set([F]) },
+    );
+    expect(d.chunks.map((c) => [c.root, c.members, c.branch, c.base])).toEqual([
+      [5, [5], C, F],
+      [10, [10, 11], F, null],
+    ]);
+  });
+
+  it("joins an issue blocked by a stacked chunk and its base to the stacked one, frozen or not", () => {
+    const C = "sandbar/chunk-50_on_10-c";
+    const issues = [issue(10), issue(11, [10]), issue(50, [11]), issue(60, [11, 50])];
+    const originChunks = on({ [F]: [10, 11], [C]: [10, 11, 50] });
+    for (const frozen of [new Set([F]), new Set<string>()]) {
+      const d = underway(issues, { originChunks, frozen });
+      expect(shape(d)).toEqual([
+        { root: 10, members: [10, 11] },
+        { root: 50, members: [50, 60] },
+      ]);
+    }
+  });
+
+  it("stacks on a frozen stacked chunk, not on its base", () => {
+    const C = "sandbar/chunk-50_on_10-c";
+    const d = underway(
+      [issue(10), issue(11, [10]), issue(50, [11]), issue(60, [11, 50])],
+      { originChunks: on({ [F]: [10, 11], [C]: [10, 11, 50] }), frozen: new Set([F, C]) },
+    );
+    expect(d.chunks.map((c) => [c.root, c.members, c.branch])).toEqual([
+      [10, [10, 11], F],
+      [50, [50], C],
+      [60, [60], "sandbar/chunk-60_on_50-issue-60"],
+    ]);
+  });
+
+  it("drops the base once it has landed and left origin", () => {
+    const C = "sandbar/chunk-50_on_10-c";
+    const d = underway([issue(50), issue(60, [50])], { originChunks: on({ [C]: [50] }) });
+    expect(d.chunks).toEqual([
+      { root: 50, members: [50, 60], parentless: [50], branch: C, base: null },
+    ]);
+  });
+
+  it("holds an issue blocked by two frozen chunks it cannot stack on together", () => {
+    const G = "sandbar/chunk-20-b";
+    const d = underway(
+      [issue(10), issue(20), issue(30, [10, 20])],
+      { originChunks: on({ [F]: [10], [G]: [20] }), frozen: new Set([F, G]) },
+    );
+    expect(d.blocked).toEqual([
+      { issue: 30, reason: "joins-two-chunks", blockers: [10, 20] },
+    ]);
+  });
+});
+
 describe("deriveChunks — settling (#193)", () => {
   it("holds a fresh component until the pending graph is settled", () => {
     const issues = [issue(753), issue(754), issue(677, [753, 754])];
