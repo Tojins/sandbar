@@ -1239,9 +1239,10 @@ export type ChunkGroup = {
 // or roots rather than a chain — a member plans only once its own blockers are
 // on the chunk branch, which no issue planned in the same cycle does — so the
 // order within a group is not a dependency order and ascending issue number
-// (what `sortIssuesAsc` already gave) is simply deterministic. Being siblings is also why they can conflict with each other
-// where a member and its ancestors provably cannot (#54 round-1 Q4): the
-// resolve loop handles them exactly as it handles two auto-lane branches.
+// (what `sortIssuesAsc` already gave) is simply deterministic. Being siblings
+// is also why they can conflict with each other where a member and its
+// ancestors provably cannot (#54 round-1 Q4): the resolve loop handles them
+// exactly as it handles two auto-lane branches.
 //
 // `root`, `base` and `landed` are taken from the FIRST member seen for a
 // branch. Every member of one group carries the same `ChunkTarget`, built once
