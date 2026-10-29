@@ -1021,8 +1021,11 @@ export type RunConfig = {
   readonly scenarioWriterModelId?: string;
   // The verifier's scenario runner (#180): beside the white-box review, it
   // runs the written scenarios against the branch. It follows the reviewer's
-  // CLI, and takes the reviewer's model and effort only while it also runs
-  // that CLI, as the adjudicator takes its model. A path in
+  // CLI, and takes the reviewer's effort only while it also runs that CLI.
+  // On claude its model is "sonnet" rather than the reviewer's (#250):
+  // driving the app and reporting against a written Then is Sonnet-class
+  // work, and a disputed failure goes to the adjudicator. On another vendor
+  // it takes the reviewer's model only while it shares that vendor. A path in
   // `promptExtensions.scenarioRunner` is probed in the issue worktree.
   readonly scenarioRunnerModelId?: string;
   readonly mergerModelId?: string;
@@ -1369,6 +1372,7 @@ export const DEFAULT_REFLECT_TAGGER_MODEL_ID = "sonnet";
 export const DEFAULT_REFLECT_SYNTHESIZER_MODEL_ID = "opus";
 export const DEFAULT_UI_CHECK_MODEL_ID = "sonnet";
 export const DEFAULT_CONDENSER_MODEL_ID = "sonnet";
+export const DEFAULT_SCENARIO_RUNNER_MODEL_ID = "sonnet";
 export const DEFAULT_CONDENSE_ABOVE_CHARS = 20_000;
 export const DEFAULT_SCENARIO_WRITER = true;
 export const DEFAULT_SCENARIO_WRITER_MODEL_ID = "opus";
@@ -3256,18 +3260,23 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     config.adjudicatorAgent === undefined || adjudicatorAgent === reviewerAgent
       ? config.reviewerModelId
       : undefined;
-  // The scenario runner (#180) follows the reviewer on the adjudicator's
-  // rule, its effort included, so routing the reviewer elsewhere moves both
-  // verifier agents at once.
+  // The scenario runner (#180) follows the reviewer's CLI, and its effort on
+  // the adjudicator's rule, so routing the reviewer elsewhere moves both
+  // verifier agents at once. Its model is a Sonnet-class job (#250), on the
+  // condenser's rule.
   const scenarioRunnerAgent = parseAgentProviderName(
     "scenarioRunnerAgent",
     config.scenarioRunnerAgent ?? reviewerAgent,
   );
   const runnerFollowsReviewer =
     config.scenarioRunnerAgent === undefined || scenarioRunnerAgent === reviewerAgent;
-  const inheritedScenarioRunnerModelId = runnerFollowsReviewer
-    ? config.reviewerModelId
-    : undefined;
+  const scenarioRunnerModelId = config.scenarioRunnerModelId ?? (
+    scenarioRunnerAgent === "claude"
+      ? DEFAULT_SCENARIO_RUNNER_MODEL_ID
+      : runnerFollowsReviewer
+        ? config.reviewerModelId
+        : undefined
+  );
   const condenseAboveChars = config.condenseAboveChars === undefined
     ? DEFAULT_CONDENSE_ABOVE_CHARS
     : config.condenseAboveChars === null
@@ -3338,7 +3347,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     assertRoleModelIdNamed(
       "scenarioRunner",
       scenarioRunnerAgent,
-      config.scenarioRunnerModelId ?? inheritedScenarioRunnerModelId,
+      scenarioRunnerModelId,
       {
         agentField:
           config.scenarioRunnerAgent === undefined ? "reviewerAgent" : "scenarioRunnerAgent",
@@ -3413,10 +3422,8 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     condenserModelId: condenserModelId ?? DEFAULT_CONDENSER_MODEL_ID,
     scenarioWriter,
     scenarioWriterModelId: config.scenarioWriterModelId ?? DEFAULT_SCENARIO_WRITER_MODEL_ID,
-    scenarioRunnerModelId:
-      config.scenarioRunnerModelId ??
-      inheritedScenarioRunnerModelId ??
-      DEFAULT_REVIEWER_MODEL_ID,
+    // Only a disabled writer leaves it unnamed off claude; nothing runs it then.
+    scenarioRunnerModelId: scenarioRunnerModelId ?? DEFAULT_SCENARIO_RUNNER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     reflectTaggerModelId: config.reflectTaggerModelId ?? DEFAULT_REFLECT_TAGGER_MODEL_ID,
     reflectSynthesizerModelId:
