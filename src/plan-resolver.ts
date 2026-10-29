@@ -72,8 +72,10 @@
 // branch, so a blocker on the base counts as on its own: its members seed
 // from the stacked tip, or the base's before the stacked branch exists. The
 // stacked branch must contain the base's tip before it takes another member,
-// which queues a base-into-chunk refresh the same way (`ChunkRefresh.base`),
-// and when the branch a member seeds from is a FROZEN base lacking the source
+// which queues a base-into-chunk refresh the same way (`ChunkRefresh.base`).
+// Unlike #174's, that refresh is queued for a stacked chunk on origin even
+// with no member waiting, for the base moves only once `land` is off it and
+// the stacked chunk is reviewed as built on what it has now. And when the branch a member seeds from is a FROZEN base lacking the source
 // tip, nothing may refresh it, so the member is held until the base lands. A
 // frozen chunk takes no rework either: it is held (`frozen`) and keeps the
 // chunk's `land` waiting, since only a human can say which of the two they
@@ -776,6 +778,22 @@ export function resolvePlan(
         dependents: [dependent],
       });
     }
+  }
+  // A stacked chunk on origin catches up with a base that moved whether or
+  // not a member waits for it (#243): it is reviewed as built on that base.
+  for (const chunk of chunks) {
+    if (
+      chunk.base === null || refreshes.has(chunk.branch) ||
+      !chunkMembers.has(chunk.branch) || chunksContainingBase.has(chunk.branch) ||
+      frozenChunks.has(chunk.branch)
+    ) continue;
+    refreshes.set(chunk.branch, {
+      root: chunk.root,
+      branch: chunk.branch,
+      base: chunk.base,
+      title: titleOf.get(chunk.root) ?? "",
+      dependents: [],
+    });
   }
   return {
     plan,

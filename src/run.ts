@@ -81,9 +81,13 @@
 //                              merges source into that existing chunk after
 //                              source landings, gates it, and pushes directly;
 //                              an unsalvageable composition parks the dependent.
-//                              Since that work exists only for a future
-//                              admission, every admission-closing drain leaves
-//                              it for the next run.
+//                              A chunk stacked on another (#243) is refreshed
+//                              onto that one's tip the same way whenever it
+//                              lacks it; one no member waits for is tried
+//                              once per process while it fails.
+//                              Since that work is never owed to a drain,
+//                              every admission-closing drain leaves it for
+//                              the next run.
 //                              While `config.landingWindow` is closed (#244,
 //                              `landing-window.ts`), each recompute keeps a
 //                              chunk's `land` request out of the pass (not a
@@ -1666,6 +1670,10 @@ export async function run(
   // Pull requests already told their `land` waits for the landing window
   // (#244), cleared whenever it is open so each closure tells them once.
   const toldLandingWindow = new Set<number>();
+  // Stacked chunks whose refresh onto their base, wanted by no member, failed
+  // in this process (#243): retried only for a member that waits, so a
+  // conflict costs one resolve rather than one per recompute.
+  const failedBaseRefreshes = new Set<string>();
   let landingNumber = 0;
   let iteration = 0;
   let lastPlanDiagnostics: string | null = null;
@@ -2027,20 +2035,26 @@ export async function run(
           return;
         }
       case "chunk-refreshed":
+        failedBaseRefreshes.delete(outcome.refresh.branch);
         await runRecord.emit({
           kind: "reconcile",
           action: "chunk-refreshed",
-          detail: `${outcome.refresh.branch} now contains origin/${config.sourceBranch}`,
+          detail: `${outcome.refresh.branch} now contains ` +
+            `origin/${outcome.refresh.base ?? config.sourceBranch}`,
         });
         return;
-      case "chunk-refresh-failed":
+      case "chunk-refresh-failed": {
+        const { refresh, dependents } = outcome.failure;
+        if (dependents.length === 0) failedBaseRefreshes.add(refresh.branch);
         await runRecord.emit({
           kind: "reconcile",
           action: "chunk-refresh-failed",
-          detail: `${outcome.failure.refresh.branch} could not be refreshed; parking ` +
-            outcome.failure.dependents.map((issue) => `#${issue.id}`).join(", "),
+          detail: `${refresh.branch} could not be refreshed` + (dependents.length === 0
+            ? `; retried once a member waits for it`
+            : `; parking ${dependents.map((issue) => `#${issue.id}`).join(", ")}`),
         });
         return;
+      }
     }
   };
 
@@ -2698,6 +2712,9 @@ export async function run(
       // The plan record is the resolver's answer, not the narrower admission
       // this observation may make. Active slots, cooldown and scheduler state
       // can all reduce admission without changing what the planner resolved.
+      const plannedRefreshes = resolution.chunkRefreshes.filter((refresh) =>
+        refresh.dependents.length > 0 || !failedBaseRefreshes.has(refresh.branch)
+      );
       const schedulerSnapshot = {
         active: pool.activeCount,
         ongoing: pool.ongoingCount,
@@ -2706,7 +2723,7 @@ export async function run(
         hasCandidates: pool.hasUnstarted(resolution.plan),
         hasRetries: pool.hasRetries,
         hasLandRequests: landRequests.length > 0,
-        hasChunkRefreshRequests: resolution.chunkRefreshes.length > 0,
+        hasChunkRefreshRequests: plannedRefreshes.length > 0,
         hasCapacity: pool.activeCount < config.maxParallelIssues,
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
@@ -2716,7 +2733,7 @@ export async function run(
       };
       const schedulerAction = decideSchedulerAction(schedulerSnapshot);
       const chunkRefreshes = chunkRefreshRequestsAreRunnable(schedulerSnapshot)
-        ? resolution.chunkRefreshes
+        ? plannedRefreshes
         : [];
       const pollDidWork =
         sourceChangedOnPoll || planDiagnosticsChanged ||

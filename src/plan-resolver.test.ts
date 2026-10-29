@@ -1819,6 +1819,29 @@ describe("resolvePlan frozen and stacked chunks (#243)", () => {
     ]);
   });
 
+  it("refreshes a stacked chunk onto a base that moved with no member waiting", () => {
+    // Rework landed on the base after `land` came off: same members, new tip.
+    const candidates = [...chain, issue(50, "## Blocked by\n- #11\n")];
+    const issueFacts = facts({ 10: {}, 11: {}, 50: {} });
+    const chunkMembers = new Map([[F, new Set([10, 11])], [C, new Set([10, 11, 50])]]);
+    expect(resolveWith(candidates, issueFacts, { chunkMembers }).chunkRefreshes).toEqual([{
+      root: 50,
+      branch: C,
+      base: F,
+      title: "Issue 50",
+      dependents: [],
+    }]);
+    expect(resolveWith(candidates, issueFacts, {
+      chunkMembers,
+      chunksContainingBase: new Set([C]),
+    }).chunkRefreshes).toEqual([]);
+    // A frozen stacked chunk takes nothing, its base included.
+    expect(resolveWith(candidates, issueFacts, {
+      chunkMembers,
+      frozenChunks: new Set([C]),
+    }).chunkRefreshes).toEqual([]);
+  });
+
   it("holds a stacked member whose frozen base lacks a blocker that closed since", () => {
     const r = resolveWith(
       [...chain, issue(50, "## Blocked by\n- #11\n- #9\n")],

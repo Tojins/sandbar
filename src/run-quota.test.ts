@@ -3156,6 +3156,42 @@ describe("run quota orchestration (#109)", () => {
       .toBeLessThan(seams.plan.mock.invocationCallOrder[1]!);
   });
 
+  it("tries a stacked chunk's refresh no member waits for once per process (#243)", async () => {
+    const refresh = {
+      root: 50,
+      branch: "sandbar/chunk-50_on_42-test",
+      base: "sandbar/chunk-42-test",
+      title: "Stacked",
+      dependents: [],
+    };
+    seams.plan.mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    const failure = { refresh, dependents: [], comment: "conflict" };
+    seams.merger.mockImplementation(async (
+      _batch: unknown,
+      _adapter: unknown,
+      _log: unknown,
+      _gate: unknown,
+      options: RunMergerOptions,
+    ) => {
+      // Bounded, so the loop this guards against fails the test, not the worker.
+      if (seams.merger.mock.calls.length > 3) throw new Error("refresh retried");
+      await options.observations.onOutcome({ kind: "chunk-refresh-failed", failure, durationMs: 1 });
+      return { ...summary([]), failedChunkRefreshes: [failure] };
+    });
+    vi.mocked(fetchOriginRefs)
+      .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+      .mockRejectedValueOnce(new Error("stop after a second poll"));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+
+    expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
+    expect(seams.merger).toHaveBeenCalledOnce();
+  });
+
   it("does not refresh a future admission while provider closure drains", async () => {
     const target = issue("1");
     const refresh = {
