@@ -199,8 +199,8 @@ describe("scenarioSetErrors (#240)", () => {
   };
 
   it("accepts a set the writer filed", () => {
-    expect(scenarioSetErrors(set)).toEqual([]);
-    expect(scenarioSetErrors({ ...set, writer: { ...set.writer, effort: "high" } })).toEqual([]);
+    expect(scenarioSetErrors(set, 7)).toEqual([]);
+    expect(scenarioSetErrors({ ...set, writer: { ...set.writer, effort: "high" } }, 7)).toEqual([]);
   });
 
   it("lists every violation, not the first", () => {
@@ -214,7 +214,7 @@ describe("scenarioSetErrors (#240)", () => {
         { ...stored(3), needs: ["gui"], given: [], when: "w", then: [7] },
         "S3",
       ],
-    })).toEqual([
+    }, 7)).toEqual([
       "version is not 1",
       "issue is not a positive integer",
       "seed is not { ref, sha }",
@@ -231,6 +231,10 @@ describe("scenarioSetErrors (#240)", () => {
     ]);
   });
 
+  it("refuses a set written for another issue", () => {
+    expect(scenarioSetErrors(set, 8)).toEqual(["issue is not 8"]);
+  });
+
   it.each([
     ["no object", null, ["is not an object"]],
     ["no scenarios", { ...set, scenarios: [] }, [`scenarios is not a list of 1 to ${MAX_SCENARIOS} scenarios`]],
@@ -240,6 +244,6 @@ describe("scenarioSetErrors (#240)", () => {
       [`scenarios is not a list of 1 to ${MAX_SCENARIOS} scenarios`],
     ],
   ])("refuses %s", (_, value, errors) => {
-    expect(scenarioSetErrors(value)).toEqual(errors);
+    expect(scenarioSetErrors(value, 7)).toEqual(errors);
   });
 });

@@ -69,7 +69,7 @@ describe("parseReplayCases (#195)", () => {
     ]))).toEqual({
       errors: [
         "cases[0].scenarios version is not 1",
-        "cases[1].scenarios were written for another issue",
+        "cases[1].scenarios issue is not 2",
       ],
     });
   });

@@ -313,7 +313,7 @@ async function freezeCase(args: {
   }
   const scenarios = admission === null || admission.scenarios === null
     ? null
-    : await readRecorded<ScenarioSet>(recorded(admission, admission.scenarios), scenarioSetErrors, "a scenario set");
+    : await readRecorded<ScenarioSet>(recorded(admission, admission.scenarios), (value) => scenarioSetErrors(value, issue), "a scenario set");
   return {
     case: {
       issue,

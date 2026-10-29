@@ -325,6 +325,29 @@ describe("replay run (#195)", SESSION_TIMEOUT, () => {
     ]);
   });
 
+  it("requires the scenario roles' providers for a pinned case file, and not for an unpinned one", async () => {
+    const set = {
+      version: 1,
+      issue: 7,
+      seed: { ref: "origin/main", sha: seed },
+      writer: { provider: "claude", model: "m", effort: null },
+      scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: [], given: ["g"], when: ["w"], then: ["t"] }],
+    };
+    const codexRoles = config({ scenarioWriter: false, scenarioWriterAgent: "codex", scenarioRunnerAgent: "codex" });
+    const pinned = await casesFile(caseFileOf({ cases: [{ ...replayCase(7), scenarios: set }] }));
+
+    await expect(replay("pins", 1, { cases: pinned, config: codexRoles })).rejects.toThrow(/Codex is routed/);
+    await expect(replay("plain", 1, { config: codexRoles })).resolves.toBe(0);
+  });
+
+  it("records the scenario runner's routing in the session manifest", async () => {
+    await replay("routed", 1, {
+      config: config({ scenarioRunnerAgent: "claude", scenarioRunnerModelId: "m-run", scenarioRunnerEffort: "high" }),
+    });
+
+    expect((await manifestOf("routed")).routing.scenarioRunner).toEqual({ agent: "claude", model: "m-run", effort: "high" });
+  });
+
   it("refuses a label that already exists", async () => {
     await expect(replay("again", 1)).resolves.toBe(0);
     await expect(replay("again", 1)).rejects.toThrow(/already exists/);

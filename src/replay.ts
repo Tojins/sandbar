@@ -192,12 +192,8 @@ function caseErrors(value: unknown, at: string, seen: Set<number>): readonly str
       errors.push(`${at}.landed is neither null nor { merge, tip, diff } with 40-hex shas and counts`);
     }
   }
-  if (c.scenarios !== undefined) {
-    const scenarioErrors = scenarioSetErrors(c.scenarios);
-    errors.push(...scenarioErrors.map((error) => `${at}.scenarios ${error}`));
-    if (scenarioErrors.length === 0 && (c.scenarios as ScenarioSet).issue !== issue) {
-      errors.push(`${at}.scenarios were written for another issue`);
-    }
+  if (c.scenarios !== undefined && typeof issue === "number") {
+    errors.push(...scenarioSetErrors(c.scenarios, issue).map((error) => `${at}.scenarios ${error}`));
   }
   return errors;
 }

@@ -358,13 +358,15 @@ function scenarioErrors(value: unknown, at: string, id: string): readonly string
   return errors;
 }
 
-// Every way `value` is not a `ScenarioSet`.
-export function scenarioSetErrors(value: unknown): readonly string[] {
+// Every way `value` is not a `ScenarioSet` written for `issue`.
+export function scenarioSetErrors(value: unknown, issue: number): readonly string[] {
   if (!isObject(value)) return ["is not an object"];
   const errors: string[] = [];
   if (value.version !== 1) errors.push("version is not 1");
   if (typeof value.issue !== "number" || !Number.isInteger(value.issue) || value.issue <= 0) {
     errors.push("issue is not a positive integer");
+  } else if (value.issue !== issue) {
+    errors.push(`issue is not ${issue}`);
   }
   const { seed, writer, scenarios } = value;
   if (!isObject(seed) || typeof seed.ref !== "string" || typeof seed.sha !== "string") {
