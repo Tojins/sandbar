@@ -4451,6 +4451,29 @@ describe("runInnerLoop context terminals (#158)", () => {
       expect(names(sandbox)).not.toContain("reviewer-158-round-1");
     });
 
+    // #240: a replay case's frozen set stands for a written one.
+    it("runs a pinned set in the verifier with no writer, whether or not it is on", async () => {
+      const pinned: ScenarioSet = {
+        version: 1,
+        issue: 158,
+        seed: { ref: "origin/main", sha: "fork-sha" },
+        writer: { provider: "claude", model: "m", effort: null },
+        scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: [], given: ["g"], when: ["w"], then: ["t"] }],
+      };
+      innerLoopMocks.buildScenarioRunnerPrompt.mockReset().mockResolvedValue("runner prompt");
+      const { sandbox, opts, events } = harness(routine, { scenarioWriter: true, pinnedScenarios: pinned });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(innerLoopMocks.createScenarioWriterTask).not.toHaveBeenCalled();
+      expect(names(sandbox)).toContain("scenario-runner-158-round-1");
+      expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ scenarios: pinned.scenarios }),
+      );
+      expect(events.flatMap((event) => event.kind === "phase" ? [event.phases] : [])).toEqual([
+        ["anchor"], ["implementer"], ["quality"], ["gate-1"], ["review"], [],
+      ]);
+    });
+
     it("creates no task when it is off", async () => {
       const { opts } = harness(routine, { scenarioWriter: false });
       await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });

@@ -60,12 +60,14 @@
 //
 // `gates` and `terminals` list every gate run and every terminal in the
 // window, in record order, for a reader that keys on their typed fields
-// rather than on the rollups (reflect, #182).
+// rather than on the rollups (reflect, #182). `scenarioRounds` does the same
+// for each `scenario-runner` event that carries the round's outcomes by
+// scenario id, which replay's per-clause report reads (#240).
 
 import type { StatsEvent, StatsInput, StatsWindow } from "./stats-record.js";
 import { proseKey } from "./stats-record.js";
 import type { DeployOutcome } from "./deploy-watch.js";
-import type { UsageFields } from "./events.js";
+import type { ScenarioOutcomeRecord, UsageFields } from "./events.js";
 import type { Lane } from "./lanes.js";
 
 export type Agg = {
@@ -144,6 +146,13 @@ export type GateRow = {
   readonly ok: boolean;
   // Empty when the record names no red step.
   readonly redSteps: readonly string[];
+};
+
+export type ScenarioRoundRow = {
+  readonly run: string;
+  readonly issue: number;
+  readonly round: number;
+  readonly outcomes: readonly ScenarioOutcomeRecord[];
 };
 
 export type TerminalRow = {
@@ -257,6 +266,7 @@ export type StatsReport = {
   readonly invocations: readonly InvocationRow[];
   readonly gates: readonly GateRow[];
   readonly terminals: readonly TerminalRow[];
+  readonly scenarioRounds: readonly ScenarioRoundRow[];
 };
 
 export function agg(values: readonly (number | null | undefined)[]): Agg {
@@ -434,6 +444,7 @@ export function computeStats(input: StatsInput): StatsReport {
   const invocations: Row[] = [];
   const gates: GateRow[] = [];
   const terminals: TerminalRow[] = [];
+  const scenarioRounds: ScenarioRoundRow[] = [];
   const passes: Record<PassName, Mutable<PassCount>> = {
     "gate-1": { runs: 0, rejected: 0 },
     "quality-list": { runs: 0, rejected: 0 },
@@ -558,6 +569,11 @@ export function computeStats(input: StatsInput): StatsReport {
           }
           if (WRITER_FAILED.has(event.result)) writerFailed += 1;
           break;
+        case "scenario-runner":
+          if (event.outcomes !== undefined) {
+            scenarioRounds.push({ run, issue: event.issue, round: event.round, outcomes: event.outcomes });
+          }
+          break;
         case "adjudication":
           adjudication[event.pass].rulings += 1;
           if (event.ruling === "OVERRULED") adjudication[event.pass].overruled += 1;
@@ -642,6 +658,7 @@ export function computeStats(input: StatsInput): StatsReport {
     invocations,
     gates,
     terminals,
+    scenarioRounds,
   };
 }
 

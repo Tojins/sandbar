@@ -46,10 +46,13 @@ tagger and a synthesizer (`reflect.ts`, cached, sandboxed in `reflectScope`)
 turn them into proposals, and writes the report (`reflect-report.ts`) under
 `<stateDir>/reflect/`; `--no-agents` stops at the tables.
 `npm run replay` (`src/replay-cli.ts`, args in `replay-args.ts`, #195) is a third, and HUMAN-ONLY: `freeze`
-writes a case file of past issues at their seeds, `run` drives
+writes a case file of past issues at their seeds, each pinning the scenario
+set its original admission wrote (#240), `run` drives
 `runInnerLoop` over it k times into `<workDir>/replay/sessions/<label>/` with
-no forge credential (`replay-run.ts`; pure layer `replay.ts`), and `report`
-sets each case's original run beside the sessions as spreads
+no forge credential, a pinned set in the writer's place (`replay-run.ts`;
+pure layer `replay.ts`), and `report`
+sets each case's original run beside the sessions as spreads, with
+pass/fail/unverified per pinned scenario
 (`compareReplay`, every run read through `computeStats`); the daemon,
 `cli.ts`, `index.ts`, prompts and reflect never import or name it.
 `scripts/stats-classify.mjs` (#209) classes the `--json --with-prose` report's

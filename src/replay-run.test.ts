@@ -16,7 +16,12 @@ import type { InnerLoopOptions, IssueRef, Terminal } from "./inner-loop.js";
 const seams = vi.hoisted(() => ({
   cleanup: [] as (() => unknown)[],
   terminals: new Map<string, Terminal>(),
-  loops: [] as { readonly issue: string; readonly env: Record<string, string>; readonly issueTitle: unknown }[],
+  loops: [] as {
+    readonly issue: string;
+    readonly env: Record<string, string>;
+    readonly issueTitle: unknown;
+    readonly pinned: unknown;
+  }[],
   // Issues whose loop rejects, and how many loops run at once.
   rejects: new Set<string>(),
   active: 0,
@@ -94,6 +99,7 @@ vi.mock("./inner-loop.js", async (importOriginal) => ({
       issue: issue.id,
       env: opts.config.env,
       issueTitle: (await opts.config.issueSource(issue.id)).title,
+      pinned: opts.config.pinnedScenarios,
     });
     if (seams.rejects.has(issue.id)) throw new Error(`loop #${issue.id} exploded`);
     seams.maxActive = Math.max(seams.maxActive, ++seams.active);
@@ -299,6 +305,47 @@ describe("replay run (#195)", SESSION_TIMEOUT, () => {
       [8, "REJECTED", "loop #8 exploded"],
       [7, "DONE", null],
     ]);
+  });
+
+  // #240
+  it("hands a case's pinned set to every repeat of its loop, and none to an unpinned case", async () => {
+    const set = {
+      version: 1,
+      issue: 7,
+      seed: { ref: "origin/main", sha: seed },
+      writer: { provider: "claude", model: "m", effort: null },
+      scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: [], given: ["g"], when: ["w"], then: ["t"] }],
+    };
+    const cases = await casesFile(caseFileOf({ cases: [{ ...replayCase(7), scenarios: set }, replayCase(8)] }));
+
+    await expect(replay("pinned", 2, { cases })).resolves.toBe(0);
+
+    expect(seams.loops.map((loop) => [loop.issue, loop.pinned])).toEqual([
+      ["7", set], ["8", undefined], ["7", set], ["8", undefined],
+    ]);
+  });
+
+  it("requires the scenario roles' providers for a pinned case file, and not for an unpinned one", async () => {
+    const set = {
+      version: 1,
+      issue: 7,
+      seed: { ref: "origin/main", sha: seed },
+      writer: { provider: "claude", model: "m", effort: null },
+      scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: [], given: ["g"], when: ["w"], then: ["t"] }],
+    };
+    const codexRoles = config({ scenarioWriter: false, scenarioWriterAgent: "codex", scenarioRunnerAgent: "codex" });
+    const pinned = await casesFile(caseFileOf({ cases: [{ ...replayCase(7), scenarios: set }] }));
+
+    await expect(replay("pins", 1, { cases: pinned, config: codexRoles })).rejects.toThrow(/Codex is routed/);
+    await expect(replay("plain", 1, { config: codexRoles })).resolves.toBe(0);
+  });
+
+  it("records the scenario runner's routing in the session manifest", async () => {
+    await replay("routed", 1, {
+      config: config({ scenarioRunnerAgent: "claude", scenarioRunnerModelId: "m-run", scenarioRunnerEffort: "high" }),
+    });
+
+    expect((await manifestOf("routed")).routing.scenarioRunner).toEqual({ agent: "claude", model: "m-run", effort: "high" });
   });
 
   it("refuses a label that already exists", async () => {
