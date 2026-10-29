@@ -706,7 +706,7 @@ describe("the scenario runner's prompt (#238)", () => {
   });
 
   it("tells a rerun of a failed scenario where it failed and to check the analogous sites (#239)", () => {
-    const slot = renderScenarioRunnerSlot({ ...bare, reruns: [{ id: "S1", head: "abc123" }] });
+    const slot = renderScenarioRunnerSlot({ ...bare, reruns: [{ id: "S1", head: "abc123", round: 1 }] });
     expect(slot).toContain(
       "Then the total is unchanged\n\n## Reruns\n\n" +
         "- S1 failed at `abc123`; its evidence from then is under `/sandbar/verifier/findings/S1/`. " +

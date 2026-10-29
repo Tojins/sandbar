@@ -130,8 +130,9 @@ vi.mock("./verifier-run.js", async (importOriginal) => ({
   archiveRun: async (workspace: string, roundDir: string) => {
     innerLoopMocks.verifierFs.push(`archive ${workspace} -> ${roundDir}`);
   },
-  restageFindings: async (workspace: string, roundDir: string, failing: readonly string[]) => {
-    innerLoopMocks.verifierFs.push(`restage ${roundDir} [${failing.join(",")}] -> ${workspace}`);
+  restageFindings: async (workspace: string, evidence: readonly { id: string; roundDir: string }[]) => {
+    const from = evidence.map(({ id, roundDir }) => `${id} from ${roundDir}`).join(",");
+    innerLoopMocks.verifierFs.push(`restage [${from}] -> ${workspace}`);
   },
   runAppHook: innerLoopMocks.runAppHook,
 }));
@@ -2465,8 +2466,8 @@ describe("runVerifier beside the scenario runner (#238)", () => {
       dbCopy: overrides.dbCopy ?? { kind: "none" },
       verifierWorkspace: ws,
     };
-    const run = (scenarios: ScenarioSet | null) => runVerifier(
-      { kind: "run-verifier", attempt: 2, scenarios },
+    const run = (scenarios: ScenarioSet | null, attempt = 2) => runVerifier(
+      { kind: "run-verifier", attempt, scenarios },
       ctx as unknown as Parameters<typeof runVerifier>[1],
     );
     return { run, order, events, sandbox, ws };
@@ -2518,8 +2519,9 @@ describe("runVerifier beside the scenario runner (#238)", () => {
     expect(r.order.indexOf("snapshot", hook)).toBeGreaterThan(hook);
     expect(innerLoopMocks.verifierFs).toEqual([
       `clear ${r.ws}`,
+      `restage [] -> ${r.ws}`,
       `archive ${r.ws} -> ${join("/logs/issue-238", "verifier", "round-2")}`,
-      `restage ${join("/logs/issue-238", "verifier", "round-2")} [S2] -> ${r.ws}`,
+      `restage [S2 from ${join("/logs/issue-238", "verifier", "round-2")}] -> ${r.ws}`,
     ]);
   });
 
@@ -2539,7 +2541,7 @@ describe("runVerifier beside the scenario runner (#238)", () => {
     await expect(r.run(set(scenario(1)))).rejects.toBe(quota);
     expect(whiteBoxDone).toBe(true);
     expect(r.events.filter((event) => event.kind === "review-pass")).toHaveLength(1);
-    expect(innerLoopMocks.verifierFs).toEqual([`clear ${r.ws}`]);
+    expect(innerLoopMocks.verifierFs).toEqual([`clear ${r.ws}`, `restage [] -> ${r.ws}`]);
   });
 
   it("runs no runner, no hook and no workspace step without scenarios", async () => {
@@ -2628,7 +2630,37 @@ describe("runVerifier beside the scenario runner (#238)", () => {
     expect(innerLoopMocks.changedPaths).toHaveBeenCalledWith("/worktree", "head238", "head238");
     expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenLastCalledWith(expect.objectContaining({
       scenarios: [written.scenarios[1], written.scenarios[2]],
-      reruns: [{ id: "S2", head: "head238" }],
+      reruns: [{ id: "S2", head: "head238", round: 2 }],
+    }));
+  });
+
+  // A round that settled the rerun before its runner ran restaged `findings/`
+  // without it, and the implementer may have touched it since.
+  it("restages a rerun's evidence from the round that archived it before the runner starts (#239)", async () => {
+    const reports = [
+      "### S2: FAIL\nObserved: empty\nEvidence: S2/rows.txt",
+      "### S2: FAIL\nObserved: still empty\nEvidence: S2/rows.txt",
+    ];
+    const r = round(async () => ran("<verdict>APPROVED</verdict>"), async () => {
+      innerLoopMocks.verifierFs.push("runner");
+      return ran(`<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n${reports.shift()}\n</scenario-results>`);
+    });
+    const written = set(scenario(2, ["ui"]));
+    const dir = (n: number) => join("/logs/issue-238", "verifier", `round-${n}`);
+    await r.run(written, 1);
+    innerLoopMocks.runAppHook.mockResolvedValueOnce("failed");
+    await expect(r.run(written, 2)).resolves.toMatchObject({ scenarios: { unverified: 1 } });
+    innerLoopMocks.verifierFs.length = 0;
+    await expect(r.run(written, 3)).resolves.toMatchObject({ scenarios: { fail: 1 } });
+    expect(innerLoopMocks.verifierFs).toEqual([
+      `clear ${r.ws}`,
+      `restage [S2 from ${dir(1)}] -> ${r.ws}`,
+      "runner",
+      `archive ${r.ws} -> ${dir(3)}`,
+      `restage [S2 from ${dir(3)}] -> ${r.ws}`,
+    ]);
+    expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenLastCalledWith(expect.objectContaining({
+      reruns: [{ id: "S2", head: "head238", round: 1 }],
     }));
   });
 
@@ -2982,8 +3014,8 @@ describe("runAdjudicator (#167)", () => {
       })),
     } as unknown as Sandbox;
     const ledger = new Map([
-      ["S2", { status: "fail", head: "head123" }],
-      ["S3", { status: "fail", head: "head123" }],
+      ["S2", { status: "fail", head: "head123", round: 1 }],
+      ["S3", { status: "fail", head: "head123", round: 1 }],
     ]);
     const ctx = {
       ...context(sandbox, events),
@@ -3017,9 +3049,9 @@ describe("runAdjudicator (#167)", () => {
     });
     expect(ctx.scenarioLedger.current).toEqual(new Map([
       ["S2", { status: "retired" }],
-      ["S3", { status: "fail", head: "head123" }],
+      ["S3", { status: "fail", head: "head123", round: 1 }],
     ]));
-    expect(ledger.get("S2")).toEqual({ status: "fail", head: "head123" });
+    expect(ledger.get("S2")).toEqual({ status: "fail", head: "head123", round: 1 });
   });
 
   it("names a report of scenario units alone the scenarios pass, and retries a missing unit token (#239)", async () => {
@@ -3107,7 +3139,7 @@ describe("runAdjudicator (#167)", () => {
 
     const result = await runAdjudicator(scenarios, ctx);
     expect(innerLoopMocks.verifierFs).toEqual([
-      `restage ${join("/logs/issue-167", "verifier", "round-1")} [S2] -> /ws`,
+      `restage [S2 from ${join("/logs/issue-167", "verifier", "round-1")}] -> /ws`,
       "judge",
     ]);
     expect(result.kind).toBe("adjudicator-wrote");

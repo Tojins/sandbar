@@ -3326,14 +3326,8 @@ export async function runAdjudicator(
     ? action.rejection.units.map((unit) => unit.id)
     : null;
   if (action.pass === "correctness" && ctx.verifierWorkspace !== null) {
-    await restageFindings(
-      ctx.verifierWorkspace,
-      opts.attemptLogger.verifierRoundDir(ctx.invocationSequence.filename({
-        role: "verifier-round",
-        attempt: rejection.round,
-      })),
-      scenarioUnits,
-    );
+    const roundDir = verifierRoundDir(ctx, rejection.round);
+    await restageFindings(ctx.verifierWorkspace, scenarioUnits.map((id) => ({ id, roundDir })));
   }
   const prompt = await buildAdjudicatorPrompt({
     ...branchRoleInputs(ctx),
@@ -3527,7 +3521,8 @@ export async function runAdjudicator(
 // the cycle's ledger selects, from the paths changed since each head it holds
 // (#239), and advances the ledger by what they came to. Before the agents
 // start, the round's `run/` is emptied, the `beforeScenarioRun` hook serves
-// the app from this head and the pre-pass settles what cannot run; the
+// the app from this head, the pre-pass settles what cannot run, and a runner's
+// reruns have their evidence restaged from the rounds that failed them; the
 // white-box picture is measured, still anchored at the seed, and from its
 // second round on the review reads the change since the last head an earlier
 // round reviewed. Both agents settle before anything is
@@ -3560,6 +3555,7 @@ export async function runVerifier(
     dbCopies: ctx.dbCopy.kind === "none" ? "off" : ctx.dbCopy.kind,
     appHook,
   });
+  const planReruns = reruns.filter((rerun) => plan.run.some((scenario) => scenario.id === rerun.id));
   const contained = new Map(await Promise.all(ctx.priorReviewRounds.map(
     async ({ head: reviewed }) =>
       [reviewed, await isAncestor(sandbox.worktreePath, reviewed, head)] as const,
@@ -3613,9 +3609,15 @@ export async function runVerifier(
       dbCopy: ctx.dbCopy.kind === "held" ? ctx.dbCopy : null,
       appHook,
       scenarios: plan.run,
-      reruns: reruns.filter((rerun) => plan.run.some((scenario) => scenario.id === rerun.id)),
+      reruns: planReruns,
     }),
   };
+  if (runnerInput !== null) {
+    await restageFindings(runnerInput.workspace, planReruns.map(({ id, round }) => ({
+      id,
+      roundDir: verifierRoundDir(ctx, round),
+    })));
+  }
   const [whiteBoxSettled, runnerSettled] = await Promise.allSettled([
     runReadOnlyReview(ctx, {
       role: "Reviewer",
@@ -3662,17 +3664,13 @@ export async function runVerifier(
   if (runnerSettled.status === "rejected") throw runnerSettled.reason;
   const outcome = whiteBoxSettled.value;
   const runner = runnerSettled.value;
-  ctx.scenarioLedger.current = advanceLedger(ledger, head, runner);
-  const roundDir = opts.attemptLogger.verifierRoundDir(ctx.invocationSequence.filename({
-    role: "verifier-round",
-    attempt: action.attempt,
-  }));
+  ctx.scenarioLedger.current = advanceLedger(ledger, head, action.attempt, runner);
+  const roundDir = verifierRoundDir(ctx, action.attempt);
   if (workspace !== null) {
     await archiveRun(workspace, roundDir);
     await restageFindings(
       workspace,
-      roundDir,
-      runnerOutcomes(runner).flatMap((o) => (o.outcome === "fail" ? [o.id] : [])),
+      runnerOutcomes(runner).flatMap((o) => (o.outcome === "fail" ? [{ id: o.id, roundDir }] : [])),
     );
   }
   if (outcome.kind === "reviewed") {
@@ -3697,6 +3695,13 @@ export async function runVerifier(
     scenarios: tallyScenarios(runner),
   };
 }
+
+// Where verifier round `round`'s evidence is archived in the run's log tree.
+const verifierRoundDir = (ctx: ExecuteActionCtx, round: number): string =>
+  ctx.opts.attemptLogger.verifierRoundDir(ctx.invocationSequence.filename({
+    role: "verifier-round",
+    attempt: round,
+  }));
 
 // The paths changed since each head the ledger's selection reads, or "all"
 // for a head `head` no longer contains.

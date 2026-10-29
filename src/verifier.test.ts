@@ -308,14 +308,14 @@ describe("the scenario ledger (#239)", () => {
 
   it("reruns a failure, skips a retired scenario, and runs a passed or unverified one only when touched", () => {
     const ledger: ScenarioLedger = new Map<string, LedgerEntry>([
-      ["S1", { status: "fail", head: "h1" }],
+      ["S1", { status: "fail", head: "h1", round: 1 }],
       ["S2", { status: "pass", head: "h1" }],
       ["S3", { status: "unverified", head: "h2" }],
       ["S4", { status: "retired" }],
     ]);
     const selected = selectScenarios(set, ledger, new Map([["h1", ["src/c/x.ts"]], ["h2", ["src/c/x.ts"]]]));
     expect(ids(selected.run)).toEqual(["S1", "S3", "S5"]);
-    expect(selected.reruns).toEqual([{ id: "S1", head: "h1" }]);
+    expect(selected.reruns).toEqual([{ id: "S1", head: "h1", round: 1 }]);
   });
 
   it("runs every scenario whose head HEAD no longer contains, but no retired one", () => {
@@ -332,7 +332,7 @@ describe("the scenario ledger (#239)", () => {
 
   it("names the heads whose change selection reads, once each", () => {
     expect(ledgerHeads(new Map<string, LedgerEntry>([
-      ["S1", { status: "fail", head: "h0" }],
+      ["S1", { status: "fail", head: "h0", round: 1 }],
       ["S2", { status: "pass", head: "h1" }],
       ["S3", { status: "unverified", head: "h1" }],
       ["S4", { status: "retired" }],
@@ -347,11 +347,11 @@ describe("the scenario ledger (#239)", () => {
 
   it("advances only the runner's own verdicts to the round's head", () => {
     const before: ScenarioLedger = new Map<string, LedgerEntry>([
-      ["S1", { status: "fail", head: "h1" }],
+      ["S1", { status: "fail", head: "h1", round: 1 }],
       ["S4", { status: "pass", head: "h1" }],
       ["S5", { status: "retired" }],
     ]);
-    const after = advanceLedger(before, "h2", reported(
+    const after = advanceLedger(before, "h2", 2, reported(
       pass("S1"),
       fail("S2"),
       unverified("S3"),
@@ -361,24 +361,24 @@ describe("the scenario ledger (#239)", () => {
       ["S1", { status: "pass", head: "h2" }],
       ["S4", { status: "pass", head: "h1" }],
       ["S5", { status: "retired" }],
-      ["S2", { status: "fail", head: "h2" }],
+      ["S2", { status: "fail", head: "h2", round: 2 }],
       ["S3", { status: "unverified", head: "h2" }],
     ]));
-    expect(before.get("S1")).toEqual({ status: "fail", head: "h1" });
+    expect(before.get("S1")).toEqual({ status: "fail", head: "h1", round: 1 });
   });
 
   it("leaves the ledger as it was after a runner failure or a write", () => {
-    const before: ScenarioLedger = new Map([["S1", { status: "fail", head: "h1" }]]);
+    const before: ScenarioLedger = new Map([["S1", { status: "fail", head: "h1", round: 1 }]]);
     const failed: RunnerResult = {
       kind: "failed",
       outcomes: [{ id: "S1", outcome: "unverified", reason: "runner-failed" }],
     };
-    expect(advanceLedger(before, "h2", failed)).toEqual(before);
-    expect(advanceLedger(before, "h2", { kind: "wrote", detail: "x" })).toEqual(before);
+    expect(advanceLedger(before, "h2", 2, failed)).toEqual(before);
+    expect(advanceLedger(before, "h2", 2, { kind: "wrote", detail: "x" })).toEqual(before);
   });
 
   it("retires overruled scenarios for good", () => {
-    const ledger = retire(new Map([["S1", { status: "fail", head: "h1" }]]), ["S1", "S2"]);
+    const ledger = retire(new Map([["S1", { status: "fail", head: "h1", round: 1 }]]), ["S1", "S2"]);
     expect(ids(selectScenarios(set, ledger, new Map()).run)).toEqual(["S3", "S4", "S5"]);
   });
 });

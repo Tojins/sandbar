@@ -620,7 +620,7 @@ describe.runIf(snapshotAvailable)("a seed snapshot sandbox against real podman (
     }
     const roundDir = join(root, "run", "issue-238", "verifier", "round-1");
     await archiveRun(workspace, roundDir);
-    await restageFindings(workspace, roundDir, ["S1"]);
+    await restageFindings(workspace, [{ id: "S1", roundDir }]);
     expect(await readFile(join(roundDir, "S1", "out.txt"), "utf8")).toBe("evidence\n");
     expect(await readFile(join(workspace, "findings", "S1", "out.txt"), "utf8")).toBe("evidence\n");
     await rm(roundDir, { recursive: true });

@@ -28,8 +28,10 @@
 // output and the runner's evidence go. After the round it moves `run/` to the
 // round's directory in the run's issue log tree and restages `findings/` with
 // copies of the FAILING scenarios' directories only, again before any
-// adjudicator: passing evidence never returns to the sandbox, so the passing
-// scenarios stay a holdout from the implementer. The agent runs as the host
+// adjudicator, and before a runner starts with the directories of the failed
+// scenarios it reruns, each from the round that failed it (#239): passing
+// evidence never returns to the sandbox, so the passing scenarios stay a
+// holdout from the implementer. The agent runs as the host
 // user (keep-id), so the host can move and remove what it wrote. A failure to
 // archive or restage propagates: a half-staged holdout must not be handed on.
 
@@ -303,17 +305,19 @@ export async function archiveRun(workspace: string, roundDir: string): Promise<v
   await rename(join(workspace, "run"), roundDir);
 }
 
-// `findings/` holds a copy of each of `failing`'s directories from the
-// archived round, and nothing else.
+// A failing scenario's evidence: its directory in the archived round.
+export type ArchivedEvidence = { readonly id: string; readonly roundDir: string };
+
+// `findings/` holds a copy of each of `evidence`'s directories, and nothing
+// else.
 export async function restageFindings(
   workspace: string,
-  roundDir: string,
-  failing: readonly string[],
+  evidence: readonly ArchivedEvidence[],
 ): Promise<void> {
   const findings = join(workspace, "findings");
   await rm(findings, { recursive: true, force: true });
   await mkdir(findings);
-  for (const id of failing) {
+  for (const { id, roundDir } of evidence) {
     await cp(join(roundDir, id), join(findings, id), { recursive: true });
   }
 }

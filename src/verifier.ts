@@ -43,7 +43,8 @@
 // failed or never ran, and one that passed or was unverified only when the
 // change since its head touches its area (`scenarioTouched`); a head HEAD no
 // longer contains counts as touching everything. A failed scenario's rerun is
-// told to check the analogous sites too. Only the runner's own verdicts
+// told to check the analogous sites too, beside its evidence from the round
+// that failed it, which the ledger names. Only the runner's own verdicts
 // advance the ledger: a pre-pass or harness UNVERIFIED leaves a scenario as it
 // was. A scenario an adjudicator overrules is retired and never runs again,
 // so a wrong scenario cannot fail every later round.
@@ -302,15 +303,17 @@ export function prepass(
 }
 
 // A scenario's standing in the ledger. An id the ledger does not hold has
-// never run; `head` is the one it last ran at.
+// never run; `head` is the one it last ran at, and a failure's `round` the
+// one whose archive holds its evidence.
 export type LedgerEntry =
-  | { readonly status: "pass" | "fail" | "unverified"; readonly head: string }
+  | { readonly status: "pass" | "unverified"; readonly head: string }
+  | { readonly status: "fail"; readonly head: string; readonly round: number }
   | { readonly status: "retired" };
 
 export type ScenarioLedger = ReadonlyMap<string, LedgerEntry>;
 
-// A failed scenario run again, and the head it failed at.
-export type ScenarioRerun = { readonly id: string; readonly head: string };
+// A failed scenario run again, and the head and round it failed at.
+export type ScenarioRerun = { readonly id: string; readonly head: string; readonly round: number };
 
 // The heads selection needs the change since: those of the scenarios that
 // passed or were unverified.
@@ -339,7 +342,7 @@ export function selectScenarios(
       run.push(scenario);
     } else if (entry.status === "fail") {
       run.push(scenario);
-      reruns.push({ id: scenario.id, head: entry.head });
+      reruns.push({ id: scenario.id, head: entry.head, round: entry.round });
     } else if (entry.status !== "retired" && touched(scenario, entry.head)) {
       run.push(scenario);
     }
@@ -347,18 +350,21 @@ export function selectScenarios(
   return { run, reruns };
 }
 
-// The ledger after a round at `head`: each scenario the runner itself
-// reported PASS, FAIL or UNVERIFIED stands at `head`, and every other one is
-// as it was.
+// The ledger after round `round` at `head`: each scenario the runner itself
+// reported PASS, FAIL or UNVERIFIED stands there, and every other one is as
+// it was.
 export function advanceLedger(
   ledger: ScenarioLedger,
   head: string,
+  round: number,
   runner: RunnerResult,
 ): ScenarioLedger {
   const next = new Map(ledger);
   for (const outcome of runnerOutcomes(runner)) {
     if (outcome.outcome === "unverified" && outcome.reason !== "runner") continue;
-    next.set(outcome.id, { status: outcome.outcome, head });
+    next.set(outcome.id, outcome.outcome === "fail"
+      ? { status: "fail", head, round }
+      : { status: outcome.outcome, head });
   }
   return next;
 }
