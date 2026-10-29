@@ -338,6 +338,7 @@ import { beginCleanup } from "./cleanup.js";
 import { RESTART_REQUEST_FILE } from "./restart-request.js";
 import type { StackSource } from "./stack-source.js";
 import { startStack } from "./gate-stack.js";
+import { routeChunkReviewFollowUps } from "./chunk-follow-up.js";
 
 const config: RunConfig = {
   ghOwner: "o", ghRepo: "r", developers: "anyone", cwd: "/tmp", workDir: "sandbar-run-quota-test",
@@ -648,6 +649,31 @@ describe("run quota orchestration (#109)", () => {
       severity: "warning",
       message: expect.stringContaining("sandbar/issue-383-parked"),
     }));
+  });
+
+  // The land listing is read before planning (#243); a chunk the
+  // reconciliation then finishes off must not reach the merger as well.
+  it("does not land a request whose chunk this recompute reconciled", async () => {
+    const wrapup = chunkWrapup([]);
+    seams.plan.mockResolvedValue({ ...resolution([]), landedChunks: [] });
+    seams.landRequestPullRequests.mockResolvedValue([{
+      number: wrapup.target.pullRequest,
+      headRefName: wrapup.target.branch,
+      title: wrapup.target.title,
+      labels: ["land"],
+    }]);
+    seams.reconcile.mockResolvedValueOnce({
+      reconciled: [{ ...wrapup, durationMs: 1 }],
+      closedIssues: [383],
+    });
+    seams.merger.mockResolvedValue(summary([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+
+    expect(seams.merger).not.toHaveBeenCalled();
   });
 
   it("warns about retained issue branches from the live merge path", async () => {
@@ -3050,6 +3076,7 @@ describe("run quota orchestration (#109)", () => {
     const target = {
       root: 42,
       branch: "sandbar/chunk-42-test",
+      base: null,
       title: "Chunk 42",
       members: [{ number: 42, title: "Issue 42" }],
       closeOrder: [{ number: 42, title: "Issue 42" }],
@@ -3127,6 +3154,42 @@ describe("run quota orchestration (#109)", () => {
       .toBeLessThan(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[1]!);
     expect(vi.mocked(fetchPlanningRefs).mock.invocationCallOrder[1])
       .toBeLessThan(seams.plan.mock.invocationCallOrder[1]!);
+  });
+
+  it("tries a stacked chunk's refresh no member waits for once per process (#243)", async () => {
+    const refresh = {
+      root: 50,
+      branch: "sandbar/chunk-50_on_42-test",
+      base: "sandbar/chunk-42-test",
+      title: "Stacked",
+      dependents: [],
+    };
+    seams.plan.mockResolvedValue({ ...resolution([]), chunkRefreshes: [refresh] });
+    const failure = { refresh, dependents: [], comment: "conflict" };
+    seams.merger.mockImplementation(async (
+      _batch: unknown,
+      _adapter: unknown,
+      _log: unknown,
+      _gate: unknown,
+      options: RunMergerOptions,
+    ) => {
+      // Bounded, so the loop this guards against fails the test, not the worker.
+      if (seams.merger.mock.calls.length > 3) throw new Error("refresh retried");
+      await options.observations.onOutcome({ kind: "chunk-refresh-failed", failure, durationMs: 1 });
+      return { ...summary([]), failedChunkRefreshes: [failure] };
+    });
+    vi.mocked(fetchOriginRefs)
+      .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+      .mockRejectedValueOnce(new Error("stop after a second poll"));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
+      .rejects.toThrow("EXIT:1");
+
+    expect(fetchOriginRefs).toHaveBeenCalledTimes(2);
+    expect(seams.merger).toHaveBeenCalledOnce();
   });
 
   it("does not refresh a future admission while provider closure drains", async () => {
@@ -3328,53 +3391,6 @@ describe("run quota orchestration (#109)", () => {
       .toBeUndefined();
   });
 
-  it("hands a deferred request to a landing pass triggered by its completed member", async () => {
-    const target = {
-      root: 42,
-      branch: "sandbar/chunk-42-test",
-      title: "Chunk 42",
-      members: [{ number: 42, title: "Issue 42" }],
-      closeOrder: [{ number: 42, title: "Issue 42" }],
-      rework: [],
-      pullRequest: 9,
-    };
-    const member = {
-      ...issue("42"),
-      chunk: { root: target.root, branch: target.branch },
-    };
-    seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) => ({
-      ...resolution(options.excluded?.has(42) ? [] : [member]),
-      landedChunks: [target],
-    }));
-    seams.landRequestPullRequests
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{
-        number: target.pullRequest,
-        headRefName: target.branch,
-        title: target.title,
-        labels: ["land"],
-      }])
-      .mockResolvedValue([]);
-    seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "member" }] });
-    seams.merger.mockImplementation(async (batch: typeof member[]) => ({
-      ...summary(batch),
-      deferredChunks: [{ target, landedNow: target.members }],
-    }));
-    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
-      throw new Error(`EXIT:${code}`);
-    }) as never);
-
-    await expect(run({ ...config, maxParallelIssues: 1, pollIntervalMs: 1 }))
-      .rejects.toThrow("EXIT:1");
-
-    expect(seams.merger).toHaveBeenCalledOnce();
-    expect(seams.merger.mock.calls[0]?.[0]).toEqual([member]);
-    expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkLanding).toEqual({
-      requests: [{ ...target, landLabels: ["land"] }],
-      sourceBranch: "main",
-    });
-  });
-
   it("refuses a drifted member-carrying request before the merger", async () => {
     const branch = "sandbar/chunk-42-old-root";
     const drift = {
@@ -3529,6 +3545,7 @@ describe("run quota orchestration (#109)", () => {
     const target = {
       root: 42,
       branch: "sandbar/chunk-42-test",
+      base: null,
       title: "Chunk 42",
       members: [{ number: 42, title: "Issue 42" }],
       closeOrder: [{ number: 42, title: "Issue 42" }],
@@ -3586,6 +3603,147 @@ describe("run quota orchestration (#109)", () => {
           },
         }),
       ]));
+    });
+
+    it("freezes a requested chunk for the planner and its review scan (#243)", async () => {
+      requestedWith(["land"]);
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockRejectedValueOnce(new Error("stop after a second closed poll"));
+
+      await runAt(CLOSED);
+
+      expect(seams.plan.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({ frozenChunks: new Set([target.branch]) }),
+      );
+      expect(vi.mocked(routeChunkReviewFollowUps).mock.calls[0]?.[0].chunks).toEqual([]);
+    });
+
+    it("holds a stacked chunk's request while its base is on origin (#243)", async () => {
+      const stacked = {
+        ...target,
+        root: 50,
+        branch: "sandbar/chunk-50_on_42-test",
+        base: target.branch,
+        pullRequest: 10,
+      };
+      seams.plan.mockResolvedValue({ ...resolution([]), landedChunks: [stacked] });
+      seams.landRequestPullRequests.mockResolvedValue([
+        { number: 10, headRefName: stacked.branch, title: stacked.title, labels: ["land"] },
+      ]);
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockRejectedValueOnce(new Error("stop after a second poll"));
+
+      await runAt(OPEN);
+
+      expect(seams.merger).not.toHaveBeenCalled();
+      expect(eventsOf("land-request")).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          pullRequest: 10,
+          status: { kind: "deferred", reason: `stacked on ${target.branch} · lands once it lands` },
+        }),
+      ]));
+    });
+
+    // A DONE member of another chunk starts a pass of its own (#243).
+    const otherChunkWork = () => {
+      const work = { ...issue("60"), chunk: { root: 60, branch: "sandbar/chunk-60-other" } };
+      seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
+      seams.merger.mockImplementation(async () => summary([]));
+      return work;
+    };
+
+    it("keeps a request the window holds out of a pass started for other work", async () => {
+      const work = otherChunkWork();
+      seams.plan
+        .mockResolvedValueOnce({ ...resolution([work]), landedChunks: [target] })
+        .mockResolvedValue({ ...resolution([]), landedChunks: [target] });
+      seams.landRequestPullRequests.mockResolvedValue([
+        { number: 9, headRefName: target.branch, title: target.title, labels: ["land"] },
+      ]);
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockRejectedValueOnce(new Error("stop after the landing"));
+
+      await runAt(CLOSED);
+
+      expect(seams.merger).toHaveBeenCalledOnce();
+      expect(seams.merger.mock.calls[0]?.[0]).toEqual([work]);
+      expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkLanding).toBeUndefined();
+    });
+
+    it("keeps a stacked request out of a pass started for other work", async () => {
+      const work = otherChunkWork();
+      const stacked = {
+        ...target,
+        root: 50,
+        branch: "sandbar/chunk-50_on_42-test",
+        base: target.branch,
+        landLabels: ["land-hotfix"],
+        pullRequest: 10,
+      };
+      seams.plan
+        .mockResolvedValueOnce({ ...resolution([work]), landedChunks: [stacked] })
+        .mockResolvedValue({ ...resolution([]), landedChunks: [stacked] });
+      seams.landRequestPullRequests.mockResolvedValue([
+        { number: 10, headRefName: stacked.branch, title: stacked.title, labels: ["land-hotfix"] },
+      ]);
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockRejectedValueOnce(new Error("stop after the landing"));
+
+      await runAt(CLOSED);
+
+      expect(seams.merger).toHaveBeenCalledOnce();
+      expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkLanding).toBeUndefined();
+    });
+
+    it("holds a DONE member of a frozen chunk off its branch until the chunk lands", async () => {
+      const member = { ...issue("43"), chunk: { root: 42, branch: target.branch } };
+      seams.plan
+        .mockResolvedValueOnce({ ...resolution([member]), landedChunks: [target] })
+        .mockResolvedValue({ ...resolution([]), landedChunks: [target] });
+      seams.innerLoop.mockResolvedValue({ type: "DONE", commits: [{ sha: "work" }] });
+      const passes: Array<{ batch: string[]; landing: string[] }> = [];
+      seams.merger.mockImplementation(async (
+        batch: typeof member[],
+        _adapter: unknown,
+        _log: unknown,
+        _gate: unknown,
+        options: RunMergerOptions,
+      ) => {
+        passes.push({
+          batch: batch.map((i) => i.id),
+          landing: (options.chunkLanding?.requests ?? []).map((r) => r.branch),
+        });
+        return summary([]);
+      });
+      // `land` goes on while #43 is in flight and stays until a pass lands
+      // the chunk.
+      seams.landRequestPullRequests.mockImplementation(async () =>
+        seams.innerLoop.mock.calls.length === 0 ||
+          passes.some((pass) => pass.landing.includes(target.branch))
+          ? []
+          : [{ number: 9, headRefName: target.branch, title: target.title, labels: ["land"] }]
+      );
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockRejectedValueOnce(new Error("stop after the release"));
+
+      await runAt(OPEN);
+
+      expect(passes).toEqual([
+        { batch: [], landing: [target.branch] },
+        { batch: ["43"], landing: [] },
+      ]);
+      expect(eventsOf("notice")).toEqual(expect.arrayContaining([{
+        kind: "notice",
+        message: `#43 is done and waits for ${target.branch}: its pull request ` +
+          "carries a landing label, so nothing more goes onto it until it lands " +
+          "or the label comes off.",
+      }]));
     });
 
     it("lands a `land-hotfix` request while closed", async () => {

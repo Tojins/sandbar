@@ -38,10 +38,11 @@
 //
 // FAIL-SOFT ON DISCOVERY, loud on the writes. A `gh` or `git` failure while
 // working out what to reconcile answers "nothing to reconcile" — the state it
-// could not read is still there next cycle, and refusing to start a run over a
-// repair that is not urgent would be the wrong trade. Once a target is chosen,
-// its writes are the wrap-up's, and what they could not finish comes back as
-// residue the orchestrator reports.
+// could not read is still there next cycle, and refusing to start a run over
+// a repair that is not urgent would be the wrong trade. The land listing here
+// is the exception: it decides which chunks are frozen (#243), so it throws.
+// Once a target is chosen, its writes are the wrap-up's, and what they could
+// not finish comes back as residue the orchestrator reports.
 //
 // RESIDUE IS REPORTED, AND — unlike the merge phase's own landings — NOT
 // HALTED ON. A durable-log failure still propagates and ends the run; silently
@@ -190,7 +191,14 @@ export async function fetchPullRequestsForBranches(
       PULL_REQUEST_FIELDS,
     ]);
     if (!r.ok) continue;
-    found.push(...parsePullRequests(r.stdout, new Set(["OPEN", "MERGED"])));
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(r.stdout.trim() || "[]");
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
+      continue;
+    }
+    found.push(...parsePullRequests(parsed, new Set(["OPEN", "MERGED"])));
   }
   return found;
 }
@@ -201,16 +209,17 @@ export async function fetchPullRequestsForBranches(
  * One listing per label, because `gh` ANDs repeated `--label`s; a pull request
  * carrying both is listed once.
  *
- * Fail-soft, like the rest of discovery here: if either listing fails, no
- * chunk is landed this cycle (never a partial answer), and the labels are
- * still on the pull requests for the next one.
+ * STRICT, unlike the rest of discovery here: their heads are the frozen
+ * chunks (#243), and "none" read off a failed listing would let a frozen chunk
+ * take new members. A failure throws, and the recompute fails as on any other
+ * tracker read; the labels are still on the pull requests for the next one.
  */
 export async function fetchLandRequestPullRequests(
   repo: RepoRef,
 ): Promise<readonly PullRequestSummary[]> {
   const byNumber = new Map<number, PullRequestSummary>();
   for (const label of LAND_REQUEST_LABELS) {
-    const r = await capture("gh", [
+    const { stdout } = await exec("gh", [
       "pr",
       "list",
       "--repo",
@@ -224,8 +233,8 @@ export async function fetchLandRequestPullRequests(
       "--limit",
       "200",
     ]);
-    if (!r.ok) return [];
-    for (const pr of parsePullRequests(r.stdout, new Set(["OPEN"]))) {
+    const parsed: unknown = JSON.parse(stdout.trim() || "[]");
+    for (const pr of parsePullRequests(parsed, new Set(["OPEN"]))) {
       byNumber.set(pr.number, pr);
     }
   }
@@ -239,16 +248,9 @@ const PULL_REQUEST_FIELDS = "number,headRefName,title,state,labels";
 // unreadable entry is one chunk not landed this cycle, and a throw here is a
 // run that will not start.
 function parsePullRequests(
-  stdout: string,
+  parsed: unknown,
   acceptedStates: ReadonlySet<string>,
 ): readonly PullRequestSummary[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout.trim() || "[]");
-  } catch (err) {
-    if (!(err instanceof SyntaxError)) throw err;
-    return [];
-  }
   if (!Array.isArray(parsed)) return [];
   const out: PullRequestSummary[] = [];
   for (const raw of parsed) {

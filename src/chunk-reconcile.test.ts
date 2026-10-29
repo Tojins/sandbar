@@ -45,6 +45,9 @@ function fakeAdapter(
         record("closePullRequest", String(p));
         return "closed" as const;
       },
+      async retargetPullRequests() {
+        return [];
+      },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
         return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
@@ -64,6 +67,7 @@ const chunk = (
 ): LandedChunk => ({
   root,
   branch: `sandbar/chunk-${root}-c`,
+  base: null,
   title: `t-${root}`,
   members: members.map((n) => ({ number: n, title: `t-${n}` })),
   // Ascending, which is what an unrelated pair closes in; a chain is

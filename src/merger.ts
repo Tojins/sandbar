@@ -5,7 +5,8 @@
 //
 // A chunk refresh (#174) is one more merge unit on this same path, after the
 // pass's source landing: detach at `origin/<chunk>`, merge --no-ff
-// `origin/<sourceBranch>`, mechanically resolve the version collision first,
+// `origin/<sourceBranch>` (or, for a chunk stacked on another, #243, that
+// one's branch), mechanically resolve the version collision first,
 // then use the ordinary resolve loop and gate-2 before directly pushing the
 // existing chunk branch. It never rewrites the branch and never moves member
 // refs, so every landed member remains contained. Moving the PR base and head
@@ -62,12 +63,13 @@
 // A DONE branch lands on the source branch unless its issue carries a CHUNK
 // (`IssueRef.chunk`, put there by the planner), in which case it lands on that
 // chunk's branch — `sandbar/chunk-<root>-<slug>`, created at
-// `origin/<sourceBranch>` the first time a member lands on it. Everything
-// between the two paths is the same code: same ephemeral worktree, same
-// per-issue `merge --no-ff`, same resolve loop with the same sibling issue
-// list, same gate-2 on the composition, same `preMergeSha` revert on
-// abandon. The only differences are what the worktree is detached at, where
-// the result is pushed, and what the issue is told afterwards.
+// `origin/<sourceBranch>` the first time a member lands on it (a chunk stacked
+// on another, #243, is created at that one's tip while origin has it).
+// Everything between the two paths is the same code: same ephemeral
+// worktree, same per-issue `merge --no-ff`, same resolve loop with the same
+// sibling issue list, same gate-2 on the composition, same `preMergeSha`
+// revert on abandon. The only differences are what the worktree is detached
+// at, where the result is pushed, and what the issue is told afterwards.
 //
 // CHUNKS ARE LANDED FIRST, and the worktree is put back at the sha it entered
 // on before the source-branch pass. Order matters for one reason: the
@@ -94,14 +96,15 @@
 // with the source branch is part of landing the chunk, not of growing it.
 //
 // EVERY CHUNK PUSH IS FOLLOWED BY A DRAFT PULL REQUEST (#62), created or
-// updated, chunk → source branch: the branch is where the work is, the PR is
-// where a human reviews it, and the review lane produces nothing anyone can act
-// on without it. After the push and after the `chunkLanded` entries, in that
-// order — a PR is a handle on commits origin has, and a failure to open one
-// must not take a durable landing down with it. What it says is `chunk-pr.ts`;
-// the `gh` create-or-update is `forge-pr.ts`; that it is a DRAFT is the
-// mechanism disabling GitHub's merge button while leaving review intact, and
-// sandbar never un-drafts one a human made ready.
+// updated, chunk → source branch (→ the chunk it is stacked on while origin
+// has that, #243, so the diff is its own work): the branch is where the work
+// is, the PR is where a human reviews it, and the review lane produces
+// nothing anyone can act on without it. After the push and after the
+// `chunkLanded` entries, in that order — a PR is a handle on commits origin
+// has, and a failure to open one must not take a durable landing down with it.
+// What it says is `chunk-pr.ts`; the `gh` create-or-update is `forge-pr.ts`;
+// that it is a DRAFT is the mechanism disabling GitHub's merge button while
+// leaving review intact, and sandbar never un-drafts one a human made ready.
 //
 // The accepted push also refreshes the host cache's chunk and member refs so
 // the next planning boundary sees sandbar's own write (#175). A failed refresh
@@ -167,7 +170,9 @@
 // that adds nothing new lands the chunk. At that boundary the exact fetched
 // chunk tip, not the plan-time list, determines the members it brings beyond
 // the source merge base and their close order (#175). `deferredChunks` reports
-// the wait; it is neither a landing nor a park.
+// the wait; it is neither a landing nor a park. Since #243 a requested chunk
+// is frozen and `run.ts` holds its members off it, so this is the backstop:
+// work merely in flight to the chunk defers nothing.
 //
 // The WRAP-UP runs only after the source branch has moved: close every member
 // ON THE BRANCH explicitly (the git-derived ones — a component member that was
@@ -792,7 +797,8 @@ function chunkRefreshStop(
 
 export function buildChunkRefreshFailedComment(args: {
   readonly chunkBranch: string;
-  readonly sourceBranch: string;
+  // What the refresh merged in: the source branch, or a stacked chunk's base.
+  readonly upstream: string;
   readonly outcome: Exclude<MergeAttempt, { readonly kind: "merged" }>;
   readonly handoffLabel: string;
 }): string {
@@ -800,7 +806,7 @@ export function buildChunkRefreshFailedComment(args: {
   return (
     `**Sandbar:** refresh of chunk branch \`${args.chunkBranch}\` stopped because ${stopped}\n\n` +
     (details ? `${details}\n\n` : "") +
-    `Action: merge \`${args.sourceBranch}\` into \`${args.chunkBranch}\`, then drop ` +
+    `Action: merge \`${args.upstream}\` into \`${args.chunkBranch}\`, then drop ` +
     `\`${args.handoffLabel}\` and re-apply \`${READY_FOR_AGENT_LABEL}\`.`
   );
 }
@@ -905,10 +911,12 @@ export type MergerAdapter = ResolveAdapter & {
   amendHead(): Promise<void>;
   // --- chunk landing (#60) ---
   // The ref a chunk's members are merged onto: `origin/<chunkBranch>` when
-  // origin has that branch, else `origin/<sourceBranch>` — which is where a
-  // chunk branch is created. Origin, not a local ref: the chunk branch outlives
-  // this run and nothing in the state directory is authoritative.
-  chunkBase(chunkBranch: string): Promise<string>;
+  // origin has that branch, else where a chunk branch is created —
+  // `origin/<base>` for a chunk stacked on `base` (#243) while origin has
+  // that, else `origin/<sourceBranch>`. Origin, not a local ref: the chunk
+  // branch outlives this run and nothing in the state directory is
+  // authoritative.
+  chunkBase(chunkBranch: string, base: string | null): Promise<string>;
   // Detach the merger worktree at `ref`. Called to move between landing targets
   // within one cycle; the tree is clean at every call site (a skipped merge has
   // already been reset, and a landed one is committed).
@@ -925,13 +933,15 @@ export type MergerAdapter = ResolveAdapter & {
   // reclaimed. Asked only when origin refuses a Phase-A push, so the handoff
   // can name the exact commits a human must publish.
   localBranchRecovery(branch: string): Promise<LocalBranchRecovery>;
-  // Create-or-update the chunk's DRAFT pull request against the source branch
-  // (#62) — the review surface the whole review lane exists to produce. Called
+  // Create-or-update the chunk's DRAFT pull request against `base`, or the
+  // source branch when null (#62, #243) — the review surface the whole review
+  // lane exists to produce. Called
   // once per chunk per cycle, AFTER the push, because a PR is a handle on
   // commits that are on origin. Title and body come from `chunk-pr.ts`: the
   // prose is the caller's, the `gh` is the adapter's, as everywhere else here.
   ensureChunkPullRequest(args: {
     readonly chunkBranch: string;
+    readonly base: string | null;
     readonly title: string;
     readonly body: string;
   }): Promise<PullRequestRef>;
@@ -955,7 +965,9 @@ export type MergerAdapter = ResolveAdapter & {
   ): Promise<ChunkMemberRefSnapshot>;
   // Delete the chunk branch on origin, once its commits are on the source
   // branch. The last step of the wrap-up and the one that stops the reconciler
-  // seeing this chunk again.
+  // seeing this chunk again. Preceded by moving the pull requests of chunks
+  // stacked on it onto the source branch (#243).
+  retargetPullRequests(base: string, onto: string): Promise<readonly number[]>;
   deleteChunkBranch(
     chunkBranch: string,
     memberIssues: readonly number[],
@@ -1206,6 +1218,8 @@ export type ChunkGroup = {
   readonly target: MergeTarget & { readonly kind: "chunk" };
   // The chunk's root, which names it and titles its pull request (#62).
   readonly root: number;
+  // `ChunkTarget.base`: the branch the chunk is stacked on (#243), or null.
+  readonly base: string | null;
   // The members that were already on the chunk branch when the plan was built
   // (#62) — the plan's snapshot, not this cycle's work. Only the PR body reads
   // it; nothing here decides anything by it, because the authority on what the
@@ -1224,25 +1238,25 @@ export type ChunkGroup = {
 // has landed can hand this cycle every member blocked on it at once, and since
 // #193 a chunk with several parentless members hands over all of its roots,
 // each seeded from the source branch. Those members are necessarily SIBLINGS
-// or roots rather than a chain — a member plans only
-// once its own blockers are on the chunk branch, which no issue planned in the same
-// cycle does — so the order within a group is not a dependency order and
-// ascending issue number (what `sortIssuesAsc` already gave) is simply
-// deterministic. Being siblings is also why they can conflict with each other
-// where a member and its ancestors provably cannot (#54 round-1 Q4): the
-// resolve loop handles them exactly as it handles two auto-lane branches.
+// or roots rather than a chain — a member plans only once its own blockers are
+// on the chunk branch, which no issue planned in the same cycle does — so the
+// order within a group is not a dependency order and ascending issue number
+// (what `sortIssuesAsc` already gave) is simply deterministic. Being siblings
+// is also why they can conflict with each other where a member and its
+// ancestors provably cannot (#54 round-1 Q4): the resolve loop handles them
+// exactly as it handles two auto-lane branches.
 //
-// `root` and `landed` are taken from the FIRST member seen for a branch. Every
-// member of one group carries the same `ChunkTarget`, built once per chunk by
-// the planner, so first-wins and a union of them agree; first-wins says which
-// answer is being trusted rather than papering over a disagreement that would
-// mean the plan contradicted itself.
+// `root`, `base` and `landed` are taken from the FIRST member seen for a
+// branch. Every member of one group carries the same `ChunkTarget`, built once
+// per chunk by the planner, so first-wins and a union of them agree; first-wins
+// says which answer is being trusted rather than papering over a disagreement
+// that would mean the plan contradicted itself.
 export function groupByChunk(
   issues: readonly IssueRef[],
 ): readonly ChunkGroup[] {
   const byBranch = new Map<
     string,
-    { root: number; landed: readonly ChunkMember[]; members: IssueRef[] }
+    { root: number; base: string | null; landed: readonly ChunkMember[]; members: IssueRef[] }
   >();
   for (const issue of issues) {
     const chunk = issue.chunk;
@@ -1252,15 +1266,17 @@ export function groupByChunk(
     else
       byBranch.set(chunk.branch, {
         root: chunk.root,
+        base: chunk.base ?? null,
         landed: chunk.landed ?? [],
         members: [issue],
       });
   }
   return [...byBranch.entries()]
     .sort((a, b) => a[1].root - b[1].root)
-    .map(([branch, { root, landed, members }]) => ({
+    .map(([branch, { root, base, landed, members }]) => ({
       target: { kind: "chunk" as const, branch },
       root,
+      base,
       landed,
       members,
     }));
@@ -1963,7 +1979,7 @@ export async function runMergerWithAdapter(
     const branch = group.target.branch;
     const landedMembers: Array<{ issue: IssueRef; durationMs: number }> = [];
     try {
-      const base = await adapter.chunkBase(branch);
+      const base = await adapter.chunkBase(branch, group.base);
       await emit(`chunk ${branch}: base ${base}`);
       await adapter.checkoutDetached(base);
     } catch (err) {
@@ -2067,9 +2083,19 @@ export async function runMergerWithAdapter(
         title: issue.title,
       })),
     );
+    // A stacked chunk is reviewed against its base until the base lands, so
+    // its pull request shows only its own work (#243).
+    const baseLookup = group.base === null ? null : await adapter.fetchChunkRef(group.base);
+    if (baseLookup?.kind === "unreadable") {
+      asHalt(`Chunk branch ${branch} is on origin, but its pull request base could not be chosen`)(
+        new SandbarError(`origin's copy of ${group.base} could not be read: ${baseLookup.detail}`),
+      );
+    }
+    const prBase = baseLookup?.kind === "present" ? group.base : null;
     const pr = await adapter
       .ensureChunkPullRequest({
         chunkBranch: branch,
+        base: prBase,
         ...chunkPullRequestContent({
           root: group.root,
           members: prMembers,
@@ -2273,11 +2299,9 @@ export async function runMergerWithAdapter(
       try {
         const deferral = chunkLandDeferral(
           request,
-          cycle.map((issue) => ({
-            number: issueNumberOf(issue),
-            title: issue.title,
-            chunkBranch: issue.chunk?.branch ?? null,
-          })),
+          chunkLanded
+            .filter((landing) => landing.chunkBranch === request.branch)
+            .map(({ issue }) => ({ number: issueNumberOf(issue), title: issue.title })),
         );
         if (deferral !== null) {
           await deferChunk(
@@ -2488,15 +2512,28 @@ export async function runMergerWithAdapter(
           `origin's copy of ${refresh.branch} could not be read: ${found.detail}`,
         );
       }
+      // A stacked chunk catches up with its base (#243), else with the source.
+      const upstream = refresh.base ?? refreshPlan.sourceBranch;
+      if (refresh.base !== null) {
+        const base = await adapter.fetchChunkRef(refresh.base);
+        if (base.kind === "absent") {
+          await emit(`chunk refresh ${refresh.branch}: base ${refresh.base} absent; recompute`);
+          continue;
+        }
+        if (base.kind === "unreadable") {
+          throw new SandbarError(
+            `origin's copy of ${refresh.base} could not be read: ${base.detail}`,
+          );
+        }
+      }
       await adapter.checkoutDetached(found.ref);
       const outcome = await attemptMerge(
         {
           unit: {
             id: String(refresh.root),
             title: refresh.title,
-            branch: `origin/${refreshPlan.sourceBranch}`,
-            mergeMessage:
-              `Merge origin/${refreshPlan.sourceBranch} into ${refresh.branch}`,
+            branch: `origin/${upstream}`,
+            mergeMessage: `Merge origin/${upstream} into ${refresh.branch}`,
           },
           target: { kind: "chunk", branch: refresh.branch },
           related: dependents,
@@ -2506,13 +2543,12 @@ export async function runMergerWithAdapter(
         mergeDeps,
       );
       if (outcome.kind !== "merged") {
-        const sourceBranch = refreshPlan.sourceBranch;
         const failure: ChunkRefreshFailure = {
           refresh,
           dependents,
           comment: buildChunkRefreshFailedComment({
             chunkBranch: refresh.branch,
-            sourceBranch,
+            upstream,
             outcome,
             handoffLabel: opts.handoffLabel,
           }),
@@ -2546,7 +2582,7 @@ export async function runMergerWithAdapter(
           durationMs: timer(),
         });
         await emit(
-          `chunk refresh ${refresh.branch}: merged source and pushed`,
+          `chunk refresh ${refresh.branch}: merged ${upstream} and pushed`,
         );
       } else {
         const detail = pushed.kind === "fatal"
@@ -3826,7 +3862,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     fetchChunkRef,
     fetchChunkMemberRefs,
-    async chunkBase(chunkBranch) {
+    async chunkBase(chunkBranch, base) {
       // Ask ORIGIN, every time — `fetchOriginChunkBranch` owns that argument
       // and the refspec it rests on. Shared with the issue-branch seeding in
       // git-ops.ts since #61, because a chained member is DEVELOPED against
@@ -3847,6 +3883,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       // be wrong.
       return (
         (await fetchOriginChunkBranch(cwd, chunkBranch)) ??
+        (base === null ? null : await fetchOriginChunkBranch(cwd, base)) ??
         `origin/${deps.sourceBranch}`
       );
     },
@@ -3920,7 +3957,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       });
       return { tipSha: stdout.trim(), ref, repoDir: deps.cacheDir };
     },
-    async ensureChunkPullRequest({ chunkBranch, title, body }) {
+    async ensureChunkPullRequest({ chunkBranch, base, title, body }) {
       // DRAFT, which is the whole mechanism (#54 Q14): it disables GitHub's
       // merge button while leaving review fully functional. Only on create —
       // `ensurePullRequest` re-titles and re-bodies a PR that already exists
@@ -3931,7 +3968,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         cwd,
         repoFlag: repoSlug(deps.repo),
         head: chunkBranch,
-        base: deps.sourceBranch,
+        base: base ?? deps.sourceBranch,
         title,
         body,
         draft: true,

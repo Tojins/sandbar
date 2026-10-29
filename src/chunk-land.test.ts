@@ -57,6 +57,7 @@ const chunk = (
 ): LandedChunk => ({
   root,
   branch,
+  base: null,
   title,
   members: members.map(([number, t]) => ({ number, title: t })),
   // A chain, which is what `members` ascending reads as here: the deepest
@@ -90,6 +91,7 @@ describe("selectLandRequests (#64)", () => {
       {
         root: 42,
         branch: "sandbar/chunk-42-alpha",
+        base: null,
         title: "alpha",
         members: [
           { number: 42, title: "alpha" },
@@ -108,6 +110,13 @@ describe("selectLandRequests (#64)", () => {
     ]);
   });
 
+  it("carries the branch a stacked chunk waits on (#243)", () => {
+    const stacked = { ...chunk(50, "sandbar/chunk-50_on_42-gamma", [[50, "gamma"]]), base: "sandbar/chunk-42-alpha" };
+    const [target] = selectLandRequests([pr(9, "sandbar/chunk-50_on_42-gamma")], [stacked]).requests;
+    expect(target?.root).toBe(50);
+    expect(target?.base).toBe("sandbar/chunk-42-alpha");
+  });
+
   it("keeps a chunk-branch PR the derivation does not know, with no members", () => {
     const [target] = selectLandRequests(
       [pr(9, "sandbar/chunk-42-alpha", "Sandbar chunk #42: alpha")],
@@ -116,6 +125,7 @@ describe("selectLandRequests (#64)", () => {
     expect(target).toEqual({
       root: 42,
       branch: "sandbar/chunk-42-alpha",
+      base: null,
       title: "Sandbar chunk #42: alpha",
       members: [],
       closeOrder: [],
@@ -302,26 +312,19 @@ describe("chunkLandDeferral (#168)", () => {
     [chunk(42, "sandbar/chunk-42-alpha", [[42, "alpha"]])],
   ).requests[0]!;
 
-  it("defers only work that targets this chunk", () => {
-    expect(chunkLandDeferral(target, [
-      { number: 41, title: "other", chunkBranch: "sandbar/chunk-41-other" },
-      { number: 43, title: "follow-up", chunkBranch: target.branch },
-    ])).toEqual({
+  it("defers only for members this pass put on the branch (#243)", () => {
+    expect(chunkLandDeferral(target, [{ number: 43, title: "follow-up" }])).toEqual({
       members: [{ number: 43, title: "follow-up" }],
       reason: "ongoing",
     });
-    expect(chunkLandDeferral(target, [
-      { number: 41, title: "other", chunkBranch: "sandbar/chunk-41-other" },
-    ])).toBeNull();
+    expect(chunkLandDeferral(target, [])).toBeNull();
   });
 
   it("gives tracker-visible rework precedence", () => {
     expect(chunkLandDeferral({
       ...target,
       rework: [{ number: 42, title: "root rework" }],
-    }, [
-      { number: 43, title: "follow-up", chunkBranch: target.branch },
-    ])).toEqual({
+    }, [{ number: 43, title: "follow-up" }])).toEqual({
       members: [{ number: 42, title: "root rework" }],
       reason: "rework",
     });
@@ -339,6 +342,7 @@ describe("selectReconciliations (#64)", () => {
       {
         root: 42,
         branch: "sandbar/chunk-42-alpha",
+        base: null,
         title: "alpha",
         members: [{ number: 42, title: "alpha" }],
         closeOrder: [{ number: 42, title: "alpha" }],
@@ -418,6 +422,10 @@ function makeWrapupAdapter(
         record("closePullRequest", String(p));
         return "closed" as const;
       },
+      async retargetPullRequests(base, onto) {
+        record("retargetPullRequests", `${base}->${onto}`);
+        return [];
+      },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
         return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
@@ -464,6 +472,7 @@ describe("wrapUpLandedChunk (#64)", () => {
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
+      "retargetPullRequests sandbar/chunk-42-alpha->main",
       "deleteChunkBranch sandbar/chunk-42-alpha [42,43]",
     ]);
   });
@@ -579,6 +588,30 @@ describe("wrapUpLandedChunk (#64)", () => {
     });
     expect(r.branchDeleted).toBe(true);
     expect(r.residue.join("\n")).toContain("pull request #9");
+  });
+
+  // A chunk stacked on this one has its pull request based on this branch,
+  // and GitHub closes a pull request whose base branch is deleted (#243).
+  it("keeps the branch for a retry when the pull requests based on it cannot be retargeted", async () => {
+    const { adapter, calls } = makeWrapupAdapter({ retargetPullRequests: "gh boom" });
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+    expect(r.closed).toEqual([42, 43]);
+    expect(r.branchDeleted).toBe(false);
+    expect(calls.some((c) => c.op === "deleteChunkBranch")).toBe(false);
+    expect(r.residue).toEqual([
+      "sandbar/chunk-42-alpha is kept on origin so the next run retries retargeting " +
+        "the pull requests based on it: gh boom",
+    ]);
+    expect(chunkResidue([{ ...r, target }]).kept).toHaveLength(1);
+  });
+
+  it("does not retarget anything while members are still open", async () => {
+    const { adapter, calls } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
+    await wrapUpLandedChunk(target, adapter, { sourceBranch: "main", provenance: "sandbar" });
+    expect(calls.some((c) => c.op === "retargetPullRequests")).toBe(false);
   });
 
   it("drops `land` even when the comment above it failed", async () => {

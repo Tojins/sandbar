@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   readChunkMembers,
+  readChunksContainingBase,
   readChunksContainingSource,
   readIssueBranchRefs,
 } from "./plan-resolver.js";
@@ -105,6 +106,29 @@ describe("source containment on chunk branches (#174)", () => {
 
     expect(await readChunksContainingSource(repo, "main")).toEqual(
       new Set(["sandbar/chunk-20-fresh"]),
+    );
+  });
+});
+
+describe("base containment on stacked chunk branches (#243)", () => {
+  it("reports only stacked chunks that contain their one base branch's tip", async () => {
+    const repo = await newRepo("sandbar-chunk-base-");
+    git(repo, "commit", "--allow-empty", "-qm", "base chunk work");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-10-base", "HEAD");
+    git(repo, "commit", "--allow-empty", "-qm", "stacked work");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-20_on_10-fresh", "HEAD");
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-30_on_10-stale", "HEAD~2");
+    // Stacked on a base that has landed and left origin: nothing to contain.
+    git(repo, "update-ref", "refs/remotes/origin/sandbar/chunk-40_on_9-orphan", "HEAD");
+    const branches = [
+      "sandbar/chunk-10-base",
+      "sandbar/chunk-20_on_10-fresh",
+      "sandbar/chunk-30_on_10-stale",
+      "sandbar/chunk-40_on_9-orphan",
+    ];
+
+    expect(await readChunksContainingBase(repo, branches)).toEqual(
+      new Set(["sandbar/chunk-20_on_10-fresh"]),
     );
   });
 });

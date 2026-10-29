@@ -76,6 +76,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         "done",
         'printf "]\\n" >> "$log"',
         'case "$*" in',
+        '  "pr list"*"--json number") printf \'[{"number":77},{"number":78}]\' ;;',
         '  "pr list"*) printf "[]" ;;',
         '  *--json*state*) printf \'{"state":"OPEN"}\' ;;',
         "esac",
@@ -224,6 +225,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         beforeOriginWrite,
       } as unknown as Parameters<typeof realMergerAdapter>[0]).ensureChunkPullRequest({
         chunkBranch: "sandbar/chunk-42-c",
+        base: null,
         title: "Sandbar chunk #42: x",
         body: "members",
       });
@@ -238,6 +240,24 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(create?.[head + 1]).toBe("sandbar/chunk-42-c");
       const base = (create ?? []).indexOf("--base");
       expect(create?.[base + 1]).toBe("main");
+    });
+
+    it("bases a stacked chunk's PR on the branch it is stacked on (#243)", async () => {
+      await realMergerAdapter({
+        cwd: shimBin,
+        repo: REPO,
+        sourceBranch: "main",
+        beforeOriginWrite,
+      } as unknown as Parameters<typeof realMergerAdapter>[0]).ensureChunkPullRequest({
+        chunkBranch: "sandbar/chunk-50_on_42-c",
+        base: "sandbar/chunk-42-c",
+        title: "Sandbar chunk #50: x",
+        body: "members",
+      });
+
+      const [list, create] = await calls();
+      expect(list?.[(list ?? []).indexOf("--base") + 1]).toBe("sandbar/chunk-42-c");
+      expect(create?.[(create ?? []).indexOf("--base") + 1]).toBe("sandbar/chunk-42-c");
     });
   });
 
@@ -326,6 +346,21 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         ["lease"], comment,
         ["lease"], close,
       ]);
+    });
+
+    // A chunk stacked on this one has its pull request based here (#243).
+    it("retargets every open pull request based on the chunk, in the configured repo", async () => {
+      expect(await adapter().retargetPullRequests("sandbar/chunk-42-c", "main"))
+        .toEqual([77, 78]);
+
+      const [list, first, second] = await calls();
+      expect(list?.slice(0, 2)).toEqual(["pr", "list"]);
+      expect(repoFlagOf(list ?? [])).toBe("acme/app");
+      expect(list?.[(list ?? []).indexOf("--base") + 1]).toBe("sandbar/chunk-42-c");
+      expect(list?.[(list ?? []).indexOf("--state") + 1]).toBe("open");
+      expect(first).toEqual(["pr", "edit", "77", "--repo", "acme/app", "--base", "main"]);
+      expect(second).toEqual(["pr", "edit", "78", "--repo", "acme/app", "--base", "main"]);
+      expect(await records()).toEqual([list, ["lease"], first, ["lease"], second]);
     });
   });
 
@@ -500,12 +535,13 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
   });
 });
 
-// Discovery FAILS SOFT, and this is the half of that claim a fake adapter can
-// never show: what the readers do with a `gh` that answered something they
-// cannot read. These run at PLAN time, before anything else in the cycle, so a
-// throw out of one is not a degraded reconciliation — it is a run that does not
-// start, over a repair that was never urgent.
-describe("the forge readers fail soft (#64)", () => {
+// Reconciliation discovery FAILS SOFT, and this is the half of that claim a
+// fake adapter can never show: what the readers do with a `gh` that answered
+// something they cannot read. These run at PLAN time, before anything else in
+// the cycle, so a throw out of one is not a degraded reconciliation — it is a
+// run that does not start, over a repair that was never urgent. The land
+// listing is the exception: it decides which chunks are frozen (#243).
+describe("the forge readers fail soft (#64), but for the land listing (#243)", () => {
   let shimBin: string;
   let originalPath: string | undefined;
   const REPO_REF = { owner: "acme", name: "app" };
@@ -535,15 +571,15 @@ describe("the forge readers fail soft (#64)", () => {
 
   const LAND = [{ name: "land" }];
 
-  it("answers 'no requests' when gh cannot be run at all", async () => {
+  it("throws for land requests, and answers none for branches, when gh cannot be run at all", async () => {
     await shimAnswering(null);
-    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
+    await expect(fetchLandRequestPullRequests(REPO_REF)).rejects.toThrow();
     expect(
       await fetchPullRequestsForBranches(REPO_REF, ["sandbar/chunk-42-c"]),
     ).toEqual([]);
   });
 
-  it("answers 'no requests' when only one of the two land listings fails", async () => {
+  it("throws when only one of the two land listings fails", async () => {
     await writeFile(
       join(shimBin, "gh"),
       `#!/bin/sh\ncase "$*" in *land-hotfix*) exit 1;; esac\ncat <<'SANDBAR_EOF'\n${JSON.stringify([
@@ -551,12 +587,12 @@ describe("the forge readers fail soft (#64)", () => {
       ])}\nSANDBAR_EOF\n`,
       { mode: 0o755 },
     );
-    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
+    await expect(fetchLandRequestPullRequests(REPO_REF)).rejects.toThrow();
   });
 
-  it("answers 'no requests' on output that is not JSON at all", async () => {
+  it("throws for land requests on output that is not JSON at all", async () => {
     await shimAnswering("gh: could not resolve to a Repository");
-    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
+    await expect(fetchLandRequestPullRequests(REPO_REF)).rejects.toThrow(SyntaxError);
   });
 
   it("drops the unreadable entries and keeps the rest", async () => {

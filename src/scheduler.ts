@@ -102,8 +102,9 @@
 // are three disjoint places and an issue is in at most one of them. A fourth,
 // `#held`, is a pending terminal the caller may not land yet — a DONE
 // auto-lane issue while the landing window is closed (#244,
-// `landing-window.ts`). It stays ongoing but is not pending, so it neither
-// wakes a landing pass nor joins one until `releaseHeldTerminals`. The pool
+// `landing-window.ts`), or a DONE member of a frozen chunk (#243). It stays
+// ongoing but is not pending, so it neither wakes a landing pass nor joins one
+// until a `holdTerminals` call no longer selects it. The pool
 // keeps one removable completion waiter; a poll winner withdraws it, so a hung
 // issue cannot retain one callback for every interval it survives.
 //
@@ -144,11 +145,12 @@ export type SchedulerSnapshot = {
   readonly storageLow: boolean;
 };
 
-// A chunk refresh exists only to make a future admission safe (#174). Once an
-// admission-closing condition is latched, refreshing that candidate's base is
-// no longer drain work. Keep this decision beside the scheduler precedence so
-// run.ts cannot accidentally attach refreshes to a landing pass that the drain
-// started for already-committed terminals or a human `land` request.
+// A chunk refresh exists to make a future admission safe (#174), or to keep a
+// stacked chunk on its base's tip for review (#243). Once an admission-closing
+// condition is latched, neither is drain work. Keep this decision beside the
+// scheduler precedence so run.ts cannot accidentally attach refreshes to a
+// landing pass that the drain started for already-committed terminals or a
+// human `land` request.
 export function chunkRefreshRequestsAreRunnable(
   state: Pick<
     SchedulerSnapshot,
@@ -393,23 +395,22 @@ export class ContinuousPool<T, R> {
     return wake;
   }
 
-  // Moves the pending terminals `holds` selects out of the landing path, and
-  // returns them: only those newly held, so a caller reports each once.
+  // Holds exactly the terminals `holds` selects now: held ones it no longer
+  // selects go back to the landing path, and pending ones it selects leave
+  // it. Returns those newly held, so a caller reports each once.
   holdTerminals(
     holds: (event: SettledIssue<T, R>) => boolean,
   ): readonly SettledIssue<T, R>[] {
+    const released = this.#held.filter((event) => !holds(event));
     const held = this.#pendingTerminals.filter(holds);
+    this.#held.splice(0, this.#held.length, ...this.#held.filter(holds), ...held);
     this.#pendingTerminals.splice(
       0,
       this.#pendingTerminals.length,
       ...this.#pendingTerminals.filter((event) => !holds(event)),
+      ...released,
     );
-    this.#held.push(...held);
     return held;
-  }
-
-  releaseHeldTerminals(): void {
-    this.#pendingTerminals.push(...this.#held.splice(0));
   }
 
   takeLandingBatch(): readonly SettledIssue<T, R>[] {

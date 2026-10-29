@@ -29,8 +29,11 @@
 //                              that have nowhere to land at all (#61: the ones
 //                              `chunks.ts` could give no chunk) and saying on
 //                              the issue where an `auto-land` label lost to
-//                              inherited gating. A changes-requested review on
-//                              a chunk's pull request is routed to its landed
+//                              inherited gating. The pull requests carrying
+//                              `land`/`land-hotfix` are read first: their
+//                              chunks are FROZEN (#243, `chunks.ts`). A
+//                              changes-requested review on an unfrozen
+//                              chunk's pull request is routed to its landed
 //                              member(s) and re-queues them (#95), and the
 //                              RECONCILER (#64) finishes off any chunk branch
 //                              already contained in origin/<sourceBranch> —
@@ -67,21 +70,31 @@
 //                              the landing even while unrelated issues run
 //                              (#168), the chunk branch is
 //                              merged in the SAME source pass, its members are
-//                              closed, and the branch is deleted.
+//                              closed, and the branch is deleted. Even issues
+//                              dispatched to it do not hold it: the label
+//                              freezes the chunk (#243), and a DONE one waits
+//                              in the pool until it lands or the label comes
+//                              off.
 //                              A chained member whose other blocker became
 //                              CLOSED waits until its origin chunk contains
 //                              origin/source (#174). The same landing path
 //                              merges source into that existing chunk after
 //                              source landings, gates it, and pushes directly;
 //                              an unsalvageable composition parks the dependent.
-//                              Since that work exists only for a future
-//                              admission, every admission-closing drain leaves
-//                              it for the next run.
+//                              A chunk stacked on another (#243) is refreshed
+//                              onto that one's tip the same way whenever it
+//                              lacks it; one no member waits for is tried
+//                              once per process while it fails.
+//                              Since that work is never owed to a drain,
+//                              every admission-closing drain leaves it for
+//                              the next run.
 //                              While `config.landingWindow` is closed (#244,
 //                              `landing-window.ts`), each recompute keeps a
 //                              chunk's `land` request out of the pass (not a
 //                              `land-hotfix` one) and holds a DONE auto-lane
-//                              issue in the pool until it opens.
+//                              issue in the pool until it opens. A chunk
+//                              stacked on another (#243) keeps its `land`
+//                              waiting until that one has landed.
 //   Finalise:                  Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
@@ -342,7 +355,6 @@ import {
   CHUNK_LAND_WINDOW_PR_COMMENT,
   CHUNK_RESIDUE_RETIRED_BANNER,
   type ChunkLandTarget,
-  chunkLandDeferral,
   chunkForgeWrites,
   chunkResidue,
   describeChunkBranchDrift,
@@ -356,6 +368,7 @@ import {
 import { landingClosedUntil, waitsForLandingWindow } from "./landing-window.js";
 import { postLaneOverrideNotices } from "./lanes.js";
 import {
+  type BuildPlanOptions,
   type PlanResolution,
   type PlannedIssue,
   type ReadyLabelPolicy,
@@ -1656,6 +1669,10 @@ export async function run(
   // Pull requests already told their `land` waits for the landing window
   // (#244), cleared whenever it is open so each closure tells them once.
   const toldLandingWindow = new Set<number>();
+  // Stacked chunks whose refresh onto their base, wanted by no member, failed
+  // in this process (#243): retried only for a member that waits, so a
+  // conflict costs one resolve rather than one per recompute.
+  const failedBaseRefreshes = new Set<string>();
   let landingNumber = 0;
   let iteration = 0;
   let lastPlanDiagnostics: string | null = null;
@@ -2017,20 +2034,26 @@ export async function run(
           return;
         }
       case "chunk-refreshed":
+        failedBaseRefreshes.delete(outcome.refresh.branch);
         await runRecord.emit({
           kind: "reconcile",
           action: "chunk-refreshed",
-          detail: `${outcome.refresh.branch} now contains origin/${config.sourceBranch}`,
+          detail: `${outcome.refresh.branch} now contains ` +
+            `origin/${outcome.refresh.base ?? config.sourceBranch}`,
         });
         return;
-      case "chunk-refresh-failed":
+      case "chunk-refresh-failed": {
+        const { refresh, dependents } = outcome.failure;
+        if (dependents.length === 0) failedBaseRefreshes.add(refresh.branch);
         await runRecord.emit({
           kind: "reconcile",
           action: "chunk-refresh-failed",
-          detail: `${outcome.failure.refresh.branch} could not be refreshed; parking ` +
-            outcome.failure.dependents.map((issue) => `#${issue.id}`).join(", "),
+          detail: `${refresh.branch} could not be refreshed` + (dependents.length === 0
+            ? `; retried once a member waits for it`
+            : `; parking ${dependents.map((issue) => `#${issue.id}`).join(", ")}`),
         });
         return;
+      }
     }
   };
 
@@ -2400,7 +2423,15 @@ export async function run(
       // restart would: its ledger is written last, so the retried recompute
       // may repeat a completed prefix but never loses a review.
       const planned = await readTracker(async () => {
-        let initial = await buildPlan(repo, planOptions);
+        // A chunk whose pull request carries a landing label is frozen
+        // (#243), so these are read before planning, and a failed read fails
+        // the recompute: read as none, a frozen chunk would take new members.
+        const landPullRequests = await fetchLandRequestPullRequests(repo);
+        const frozenOptions: BuildPlanOptions = {
+          ...planOptions,
+          frozenChunks: new Set(landPullRequests.map((pr) => pr.headRefName)),
+        };
+        let initial = await buildPlan(repo, frozenOptions);
         // The chunk-review scan (#95). Every chunk with work on origin is asked
         // whether a human has requested changes on its pull request, and each
         // review that has not already been handled is routed to and re-queues
@@ -2410,9 +2441,12 @@ export async function run(
         // RE-PLANNED when it re-queues anything. The existing issues are handed
         // back rather than re-listed: the listing `gh issue list` serves lags a
         // label flip by seconds (#96), so it may not carry the re-queue this
-        // cycle made.
+        // cycle made. A frozen chunk is not asked: rework would move the head
+        // its reviewer labelled, so its reviews wait until `land` comes off.
         const followUps = await routeChunkReviewFollowUps({
-          chunks: initial.landedChunks,
+          chunks: initial.landedChunks.filter(
+            (chunk) => !frozenOptions.frozenChunks.has(chunk.branch),
+          ),
           adapter: followUpAdapter,
           log: (line) => runRecord.emit({ kind: "follow-up", action: "route", detail: line }).then(() => undefined),
         });
@@ -2424,11 +2458,11 @@ export async function run(
             detail: `Re-queued ${followUps.length} chunk member(s): ${filed}`,
           });
           initial = await buildPlan(repo, {
-            ...planOptions,
+            ...frozenOptions,
             extraCandidates: followUps,
           });
         }
-        return { resolution: initial, followUps };
+        return { resolution: initial, followUps, frozenOptions, landPullRequests };
       });
       if ("failure" in planned) {
         if (await recoverFromRefRefreshFailure("Tracker read", [planned.failure]) === "exit") {
@@ -2436,7 +2470,7 @@ export async function run(
         }
         continue;
       }
-      const { followUps } = planned.value;
+      const { followUps, frozenOptions, landPullRequests } = planned.value;
       let resolution = planned.value.resolution;
 
       // ---------------------------------------------------------------------
@@ -2484,7 +2518,7 @@ export async function run(
         // The reconciliation is already recorded, so a failed re-plan retries
         // from a recompute that finds those chunks gone.
         const replanned = await readTracker(() => buildPlan(repo, {
-          ...planOptions,
+          ...frozenOptions,
           extraCandidates: followUps,
         }));
         if ("failure" in replanned) {
@@ -2553,12 +2587,14 @@ export async function run(
           }) });
       }
 
-      // What a human has asked to land, read AFTER the reconciliation so a
-      // chunk it just finished off is not also merged again by the merge phase
-      // (its branch is gone by then, which the merger would park on, but
-      // asking in this order means it never gets there).
+      // What a human has asked to land, less any chunk the reconciliation just
+      // finished off: it is not merged again by the merge phase (its branch is
+      // gone by then, which the merger would park on).
+      const reconciledBranches = new Set(
+        reconciliation.reconciled.map((chunk) => chunk.target.branch),
+      );
       const landRequestSelection = selectLandRequests(
-        await fetchLandRequestPullRequests(repo),
+        landPullRequests.filter((pr) => !reconciledBranches.has(pr.headRefName)),
         resolution.landedChunks,
         resolution.chunkNameDrifts,
       );
@@ -2572,22 +2608,24 @@ export async function run(
         await refuseLandRequest(refusal, chunkRequestWrites);
       }
       const selectedLandRequests = landRequestSelection.requests;
-      const ongoingForChunkLanding = pool.ongoingIssues().map((issue) => ({
-        number: Number(issue.id),
-        title: issue.title,
-        chunkBranch: issue.chunk?.branch ?? null,
-      }));
       // A closed landing window (#244) holds every source-branch landing but a
       // `land-hotfix` one; `landing-window.ts` owns what waits and how.
       const closedUntil = landingClosedUntil(config.landingWindow, new Date());
       if (closedUntil === null) toldLandingWindow.clear();
       const landDeferrals = new Map<string, string>();
+      // Deferred requests no pass may land, not even one started for other
+      // work: the merger never sees them.
+      const heldOffSource = new Set<string>();
       for (const request of selectedLandRequests) {
-        const deferral = chunkLandDeferral(request, ongoingForChunkLanding);
-        if (deferral !== null) {
-          landDeferrals.set(request.branch, deferredLandReason(deferral.members));
+        if (request.base !== null) {
+          // Its branch carries the base's commits, which land with the base.
+          landDeferrals.set(request.branch, `stacked on ${request.base} · lands once it lands`);
+          heldOffSource.add(request.branch);
+        } else if (request.rework.length > 0) {
+          landDeferrals.set(request.branch, deferredLandReason(request.rework));
         } else if (closedUntil !== null && waitsForLandingWindow(request)) {
           landDeferrals.set(request.branch, `landing window closed · lands after ${closedUntil}`);
+          heldOffSource.add(request.branch);
           if (!toldLandingWindow.has(request.pullRequest)) {
             await chunkRequestWrites.commentOnPullRequest(
               request.pullRequest,
@@ -2599,6 +2637,9 @@ export async function run(
       }
       const landRequests = selectedLandRequests.filter(
         (request) => !landDeferrals.has(request.branch),
+      );
+      const mergerLandRequests = selectedLandRequests.filter(
+        (request) => !heldOffSource.has(request.branch),
       );
       if (landRequests.length > 0) {
         const named = landRequests
@@ -2638,17 +2679,26 @@ export async function run(
           describeChunkBranchDrift(drift)
         );
 
-      // A DONE auto-lane issue is the window's other source-branch landing.
-      if (closedUntil === null) pool.releaseHeldTerminals();
-      const heldForLandingWindow = closedUntil === null ? [] : pool.holdTerminals(
+      // What may not land yet stays in the pool: a DONE auto-lane issue while
+      // the window is closed, the window's other source-branch landing, and a
+      // DONE member of a frozen chunk (#243), dispatched before the label went
+      // on, until the chunk lands or the label comes off.
+      const { frozenChunks } = frozenOptions;
+      const heldTerminals = pool.holdTerminals(
         (event) => event.status === "fulfilled" && event.value.type === "DONE" &&
-          event.issue.chunk === null,
+          (event.issue.chunk === null
+            ? closedUntil !== null
+            : frozenChunks.has(event.issue.chunk.branch)),
       );
-      for (const event of heldForLandingWindow) {
+      for (const event of heldTerminals) {
         await runRecord.emit({
           kind: "notice",
-          message: `#${event.issue.id} is done and waits for the landing window: ` +
-            `nothing lands on ${config.sourceBranch} until ${closedUntil}.`,
+          message: event.issue.chunk === null
+            ? `#${event.issue.id} is done and waits for the landing window: ` +
+              `nothing lands on ${config.sourceBranch} until ${closedUntil}.`
+            : `#${event.issue.id} is done and waits for ${event.issue.chunk.branch}: ` +
+              `its pull request carries a landing label, so nothing more goes onto ` +
+              `it until it lands or the label comes off.`,
         });
       }
 
@@ -2658,6 +2708,9 @@ export async function run(
       // The plan record is the resolver's answer, not the narrower admission
       // this observation may make. Active slots, cooldown and scheduler state
       // can all reduce admission without changing what the planner resolved.
+      const plannedRefreshes = resolution.chunkRefreshes.filter((refresh) =>
+        refresh.dependents.length > 0 || !failedBaseRefreshes.has(refresh.branch)
+      );
       const schedulerSnapshot = {
         active: pool.activeCount,
         ongoing: pool.ongoingCount,
@@ -2666,7 +2719,7 @@ export async function run(
         hasCandidates: pool.hasUnstarted(resolution.plan),
         hasRetries: pool.hasRetries,
         hasLandRequests: landRequests.length > 0,
-        hasChunkRefreshRequests: resolution.chunkRefreshes.length > 0,
+        hasChunkRefreshRequests: plannedRefreshes.length > 0,
         hasCapacity: pool.activeCount < config.maxParallelIssues,
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
@@ -2676,14 +2729,14 @@ export async function run(
       };
       const schedulerAction = decideSchedulerAction(schedulerSnapshot);
       const chunkRefreshes = chunkRefreshRequestsAreRunnable(schedulerSnapshot)
-        ? resolution.chunkRefreshes
+        ? plannedRefreshes
         : [];
       const pollDidWork =
         sourceChangedOnPoll || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
         landRequestSelection.refusals.length > 0 ||
-        heldForLandingWindow.length > 0 ||
+        heldTerminals.length > 0 ||
         chunkRefreshes.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
       const pollIsReportable = pollDidWork || resolution.waiting.some(
@@ -3058,13 +3111,13 @@ export async function run(
               },
               ...(verified ? { verified } : {}),
               // Scheduling sees only runnable requests, but a pass started for
-              // another reason must still let the merger observe deferred
-              // requests. That is where the PR notice about newly landed or
-              // ongoing member work is posted (#64, #168).
-              ...(selectedLandRequests.length > 0
+              // another reason still lets the merger observe the ones deferred
+              // for rework: it re-defers them and says so on their pull
+              // requests (#64, #168).
+              ...(mergerLandRequests.length > 0
                 ? {
                     chunkLanding: {
-                      requests: selectedLandRequests,
+                      requests: mergerLandRequests,
                       sourceBranch: config.sourceBranch,
                     },
                   }
