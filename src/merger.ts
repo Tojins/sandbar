@@ -65,11 +65,11 @@
 // chunk's branch — `sandbar/chunk-<root>-<slug>`, created at
 // `origin/<sourceBranch>` the first time a member lands on it (a chunk stacked
 // on another, #243, is created at that one's tip while origin has it).
-// Everything between the two paths is the same code: same ephemeral worktree, same
-// per-issue `merge --no-ff`, same resolve loop with the same sibling issue
-// list, same gate-2 on the composition, same `preMergeSha` revert on
-// abandon. The only differences are what the worktree is detached at, where
-// the result is pushed, and what the issue is told afterwards.
+// Everything between the two paths is the same code: same ephemeral
+// worktree, same per-issue `merge --no-ff`, same resolve loop with the same
+// sibling issue list, same gate-2 on the composition, same `preMergeSha`
+// revert on abandon. The only differences are what the worktree is detached
+// at, where the result is pushed, and what the issue is told afterwards.
 //
 // CHUNKS ARE LANDED FIRST, and the worktree is put back at the sha it entered
 // on before the source-branch pass. Order matters for one reason: the
@@ -98,13 +98,13 @@
 // EVERY CHUNK PUSH IS FOLLOWED BY A DRAFT PULL REQUEST (#62), created or
 // updated, chunk → source branch (→ the chunk it is stacked on while origin
 // has that, #243, so the diff is its own work): the branch is where the work
-// is, the PR is where a human reviews it, and the review lane produces nothing anyone can act
-// on without it. After the push and after the `chunkLanded` entries, in that
-// order — a PR is a handle on commits origin has, and a failure to open one
-// must not take a durable landing down with it. What it says is `chunk-pr.ts`;
-// the `gh` create-or-update is `forge-pr.ts`; that it is a DRAFT is the
-// mechanism disabling GitHub's merge button while leaving review intact, and
-// sandbar never un-drafts one a human made ready.
+// is, the PR is where a human reviews it, and the review lane produces
+// nothing anyone can act on without it. After the push and after the
+// `chunkLanded` entries, in that order — a PR is a handle on commits origin
+// has, and a failure to open one must not take a durable landing down with it.
+// What it says is `chunk-pr.ts`; the `gh` create-or-update is `forge-pr.ts`;
+// that it is a DRAFT is the mechanism disabling GitHub's merge button while
+// leaving review intact, and sandbar never un-drafts one a human made ready.
 //
 // The accepted push also refreshes the host cache's chunk and member refs so
 // the next planning boundary sees sandbar's own write (#175). A failed refresh
@@ -1236,19 +1236,18 @@ export type ChunkGroup = {
 // has landed can hand this cycle every member blocked on it at once, and since
 // #193 a chunk with several parentless members hands over all of its roots,
 // each seeded from the source branch. Those members are necessarily SIBLINGS
-// or roots rather than a chain — a member plans only
-// once its own blockers are on the chunk branch, which no issue planned in the same
-// cycle does — so the order within a group is not a dependency order and
-// ascending issue number (what `sortIssuesAsc` already gave) is simply
-// deterministic. Being siblings is also why they can conflict with each other
+// or roots rather than a chain — a member plans only once its own blockers are
+// on the chunk branch, which no issue planned in the same cycle does — so the
+// order within a group is not a dependency order and ascending issue number
+// (what `sortIssuesAsc` already gave) is simply deterministic. Being siblings is also why they can conflict with each other
 // where a member and its ancestors provably cannot (#54 round-1 Q4): the
 // resolve loop handles them exactly as it handles two auto-lane branches.
 //
 // `root`, `base` and `landed` are taken from the FIRST member seen for a
-// branch. Every member of one group carries the same `ChunkTarget`, built once per chunk by
-// the planner, so first-wins and a union of them agree; first-wins says which
-// answer is being trusted rather than papering over a disagreement that would
-// mean the plan contradicted itself.
+// branch. Every member of one group carries the same `ChunkTarget`, built once
+// per chunk by the planner, so first-wins and a union of them agree; first-wins
+// says which answer is being trusted rather than papering over a disagreement
+// that would mean the plan contradicted itself.
 export function groupByChunk(
   issues: readonly IssueRef[],
 ): readonly ChunkGroup[] {
