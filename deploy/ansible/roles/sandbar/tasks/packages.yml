@@ -72,6 +72,8 @@
   ansible.builtin.command: podman version --format {% raw %}'{{.Client.Version}}'{% endraw %}
   register: sandbar_podman_version
   changed_when: false
+  # A read, so `--check` runs it and the floor is checked there too.
+  check_mode: false
 
 - name: Refuse a podman older than {{ sandbar_podman_min_version }}
   ansible.builtin.assert:
