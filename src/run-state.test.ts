@@ -1162,3 +1162,35 @@ describe("standalone-step feed rows (#247)", () => {
     expect(state.run.complaints).toEqual([]);
   });
 });
+
+describe("janitor runner feed rows (#205)", () => {
+  it("shows a run's start and its outcome as feed lines, never as an issue", () => {
+    const events = [
+      at(1, "2026-10-28T08:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 2, pid: 1,
+      }),
+      at(2, "2026-10-28T08:01:00Z", {
+        kind: "janitor-start", task: "tidy", branch: "sandbar/janitor-tidy", base: "b".repeat(40),
+        fresh: true, scope: ["a.ts", "b.ts"], runsToday: 1, runsPerDay: 4,
+      }),
+      at(3, "2026-10-28T08:30:00Z", {
+        kind: "janitor-run", task: "tidy", branch: "sandbar/janitor-tidy", outcome: "committed",
+        commits: 2, pullRequest: 12, scope: ["a.ts", "b.ts"], durationMs: 5,
+      }),
+      at(4, "2026-10-28T09:30:00Z", {
+        kind: "janitor-run", task: "tidy", branch: "sandbar/janitor-tidy", outcome: "rejected",
+        cause: "stack-change", scope: ["c.ts"], durationMs: 5,
+      }),
+    ];
+    const live = reduceRunEvents(events, { now: new Date("2026-10-28T09:31:00Z"), pidAlive: true });
+
+    expect(live.events.slice(0, 3).map(({ text, tone }) => ({ text, tone }))).toEqual([
+      { text: "janitor tidy rejected · stack-change", tone: "dim" },
+      { text: "janitor tidy committed · PR #12", tone: "good" },
+      { text: "janitor tidy started · 2 path(s) · run 1 of 4 today", tone: "dim" },
+    ]);
+    expect(live.pool).toEqual([]);
+    expect(live.finished).toEqual([]);
+  });
+});

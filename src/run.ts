@@ -166,6 +166,14 @@
 // run's own copies of that base (`db-copy.ts`) come from one registry every
 // inner loop shares, one copy per issue; they are swept at startup, after
 // the orphan containers, and again at each quiescent sweep.
+// With `config.janitor` (#205), a recompute with nothing to admit or land and
+// a free slot starts the idle task due next (`dueJanitorTask`, `janitor.ts`)
+// beside the pool. Its run is no pool member — never finalised, landed or
+// counted by the stuck backstop — but holds one slot until it has settled:
+// admission, drains and the idle event count it. A candidate it keeps out, a
+// `land` on its own pull request, or any stop aborts it (`preempt-janitor`),
+// and its end wakes the scheduler (`janitor-finished`). With no tasks
+// configured, none of this reads a ledger or asks the forge anything.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
 // An egress allowlist (#202) builds the proxy image once at startup and hands
@@ -192,6 +200,7 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
+  type JanitorTask,
   type ResolvedConfig,
   type RunConfig,
   egressStartupWarning,
@@ -332,7 +341,8 @@ import {
   type OriginLockHandle,
   type OriginLockRenewal,
 } from "./origin-lock.js";
-import { type RunScope, runScope } from "./naming.js";
+import { type RunScope, janitorTaskFromBranch, runScope } from "./naming.js";
+import { type JanitorRunDeps, dueJanitorTask, realJanitorForge, runJanitor, settleJanitorRun } from "./janitor.js";
 import {
   MergerError,
   type MergerOutcome,
@@ -901,6 +911,7 @@ export async function run(
     agentProviders,
     deployWatch: config.deployWatch,
     databaseCopies: config.databaseCopies,
+    janitor: config.janitor !== null,
   };
   const stopBeforeOriginLock = async (
     err: PreflightError | SandbarError,
@@ -1644,6 +1655,64 @@ export async function run(
     config.maxParallelIssues,
     (issue) => issue.id,
   );
+  // The idle janitor's one run in flight (#205), aborting or not. It is no
+  // pool slot, yet it holds one: admission, drains and the idle event count
+  // it until it has settled. A holder, because only closures assign it.
+  // Cleanup aborts one still in flight (a halt leaves the loop without
+  // draining it) and waits for its teardown.
+  const janitor: {
+    run: {
+      readonly task: string;
+      readonly controller: AbortController;
+      readonly settled: Promise<void>;
+    } | null;
+  } = { run: null };
+  onCleanup(async () => {
+    const run = janitor.run;
+    if (run === null) return;
+    run.controller.abort();
+    await run.settled;
+  });
+  const activeSlots = (): number => pool.activeCount + (janitor.run === null ? 0 : 1);
+  const janitorForge = realJanitorForge({
+    repo,
+    repoDir: layout.repoDir,
+    sourceBranch: config.sourceBranch,
+    beforeOriginWrite: renewOriginLease,
+  });
+  // A run records its own ending (#82). One that throws is recorded by
+  // `settleJanitorRun` as `failed` and the daemon carries on: `runsPerDay`
+  // bounds a repeat. Its end wakes the scheduler, which owns what happens next.
+  const startJanitor = (task: JanitorTask, loop: JanitorRunDeps["loop"]): void => {
+    const controller = new AbortController();
+    const timer = startTimer();
+    const settled = settleJanitorRun({
+      task: task.name,
+      run: async () => runJanitor({
+        task,
+        layout,
+        sourceBranch: config.sourceBranch,
+        botName: config.botName,
+        botEmail: config.botEmail,
+        maxContextChars: config.maxContextChars,
+        standards: config.promptExtensions.reviewerQuality,
+        forge: janitorForge,
+        beforeOriginWrite: renewOriginLease,
+        loop,
+        attemptLogger: await runRecord.janitor(task.name),
+        onEvent: (event) => runRecord.emit(event).then(() => undefined),
+        signal: controller.signal,
+        now: () => new Date(),
+      }),
+      emit: (event) => runRecord.emit(event).then(() => undefined),
+      durationMs: timer,
+      onEnd: () => {
+        janitor.run = null;
+        pool.wakeExternal();
+      },
+    });
+    janitor.run = { task: task.name, controller, settled };
+  };
   let providerExitPending: TerminalExit | null = null;
   let storageLow: LowStorage | null = null;
   // Source movement creates refresh WORK, not an instruction to build at the
@@ -1728,7 +1797,7 @@ export async function run(
   const waitForSchedulerWake = async (): Promise<RecomputeTrigger> => {
     const wake = await pool.waitForWake(config.pollIntervalMs);
     await renewOriginLease();
-    return wake;
+    return wake === "external" ? "janitor-finished" : wake;
   };
 
   // One observation per recompute. A request is latched from the first
@@ -2159,7 +2228,7 @@ export async function run(
     // reads no refs, while every other state waits for a complete snapshot.
     const stalled = decideAfterFailedRefresh({
       restartDue: restartDueAs !== null,
-      active: pool.activeCount,
+      active: activeSlots(),
       ongoing: pool.ongoingCount,
       hasPendingTerminals: pool.hasPendingTerminals,
     });
@@ -2407,6 +2476,7 @@ export async function run(
         ]),
         defaultLane: config.defaultLane,
         readyLabelPolicy,
+        // Not less the janitor's slot: a candidate it keeps out is what pre-empts it.
         k: Math.max(0, config.maxParallelIssues - pool.activeCount),
         repoDir: layout.repoDir,
         sourceBranch: config.sourceBranch,
@@ -2679,6 +2749,23 @@ export async function run(
           describeChunkBranchDrift(drift)
         );
 
+      // The idle janitor (#205): which configured tasks carry `land` on their
+      // pull request, and the task due next when no run is in flight.
+      const janitorLandLabelled = new Set(landPullRequests.flatMap((pr) => {
+        const task = janitorTaskFromBranch(pr.headRefName);
+        return task === null ? [] : [task];
+      }));
+      const dueJanitor = config.janitor === null || janitor.run !== null
+        ? null
+        : await dueJanitorTask({
+            tasks: config.janitor.tasks,
+            layout,
+            sourceBranch: config.sourceBranch,
+            landLabelled: janitorLandLabelled,
+            now: new Date(),
+            onNotice: (message) => runRecord.emit({ kind: "notice", message }).then(() => undefined),
+          });
+
       // What may not land yet stays in the pool: a DONE auto-lane issue while
       // the window is closed, the window's other source-branch landing, and a
       // DONE member of a frozen chunk (#243), dispatched before the label went
@@ -2712,7 +2799,7 @@ export async function run(
         refresh.dependents.length > 0 || !failedBaseRefreshes.has(refresh.branch)
       );
       const schedulerSnapshot = {
-        active: pool.activeCount,
+        active: activeSlots(),
         ongoing: pool.ongoingCount,
         hasCompleted: pool.hasCompleted,
         hasPendingTerminals: pool.hasPendingTerminals,
@@ -2720,12 +2807,15 @@ export async function run(
         hasRetries: pool.hasRetries,
         hasLandRequests: landRequests.length > 0,
         hasChunkRefreshRequests: plannedRefreshes.length > 0,
-        hasCapacity: pool.activeCount < config.maxParallelIssues,
+        hasCapacity: activeSlots() < config.maxParallelIssues,
         noProgressSinceLanding: pool.noProgressSinceLanding,
         noProgressBackstop: MAX_CONSECUTIVE_NO_PROGRESS_WITHOUT_LANDING,
         providerClosed,
         restartDue: restartDueAs !== null,
         storageLow: storageLow !== null,
+        janitorRunning: janitor.run !== null && !janitor.run.controller.signal.aborted,
+        janitorStartable: dueJanitor !== null,
+        janitorLandRequested: janitor.run !== null && janitorLandLabelled.has(janitor.run.task),
       };
       const schedulerAction = decideSchedulerAction(schedulerSnapshot);
       const chunkRefreshes = chunkRefreshRequestsAreRunnable(schedulerSnapshot)
@@ -2738,7 +2828,8 @@ export async function run(
         landRequestSelection.refusals.length > 0 ||
         heldTerminals.length > 0 ||
         chunkRefreshes.length > 0 ||
-        schedulerAction.kind === "admit" || schedulerAction.kind === "land";
+        schedulerAction.kind === "admit" || schedulerAction.kind === "land" ||
+        schedulerAction.kind === "janitor" || schedulerAction.kind === "preempt-janitor";
       const pollIsReportable = pollDidWork || resolution.waiting.some(
         (entry) => entry.reason.kind === "label-actor",
       );
@@ -2761,7 +2852,7 @@ export async function run(
 
       if (schedulerAction.kind === "admit") await renewOriginLease();
       const admission = schedulerAction.kind === "admit"
-        ? pool.admit(resolution.plan)
+        ? pool.admit(resolution.plan, false, activeSlots() - pool.activeCount)
         : [];
       const executionIssues = [...admission];
       const issues = executionIssues;
@@ -2838,6 +2929,20 @@ export async function run(
         })();
         pool.start(issue, task);
       }
+      if (schedulerAction.kind === "preempt-janitor") janitor.run?.controller.abort();
+      if (schedulerAction.kind === "janitor" && dueJanitor !== null) {
+        activity.enterBusy();
+        startJanitor(dueJanitor, {
+          config: admissionConfig,
+          hooks: config.sandboxHooks,
+          copyToWorktree: config.copyToWorktree,
+          branchImages: admissionImages.branchImages,
+          stackSource,
+          gateSemaphore,
+          dbCopies,
+          providerState,
+        });
+      }
 
       // A recompute with no new candidate can still have running work. Wait
       // only for the next freed slot; siblings remain live and the next full
@@ -2850,7 +2955,7 @@ export async function run(
         activity.enterBusy();
         settled = [...pool.takeLandingBatch()];
       } else {
-        if (pool.activeCount === 0 && !activity.isIdle()) {
+        if (activeSlots() === 0 && !activity.isIdle()) {
           await runRecord.emit({ kind: "idle", pollIntervalMs: config.pollIntervalMs });
           activity.enterIdle();
         }

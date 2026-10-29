@@ -459,3 +459,23 @@ describe("the scorecard over schema-5 records (#194)", () => {
       .toMatchFileSnapshot("./__fixtures__/stats/report.golden.txt");
   });
 });
+
+describe("computeStats janitor runs (#205)", () => {
+  const janitorRun = (task: string, outcome: string): StatsEvent => ev({
+    kind: "janitor-run", task, branch: `sandbar/janitor-${task}`, outcome, scope: ["a.ts"], durationMs: 3,
+  });
+
+  it("counts runs per task and outcome, apart from the issue cycles, tokens unmeasured", () => {
+    const report = computeStats(input([run("run-1", [
+      janitorRun("tidy", "committed"),
+      janitorRun("tidy", "no-change"),
+      janitorRun("tidy", "committed"),
+      janitorRun("docs", "pre-empted"),
+    ])]));
+    expect(report.janitor.runs).toBe(4);
+    expect(report.janitor.byTask["tidy"]).toMatchObject({ runs: 3, outcomes: { committed: 2, "no-change": 1 } });
+    expect(report.janitor.byTask["docs"]).toMatchObject({ runs: 1, outcomes: { "pre-empted": 1 } });
+    expect(report.janitor.byTask["tidy"]?.tokens.output).toBeNull();
+    expect(report.issues).toEqual([]);
+  });
+});

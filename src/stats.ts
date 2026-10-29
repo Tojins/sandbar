@@ -33,9 +33,12 @@
 // population and `n` the measured part of it, and an aggregate of nothing
 // measured has null statistics, never 0. Quantiles are nearest-rank. A token
 // sum is null where no invocation in it reported that bucket. The rows for
-// quality rule groups (#204), DB copies (#201) and the janitor (#205) are
-// empty until those issues emit their events; each adds its own reducer arm
-// here.
+// quality rule groups (#204) and DB copies (#201) are empty until those issues
+// emit their events; each adds its own reducer arm here.
+//
+// The janitor (#205) counts `janitor-run` events per task and outcome. Its
+// `tokens` stay unmeasured: a janitor run's agent events are dropped as
+// `janitor <kind>` ignored kinds (`stats-record.ts`), never read as an issue's.
 //
 // Scenario sets (#203) are one sample per `scenario-writer` event that
 // carries `scenarios`, NONE counting 0: `issues` is how many issues got one,
@@ -476,6 +479,7 @@ export function computeStats(input: StatsInput): StatsReport {
   const scenarioOutcomes = { pass: 0, fail: 0, unverified: 0 };
   let writerFailed = 0;
   const deploys = new Map<string, DeployOutcome>();
+  const janitorRuns: Extract<StatsEvent, { kind: "janitor-run" }>[] = [];
 
   for (const { run, events, prose } of input.runs) {
     // Each issue's latest cycle in this run; it keeps the events that follow
@@ -593,6 +597,9 @@ export function computeStats(input: StatsInput): StatsReport {
             if (ruling === "OVERRULED") adjudication[pass].overruled += 1;
           }
           break;
+        case "janitor-run":
+          janitorRuns.push(event);
+          break;
       }
     }
   }
@@ -669,7 +676,19 @@ export function computeStats(input: StatsInput): StatsReport {
       condensed: agg(anchors.map((event) => event.anchorChars)),
       condenser: tally(anchors.map((event) => event.result)),
     },
-    janitor: { runs: 0, byTask: {} },
+    janitor: {
+      runs: janitorRuns.length,
+      byTask: Object.fromEntries(
+        [...new Set(janitorRuns.map((event) => event.task))].map((task) => {
+          const runs = janitorRuns.filter((event) => event.task === task);
+          return [task, {
+            runs: runs.length,
+            outcomes: tally(runs.map((event) => event.outcome)),
+            tokens: sumTokens([]),
+          }];
+        }),
+      ),
+    },
     invocations,
     gates,
     terminals,

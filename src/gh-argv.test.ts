@@ -28,6 +28,7 @@ import {
   fetchPullRequestsForBranches,
 } from "./chunk-reconcile.js";
 import { realAdapter as realFinalizeAdapter } from "./finalize.js";
+import { realJanitorForge } from "./janitor.js";
 import { realAdapter as realMergerAdapter } from "./merger.js";
 import { repoLayout } from "./repo-cache.js";
 
@@ -532,6 +533,22 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
           .toEqual(["--json", "number,headRefName,title,state,labels"]);
       }
     });
+
+    it("asks for a janitor branch's latest pull request in any state, in the configured repo (#205)", async () => {
+      const forge = realJanitorForge({
+        repo: REPO,
+        repoDir: shimBin,
+        sourceBranch: "main",
+        beforeOriginWrite,
+      });
+      expect(await forge.latestPullRequest("sandbar/janitor-tidy")).toBeNull();
+
+      const [argv] = await calls();
+      expect(argv).toEqual([
+        "pr", "list", "--repo", "acme/app", "--head", "sandbar/janitor-tidy",
+        "--state", "all", "--json", "number,state,labels", "--limit", "5",
+      ]);
+    });
   });
 });
 
@@ -646,5 +663,37 @@ describe("the forge readers fail soft (#64), but for the land listing (#243)", (
     ).toEqual([
       { number: 9, headRefName: "sandbar/chunk-42-c", title: "merged", labels: [] },
     ]);
+  });
+
+  describe("the janitor's latest pull request (#205)", () => {
+    const latest = async (body: string) => {
+      await shimAnswering(body);
+      return realJanitorForge({
+        repo: REPO_REF,
+        repoDir: shimBin,
+        sourceBranch: "main",
+        beforeOriginWrite: async () => undefined,
+      }).latestPullRequest("sandbar/janitor-tidy");
+    };
+
+    it("picks the highest number whatever the listing's order, with its label names", async () => {
+      expect(await latest(JSON.stringify([
+        { number: 4, state: "CLOSED", labels: [{ name: "old" }] },
+        { number: 9, state: "OPEN", labels: [{ name: "land" }, { color: "fff" }, { name: "x" }] },
+        { number: 6, state: "MERGED", labels: [] },
+      ]))).toEqual({ number: 9, state: "OPEN", labels: ["land", "x"] });
+    });
+
+    it("answers null for an empty listing", async () => {
+      expect(await latest("[]")).toBeNull();
+    });
+
+    it.each([
+      ["a listing that is not an array", '{"number":1}'],
+      ["a pull request without a number", '[{"state":"OPEN","labels":[]}]'],
+      ["a pull request in an unknown state", '[{"number":1,"state":"DRAFT","labels":[]}]'],
+    ])("throws on %s", async (_, body) => {
+      await expect(latest(body)).rejects.toThrow(/gh pr list answered/);
+    });
   });
 });

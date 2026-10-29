@@ -107,6 +107,12 @@
 // take a reflink copy (`dbVolumeRefusals`, #201): without reflink every copy
 // would fail, and `--reflink=auto` would silently fill the volume instead.
 //
+// With `config.janitor` (#205), git must be 2.38 or newer, for the
+// `merge-tree --write-tree` that refreshes a rolling branch. Whether or not
+// it is on, every local `sandbar/janitor-*` branch is deleted with its clone:
+// origin owns the rolling branches, and a local one is only a dead run's
+// scratch.
+//
 // The git fetch is an answer too, not a best-effort warmup. Its failure joins
 // the ordinary invariant report and retains git's stderr (#81, absorbed by
 // #118); a wildcard refspec matching nothing still exits zero.
@@ -258,8 +264,10 @@ import { SandbarError, hasExitCode, isErrno, isExitStatus } from "./errors.js";
 import { type ExecFn, defaultExec } from "./forge-verify.js";
 import { LOG_READ_TIMEOUT_MS, boundedOk, boundedPodman } from "./gate-stack.js";
 import {
+  LOCAL_JANITOR_BRANCH_REFGLOB,
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
+  ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS,
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
@@ -334,6 +342,8 @@ export type PreflightConfig = {
   readonly deployWatch: DeployWatchSettings | null;
   // `config.databaseCopies`; null when copies are off.
   readonly databaseCopies: DatabaseCopiesSettings | null;
+  // Whether `config.janitor` is on (#205): it needs `git merge-tree --write-tree`.
+  readonly janitor: boolean;
   readonly onEvent: (event: EventInput) => Promise<void> | void;
 };
 
@@ -1206,6 +1216,35 @@ export function classifySandbarBranches(
   return { unmerged, discarded, resumable, parked, closed };
 }
 
+// A local `sandbar/janitor-*` branch and its clone are a dead run's scratch
+// (#205): origin owns each rolling branch, every janitor run sets its local
+// copy to that run's base, and only a DONE run's push carries work out of it.
+// So the clone is removed outright, not reclaimed, before its branch.
+export async function deleteJanitorScratch(
+  layout: RepoLayout,
+): Promise<readonly string[]> {
+  const { stdout } = await exec("git", [
+    "for-each-ref", "--format=%(refname:lstrip=2)", LOCAL_JANITOR_BRANCH_REFGLOB,
+  ], { cwd: layout.repoDir });
+  const branches = stdout.split("\n").filter((branch) => branch !== "");
+  for (const branch of branches) {
+    await rm(worktreePathFor(layout.worktreesDir, branch), { recursive: true, force: true });
+    await exec("git", ["update-ref", "-d", `refs/heads/${branch}`], { cwd: layout.repoDir });
+  }
+  return branches;
+}
+
+// The janitor refreshes its rolling branch with `git merge-tree --write-tree`
+// (#205), which git 2.38 introduced. `git --version`'s answer, judged.
+export function mergeTreeRefusals(versionOutput: string): readonly string[] {
+  const m = versionOutput.match(/git version (\d+)\.(\d+)/);
+  if (m !== null && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 38))) return [];
+  return [
+    `config.janitor needs git 2.38 or newer for \`merge-tree --write-tree\`; this host has ` +
+      `${versionOutput.trim() || "an unidentified git"}.`,
+  ];
+}
+
 // The destructive step, and the reason every other call site in this module
 // had to be retargeted first (#38 item 3): it runs `git branch -D` in
 // `layout.repoDir`. Against the operator's own checkout that would be a
@@ -1517,7 +1556,7 @@ async function fetchOriginRefspecs(
   };
 }
 
-// The daemon's poll refresh (#133). One fetch updates the source plus all three
+// The daemon's poll refresh (#133). One fetch updates the source plus all four
 // sandbar namespaces, so the next wake never sees a half-refreshed cache.
 // Measuring the source tip around it makes a human push trigger the same image
 // refresh as a source landing performed by sandbar itself.
@@ -1529,13 +1568,15 @@ export async function fetchOriginRefs(
     ...ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
     ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
     ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
-  ], "source, issues, chunks, members");
+    ...ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS,
+  ], "source, issues, chunks, members, janitor");
 }
 
 // Planning's containment decisions need a snapshot obtained by that
 // recompute, not merely the last idle poll's cache (#174). Issue branches do
 // not answer either containment question, so this narrower fetch updates only
-// the source, chunk and membership namespaces the planner is about to read.
+// the source, chunk and membership namespaces the planner is about to read,
+// and the janitor's rolling branches its task pick reads (#205).
 export async function fetchPlanningRefs(
   repoDir: string,
   sourceBranch: string,
@@ -1543,7 +1584,8 @@ export async function fetchPlanningRefs(
   return fetchOriginRefspecs(repoDir, sourceBranch, [
     ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
     ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
-  ], "source, chunks, members");
+    ...ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS,
+  ], "source, chunks, members, janitor");
 }
 
 export async function checkForgeReachabilityForPreflight(
@@ -1694,6 +1736,14 @@ export async function runPreflightAfterReachability(
     ? await resolveReadyLabelPolicy(cfg.developers)
     : null;
 
+  const scratch = await deleteJanitorScratch(cfg.layout);
+  if (scratch.length > 0) {
+    await cfg.onEvent({
+      kind: "preflight",
+      action: "cleaned",
+      detail: `Cleaned up local janitor branches and their clones: ${scratch.join(", ")}`,
+    });
+  }
   const deleted = await deleteMergedSandbarBranches({
     layout: cfg.layout,
     sourceBranch: cfg.sourceBranch,
@@ -1838,6 +1888,7 @@ export async function runPreflightAfterReachability(
     ...synced.refusals,
     ...deployWatchFailures,
     ...(cfg.databaseCopies === null ? [] : await dbVolumeRefusals(cfg.databaseCopies)),
+    ...(cfg.janitor ? mergeTreeRefusals((await exec("git", ["--version"])).stdout) : []),
   ];
   if (failures.length > 0) throw new PreflightError(failures);
 

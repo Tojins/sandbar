@@ -16,6 +16,8 @@
 // and sessions, laid out by `replay-run.ts`. `snapshots/` holds the seed
 // snapshots `createSeedSnapshotSandbox` checks out (#203); preflight removes
 // it whole at start, because under the workdir lock every entry is stale.
+// `janitor/` holds each idle janitor task's visit ledger (#205,
+// `janitor-ledger.ts`), a cache whose loss costs only repeat visits.
 //
 // `repo.git` being BARE is not tidiness: it is what makes the three
 // genuinely-destructive operations (`branch -D`, `worktree remove --force`,

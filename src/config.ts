@@ -21,7 +21,12 @@ import {
 } from "./egress-policy.js";
 import { SandbarError } from "./errors.js";
 import { DEFAULT_LANE, type Lane } from "./lanes.js";
-import { ALL_BRANCH_INFIXES, BRANCH_PREFIX } from "./naming.js";
+import {
+  ALL_BRANCH_INFIXES,
+  BRANCH_PREFIX,
+  JANITOR_TASK_MAX_CHARS,
+  JANITOR_TASK_RE,
+} from "./naming.js";
 import { checkRequiresSandbar } from "./requires-sandbar.js";
 import { sandbarVersion } from "./version.js";
 
@@ -879,6 +884,37 @@ export type DatabaseCopiesConfig = {
 
 export type DatabaseCopiesSettings = Required<DatabaseCopiesConfig>;
 
+// What an idle janitor task applies (#205): the standards groups flagged
+// `{janitor}` (#204), a prompt file at the source tip, or a skill, which is
+// its `.claude/skills/<skill>/SKILL.md` there.
+export type JanitorTaskPrompt =
+  | "standards"
+  | { readonly file: string }
+  | { readonly skill: string };
+
+// One idle janitor task (#205, `janitor.ts`). When no issue is admissible the
+// daemon runs the next task in rotation; each run's commits go to the task's
+// one rolling draft pull request, which lands only on a human `land`.
+export type JanitorTaskConfig = {
+  // A slug, unique among the tasks: `^[a-z0-9]+(-[a-z0-9]+)*$`, at most 40
+  // chars. It names the branch `sandbar/janitor-<name>`.
+  readonly name: string;
+  readonly prompt: JanitorTaskPrompt;
+  // Run starts per UTC day, 1 through 48. Pre-empted and failed runs count.
+  readonly runsPerDay: number;
+  // Git pathspecs at the source tip a run's scope is picked from. Default ["."].
+  readonly paths?: readonly string[];
+  // What one run visits: the least recently visited files up to a quarter of
+  // `maxContextChars`, or one directory. Default "file".
+  readonly unit?: "file" | "directory";
+};
+
+export type JanitorConfig = {
+  readonly tasks: readonly JanitorTaskConfig[];
+};
+
+export type JanitorTask = Required<JanitorTaskConfig>;
+
 // A container `assertDatabaseCopiesTarget` accepted.
 export type DbCopyTarget = ResolvedStackContainer & { readonly readiness: Readiness };
 
@@ -1247,6 +1283,9 @@ export type RunConfig = {
   // (#201). Default: unset, no import and no copies.
   readonly databaseCopies?: DatabaseCopiesConfig;
 
+  // Idle janitor tasks (#205). Default: unset or no tasks, the janitor is off.
+  readonly janitor?: JanitorConfig;
+
   // Which landing lane an issue takes when it carries no `auto-land` label
   // (#57, §1 of #54): "auto" — the gate is the last word, what sandbar has
   // always done — or "review", where a human looks before the work lands.
@@ -1317,8 +1356,8 @@ export type RunConfig = {
 // merely `Required<>`d because resolution changes their TYPE, not just their
 // presence: `labels` widens from Partial to the fully-populated vocabulary,
 // `gateStack` and `mergeMode` become their resolved-and-validated forms,
-// `deployWatch`, `landingWindow` and `databaseCopies` are null when they are
-// off, and `egress` is `open` without an allowlist.
+// `deployWatch`, `landingWindow`, `databaseCopies` and `janitor` are null
+// when they are off, and `egress` is `open` without an allowlist.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
@@ -1328,6 +1367,7 @@ export type ResolvedConfig = Required<
     | "deployWatch"
     | "landingWindow"
     | "databaseCopies"
+    | "janitor"
     | "requiresSandbar"
     | "implementerEffort"
     | "uiCheckEffort"
@@ -1370,6 +1410,7 @@ export type ResolvedConfig = Required<
   readonly landingWindow: LandingWindowSettings | null;
   readonly egress: ResolvedEgress;
   readonly databaseCopies: DatabaseCopiesSettings | null;
+  readonly janitor: { readonly tasks: readonly JanitorTask[] } | null;
 };
 
 export const DEFAULT_CWD = (): string => process.cwd();
@@ -1680,6 +1721,84 @@ export function resolveDeployWatch(
       watch.timeoutMs ?? DEFAULT_DEPLOY_WATCH_TIMEOUT_MS,
     ),
   };
+}
+
+export const JANITOR_MAX_RUNS_PER_DAY = 48;
+
+// `.mjs` is type-checked by nothing, so every field is checked here. No
+// tasks is the janitor off, as an absent key is.
+export function resolveJanitor(
+  janitor: JanitorConfig | undefined,
+): { readonly tasks: readonly JanitorTask[] } | null {
+  if (janitor === undefined) return null;
+  if (!isRecord(janitor) || !Array.isArray(janitor.tasks)) {
+    throw new SandbarError("config.janitor must be { tasks: [...] }.");
+  }
+  const names = new Set<string>();
+  const tasks = janitor.tasks.map((raw: unknown, i): JanitorTask => {
+    const field = `config.janitor.tasks[${i}]`;
+    if (!isRecord(raw)) {
+      throw new SandbarError(`${field} must be { name, prompt, runsPerDay, paths?, unit? }.`);
+    }
+    const { name, runsPerDay } = raw;
+    if (
+      typeof name !== "string" || !JANITOR_TASK_RE.test(name) ||
+      name.length > JANITOR_TASK_MAX_CHARS
+    ) {
+      throw new SandbarError(
+        `${field}.name must be a slug of lowercase letters, digits and single ` +
+          `hyphens, at most ${JANITOR_TASK_MAX_CHARS} chars (got ${JSON.stringify(name)}).`,
+      );
+    }
+    if (names.has(name)) {
+      throw new SandbarError(`${field}.name '${name}' names an earlier task too; task names are unique.`);
+    }
+    names.add(name);
+    if (
+      !Number.isInteger(runsPerDay) || (runsPerDay as number) < 1 ||
+      (runsPerDay as number) > JANITOR_MAX_RUNS_PER_DAY
+    ) {
+      throw new SandbarError(
+        `${field}.runsPerDay must be an integer from 1 through ${JANITOR_MAX_RUNS_PER_DAY} ` +
+          `(got ${JSON.stringify(runsPerDay)}).`,
+      );
+    }
+    const paths = raw.paths ?? ["."];
+    if (
+      !Array.isArray(paths) || paths.length === 0 ||
+      !paths.every((p) => typeof p === "string" && p.trim() !== "" && !p.startsWith("/") && !p.split("/").includes(".."))
+    ) {
+      throw new SandbarError(
+        `${field}.paths must be a non-empty list of git pathspecs relative to the ` +
+          `repository root, without '..' (got ${JSON.stringify(raw.paths)}).`,
+      );
+    }
+    const unit = raw.unit ?? "file";
+    if (unit !== "file" && unit !== "directory") {
+      throw new SandbarError(`${field}.unit must be "file" or "directory" (got ${JSON.stringify(unit)}).`);
+    }
+    return {
+      name,
+      prompt: resolveJanitorPrompt(`${field}.prompt`, raw.prompt),
+      runsPerDay: runsPerDay as number,
+      paths: paths as readonly string[],
+      unit,
+    };
+  });
+  return tasks.length === 0 ? null : { tasks };
+}
+
+function resolveJanitorPrompt(field: string, prompt: unknown): JanitorTaskPrompt {
+  if (prompt === "standards") return prompt;
+  if (isRecord(prompt) && Object.keys(prompt).length === 1) {
+    if ("file" in prompt) return { file: repoRelativePath(`${field}.file`, prompt.file) };
+    const { skill } = prompt;
+    if (typeof skill === "string" && JANITOR_TASK_RE.test(skill)) return { skill };
+  }
+  throw new SandbarError(
+    `${field} must be "standards", { file: "<repository-relative path>" } or ` +
+      `{ skill: "<slug>" } (got ${JSON.stringify(prompt)}).`,
+  );
 }
 
 // `.mjs` is type-checked by nothing, so every field is checked here. The zone
@@ -3561,6 +3680,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       mergerAgent,
     })),
     databaseCopies,
+    janitor: resolveJanitor(config.janitor),
     defaultLane: requireLane(config.defaultLane),
   };
 }

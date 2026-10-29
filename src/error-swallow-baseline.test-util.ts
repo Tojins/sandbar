@@ -38,6 +38,13 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "agent-tools.ts": 4,
   "ensure-images.ts": 2,
   "finalize.ts": 4,
+  // An idle janitor run (#205) classifies merge-tree's exit 1 as a conflict,
+  // a push refused for a stale lease as a lease failure, and its loop's abort
+  // and provider errors as outcomes; anything else is rethrown. The fourth
+  // classifies a lease lost to cleanup as cleanup's to record, and records any
+  // other failure, whatever its type, as the run's `failed` outcome, its
+  // complaint included, as the pool records a rejected issue loop.
+  "janitor.ts": 4,
   "forge-verify.ts": 6,
   "gate-run.ts": 2,
   // The three-state origin lookup (#112) reads as a swallow to the pattern and

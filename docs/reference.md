@@ -104,6 +104,7 @@ defaults.
 | `promptExtensions` | `{}` | Per-role `{ text }` or `{ path }` additions. `reviewerQuality` is a [standards file](#coding-standards). |
 | `coauthorTrailer` | from bot name/email | `Co-authored-by` line. |
 | `requiresSandbar` | none | Oldest driver version this config needs. |
+| `janitor` | off | `{ tasks: [...] }`: idle tasks run when no issue is admissible. See [Idle janitor](#idle-janitor). |
 
 `ready-for-agent`, `auto-land` and `land` are fixed label names. `land` and the
 handoff label must exist in the repo; sandbar never creates either.
@@ -352,6 +353,34 @@ Shared context for every group.
 | `maxReviewRounds` | verifier rejections | — | issue parks as stuck |
 
 A reviewer that crashes spends no budget. A second crash in one issue stops it.
+
+### Idle janitor
+
+When no issue is admissible and a slot is free, sandbar runs the next idle
+task in rotation. No issue is created. Each task is
+`{ name, prompt, runsPerDay, paths?, unit? }`:
+
+| Key | Meaning |
+| --- | --- |
+| `name` | Lowercase slug, at most 40 chars, unique. The branch is `sandbar/janitor-<name>`. |
+| `prompt` | `"standards"` (the groups flagged `{janitor}` in the [standards file](#coding-standards)), `{ file }` (a repository path) or `{ skill }` (`.claude/skills/<skill>/SKILL.md`), read from `origin/<sourceBranch>`. |
+| `runsPerDay` | Run starts per UTC day, 1–48. Pre-empted and failed runs count. |
+| `paths` | Git pathspecs a run's files are picked from. Default `["."]`. |
+| `unit` | `"file"` (the least recently visited files, up to a quarter of `maxContextChars`) or `"directory"` (one directory). Default `"file"`. |
+
+A run goes through the quality pass, the gate and the white-box review like an
+issue. Only a run that ends DONE is pushed, onto the task's one rolling branch,
+which has a draft pull request titled `Idle task: <name>`. A run with nothing
+to change, or one that is rejected, changes nothing on GitHub. An admissible
+issue that needs the slot pre-empts a running task, and so does a `land`
+label on its pull request; while the label is there the task does not run.
+Once that pull request is merged or closed, the next run starts a fresh branch,
+and a run under way is discarded.
+When the source branch moves, a run first merges it into the rolling branch;
+on a conflict the task waits, with one comment on its pull request, until
+either branch moves. Which files were visited is kept in
+`.sandbar/janitor/<name>.json`; deleting it costs only repeat visits. With
+tasks configured, git must be 2.38 or newer.
 
 ## Images
 

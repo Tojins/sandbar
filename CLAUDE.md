@@ -113,6 +113,13 @@ Daemon polling and the six exits (`stuck`, `quota`, `credential`, `storage`,
 holds planning until reset (`forge-rate-limit.ts`) instead of halting.
 With `config.deployWatch`, polls and landings also kick the deploy watch
 (`deploy-watch.ts`, #198), which never blocks the loop.
+With `config.janitor` (#205), an idle daemon runs the next due task
+(`janitor.ts`; pure layer `janitor-plan.ts`, visit ledger
+`janitor-ledger.ts` under `<stateDir>/janitor/`) through `runInnerLoop`
+under its task name, beside the pool in one slot. Only a DONE run is pushed,
+onto its rolling `sandbar/janitor-<task>` branch and draft PR;
+`preempt-janitor` aborts a run for any stop, a `land` on its PR, or work
+its slot keeps out.
 With `config.databaseCopies`, every recompute reads the base import's outcome
 (`createDbBaseWatch`, #201) into `db-base` events and stale/failed complaints,
 and measures the database volume into the same storage latch as the
@@ -187,6 +194,8 @@ a written set.
   failed app hook, +0.2k a rerun);
   adjudicator 1.1k + the report (1.5k + 0.1k a unit ruled unit by unit); UI check 1.6k and partition
   check 1.5k + the issue anchor; scenario writer 2.4k + the issue anchor;
+  a janitor task anchor (`prompts/janitor-task.md`, in place of the issue
+  anchor) 1.0k + its scope + its prompt source;
   resolve 1.2k + anchor + paths/trace; reflect
   tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser
   1.3k + the thread (no anchor). The issue anchor (median 5.6k, max 41k

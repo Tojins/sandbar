@@ -34,6 +34,7 @@ import {
 } from "./events.js";
 import { type ResolvedStack, resolveGateStack } from "./config.js";
 import {
+  deleteJanitorScratch,
   deleteMergedSandbarBranches,
   fetchOriginRefs,
   fetchPlanningRefs,
@@ -165,6 +166,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     agentProviders: ["claude"] as readonly AgentProviderName[],
     deployWatch: null,
     databaseCopies: null,
+    janitor: false,
     onEvent: () => undefined,
   });
   // What `runPreflight` hands `gatherState` once its own `gh` checks pass.
@@ -279,6 +281,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     await git(target, "update-ref", "refs/heads/sandbar/issue-2-test", "HEAD");
     await git(target, "update-ref", "refs/heads/sandbar/chunk-2-test", "HEAD");
     await git(target, "update-ref", "refs/heads/sandbar/member-2", "HEAD");
+    await git(target, "update-ref", "refs/heads/sandbar/janitor-tidy", "HEAD");
     await writeFile(join(target, "a.txt"), "planning moved\n");
     await git(target, "add", "a.txt");
     await git(target, "commit", "-qm", "move before planning");
@@ -294,8 +297,34 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       target, "show-ref", "--verify", "refs/remotes/origin/sandbar/member-2",
     )).resolves.toBeDefined();
     await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/janitor-tidy",
+    )).resolves.toBeDefined();
+    await expect(git(
       target, "show-ref", "--verify", "refs/sandbar/poll/origin/sandbar/issue-2-test",
     )).rejects.toBeDefined();
+  });
+
+  it("deletes local janitor branches and their clones, and nothing else (#205)", async () => {
+    const layout = layoutAt(target);
+    await git(target, "update-ref", "refs/heads/sandbar/janitor-tidy", "HEAD");
+    await git(target, "update-ref", "refs/heads/sandbar/issue-3-keep", "HEAD");
+    await git(target, "update-ref", "refs/remotes/origin/sandbar/janitor-tidy", "HEAD");
+    const janitorClone = join(layout.worktreesDir, "sandbar-janitor-tidy");
+    const issueClone = join(layout.worktreesDir, "sandbar-issue-3-keep");
+    for (const clone of [janitorClone, issueClone]) {
+      await mkdir(clone, { recursive: true });
+      await writeFile(join(clone, "a.txt"), "uncommitted\n");
+    }
+
+    expect(await deleteJanitorScratch(layout)).toEqual(["sandbar/janitor-tidy"]);
+    expect(existsSync(janitorClone)).toBe(false);
+    expect(existsSync(issueClone)).toBe(true);
+    await expect(git(target, "show-ref", "--verify", "refs/heads/sandbar/janitor-tidy")).rejects.toBeDefined();
+    await expect(git(target, "show-ref", "--verify", "refs/heads/sandbar/issue-3-keep")).resolves.toBeDefined();
+    await expect(git(
+      target, "show-ref", "--verify", "refs/remotes/origin/sandbar/janitor-tidy",
+    )).resolves.toBeDefined();
+    expect(await deleteJanitorScratch(layout)).toEqual([]);
   });
 
   it("fetches origin member refs before later preflight checks", async () => {
@@ -363,7 +392,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     ).catch((err: unknown) => err);
 
     expect(error).toBeInstanceOf(Error);
-    expect(String(error)).toContain("Fetching origin refs (source, issues, chunks, members) failed");
+    expect(String(error)).toContain("Fetching origin refs (source, issues, chunks, members, janitor) failed");
     expect(String(error)).toContain("does not appear to be a git repository");
   });
 
@@ -415,6 +444,31 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     expect((error as PreflightError).failures).toEqual([
       "gate/stack.json at origin/main: no such file.",
     ]);
+  });
+
+  it("deletes a crashed janitor run's branch and clone through preflight, leaving origin's (#205)", async () => {
+    await installPassingPreflightShims();
+    const origin = await giveTargetBareOrigin();
+    await git(target, "commit", "-q", "--allow-empty", "-m", "an earlier janitor run");
+    await git(target, "push", "-q", "origin", "HEAD:refs/heads/sandbar/janitor-tidy");
+    const { stdout: originTip } = await git(origin, "rev-parse", "sandbar/janitor-tidy");
+    await git(target, "update-ref", "refs/heads/sandbar/janitor-tidy", "HEAD");
+    const config = passingCfg();
+    const clone = join(config.layout.worktreesDir, "sandbar-janitor-tidy");
+    await mkdir(clone, { recursive: true });
+    await writeFile(join(clone, "a.txt"), "a dead run's edit\n");
+    const events: EventInput[] = [];
+
+    await runPreflight({ ...config, onEvent: (event) => events.push(event) }, localReachability);
+
+    expect(events).toContainEqual({
+      kind: "preflight",
+      action: "cleaned",
+      detail: "Cleaned up local janitor branches and their clones: sandbar/janitor-tidy",
+    });
+    expect(existsSync(clone)).toBe(false);
+    await expect(git(target, "show-ref", "--verify", "refs/heads/sandbar/janitor-tidy")).rejects.toBeDefined();
+    expect((await git(origin, "rev-parse", "sandbar/janitor-tidy")).stdout).toBe(originTip);
   });
 
   it("abandons an origin-deleted closed branch through preflight and announces it", async () => {

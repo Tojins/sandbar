@@ -285,7 +285,7 @@ type OriginIssueBranchLookup =
   | { readonly kind: "absent"; readonly previous: string | null }
   | { readonly kind: "unreadable"; readonly detail: string };
 
-const revParseOrNull = async (cwd: string, ref: string): Promise<string | null> => {
+export const revParseOrNull = async (cwd: string, ref: string): Promise<string | null> => {
   try {
     return await revParse(cwd, ref);
   } catch (err) {
