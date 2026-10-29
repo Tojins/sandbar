@@ -224,7 +224,10 @@ unlanded code: `npm run build && node dist/cli.js --config <path>`.
   when it won't fit `maxContextChars`, never merely because it is large.
 - Podman-layer tests run over the host socket; only
   `gate-stack-hostpodman`, `sandbox-stack-podman` and
-  `container-resources-podman` tests are host-only.
+  `container-resources-podman` tests are host-only. A remote exec can exit
+  with its status and none of its output under load: a test whose assertion
+  reads exec output marks it (`podman-exec.test-util.ts`, #254) rather than
+  retrying on its own.
 - Tests must not depend on ambient git config or on `process.cwd()` being a
   repository — name the directory in every git call.
 

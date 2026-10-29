@@ -17,6 +17,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { type GateStep, resolveGateStack } from "./config.js";
 import { standaloneContainerNameFor } from "./naming.js";
+import { markExec, retryUndelivered, unmarked } from "./podman-exec.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { podmanTestScope } from "./podman-test-scope.test-util.js";
 import { RUNTIME } from "./runtime.js";
@@ -96,18 +97,18 @@ describe.runIf(available)("runStandaloneSteps against podman (#247)", () => {
   it("cannot write the worktree, keeps its .git writes from the clone, and runs every step past a red", async () => {
     const repo = await cloneWithHistory();
     try {
-      const runs = await runOn(repo, "readonly", [
-        { name: "write", command: ["touch", "/app/new.ts"] },
-        { name: "ref", command: ["git", "update-ref", "refs/heads/probe", "HEAD"] },
-        { name: "red", command: ["sh", "-c", "echo 'src/a.ts:1 inline it'; exit 3"] },
-      ]);
+      const runs = await retryUndelivered(() => runOn(repo, "readonly", [
+        { name: "write", command: markExec(["touch", "/app/new.ts"]) },
+        { name: "ref", command: markExec(["git", "update-ref", "refs/heads/probe", "HEAD"]) },
+        { name: "red", command: markExec(["sh", "-c", "echo 'src/a.ts:1 inline it'; exit 3"]) },
+      ]), (rs) => rs.map((run) => run.output));
       expect(runs.map((run) => [run.step.name, run.result, run.exitCode])).toEqual([
         ["write", "failed", 1],
         ["ref", "passed", 0],
         ["red", "failed", 3],
       ]);
       expect(runs[0]!.output).toContain("Read-only file system");
-      expect(runs[2]!.output).toBe("src/a.ts:1 inline it\n");
+      expect(unmarked(runs[2]!.output)).toBe("src/a.ts:1 inline it\n");
       await expect(access(join(repo, "new.ts"))).rejects.toMatchObject({ code: "ENOENT" });
       await expect(exec("git", ["-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/probe"]))
         .rejects.toMatchObject({ code: 1 });

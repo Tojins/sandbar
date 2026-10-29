@@ -20,6 +20,7 @@ import { assertDatabaseCopiesTarget, resolveDatabaseCopies, resolveGateStack } f
 import { type UsernsRun, dbBaseLayout, readImportStatus, runDbBaseJob } from "./db-base.js";
 import type { BaseMeta } from "./db-copy-policy.js";
 import { dbImportContainerName, runScope } from "./naming.js";
+import { podmanExecOutput } from "./podman-exec.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import { RUNTIME } from "./runtime.js";
 
@@ -84,19 +85,11 @@ async function rowsIn(root: string, base: string): Promise<string> {
       await new Promise((done) => setTimeout(done, 500));
     }
   }
-  // A remote client's exec can exit 0 having delivered none of its output on
-  // a loaded host; a trailing marker tells that apart from an empty table.
-  const END = "rows-end\n";
-  let stdout = "";
-  for (let tries = 0; tries < 5 && !stdout.endsWith(END); tries++) {
-    ({ stdout } = await exec(RUNTIME, [
-      "exec", name, "mariadb", "-uroot", "app", "-N", "-e",
-      "SELECT id, email FROM t ORDER BY id; SELECT 'rows-end'",
-    ]));
-  }
+  const stdout = await podmanExecOutput(name, [
+    "mariadb", "-uroot", "app", "-N", "-e", "SELECT id, email FROM t ORDER BY id",
+  ]);
   await exec(RUNTIME, ["rm", "-f", "-t", "0", name]);
-  if (!stdout.endsWith(END)) throw new Error(`the check query delivered no complete output: ${JSON.stringify(stdout)}`);
-  return stdout.slice(0, -END.length);
+  return stdout;
 }
 
 describe.runIf(available)("sandbar db-base against real podman", () => {

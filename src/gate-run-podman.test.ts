@@ -22,7 +22,6 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
@@ -40,6 +39,7 @@ import {
   podNameFor,
   stackContainerNameFor,
 } from "./naming.js";
+import { podmanExecOutput } from "./podman-exec.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   type FinishedHook,
@@ -286,21 +286,8 @@ describe.runIf(available)("sandbar gate against real podman", () => {
         await exec(RUNTIME, ["inspect", "--format", "{{.Id}}", dbName])
           .then((r) => r.stdout.trim())
           .catch(() => null);
-      const seededValue = async (): Promise<string> => {
-        // A successful read of this file cannot be empty: its writer emits a
-        // timestamp, and the test never truncates it. Remote podman can still
-        // transiently return empty stdout from a successful exec, so retry
-        // only that impossible observation without weakening the value check.
-        let value = "";
-        for (let attempt = 0; attempt < 20; attempt += 1) {
-          value = (
-            await exec(RUNTIME, ["exec", dbName, "cat", "/tmp/seeded"])
-          ).stdout.trim();
-          if (value) return value;
-          if (attempt < 19) await delay(250);
-        }
-        return value;
-      };
+      const seededValue = async (): Promise<string> =>
+        (await podmanExecOutput(dbName, ["cat", "/tmp/seeded"])).trim();
 
       expect(
         await runGateCommand(withDb, { worktree: repo, keep: true, ...sink }),

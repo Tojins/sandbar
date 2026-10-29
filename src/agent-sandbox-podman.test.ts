@@ -69,6 +69,7 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 
 import { scopedResourcePrefix } from "./naming.js";
 import { repoLayout, type RepoLayout } from "./repo-cache.js";
+import { podmanExecOutput } from "./podman-exec.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
@@ -196,13 +197,7 @@ describe.runIf(available)("the sandbox container against real podman", () => {
   // world-readable whatever uid the container runs as. Field 3 is the state
   // letter, and it follows the `)` that closes the comm field.
   const zombieCount = async (name: string): Promise<number> => {
-    const { stdout } = await exec(RUNTIME, [
-      "exec",
-      name,
-      "sh",
-      "-c",
-      "cat /proc/[0-9]*/stat",
-    ]);
+    const stdout = await podmanExecOutput(name, ["sh", "-c", "cat /proc/[0-9]*/stat"]);
     return stdout.split("\n").filter((l) => /\)\s+Z\s/.test(l)).length;
   };
 
@@ -224,25 +219,8 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     }
   };
 
-  const pid1Comm = async (name: string): Promise<string> => {
-    // A live process's comm is never empty, but the remote podman service can
-    // transiently return an empty successful exec immediately after a
-    // detached start. Poll that impossible observation so neither half of the
-    // control pair can pass or fail on transport timing.
-    let comm = "";
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const { stdout } = await exec(RUNTIME, [
-        "exec",
-        name,
-        "cat",
-        "/proc/1/comm",
-      ]);
-      comm = stdout.trim();
-      if (comm) return comm;
-      if (attempt < 19) await delay(250);
-    }
-    return comm;
-  };
+  const pid1Comm = async (name: string): Promise<string> =>
+    (await podmanExecOutput(name, ["cat", "/proc/1/comm"])).trim();
 
   it.concurrent(
     "leaks a zombie per orphan when pid 1 is the sleep entrypoint",
@@ -329,17 +307,9 @@ describe.runIf(available)("an agent's process group against real podman (#189)",
   }, 60_000);
 
   // Field 5 of /proc/<pid>/stat is the process group, after the `)` that
-  // closes comm; zombies are excluded because --init reaps them. A /proc with
-  // no stat line at all is impossible (pid 1 is always there), yet a loaded
-  // remote podman occasionally returns an empty successful exec, as pid1Comm
-  // above notes; re-read that observation rather than count it as an empty
-  // group, which would fail the control and pass the reaps vacuously.
+  // closes comm; zombies are excluded because --init reaps them.
   const groupMembers = async (pgid: string): Promise<number> => {
-    let stdout = "";
-    for (let attempt = 0; attempt < 20 && stdout.trim() === ""; attempt += 1) {
-      if (attempt > 0) await delay(250);
-      ({ stdout } = await exec(RUNTIME, ["exec", name, "sh", "-c", "cat /proc/[0-9]*/stat 2>/dev/null"]));
-    }
+    const stdout = await podmanExecOutput(name, ["sh", "-c", "cat /proc/[0-9]*/stat 2>/dev/null"]);
     return stdout.split("\n").filter((l) => {
       const fields = l.slice(l.lastIndexOf(")") + 2).split(" ");
       return fields[0] !== "Z" && fields[2] === pgid;

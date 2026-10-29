@@ -27,6 +27,7 @@ import {
   scopedResourcePrefix,
   stackContainerNameFor,
 } from "./naming.js";
+import { markExec, podmanExecOutput, retryUndelivered } from "./podman-exec.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   podmanTestScope,
@@ -342,7 +343,7 @@ describe.runIf(available)("gate stack against real podman", () => {
                 // podman socket (CONTAINER_HOST, as the gate runs) `exec` can
                 // drop the stderr of a process that exits the instant it writes,
                 // while still reporting its exit code.
-                command: ["sh", "-c", "echo nope >&2; sleep 1; exit 3"],
+                command: markExec(["sh", "-c", "echo nope >&2; sleep 1; exit 3"]),
               },
               // Must NOT run: later steps read what earlier ones build, so
               // running them buries the real failure under derived ones.
@@ -360,21 +361,7 @@ describe.runIf(available)("gate stack against real podman", () => {
         }),
       );
 
-      // A step that wrote `nope` cannot exit 3 with an empty stderr, yet under
-      // a loaded remote podman `exec` still occasionally returns none (the
-      // drain sleep above did not cure it). Re-run only that impossible
-      // observation; the capture is then judged on the run podman delivered.
-      let red = await stack.runGate();
-      for (
-        let attempt = 1;
-        attempt < 5 &&
-        red.failedStep === "boom" &&
-        red.exitCode === 3 &&
-        !red.stderr.includes("nope");
-        attempt += 1
-      ) {
-        red = await stack.runGate();
-      }
+      const red = await retryUndelivered(() => stack.runGate(), (r) => [r.stdout]);
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe("boom");
       expect(red.exitCode).toBe(3);
@@ -613,28 +600,17 @@ describe.runIf(available)("gate stack against real podman", () => {
       // gating whatever source it started with.
       expect(await idOf("runner")).not.toBe(runnerIdBefore);
 
-      // Under a loaded remote podman `exec` occasionally returns an empty
-      // capture (as for boom above). A lost table stays lost on a re-query, so
-      // re-asking only on empty output weakens nothing.
-      const showTables = async (): Promise<string> =>
-        (
-          await exec(RUNTIME, [
-            "exec",
-            cName("runner"),
-            "mariadb",
-            "-h",
-            "127.0.0.1",
-            "-uroot",
-            "app",
-            "-e",
-            "SHOW TABLES",
-          ])
-        ).stdout;
-      let stdout = await showTables();
-      for (let attempt = 1; attempt < 5 && stdout === ""; attempt += 1) {
-        stdout = await showTables();
-      }
-      expect(stdout).toContain("persisted");
+      expect(
+        await podmanExecOutput(cName("runner"), [
+          "mariadb",
+          "-h",
+          "127.0.0.1",
+          "-uroot",
+          "app",
+          "-e",
+          "SHOW TABLES",
+        ]),
+      ).toContain("persisted");
     },
     240_000,
   );
