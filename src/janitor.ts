@@ -36,7 +36,9 @@
 // the pre-emption, is `pre-empted`; a provider's quota or credential error is
 // `failed` (the run's provider state has already heard it). Anything else
 // propagates to `settleJanitorRun`, which records the run as `failed` and
-// settles: the daemon carries on, and `runsPerDay` bounds a repeat.
+// settles when it is a forge or git fault (a SandbarError, or a failed `gh`/`git`
+// child with an exit code): the daemon carries on, and `runsPerDay` bounds a
+// repeat. Any other error is a bug and propagates to cleanup's fatal path.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -45,7 +47,7 @@ import type { JanitorTask, PromptExtension } from "./config.js";
 import type { EventInput } from "./events.js";
 import { AgentCredentialError, AgentQuotaError, reclaimIssueClone } from "./agent-sandbox.js";
 import { chunkForgeWrites, LAND_LABEL } from "./chunk-land.js";
-import { faultDetail, isExitCode } from "./errors.js";
+import { SandbarError, faultDetail, hasExitCode, isExitCode } from "./errors.js";
 import { ensurePullRequest, type PullRequestRef } from "./forge-pr.js";
 import { gitStdout, isAncestor, readFileAtRef, revParse, revParseOrNull } from "./git-ops.js";
 import {
@@ -302,12 +304,13 @@ export type JanitorRunDeps = {
   readonly runLoop?: typeof runInnerLoop;
 };
 
-// A run as the daemon holds it: one that throws, whatever it threw, is
-// recorded as a complaint and a `failed` run, and that record is its outcome,
-// as a rejected issue loop of any error type is the pool's `REJECTED`
-// terminal: one janitor run's failure must not stop the daemon with every
-// issue in flight, and `runsPerDay` bounds a repeat. A lease lost to cleanup
-// is cleanup's to record. `onEnd` runs either way.
+// A run as the daemon holds it: one that throws a forge or git fault (a
+// SandbarError, or a failed `gh`/`git` child) is recorded as a complaint and a
+// `failed` run, and that record is its outcome, as a rejected issue's
+// `REJECTED` terminal is the pool's: one run's forge hiccup must not stop the
+// daemon with every issue in flight. A lease lost to cleanup is cleanup's to
+// record. Any other error is a bug: it is rethrown for the caller's fatal path.
+// `onEnd` runs either way.
 export async function settleJanitorRun(args: {
   readonly task: string;
   readonly run: () => Promise<unknown>;
@@ -319,6 +322,7 @@ export async function settleJanitorRun(args: {
     await args.run();
   } catch (err) {
     if (err instanceof OriginLeaseLostDuringCleanupError) return;
+    if (!(err instanceof SandbarError || hasExitCode(err))) throw err;
     await args.emit({
       kind: "complaint",
       severity: "error",
