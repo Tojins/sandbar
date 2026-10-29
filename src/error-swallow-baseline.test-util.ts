@@ -78,7 +78,7 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // is recorded as a complaint and a halted exit, and cleanup releases the
   // origin lease — none of which happens if it escapes `run()` instead.
   // One more hands a janitor run's rethrown failure (#232) to cleanup's
-  // fatal path: report, drain, exit 1.
+  // `exitOnInternalFailure` (the one fatal path, report, drain, exit 1).
   "run.ts": 12,
   // The scenario writer (#203): a run, and the host steps around it, that
   // failed with anything but sandbar's own SandbarError are its named

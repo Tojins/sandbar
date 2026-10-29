@@ -200,10 +200,10 @@ import {
 } from "./containers.js";
 import {
   beginCleanup,
+  exitOnInternalFailure,
   installCleanupTraps,
   onCleanup,
   registerDisposable,
-  reportCleanupNotice,
   runCleanup,
   setCleanupReporter,
 } from "./cleanup.js";
@@ -1692,11 +1692,9 @@ export async function run(
         pool.wakeExternal();
       },
     }).catch((err: unknown) => {
-      void reportCleanupNotice("internal-failure", `Janitor task '${task.name}' failed`, err)
-        .then(runCleanup)
-        .finally(() => process.exit(1));
+      void exitOnInternalFailure(`Janitor task '${task.name}' failed`, err);
     });
-    janitor.run ={ task: task.name, controller, settled };
+    janitor.run = { task: task.name, controller, settled };
   };
   let providerExitPending: TerminalExit | null = null;
   let storageLow: LowStorage | null = null;

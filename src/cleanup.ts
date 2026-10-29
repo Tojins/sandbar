@@ -160,6 +160,13 @@ export async function runCleanup(): Promise<void> {
   await beginCleanup().done;
 }
 
+/** The one fatal path: report the failure, drain cleanup, exit 1. */
+export function exitOnInternalFailure(message: string, cause: unknown): Promise<void> {
+  return reportCleanupNotice("internal-failure", message, cause)
+    .then(runCleanup)
+    .finally(() => process.exit(1));
+}
+
 export function installCleanupTraps(): void {
   if (installed) return;
   installed = true;
@@ -173,11 +180,9 @@ export function installCleanupTraps(): void {
   process.once("SIGINT", () => handler("SIGINT"));
   process.once("SIGTERM", () => handler("SIGTERM"));
   process.once("uncaughtException", (err) => {
-    void reportCleanupNotice("internal-failure", "Uncaught exception", err)
-      .then(runCleanup).finally(() => process.exit(1));
+    void exitOnInternalFailure("Uncaught exception", err);
   });
   process.once("unhandledRejection", (reason) => {
-    void reportCleanupNotice("internal-failure", "Unhandled rejection", reason)
-      .then(runCleanup).finally(() => process.exit(1));
+    void exitOnInternalFailure("Unhandled rejection", reason);
   });
 }
