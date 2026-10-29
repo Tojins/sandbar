@@ -130,8 +130,8 @@ export default { /* ... */ env, ...routing };
   `MERGER`, and
   `npm run reflect`'s `REFLECT_TAGGER` and `REFLECT_SYNTHESIZER`. They never enter a
   sandbox. Defaults are claude with `opus` at `high` for the implementer and
-  reviewer (and so the adjudicator and the scenario runner), `sonnet` at
-  `high` for the UI check,
+  reviewer (and so the adjudicator), `sonnet` at `high` for the UI check and
+  the scenario runner,
   `sonnet` at `medium` for the quality pass and the reflect tagger, `opus`
   at `medium` for the merger and `opus` at `high` for the reflect
   synthesizer. The condenser follows the quality pass's CLI, on `sonnet` when
@@ -290,7 +290,8 @@ reviewer runs on; the verifier's code review uses `reviewer*` and
 `promptExtensions.reviewer`, and the adjudicator defaults to that routing.
 The scenario runner uses `scenarioRunner*` and
 `promptExtensions.scenarioRunner`; it follows the reviewer's CLI, and its
-model and effort too while it runs that CLI. Before each round that runs
+effort too while it runs that CLI. Its model is `sonnet` on claude, and the
+reviewer's only on the reviewer's own non-claude CLI. Before each round that runs
 scenarios, `sandboxHooks.sandbox.beforeScenarioRun` runs in the sandbox (after
 `onDbCopyReady`) so the app it drives is served from the head under review;
 if it fails, the scenarios that need the UI or the API are unverified.

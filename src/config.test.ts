@@ -1173,11 +1173,31 @@ describe("resolveConfig", () => {
       .scenarioWriter).toBe(false);
   });
 
-  it("routes the scenario runner as the reviewer, model and effort while it shares the reviewer's CLI (#180)", () => {
-    expect(resolveConfig(minimal)).toMatchObject({
+  it.each([
+    ["no reviewer keys", {}, "claude", "sonnet"],
+    ["a claude reviewer on opus", { reviewerModelId: "opus" }, "claude", "sonnet"],
+    [
+      "a codex reviewer",
+      { reviewerAgent: "codex", reviewerModelId: "gpt-5.6-sol" },
+      "codex",
+      "gpt-5.6-sol",
+    ],
+  ] as const)("with no runner keys and %s, the scenario runner runs %s on %s (#250)", (
+    _name,
+    reviewer,
+    agent,
+    model,
+  ) => {
+    expect(resolveConfig({ ...minimal, ...reviewer })).toMatchObject({
+      scenarioRunnerAgent: agent,
+      scenarioRunnerModelId: model,
+    });
+  });
+
+  it("routes the scenario runner as the reviewer, its effort while it shares the reviewer's CLI (#180)", () => {
+    expect(resolveConfig({ ...minimal, reviewerEffort: "max" })).toMatchObject({
       scenarioRunnerAgent: "claude",
-      scenarioRunnerModelId: "opus",
-      scenarioRunnerEffort: "high",
+      scenarioRunnerEffort: "max",
     });
     expect(resolveConfig({
       ...minimal,
@@ -1198,14 +1218,14 @@ describe("resolveConfig", () => {
       scenarioRunnerAgent: "claude",
     })).toMatchObject({
       scenarioRunnerAgent: "claude",
-      scenarioRunnerModelId: "opus",
+      scenarioRunnerModelId: "sonnet",
       scenarioRunnerEffort: "high",
     });
     expect(resolveConfig({
       ...minimal,
-      scenarioRunnerModelId: "sonnet",
+      scenarioRunnerModelId: "opus",
       scenarioRunnerEffort: "medium",
-    })).toMatchObject({ scenarioRunnerModelId: "sonnet", scenarioRunnerEffort: "medium" });
+    })).toMatchObject({ scenarioRunnerModelId: "opus", scenarioRunnerEffort: "medium" });
   });
 
   it("refuses a scenario runner moved half-way off claude, unless the writer is off (#180)", () => {
