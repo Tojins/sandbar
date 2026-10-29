@@ -104,6 +104,12 @@ describe("the janitor's git (#205)", () => {
       await fetchCache();
       expect(await refresh(branchTip, sourceTip)).toEqual({ kind: "conflict" });
     });
+
+    it("rejects a merge-tree failure that is not a conflict", async () => {
+      const sourceTip = await commit("main", { "README.md": "moved\n" });
+      await fetchCache();
+      await expect(refresh("0".repeat(40), sourceTip)).rejects.toThrow();
+    });
   });
 
   describe("pushRollingBranch", () => {
@@ -134,6 +140,13 @@ describe("the janitor's git (#205)", () => {
       expect(await pushRollingBranch(cache, branch, seen)).toBe(false);
       expect(await git(origin, "rev-parse", `refs/heads/${branch}`)).toBe(human);
       expect(await pushRollingBranch(cache, branch, "")).toBe(false);
+    });
+
+    it("rejects a push origin refuses for any other reason", async () => {
+      await setLocal(await git(cache, "rev-parse", "refs/remotes/origin/main"));
+      await mkdir(join(origin, "hooks"), { recursive: true });
+      await writeFile(join(origin, "hooks", "pre-receive"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      await expect(pushRollingBranch(cache, branch, "")).rejects.toThrow();
     });
   });
 
@@ -194,6 +207,7 @@ describe("the janitor's git (#205)", () => {
       runLoop: typeof runInnerLoop,
       runTask = task,
       standards: PromptExtension | undefined = undefined,
+      signal: AbortSignal = new AbortController().signal,
     ) => runJanitor({
       task: runTask,
       layout,
@@ -208,7 +222,7 @@ describe("the janitor's git (#205)", () => {
       onEvent: async (event) => {
         events.push(event);
       },
-      signal: new AbortController().signal,
+      signal,
       now: () => new Date("2026-10-28T12:00:00.000Z"),
       runLoop,
     });
@@ -281,6 +295,7 @@ describe("the janitor's git (#205)", () => {
 
     it("discards a pre-empted run and does not count its visit", async () => {
       expect(await run(loopEnding(new InnerLoopAbortedError()))).toBe("pre-empted");
+      expect(ended()).toMatchObject({ outcome: "pre-empted" });
       expect(await originTip()).toBeNull();
       const ledger = JSON.parse(await readFile(janitorLedgerPath(layout.stateDir, "tidy"), "utf8"));
       expect(ledger.visits).toEqual({});
@@ -404,12 +419,32 @@ describe("the janitor's git (#205)", () => {
       expect(ledger.visits).toEqual({});
     });
 
-    it("reports a thrown abort as a pre-empted run", async () => {
-      expect(await run((async () => {
-        throw new InnerLoopAbortedError();
-      }) as typeof runInnerLoop)).toBe("pre-empted");
+    it("discards a DONE run the daemon aborted before it published, without asking the forge", async () => {
+      const aborter = new AbortController();
+      let asked = 0;
+      let askedBeforeAbort = -1;
+      const latestPullRequest = forge.latestPullRequest;
+      forge.latestPullRequest = async (head) => {
+        asked += 1;
+        return await latestPullRequest(head);
+      };
+      const committing = loopEnding(DONE);
+      try {
+        const outcome = await run((async (...args: Parameters<typeof runInnerLoop>) => {
+          const terminal = await committing(...args);
+          askedBeforeAbort = asked;
+          aborter.abort();
+          return terminal;
+        }) as typeof runInnerLoop, task, undefined, aborter.signal);
+        expect(outcome).toBe("pre-empted");
+      } finally {
+        forge.latestPullRequest = latestPullRequest;
+      }
       expect(ended()).toMatchObject({ outcome: "pre-empted" });
+      expect(ended()).not.toHaveProperty("cause");
       expect(await originTip()).toBeNull();
+      expect(ensured).toEqual([]);
+      expect(asked).toBe(askedBeforeAbort);
     });
 
     it("holds a task whose previous clone must be preserved, without a start or an end", async () => {
