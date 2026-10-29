@@ -101,11 +101,12 @@
 // held gate-step findings alone. A stack with no standalone step adds nothing
 // to any of this. The quality fixer runs in this same writable sandbox,
 // committing under a `<botName> (quality)` author the host sets for that
-// invocation only; its text is ignored. Whatever it leaves, `settleQualityResidue` (git-ops.ts)
-// discards uncommitted residue, puts HEAD back on the branch (with #127's
-// repair where it applies), keeps every commit it made and records what was
-// discarded. An invocation that fails (`AgentError`, idle or completion
-// timeout) is settled the same way and retried once; the state machine hears
+// invocation only; its text is ignored. Whatever it leaves,
+// `settleQualityResidue` (git-ops.ts) discards uncommitted residue, puts HEAD
+// back on the branch (with #127's repair where it applies), keeps every commit
+// it made and records what was discarded. An invocation that fails
+// (`AgentError`, idle or completion timeout) is settled the same way and
+// retried once; the state machine hears
 // only whether the last one exited normally and how many commits the step
 // made. The fixer's commits since the implementer's last attempt are handed to
 // the next implementer prompt. Every quality report an adjudicator overrules
