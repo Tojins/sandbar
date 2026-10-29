@@ -56,11 +56,17 @@ RUN groupmod -n agent node \
 # `apt upgrade` triggers a rebuild mid-backlog, against a failure that needs a
 # major-version bump to appear.
 #
+# The pin follows the ansible floor, `sandbar_podman_min_version`
+# (deploy/ansible/roles/sandbar/defaults/main.yml), and never exceeds it: every
+# host the play accepts is at least this client, and the client does not lag
+# the host by majors. A 4.9.3 client against a 5.7 host is where remote execs
+# exited with their status and none of their stdout under load (#254).
+#
 # In the agent-sandbox role the gate step runner's declared mounts and env are
 # inherited (#166). This repo's installation therefore gives the implementer
 # the same socket and `CONTAINER_HOST`, making this client usable for iterating
 # on podman-layer tests instead of leaving them to gate-only verification.
-RUN curl -fsSL https://github.com/containers/podman/releases/download/v4.9.3/podman-remote-static-linux_amd64.tar.gz \
+RUN curl -fsSL https://github.com/containers/podman/releases/download/v5.7.0/podman-remote-static-linux_amd64.tar.gz \
       | tar xz -C /tmp \
     && install -m0755 /tmp/bin/podman-remote-static-linux_amd64 /usr/bin/podman \
     && rm -rf /tmp/bin

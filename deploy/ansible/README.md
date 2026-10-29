@@ -40,7 +40,9 @@ that exists must have `sandbar.env`'s owner and mode.
 ## What the role provides
 
 The target is Ubuntu 24.04 or 26.04, with Podman 5.7 / Buildah 1.42 or newer
-(agent tools use `ADD --checksum` and `COPY --from=<local image>`). Host-global
+(agent tools use `ADD --checksum` and `COPY --from=<local image>`; the gate
+image pins its podman client to `sandbar_podman_min_version`, and convergence
+fails on a host below it). Host-global
 work runs once: packages, Node 24, git, gh, AppArmor's podman/pasta
 interoperability rule, cgroup-v2
 delegation, swap, the database volume, key-only SSH, unattended security upgrades without automatic

@@ -13,7 +13,6 @@
 import { execFile } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, describe, it } from "vitest";
 
@@ -25,6 +24,7 @@ import {
   initStackRepo,
 } from "./gate-stack-podman.test-util.js";
 import { networkNameFor, podNameFor, stackContainerNameFor } from "./naming.js";
+import { markExec, podmanExecOutput, retryUndelivered } from "./podman-exec.test-util.js";
 import { podmanTestsEnabled } from "./podman-test-availability.test-util.js";
 import {
   type FinishedHook,
@@ -69,20 +69,8 @@ async function standaloneFixture(taskId: string, onTestFinished: FinishedHook) {
   const readNonEmptyFile = async (
     name: string,
     path: string,
-  ): Promise<string> => {
-    // These fixtures only call this for files whose writers cannot produce an
-    // empty value. Remote podman can still transiently return empty stdout
-    // from a successful exec, so retry only that impossible observation.
-    let value = "";
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      value = (
-        await exec(RUNTIME, ["exec", gName(name), "cat", path])
-      ).stdout.trim();
-      if (value) return value;
-      if (attempt < 19) await delay(250);
-    }
-    return value;
-  };
+  ): Promise<string> =>
+    (await podmanExecOutput(gName(name), ["cat", path])).trim();
   const spec = (expectedMarker = "v1") =>
     resolveGateStack({
       containers: [
@@ -301,29 +289,17 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
               // The sleep lets the writes drain before the exit: over a remote
               // podman socket (CONTAINER_HOST, as the gate runs) `exec` can drop
               // the output of a process that exits the instant it writes.
-              command: ["sh", "-c", "echo out-line; echo err-line >&2; sleep 1"],
+              command: markExec(["sh", "-c", "echo out-line; echo err-line >&2; sleep 1"]),
             },
           ],
         }),
         allowDirtyWorktree: true,
         onStepOutput: (c) => chunks.push(c),
       });
-      // A green step that wrote both lines cannot have an empty capture, yet
-      // under a loaded remote podman `exec` still occasionally returns none
-      // (the drain sleep above did not cure it). Re-run only that impossible
-      // observation; the tee is then judged on the run podman delivered.
-      let result = await stack.runGate();
-      for (
-        let attempt = 1;
-        attempt < 5 &&
-        result.ok &&
-        !(result.stdout.includes("out-line") &&
-          result.stderr.includes("err-line"));
-        attempt += 1
-      ) {
+      const result = await retryUndelivered(() => {
         chunks.length = 0;
-        result = await stack.runGate();
-      }
+        return stack.runGate();
+      }, (r) => [r.stdout]);
       await stack.stop();
 
       expect(result.ok).toBe(true);
