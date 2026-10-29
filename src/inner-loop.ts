@@ -2562,13 +2562,9 @@ export async function runQualityList(
   const reviews = settled.flatMap((result, i) => result.status === "fulfilled"
     ? [{ group: listers[i]!.group, review: reviewerResult(result.value, "quality") }]
     : []);
-  quality.listerReport = changesRequested(combineGroupReviews(reviews, []));
-  return {
-    kind: "quality-review-result",
-    mode: "list",
-    head,
-    review: combineGroupReviews(reviews, early.status === "fulfilled" ? early.value : []),
-  };
+  const folded = combineGroupReviews(reviews, early.status === "fulfilled" ? early.value : []);
+  quality.listerReport = folded.listerReport;
+  return { kind: "quality-review-result", mode: "list", head, review: folded.review };
 }
 
 // A quality verify (#187): a cold, read-only review of what changed since the

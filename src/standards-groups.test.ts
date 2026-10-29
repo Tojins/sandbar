@@ -224,7 +224,17 @@ describe("combineGroupReviews (#204)", () => {
   ])("%s", (_name, results, expected) => {
     const groups = [sandbar, naming, tests];
     const reviews = results.map((review, i) => ({ group: groups[i]!, review }));
-    expect(combineGroupReviews(reviews, [])).toEqual(expected);
+    expect(combineGroupReviews(reviews, []).review).toEqual(expected);
+  });
+
+  it("reports the model-written part apart from step findings, null when there is none", () => {
+    const reviews = [
+      { group: sandbar, review: requested("s1") },
+      { group: naming, review: failed("dead") },
+    ];
+    expect(combineGroupReviews(reviews, ["[step: lint] red"]).listerReport)
+      .toBe(`[group: sandbar] ${sandbar.name}\n\ns1\n\n[group: naming] produced no review this pass.`);
+    expect(combineGroupReviews([{ group: sandbar, review: approved }], ["[step: lint] red"]).listerReport).toBeNull();
   });
 
   it("refuses an empty fan-out rather than approving it", () => {
@@ -272,7 +282,7 @@ describe("combineGroupReviews (#204)", () => {
       (_name, results, runs, expected) => {
         const groups = [sandbar, naming, tests];
         const reviews = results.map((review, i) => ({ group: groups[i]!, review }));
-        expect(combineGroupReviews(reviews, stepFindings(runs))).toEqual(expected);
+        expect(combineGroupReviews(reviews, stepFindings(runs)).review).toEqual(expected);
       },
     );
 
