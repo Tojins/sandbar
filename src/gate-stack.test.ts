@@ -2185,10 +2185,18 @@ describe("pollUntilHealthy", () => {
 
   it("returns unhealthy once the budget is spent with the container still saying no", async () => {
     const { probe, calls } = healthProbeOf([podmanSaid({ exitCode: 1 })]);
-    const { verdict } = await pollUntilHealthy("c", probed(), probe);
+    const healthchecks = () => calls.filter((c) => c === "healthcheck").length;
+    // Time moves only with the probes, so a loaded suite cannot spend the
+    // 600ms budget on the wall clock before the second one.
+    const { verdict } = await pollUntilHealthy(
+      "c",
+      probed(),
+      probe,
+      () => healthchecks() * 300,
+    );
     expect(verdict).toBe("unhealthy");
     // More than one, or the poll is a one-shot wearing a loop's clothes.
-    expect(calls.filter((c) => c === "healthcheck").length).toBeGreaterThan(1);
+    expect(healthchecks()).toBe(2);
   });
 
   // The rule that keeps this from being a storm: podman failing to ANSWER is
