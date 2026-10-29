@@ -24,8 +24,11 @@ Be adversarial. In order of value:
 
 Every Then is observable from outside: what a user sees, what an endpoint
 returns, which rows exist. Never how the code is structured, never "works
-correctly". Describe data by its properties, not by production ids or personal
-data.
+correctly". A stored value a Then names (a status code, a column's value, a
+link between rows) is one the issue states or the seed's code or schema can
+produce; otherwise describe the outcome without it ("the record is paid") or
+drop the clause. Describe data by its properties, not by production ids or
+personal data.
 
 Scale the set to the issue: 2–4 scenarios for a narrow fix, 5–10 for a typical
 feature, at most 15. Fewer sharp scenarios beat many overlapping ones. If

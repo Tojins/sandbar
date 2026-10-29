@@ -179,7 +179,7 @@ a written set.
   anchor; +2.3k sandbox-stack, +0.2k egress, +0.6k a held copy, +0.2k a
   failed app hook, +0.2k a rerun);
   adjudicator 1.1k + the report (1.5k + 0.1k a unit ruled unit by unit); UI check 1.6k and partition
-  check 1.5k + the issue anchor; scenario writer 2.2k + the issue anchor;
+  check 1.5k + the issue anchor; scenario writer 2.4k + the issue anchor;
   resolve 1.2k + anchor + paths/trace; reflect
   tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser
   1.3k + the thread (no anchor). The issue anchor (median 5.6k, max 41k
