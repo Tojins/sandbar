@@ -234,12 +234,15 @@ describe("adjudication prompt contracts (#167)", () => {
 
   it("requires a fresh whole-report ruling with literal tokens and no implementer advocacy", () => {
     const prompt = loadTemplate("adjudicator");
+    const ruling = loadTemplate("adjudicator-report");
     expect(prompt).toContain("Read every cited line");
-    expect(prompt).toContain("report as a whole");
-    expect(prompt).toContain("<ruling>UPHELD</ruling>");
-    expect(prompt).toContain("<ruling>OVERRULED</ruling>");
-    expect(prompt).not.toContain("implementer");
-    expect(prompt).not.toContain("prior round");
+    expect(ruling).toContain("report as a whole");
+    expect(ruling).toContain("<ruling>UPHELD</ruling>");
+    expect(ruling).toContain("<ruling>OVERRULED</ruling>");
+    for (const text of [prompt, ruling, loadTemplate("adjudicator-units")]) {
+      expect(text).not.toContain("implementer");
+      expect(text).not.toContain("prior round");
+    }
   });
 });
 
@@ -689,6 +692,7 @@ describe("the scenario runner's prompt (#238)", () => {
     dbCopy: null,
     appHook: "none",
     scenarios: [scenario],
+    reruns: [],
   } as const;
 
   it("renders the scenarios and nothing of an environment the sandbox lacks", () => {
@@ -696,8 +700,19 @@ describe("the scenario runner's prompt (#238)", () => {
     expect(slot).toContain("### S1: Totals survive payment\nneeds: ui, sql\narea: app/Invoices\n" +
       "Given a paid invoice\nWhen the user opens it\nThen the total is unchanged");
     expect(slot).toContain("- Quote only the rows a failure needs, here and in your evidence.\n\n## Scenarios");
-    expect(slot).not.toMatch(/sandbox stack|allowlist|production database|beforeScenarioRun/);
+    expect(slot).not.toMatch(/sandbox stack|allowlist|production database|beforeScenarioRun|Reruns/);
+    expect(slot).toContain("Then the total is unchanged\n\n## Report");
     expect(slot).toContain("<scenario-runner>REPORTED</scenario-runner>");
+  });
+
+  it("tells a rerun of a failed scenario where it failed and to check the analogous sites (#239)", () => {
+    const slot = renderScenarioRunnerSlot({ ...bare, reruns: [{ id: "S1", head: "abc123" }] });
+    expect(slot).toContain(
+      "Then the total is unchanged\n\n## Reruns\n\n" +
+        "- S1 failed at `abc123`; its evidence from then is under `/sandbar/verifier/findings/S1/`. " +
+        "Check the same thing at the analogous sites too, and report a failure there under this id.\n\n" +
+        "## Report",
+    );
   });
 
   it("names the copy, the copy hook, the egress allowlist and the app hook when they apply", () => {

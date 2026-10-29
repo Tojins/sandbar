@@ -108,7 +108,10 @@
 // adjudicator (#167, #187). The judge sees that report without implementer
 // speech or prior-round wording, is held to the same read-only snapshot
 // contract, and either upholds or overrules it; the state machine decides
-// what each ruling means for its pass.
+// what each ruling means for its pass. A verifier report with scenario units
+// is ruled unit by unit, and each scenario it overrules is retired from the
+// cycle's scenario ledger (#239), which the verifier selects a round's
+// scenarios from.
 //
 // The other deliberate runner-side exception is #127's off-branch repair.
 // `headMismatch` has already made the mechanical ancestry decision; when the
@@ -137,8 +140,8 @@
 // and are handed to the next white-box prompt (#88), which from then on reads
 // only the change since the last of those heads that HEAD still contains
 // (`reviewScope`). Harness failures add no
-// entry, and a fresh HARD-ERROR cycle resets the history and the quality
-// ledger. An optional `<spec-gap>` declared by the white-box review is
+// entry, and a fresh HARD-ERROR cycle resets the history, the quality
+// ledger and the scenario ledger. An optional `<spec-gap>` declared by the white-box review is
 // accumulated beside that history but around the state machine, preserved
 // across fresh cycles, and carried on every terminal for finalise to record
 // (#108).
@@ -184,7 +187,7 @@
 // effect at setup. Before every action the runner aligns it to that action's
 // holder (`dbCopyHolderFor`): the implementer gets a fresh copy each round,
 // kept across back-to-back implementer actions and dropped at any other, and
-// so does the scenario runner in a verifier round that runs scenarios (#238);
+// so does the scenario runner in a verifier round given a written set (#238);
 // quality, gate, the adjudicator and a white-box review alone run beside the
 // fixtures. The implementer's and the runner's prompts read the slot's
 // answer, and the white-box review beside a held copy is told not to read it;
@@ -304,6 +307,7 @@ import {
   dirtyWorktreePaths,
   ensureIssueBranch,
   fastForwardOffBranchHead,
+  gitStdout,
   headMismatch,
   isAncestor,
   settleQualityResidue,
@@ -344,7 +348,7 @@ import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
 import { type ScenarioWriterTask, createScenarioWriterTask } from "./scenario-writer-run.js";
 import {
-  parseAdjudicationRuling,
+  parseRulings,
   stripAdjudicationRulingTokens,
 } from "./adjudication-parser.js";
 import { loadTemplate } from "./prompts.js";
@@ -377,12 +381,17 @@ import type { RepoRef } from "./repo-ref.js";
 import {
   VERIFIER_MOUNT,
   type RunnerEnvironment,
+  type ScenarioLedger,
   type ScenarioTally,
   type WhiteBoxVerdict,
+  advanceLedger,
   combineVerifier,
+  ledgerHeads,
   prepass,
+  retire,
   reviewScope,
   runnerOutcomes,
+  selectScenarios,
   tallyScenarios,
   withheldTranscript,
 } from "./verifier.js";
@@ -1219,6 +1228,7 @@ async function runSandboxCycle(
     openRound: null,
     grader: null,
   };
+  const scenarioLedger: { current: ScenarioLedger } = { current: new Map() };
   const specGaps: SpecGap[] = [];
   let preparedWorktreePath: string | null = null;
 
@@ -1682,6 +1692,7 @@ async function runSandboxCycle(
         accumulated,
         priorReviewRounds,
         quality,
+        scenarioLedger,
         specGaps,
         sandboxStatuses,
         invocationSequence,
@@ -1878,6 +1889,9 @@ type ExecuteActionCtx = {
   // finalize.
   readonly priorReviewRounds: PriorReviewRound[];
   readonly quality: QualityLedger;
+  // What each written scenario came to in this sandbox cycle (#239): the
+  // verifier selects from it and advances it, the adjudicator retires from it.
+  readonly scenarioLedger: { current: ScenarioLedger };
   readonly specGaps: SpecGap[];
   // What came up beside the agent, for the implementer's prompt slot (#44 D8).
   // Empty when the consumer declares no `inSandbox` container.
@@ -3288,9 +3302,11 @@ export async function enforceReadOnlyAgentSnapshot(
 
 // The cold judge of one unchanged rejection (#167, #187): a verifier
 // report the implementer committed nothing for, or a quality report the fixer
-// committed nothing for. A verifier OVERRULED ends the issue as approved,
-// so no history entry needs rewriting afterwards; a quality OVERRULED joins
-// the overrules later listers are shown. Before a verifier report is judged,
+// committed nothing for. A verifier OVERRULED ends the issue as approved, or
+// re-verifies a head no white-box review reviewed, so no history entry needs
+// rewriting afterwards; a quality OVERRULED joins the overrules later listers
+// are shown. A report with scenario units is ruled unit by unit (#239), and
+// its overruled scenarios are retired. Before a verifier report is judged,
 // `findings/` is restaged from that round's archive (#238), whatever the
 // implementer did to it; beside a scenario unit, a write's detail names the
 // judge's transcript rather than quoting it, as it may quote the evidence.
@@ -3305,6 +3321,10 @@ export async function runAdjudicator(
   const scenarioUnits = action.pass === "correctness"
     ? action.rejection.units.flatMap((unit) => (unit.id === "white-box" ? [] : [unit.id]))
     : [];
+  // A report with scenario units is ruled unit by unit (#239).
+  const units = action.pass === "correctness" && scenarioUnits.length > 0
+    ? action.rejection.units.map((unit) => unit.id)
+    : null;
   if (action.pass === "correctness" && ctx.verifierWorkspace !== null) {
     await restageFindings(
       ctx.verifierWorkspace,
@@ -3320,6 +3340,7 @@ export async function runAdjudicator(
     pass: action.pass,
     head: rejection.head,
     report: rejection.report,
+    units,
   });
   const measuredContextChars = contextChars(
     prompt,
@@ -3424,8 +3445,9 @@ export async function runAdjudicator(
       throw failure;
     }
 
-    const ruling = parseAdjudicationRuling(output);
-    if (ruling !== null) {
+    const parsed = parseRulings(output, units);
+    if (parsed !== null) {
+      const { ruling, rulings } = parsed;
       // A decision emitted before a teardown failure is still a decision,
       // matching reviewer invocation semantics (#41).
       const measuredUsage = usageFields(
@@ -3435,12 +3457,15 @@ export async function runAdjudicator(
       );
       await opts.onEvent({
         kind: "adjudication",
-        pass: action.pass,
+        pass: units !== null && !units.includes("white-box") ? "scenarios" : action.pass,
         ...ctx.subject.event,
         attempt: action.attempt,
         round: rejection.round,
         head: rejection.head,
         ruling,
+        ...(rulings === null
+          ? {}
+          : { rulings: Object.entries(rulings).map(([unit, unitRuling]) => ({ unit, ruling: unitRuling })) }),
         provider: config.adjudicatorAgent,
         model: config.adjudicatorModelId,
         effort: config.adjudicatorEffort ?? null,
@@ -3460,10 +3485,17 @@ export async function runAdjudicator(
           ruling: reasoning,
         });
       }
+      if (rulings !== null) {
+        ctx.scenarioLedger.current = retire(
+          ctx.scenarioLedger.current,
+          scenarioUnits.filter((id) => rulings[id] === "OVERRULED"),
+        );
+      }
       return {
         kind: "adjudicator-result",
         head: rejection.head,
         ruling,
+        rulings,
         reasoning,
       };
     }
@@ -3491,8 +3523,9 @@ export async function runAdjudicator(
 // The verifier (#180, #238): its white-box review, the correctness review
 // (#121, #185), and, when the scenario writer wrote a set, the scenario runner
 // beside it (verifier-run.ts), both cold and read-only, run only on a green
-// gate-1 at the head the quality pass left. Every round runs every written
-// scenario. Before the agents start, the round's `run/` is emptied, the
+// gate-1 at the head the quality pass left. A round runs the written scenarios
+// the cycle's ledger selects, from the paths changed since each head it holds
+// (#239), and advances the ledger by what they came to. Before the agents start, the round's `run/` is emptied, the
 // `beforeScenarioRun` hook serves the app from this head and the pre-pass
 // settles what cannot run; the white-box picture is measured, still anchored at
 // the seed, and from its second round on the review reads the change since the
@@ -3507,7 +3540,10 @@ export async function runVerifier(
 ): Promise<Extract<LoopEvent, { kind: "verifier-result" | "context-over-budget" }>> {
   const { issue, sandbox, opts, config } = ctx;
   const head = await requireIssueTip(ctx, "before the verifier");
-  const selected = action.scenarios?.scenarios ?? [];
+  const ledger = ctx.scenarioLedger.current;
+  const { run: selected, reruns } = action.scenarios === null
+    ? { run: [], reruns: [] }
+    : selectScenarios(action.scenarios, ledger, await changedSince(sandbox.worktreePath, ledger, head));
   // The workspace exists whenever the scenario writer's task does, and so
   // whenever a set was written.
   const workspace = selected.length === 0 ? null : ctx.verifierWorkspace;
@@ -3576,6 +3612,7 @@ export async function runVerifier(
       dbCopy: ctx.dbCopy.kind === "held" ? ctx.dbCopy : null,
       appHook,
       scenarios: plan.run,
+      reruns: reruns.filter((rerun) => plan.run.some((scenario) => scenario.id === rerun.id)),
     }),
   };
   const [whiteBoxSettled, runnerSettled] = await Promise.allSettled([
@@ -3624,6 +3661,7 @@ export async function runVerifier(
   if (runnerSettled.status === "rejected") throw runnerSettled.reason;
   const outcome = whiteBoxSettled.value;
   const runner = runnerSettled.value;
+  ctx.scenarioLedger.current = advanceLedger(ledger, head, runner);
   const roundDir = opts.attemptLogger.verifierRoundDir(ctx.invocationSequence.filename({
     role: "verifier-round",
     attempt: action.attempt,
@@ -3657,6 +3695,22 @@ export async function runVerifier(
     ),
     scenarios: tallyScenarios(runner),
   };
+}
+
+// The paths changed since each head the ledger's selection reads, "all"
+// since one `head` no longer contains.
+async function changedSince(
+  worktreePath: string,
+  ledger: ScenarioLedger,
+  head: string,
+): Promise<ReadonlyMap<string, readonly string[] | "all">> {
+  return new Map(await Promise.all(ledgerHeads(ledger).map(async (since) => [
+    since,
+    await isAncestor(worktreePath, since, head)
+      ? (await gitStdout(worktreePath, ["diff", "--name-only", "-z", `${since}..${head}`]))
+        .split("\0").filter((path) => path !== "")
+      : "all" as const,
+  ] as const)));
 }
 
 // One invocation of a read-only review, as its pass records it.

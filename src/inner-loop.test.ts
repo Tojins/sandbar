@@ -44,6 +44,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   prepareSandboxLogDir: vi.fn(async (_dir: string) => undefined),
   startSandboxStack: vi.fn(),
   isAncestor: vi.fn(async (_cwd: string, _ancestor: string, _descendant: string) => true),
+  gitStdout: vi.fn(async (_cwd: string, _args: readonly string[]) => ""),
   fetchIssueAnchor: vi.fn(async (): Promise<IssueAnchor> => ({
     text: "Issue #1: Issue",
     json: { title: "Issue", body: "", comments: [] },
@@ -110,6 +111,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   revParse: innerLoopMocks.revParse,
   forkPoint: innerLoopMocks.forkPoint,
   isAncestor: innerLoopMocks.isAncestor,
+  gitStdout: innerLoopMocks.gitStdout,
 }));
 
 vi.mock("./scenario-writer-run.js", async (importOriginal) => ({
@@ -1407,6 +1409,7 @@ describe("role prompt-extension wiring (#91)", () => {
     accumulated: [{ sha: "abc123" }],
     priorReviewRounds: [],
     quality: { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader },
+    scenarioLedger: { current: new Map() },
     dbCopy: { kind: "none" },
     verifierWorkspace: null,
   });
@@ -1545,6 +1548,7 @@ describe("runVerifier (#121, #180, #185)", () => {
       base: { ref: "origin/main" },
       accumulated: [{ sha: "head123" }],
       priorReviewRounds: [] as unknown[],
+      scenarioLedger: { current: new Map() },
       specGaps: [] as unknown[],
       invocationSequence: createAgentInvocationSequencer().startCycle(),
       dbCopy: { kind: "none" },
@@ -2453,6 +2457,7 @@ describe("runVerifier beside the scenario runner (#238)", () => {
       base: { ref: "origin/main" },
       accumulated: [{ sha: "head238" }],
       priorReviewRounds: [] as unknown[],
+      scenarioLedger: { current: new Map() },
       specGaps: [] as unknown[],
       sandboxStatuses: [],
       sandboxGateAttachments: { env: {}, mounts: [] },
@@ -2600,6 +2605,56 @@ describe("runVerifier beside the scenario runner (#238)", () => {
     expect(r.events.filter((event) => event.kind === "scenario-runner")).toEqual([
       expect.objectContaining({ invocation: 0, result: "completed" }),
     ]);
+  });
+
+  it("reruns a later round's failed scenarios and those the change touched, and nothing else (#239)", async () => {
+    const at = (n: number, area: string): Scenario => ({ ...scenario(n), area: [area] });
+    const written = set(at(1, "src/a"), at(2, "src/b"), at(3, "src/c"));
+    const reports = [
+      "### S1: PASS\n### S2: FAIL\nObserved: empty\nEvidence: S2/rows.txt\n### S3: PASS",
+      "### S2: PASS\n### S3: PASS",
+    ];
+    const r = round(
+      async () => ran("<verdict>APPROVED</verdict>"),
+      async () => ran(`<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n${reports.shift()}\n</scenario-results>`),
+    );
+    innerLoopMocks.gitStdout.mockReset().mockResolvedValue("src/c/x.ts\0README.md\0");
+    await r.run(written);
+    expect(innerLoopMocks.gitStdout).not.toHaveBeenCalled();
+    await expect(r.run(written)).resolves.toMatchObject({
+      outcome: { kind: "approved" },
+      scenarios: { selected: 2, pass: 2, fail: 0, unverified: 0 },
+    });
+    expect(innerLoopMocks.gitStdout).toHaveBeenCalledWith(
+      "/worktree",
+      ["diff", "--name-only", "-z", "head238..head238"],
+    );
+    expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenLastCalledWith(expect.objectContaining({
+      scenarios: [written.scenarios[1], written.scenarios[2]],
+      reruns: [{ id: "S2", head: "head238" }],
+    }));
+  });
+
+  it("runs every scenario again whose head the branch no longer contains (#239)", async () => {
+    const reports = [
+      "### S1: PASS\n### S2: UNVERIFIED\nReason: no browser",
+      "### S1: PASS\n### S2: PASS",
+    ];
+    const r = round(
+      async () => ran("<verdict>APPROVED</verdict>"),
+      async () => ran(`<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n${reports.shift()}\n</scenario-results>`),
+    );
+    innerLoopMocks.gitStdout.mockReset().mockResolvedValue("");
+    await r.run(set(scenario(1), scenario(2)));
+    innerLoopMocks.isAncestor.mockResolvedValue(false);
+    await expect(r.run(set(scenario(1), scenario(2)))).resolves.toMatchObject({
+      scenarios: { selected: 2, pass: 2 },
+    });
+    expect(innerLoopMocks.gitStdout).not.toHaveBeenCalled();
+    expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenLastCalledWith(expect.objectContaining({
+      scenarios: [scenario(1), scenario(2)],
+      reruns: [],
+    }));
   });
 });
 
@@ -2800,6 +2855,7 @@ describe("runAdjudicator (#167)", () => {
       kind: "adjudicator-result",
       head: "head123",
       ruling: "OVERRULED",
+      rulings: null,
       reasoning: "five arguments",
     });
     expect(vi.mocked(sandbox.run).mock.calls[0]![0].name).toBe("adjudicator-167-round-1");
@@ -2817,7 +2873,7 @@ describe("runAdjudicator (#167)", () => {
       transcript: "attempt-2-adjudicator-1.log",
     });
     expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenLastCalledWith(
-      expect.objectContaining({ pass: "correctness" }),
+      expect.objectContaining({ pass: "correctness", units: null }),
     );
     expect(ctx.quality.overrules).toEqual([]);
   });
@@ -2911,6 +2967,102 @@ describe("runAdjudicator (#167)", () => {
 
   // #238: the judge reads the failing scenarios' evidence as that round left
   // it, and a write beside them does not quote its transcript.
+  it("rules a report with scenario units unit by unit, records each ruling and retires the overruled scenarios (#239)", async () => {
+    unchangedAdjudicatorSnapshot();
+    const events: EventInput[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(async () => undefined),
+      run: vi.fn(async () => ({
+        stdout: "S3 holds\n<ruling-white-box>UPHELD</ruling-white-box>\n<ruling-s2>OVERRULED</ruling-s2>\n" +
+          "<ruling-s3>UPHELD</ruling-s3>",
+        commits: [],
+        durationMs: 5,
+        silent: false,
+        maxGapMs: 1,
+        toolCalls: 0,
+      })),
+    } as unknown as Sandbox;
+    const ledger = new Map([
+      ["S2", { status: "fail", head: "head123" }],
+      ["S3", { status: "fail", head: "head123" }],
+    ]);
+    const ctx = {
+      ...context(sandbox, events),
+      scenarioLedger: { current: ledger },
+    } as unknown as Parameters<typeof runAdjudicator>[1];
+    const units = [
+      { id: "white-box" as const, text: "w", publicText: "w" },
+      { id: "S2" as const, text: "s2", publicText: "p2" },
+      { id: "S3" as const, text: "s3", publicText: "p3" },
+    ];
+
+    await expect(runAdjudicator({ ...action, rejection: { ...action.rejection, units } }, ctx))
+      .resolves.toEqual({
+        kind: "adjudicator-result",
+        head: "head123",
+        ruling: "UPHELD",
+        rulings: { "white-box": "UPHELD", S2: "OVERRULED", S3: "UPHELD" },
+        reasoning: "S3 holds",
+      });
+    expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ units: ["white-box", "S2", "S3"] }),
+    );
+    expect(events.find((event) => event.kind === "adjudication")).toMatchObject({
+      pass: "correctness",
+      ruling: "UPHELD",
+      rulings: [
+        { unit: "white-box", ruling: "UPHELD" },
+        { unit: "S2", ruling: "OVERRULED" },
+        { unit: "S3", ruling: "UPHELD" },
+      ],
+    });
+    expect(ctx.scenarioLedger.current).toEqual(new Map([
+      ["S2", { status: "retired" }],
+      ["S3", { status: "fail", head: "head123" }],
+    ]));
+    expect(ledger.get("S2")).toEqual({ status: "fail", head: "head123" });
+  });
+
+  it("names a report of scenario units alone the scenarios pass, and retries a missing unit token (#239)", async () => {
+    unchangedAdjudicatorSnapshot();
+    const events: EventInput[] = [];
+    const outputs = ["<ruling>OVERRULED</ruling>", "<ruling-s2>OVERRULED</ruling-s2>"];
+    const sandbox = {
+      worktreePath: "/worktree",
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(async () => undefined),
+      run: vi.fn(async () => ({
+        stdout: outputs.shift(),
+        commits: [],
+        durationMs: 5,
+        silent: false,
+        maxGapMs: 1,
+        toolCalls: 0,
+      })),
+    } as unknown as Sandbox;
+    const ctx = {
+      ...context(sandbox, events),
+      scenarioLedger: { current: new Map() },
+    } as unknown as Parameters<typeof runAdjudicator>[1];
+    const rejection = {
+      ...action.rejection,
+      units: [{ id: "S2" as const, text: "s2", publicText: "p2" }],
+      whiteBox: "HARNESS-FAILED",
+    };
+
+    await expect(runAdjudicator({ ...action, rejection }, ctx)).resolves.toMatchObject({
+      ruling: "OVERRULED",
+      rulings: { S2: "OVERRULED" },
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event.kind === "adjudication")).toEqual([
+      expect.objectContaining({ pass: "scenarios", ruling: "OVERRULED", rulings: [{ unit: "S2", ruling: "OVERRULED" }] }),
+    ]);
+    expect(ctx.scenarioLedger.current).toEqual(new Map([["S2", { status: "retired" }]]));
+  });
+
   it("restages a verifier round's findings before judging scenario units", async () => {
     unchangedAdjudicatorSnapshot();
     innerLoopMocks.verifierFs.length = 0;
@@ -4402,6 +4554,54 @@ describe("runInnerLoop context terminals (#158)", () => {
       expect(innerLoopMocks.createScenarioWriterTask).toHaveBeenCalledTimes(1);
       expect(writer.start).toHaveBeenCalledTimes(1);
       expect(writer.settled).toHaveBeenCalledTimes(1);
+    });
+
+    // #239: the ledger is the sandbox cycle's, as the review history is. A
+    // scenario the first cycle's runner could not check, at a head the next
+    // cycle reaches unchanged, is selected again only because that ledger is
+    // new.
+    it("starts a fresh scenario ledger in a fresh HARD-ERROR cycle (#239)", async () => {
+      const logsDir = mkdtempSync(join(tmpdir(), "sandbar-ledger-"));
+      mkdirSync(join(logsDir, `issue-${issue.id}`, "verifier-workspace", "run"), { recursive: true });
+      const set: ScenarioSet = {
+        version: 1,
+        issue: Number(issue.id),
+        seed: { ref: "origin/main", sha: "fork-sha" },
+        writer: { provider: "claude", model: "opus", effort: null },
+        scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: ["src"], given: ["g"], when: ["w"], then: ["t"] }],
+      };
+      innerLoopMocks.createScenarioWriterTask.mockReturnValue(
+        fakeWriter(Promise.resolve({ kind: "written", set })),
+      );
+      let implementers = 0;
+      let reviews = 0;
+      const { sandbox, opts, events } = harness(async (options) => {
+        const name = options.name ?? "";
+        if (name.startsWith("scenario-runner-")) {
+          return {
+            ...approvedReview,
+            stdout: "<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n" +
+              "### S1: UNVERIFIED\nReason: no shell\n</scenario-results>",
+          };
+        }
+        if (name.startsWith("reviewer-") && (reviews += 1) === 1) {
+          return { ...approvedReview, stdout: "### Correctness\nwrong\n<verdict>CHANGES-REQUESTED</verdict>" };
+        }
+        if (name.startsWith("implementer-") && (implementers += 1) === 2) {
+          throw new Error("podman exec died");
+        }
+        return routine(options);
+      }, {
+        scenarioWriter: true,
+        scenarioRunnerAgent: "codex",
+        scenarioRunnerModelId: "runner-model",
+        layout: { repoDir: "/repo", worktreesDir: "/worktrees", logsDir, anchorCacheDir: "/anchor-cache" },
+      });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(events).toContainEqual(expect.objectContaining({ kind: "hard-error", retry: 1 }));
+      expect(names(sandbox).filter((name) => name.startsWith("scenario-runner-"))).toHaveLength(2);
+      await rm(logsDir, { recursive: true, force: true });
     });
 
     it("is aborted when the admission ends before the join", async () => {

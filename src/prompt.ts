@@ -40,7 +40,8 @@
 // The adjudicator (#167) gets the shared anchors plus one rejected report of
 // either pass and its immutable head, deliberately without prior-round
 // history or implementer speech so it must re-establish every blocking claim
-// from the code.
+// from the code. It rules on the report as a whole, or, on a verifier report
+// with scenario units, on each unit with its own token (#239).
 // The scenario writer (#203) gets the issue anchor, its adversarial contract
 // and its own prompt extension, probed in the seed snapshot it explores; no
 // project anchor, diff or branch history, because it works from the seed and
@@ -48,9 +49,10 @@
 // The verifier's scenario runner (#238) gets the project anchor, its contract
 // with what the sandbox offers this round (the sandbox-stack and egress slots
 // the implementer reads, the database copy it holds, how the
-// `beforeScenarioRun` hook went) and the scenarios it runs, then its own
-// prompt extension: no issue anchor and no diff, because it checks each Then
-// and judging the branch against the issue is the white-box review's. While
+// `beforeScenarioRun` hook went) and the scenarios it runs, a failed one it
+// reruns with the head it failed at (#239), then its own prompt extension: no
+// issue anchor and no diff, because it checks each Then and judging the
+// branch against the issue is the white-box review's. While
 // it holds a production copy, the white-box review beside it is told not to
 // read or quote it.
 // The UI and partition checkers (#126/#158) are intentionally smaller: issue
@@ -109,7 +111,8 @@ import type { DbCopyHeld } from "./db-copy.js";
 import { DB_COPY_HOOK_LOG } from "./db-copy-policy.js";
 import { SANDBOX_LOG_MOUNT, type SandboxContainerStatus } from "./sandbox-stack.js";
 import { type Scenario, renderScenario } from "./scenario-parser.js";
-import { APP_HOOK_LOG, VERIFIER_MOUNT } from "./verifier.js";
+import { unitRulingTag } from "./adjudication-parser.js";
+import { APP_HOOK_LOG, type ScenarioRerun, VERIFIER_MOUNT } from "./verifier.js";
 import { type QualityStandards, type RuleGroup, renderStandards } from "./standards-groups.js";
 import { type ParsedVerdict, stripVerdictTokens } from "./verdict-parser.js";
 
@@ -161,6 +164,8 @@ const IMPLEMENTER_SANDBOX_EGRESS_TPL = loadTemplate("implementer-sandbox-egress"
 const IMPLEMENTER_DB_COPY_TPL = loadTemplate("implementer-db-copy");
 const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
 const ADJUDICATOR_TPL = loadTemplate("adjudicator");
+const ADJUDICATOR_REPORT_TPL = loadTemplate("adjudicator-report");
+const ADJUDICATOR_UNITS_TPL = loadTemplate("adjudicator-units");
 const QUALITY_TESTS_MISSING_LISTER_TPL = loadTemplate("quality-tests-missing-lister");
 const QUALITY_TESTS_MISSING_FIXER_TPL = loadTemplate("quality-tests-missing-fixer");
 const COMMIT_RITUAL_FIXER_TPL = loadTemplate("commit-ritual-fixer");
@@ -526,6 +531,7 @@ export type ScenarioRunnerEnvironment = {
 
 export type ScenarioRunnerSlotRender = ScenarioRunnerEnvironment & {
   readonly scenarios: readonly Scenario[];
+  readonly reruns: readonly ScenarioRerun[];
 };
 
 export type ScenarioRunnerPromptInputs = ScenarioRunnerSlotRender & {
@@ -569,6 +575,14 @@ export function renderScenarioRunnerSlot(inputs: ScenarioRunnerSlotRender): stri
       appHook,
     ].map(section).join(""),
     scenarios: inputs.scenarios.map(renderScenario).join("\n\n"),
+    reruns: inputs.reruns.length === 0 ? "" : [
+      "\n## Reruns\n",
+      ...inputs.reruns.map(({ id, head }) =>
+        `- ${id} failed at \`${head}\`; its evidence from then is under ` +
+        `\`${VERIFIER_MOUNT}/findings/${id}/\`. Check the same thing at the analogous sites ` +
+        "too, and report a failure there under this id."),
+      "",
+    ].join("\n"),
   });
 }
 
@@ -729,6 +743,9 @@ export type AdjudicatorPromptInputs = ReviewerPromptInputs & {
   readonly pass: ReviewPass;
   readonly head: string;
   readonly report: string;
+  // The ids of the units to rule on one by one (#239); null rules on the
+  // report as a whole.
+  readonly units: readonly string[] | null;
 };
 
 // A cold adjudicator gets the project and issue anchors plus exactly one
@@ -747,6 +764,14 @@ export async function buildAdjudicatorPrompt(
       branch: inputs.branch,
       baseRef: inputs.base.ref,
       report: reportProse(inputs.report),
+      ruling: inputs.units === null
+        ? ADJUDICATOR_REPORT_TPL
+        : render(ADJUDICATOR_UNITS_TPL, {
+            tokens: inputs.units.map((id) => {
+              const tag = unitRulingTag(id);
+              return `- \`<${tag}>UPHELD</${tag}>\` or \`<${tag}>OVERRULED</${tag}>\``;
+            }).join("\n"),
+          }),
     }),
   ].join("\n\n---\n\n");
 }

@@ -133,6 +133,14 @@
 // `rejectingPasses` names both. `correctness` stays the white-box verdict.
 // A new kind and new optional fields, so no bump.
 //
+// `adjudication.pass` is `scenarios` for a verifier report of scenario units
+// alone (#239), and `correctness` for one with a white-box unit. Whenever a
+// scenario unit was ruled, `rulings` holds every unit's ruling by unit id,
+// and `ruling` is UPHELD when any of them is. A re-verify, which follows
+// when every unit was overruled but the white-box review produced nothing,
+// closes the round it re-verifies with a second `review-round`. A new value
+// and a new optional field, so no bump.
+//
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
@@ -240,6 +248,9 @@ export type ScenarioOutcomeRecord = {
 };
 
 export type RejectingPass = "correctness" | "scenarios";
+
+// One verifier unit's ruling (#239), by unit id: `white-box` or `S<n>`.
+export type UnitRuling = { readonly unit: string; readonly ruling: "UPHELD" | "OVERRULED" };
 
 export type HeldReason = ChunkBlockReason | "drifted-branches";
 
@@ -459,7 +470,7 @@ export type EventInput =
   | (EventSubject & ContainerResources & QualityReviewEvent & { readonly kind: "quality-review"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & QualityPassEvent & { readonly kind: "quality-pass"; readonly attempt: number; readonly round: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
-  | (EventSubject & ContainerResources & { readonly kind: "adjudication"; readonly pass: "quality" | "correctness"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
+  | (EventSubject & ContainerResources & { readonly kind: "adjudication"; readonly pass: "quality" | "correctness" | "scenarios"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly rulings?: readonly UnitRuling[]; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventIssue & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields })
   | (EgressSubject & EgressRefusal & { readonly kind: "egress-refused" })
   | (EgressSubject & EgressSummaryEvent & { readonly kind: "egress" })

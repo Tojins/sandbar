@@ -9,7 +9,7 @@
 // A verifier report with scenario units is ruled unit by unit (#239): one
 // `<ruling-<unit>>` token per unit, the unit id lower-cased
 // (`<ruling-white-box>`, `<ruling-s2>`). A report missing any unit's token has
-// no ruling at all.
+// no ruling at all, and one with them all is UPHELD when any unit is.
 
 import { lastToken, literalTokenPattern } from "./token-scan.js";
 
@@ -51,6 +51,24 @@ export function parseUnitRulings(
     rulings[id] = ruling as AdjudicationRuling;
   }
   return rulings;
+}
+
+// The ruling an adjudicator's output carries, with each unit's when `units`
+// names the units ruled one by one; null when it carries none.
+export function parseRulings(
+  stdout: string,
+  units: readonly string[] | null,
+): {
+  readonly ruling: AdjudicationRuling;
+  readonly rulings: Readonly<Record<string, AdjudicationRuling>> | null;
+} | null {
+  if (units === null) {
+    const ruling = parseAdjudicationRuling(stdout);
+    return ruling === null ? null : { ruling, rulings: null };
+  }
+  const rulings = parseUnitRulings(stdout, units);
+  if (rulings === null) return null;
+  return { ruling: Object.values(rulings).includes("UPHELD") ? "UPHELD" : "OVERRULED", rulings };
 }
 
 export function stripAdjudicationRulingTokens(stdout: string): string {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   parseAdjudicationRuling,
+  parseRulings,
   parseUnitRulings,
   stripAdjudicationRulingTokens,
 } from "./adjudication-parser.js";
@@ -36,6 +37,21 @@ describe("per-unit rulings (#239)", () => {
     expect(parseUnitRulings("<ruling-s2>UPHELD</ruling-s2>", ["S2", "S3"])).toBeNull();
     expect(parseUnitRulings("<ruling-s2>maybe</ruling-s2>", ["S2"])).toBeNull();
     expect(parseUnitRulings("<ruling>OVERRULED</ruling>", ["S2"])).toBeNull();
+  });
+
+  it("upholds a unit report when any unit is upheld, and rules a whole report by its one token", () => {
+    const units = ["white-box", "S2"];
+    expect(parseRulings(
+      "<ruling-white-box>OVERRULED</ruling-white-box><ruling-s2>UPHELD</ruling-s2>",
+      units,
+    )).toEqual({ ruling: "UPHELD", rulings: { "white-box": "OVERRULED", S2: "UPHELD" } });
+    expect(parseRulings(
+      "<ruling-white-box>OVERRULED</ruling-white-box><ruling-s2>OVERRULED</ruling-s2>",
+      units,
+    )?.ruling).toBe("OVERRULED");
+    expect(parseRulings("<ruling>OVERRULED</ruling>", units)).toBeNull();
+    expect(parseRulings("<ruling>OVERRULED</ruling>", null)).toEqual({ ruling: "OVERRULED", rulings: null });
+    expect(parseRulings("<ruling-s2>UPHELD</ruling-s2>", null)).toBeNull();
   });
 
   it("does not read a unit token as the whole-report ruling", () => {

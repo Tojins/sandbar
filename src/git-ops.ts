@@ -47,7 +47,8 @@
 //
 // `gitStdout` is the one "run git in this directory, hand back stdout" call,
 // with an optional stdin, for the callers that have no richer need (replay,
-// #195: its cache is built by `update-ref --stdin`).
+// #195: its cache is built by `update-ref --stdin`; the verifier's changed
+// paths, #239).
 //
 // `hasNonMergeCommitOutside` is the shared safety test for retiring issue
 // branches (#177, #179). Chunk wrap-up applies it to origin's freshly fetched
