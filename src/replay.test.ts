@@ -17,6 +17,7 @@ import {
   spread,
   stripForgeCredentials,
 } from "./replay.js";
+import type { ScenarioSet } from "./scenario-parser.js";
 import { type StatsReport, computeStats } from "./stats.js";
 import type { StatsEvent } from "./stats-record.js";
 
@@ -34,6 +35,16 @@ const replayCase = (issue: number, extra: Partial<ReplayCase> = {}): ReplayCase 
   ...extra,
 } as ReplayCase);
 
+const pinned = (issue: number, ids = 2): ScenarioSet => ({
+  version: 1,
+  issue,
+  seed: { ref: "origin/main", sha: SEED },
+  writer: { provider: "claude", model: "m", effort: null },
+  scenarios: Array.from({ length: ids }, (_, i) => ({
+    id: `S${i + 1}`, title: `Clause ${i + 1}`, needs: ["cli"], area: [], given: ["g"], when: ["w"], then: ["t"],
+  })),
+});
+
 const caseFile = (cases: readonly unknown[]) => ({
   replayCases: 1,
   repo: "acme/app",
@@ -46,8 +57,21 @@ describe("parseReplayCases (#195)", () => {
     const file = caseFile([
       replayCase(1),
       replayCase(2, { issueFrom: "reconstructed", editedAfterAdmission: true, original: null, landed: null }),
+      replayCase(3, { scenarios: pinned(3) }),
     ]);
     expect(parseReplayCases(file)).toEqual({ cases: file });
+  });
+
+  it("names a pinned set that is no set, or another issue's", () => {
+    expect(parseReplayCases(caseFile([
+      replayCase(1, { scenarios: { ...pinned(1), version: 2 } as unknown as ScenarioSet }),
+      replayCase(2, { scenarios: pinned(9) }),
+    ]))).toEqual({
+      errors: [
+        "cases[0].scenarios version is not 1",
+        "cases[1].scenarios were written for another issue",
+      ],
+    });
   });
 
   it("lists every violation, not the first", () => {
@@ -217,13 +241,36 @@ describe("lastDoneAdmission (#195)", () => {
       title: "Seven",
       seedSha: SEED,
       issueSnapshot: "issue-snapshot-2.json",
+      scenarios: null,
     });
   });
 
   it("is null without a DONE, and reads an older record's missing fields as null", () => {
     expect(lastDoneAdmission("run-x", [admitted("t1"), terminal("HARD-ERROR")], 7)).toBeNull();
     expect(lastDoneAdmission("run-x", [admitted("t1"), terminal("DONE")], 7))
-      .toMatchObject({ seedSha: null, issueSnapshot: null });
+      .toMatchObject({ seedSha: null, issueSnapshot: null, scenarios: null });
+  });
+
+  // #240: only a written set is filed, numbered per issue across the run.
+  it("names the set its own admission's writer filed", () => {
+    const writer = (issue: number, scenarios?: number) =>
+      ({ kind: "scenario-writer", issue, result: "completed", ...(scenarios === undefined ? {} : { scenarios }) });
+    const events = [
+      admitted("t1"),
+      writer(7, 3),
+      terminal("NEEDS-INFO"),
+      { kind: "admitted", issue: 8, title: "Eight", ts: "t2" },
+      writer(8, 2),
+      admitted("t3"),
+      writer(7),
+      writer(7, 0),
+      terminal("DONE"),
+      admitted("t4"),
+      writer(7, 4),
+      terminal("DONE"),
+    ];
+    expect(lastDoneAdmission("run-x", events, 7)).toMatchObject({ ts: "t4", scenarios: "scenarios-2.json" });
+    expect(lastDoneAdmission("run-x", events.slice(0, 9), 7)).toMatchObject({ ts: "t3", scenarios: null });
   });
 });
 

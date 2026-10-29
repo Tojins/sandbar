@@ -24,6 +24,8 @@
 // The set is stored as JSON (`ScenarioSet`) and rendered back to the block
 // grammar on demand (`renderScenario`); `scenarioTouched` is the pure selection
 // primitive for rerunning a scenario whose area a later change touched.
+// `scenarioSetErrors` checks a stored set read back as JSON, such as one a
+// replay case pins (#240), against the shape the grammar guarantees.
 
 import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 
@@ -331,4 +333,54 @@ export function scenarioTouched(s: Scenario, changedPaths: readonly string[]): b
   const areas = s.area.map((entry) => entry.replace(/\/+$/, ""));
   return changedPaths.some((path) =>
     areas.some((entry) => path === entry || path.startsWith(`${entry}/`)));
+}
+
+const isObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isTextList = (value: unknown): value is readonly string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+function scenarioErrors(value: unknown, at: string, id: string): readonly string[] {
+  if (!isObject(value)) return [`${at} is not an object`];
+  const errors: string[] = [];
+  if (value.id !== id) errors.push(`${at}.id is not ${id}`);
+  if (typeof value.title !== "string" || value.title === "") errors.push(`${at}.title is not a non-empty string`);
+  const { needs } = value;
+  if (!isTextList(needs) || new Set(needs).size !== needs.length || !needs.every(isNeed)) {
+    errors.push(`${at}.needs is not a list of distinct ${SCENARIO_NEEDS.join(", ")}`);
+  }
+  if (!isTextList(value.area)) errors.push(`${at}.area is not a list of strings`);
+  for (const clause of CLAUSE_ORDER) {
+    const texts = value[clause];
+    if (!isTextList(texts) || texts.length === 0) errors.push(`${at}.${clause} is not a non-empty list of strings`);
+  }
+  return errors;
+}
+
+// Every way `value` is not a `ScenarioSet`.
+export function scenarioSetErrors(value: unknown): readonly string[] {
+  if (!isObject(value)) return ["is not an object"];
+  const errors: string[] = [];
+  if (value.version !== 1) errors.push("version is not 1");
+  if (typeof value.issue !== "number" || !Number.isInteger(value.issue) || value.issue <= 0) {
+    errors.push("issue is not a positive integer");
+  }
+  const { seed, writer, scenarios } = value;
+  if (!isObject(seed) || typeof seed.ref !== "string" || typeof seed.sha !== "string") {
+    errors.push("seed is not { ref, sha }");
+  }
+  if (
+    !isObject(writer) || typeof writer.provider !== "string" || typeof writer.model !== "string" ||
+    (writer.effort !== null && typeof writer.effort !== "string")
+  ) {
+    errors.push("writer is not { provider, model, effort }");
+  }
+  if (!Array.isArray(scenarios) || scenarios.length === 0 || scenarios.length > MAX_SCENARIOS) {
+    errors.push(`scenarios is not a list of 1 to ${MAX_SCENARIOS} scenarios`);
+  } else {
+    scenarios.forEach((scenario: unknown, i) =>
+      errors.push(...scenarioErrors(scenario, `scenarios[${i}]`, `S${i + 1}`)));
+  }
+  return errors;
 }

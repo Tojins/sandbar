@@ -183,25 +183,40 @@ describe("replay freeze (#195)", () => {
     process.env.PATH = `${bin}${delimiter}${savedPath ?? ""}`;
   }
 
-  // Issue 8's last DONE, admitted with both replay fields.
+  // Issue 8's last DONE, admitted with both replay fields, and with the set
+  // its writer filed when `scenarios` is given.
   async function recordedRun(
     logsDir: string,
-    opts: { readonly name?: string; readonly title?: string; readonly snapshot?: unknown } = {},
+    opts: { readonly name?: string; readonly title?: string; readonly snapshot?: unknown; readonly scenarios?: unknown } = {},
   ): Promise<void> {
     const run = join(logsDir, opts.name ?? "run-2026-10-28T00-00-00-000Z");
     await mkdir(join(run, "issue-8"), { recursive: true });
     const events = [
-      { kind: "run-start", schemaVersion: 6, seq: 1, ts: "2026-10-28T00:00:00.000Z" },
+      { kind: "run-start", schemaVersion: 6, ts: "2026-10-28T00:00:00.000Z" },
       {
         kind: "admitted", issue: 8, title: opts.title ?? "Recorded", branch: "sandbar/issue-8-recorded", chunk: null,
         seedRef: "origin/main", seedSha: fixture.seed, issueSnapshot: "issue-snapshot-1.json",
-        seq: 2, ts: "2026-10-28T00:00:01.000Z",
+        ts: "2026-10-28T00:00:01.000Z",
       },
-      { kind: "terminal", issue: 8, terminal: "DONE", reason: null, durationMs: 1, seq: 3, ts: "2026-10-28T00:00:02.000Z" },
+      ...(opts.scenarios === undefined ? [] : [{
+        kind: "scenario-writer", issue: 8, result: "completed", scenarios: 1, ts: "2026-10-28T00:00:01.500Z",
+      }]),
+      { kind: "terminal", issue: 8, terminal: "DONE", reason: null, durationMs: 1, ts: "2026-10-28T00:00:02.000Z" },
     ];
-    await writeFile(join(run, "events.jsonl"), events.map((e) => `${JSON.stringify(e)}\n`).join(""));
+    await writeFile(join(run, "events.jsonl"), events.map((e, i) => `${JSON.stringify({ ...e, seq: i + 1 })}\n`).join(""));
     await writeFile(join(run, "issue-8", "issue-snapshot-1.json"), JSON.stringify(opts.snapshot ?? { title: "Recorded", body: "then" }));
+    if (opts.scenarios !== undefined) {
+      await writeFile(join(run, "issue-8", "scenarios-1.json"), JSON.stringify(opts.scenarios));
+    }
   }
+
+  const SET = {
+    version: 1,
+    issue: 8,
+    seed: { ref: "origin/main", sha: "a".repeat(40) },
+    writer: { provider: "claude", model: "m", effort: null },
+    scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: [], given: ["g"], when: ["w"], then: ["t"] }],
+  };
 
   const frozenCases = async (issues: readonly number[], logsDir: string): Promise<ReplayCases["cases"]> => {
     const out = join(fixture.root, `cases-${issues.join("-")}.json`);
@@ -291,6 +306,26 @@ describe("replay freeze (#195)", () => {
 
     await expect(freeze({ config: config(), issues: [8], logsDir, out, log: () => undefined }))
       .rejects.toThrow(/issue-snapshot-1\.json is not an issue snapshot: title is not a string/);
+    await expect(readFile(out)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  // #240
+  it("pins the set the admission's writer filed", async () => {
+    const logsDir = join(fixture.root, "logs");
+    await recordedRun(logsDir, { scenarios: SET });
+
+    const [c] = await frozenCases([8], logsDir);
+
+    expect(c?.scenarios).toEqual(SET);
+  });
+
+  it("refuses a filed set that is not a scenario set", async () => {
+    const logsDir = join(fixture.root, "logs");
+    await recordedRun(logsDir, { scenarios: { ...SET, scenarios: [] } });
+    const out = join(fixture.root, "cases.json");
+
+    await expect(freeze({ config: config(), issues: [8], logsDir, out, log: () => undefined }))
+      .rejects.toThrow(/scenarios-1\.json is not a scenario set: scenarios is not a list of 1 to 20 scenarios/);
     await expect(readFile(out)).rejects.toMatchObject({ code: "ENOENT" });
   });
 

@@ -7,9 +7,13 @@
 // branch was cut from (`seedSha`, and where that came from), the issue JSON
 // the roles read (`issueFrom`: the snapshot the admission filed, or a
 // reconstruction from today's issue with only the comments made by the
-// cutoff, flagged when the body was edited after it), and pointers to the
-// original run and its landing. `parseReplayCases` is the one validation of a
-// case file, and lists every violation rather than the first.
+// cutoff, flagged when the body was edited after it), pointers to the
+// original run and its landing, and, when that admission's writer wrote one,
+// its scenario set (#240): pinned, it replaces the writer in every repeat and
+// session, so all of them are judged on the same clauses. A case file frozen
+// before pinning has no `scenarios`, and its cases run the writer as
+// configured. `parseReplayCases` is the one validation of a case file, and
+// lists every violation rather than the first.
 //
 // A SESSION is one `replay run`: its manifest records what was compared (the
 // driver, the per-role routing, the budgets, the case file's sha256) and one
@@ -31,6 +35,7 @@
 
 import { type IssueComment, type IssueJson, issueJsonErrors } from "./issue-anchor.js";
 import type { Terminal } from "./inner-loop.js";
+import { type ScenarioSet, scenarioSetErrors } from "./scenario-parser.js";
 import {
   type Cell,
   type InvocationRow,
@@ -67,6 +72,7 @@ export type ReplayCase = CaseText & {
     readonly tip: string;
     readonly diff: DiffSize;
   } | null;
+  readonly scenarios?: ScenarioSet;
 };
 
 export type ReplayCases = {
@@ -182,6 +188,13 @@ function caseErrors(value: unknown, at: string, seen: Set<number>): readonly str
       errors.push(`${at}.landed is neither null nor { merge, tip, diff } with 40-hex shas and counts`);
     }
   }
+  if (c.scenarios !== undefined) {
+    const scenarioErrors = scenarioSetErrors(c.scenarios);
+    errors.push(...scenarioErrors.map((error) => `${at}.scenarios ${error}`));
+    if (scenarioErrors.length === 0 && (c.scenarios as ScenarioSet).issue !== issue) {
+      errors.push(`${at}.scenarios were written for another issue`);
+    }
+  }
   return errors;
 }
 
@@ -262,22 +275,39 @@ export type RecordedAdmission = {
   readonly title: string;
   readonly seedSha: string | null;
   readonly issueSnapshot: string | null;
+  // The `scenarios-<k>.json` its writer filed, when it wrote a set.
+  readonly scenarios: string | null;
 };
 
 // The admission behind an issue's last DONE in one run's events, or null when
 // the run has none. Records are read version-blind (`parseEventLines`), so
-// every field is checked rather than trusted.
+// every field is checked rather than trusted. The issue's k-th
+// `scenario-writer` event with a non-empty set in the run is its
+// `scenarios-<k>.json`: the logger numbers only written sets, per issue.
 export function lastDoneAdmission(
   run: string,
   events: readonly Json[],
   issue: number,
 ): RecordedAdmission | null {
   let admitted: Json | null = null;
+  let written = 0;
+  let scenarios: string | null = null;
   let done: Json | null = null;
+  let doneScenarios: string | null = null;
   for (const event of events) {
     if (event.issue !== issue) continue;
-    if (event.kind === "admitted") admitted = event;
-    if (event.kind === "terminal" && event.terminal === "DONE" && admitted !== null) done = admitted;
+    if (event.kind === "admitted") {
+      admitted = event;
+      scenarios = null;
+    }
+    if (event.kind === "scenario-writer" && typeof event.scenarios === "number" && event.scenarios > 0) {
+      written += 1;
+      scenarios = `scenarios-${written}.json`;
+    }
+    if (event.kind === "terminal" && event.terminal === "DONE" && admitted !== null) {
+      done = admitted;
+      doneScenarios = scenarios;
+    }
   }
   if (done === null || typeof done.ts !== "string" || typeof done.title !== "string") return null;
   return {
@@ -286,6 +316,7 @@ export function lastDoneAdmission(
     title: done.title,
     seedSha: typeof done.seedSha === "string" ? done.seedSha : null,
     issueSnapshot: typeof done.issueSnapshot === "string" ? done.issueSnapshot : null,
+    scenarios: doneScenarios,
   };
 }
 
