@@ -203,6 +203,46 @@ describe("sandbox gate attachments (#166)", () => {
   });
 });
 
+describe("a secretEnv key that config.env declares (#252)", () => {
+  const LABEL = "gate/stack.json at origin/main";
+  const stack = minimal.gateStack as GateStackConfig;
+  const withProxy = {
+    ...stack,
+    containers: [
+      ...stack.containers,
+      {
+        name: "proxy",
+        image: "localhost/proxy",
+        inSandbox: true,
+        inGate: false,
+        secretEnv: ["ADFINITY_USER", "ADFINITY_TOKEN"],
+      },
+    ],
+  };
+
+  it("refuses an inline stack, naming every shared key", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      env: { ADFINITY_TOKEN: "", ADFINITY_USER: "u", GH_TOKEN: "" },
+      gateStack: withProxy,
+    })).toThrow(
+      /^config\.gateStack: container 'proxy' has secretEnv key\(s\) ADFINITY_USER, ADFINITY_TOKEN, which config\.env also declares/,
+    );
+  });
+
+  it("refuses a stack file, naming the label", () => {
+    expect(() => resolveStackFile(JSON.stringify(withProxy), LABEL, { ADFINITY_TOKEN: "" }))
+      .toThrow(/^gate\/stack\.json at origin\/main: container 'proxy' has secretEnv key\(s\) ADFINITY_TOKEN,/);
+  });
+
+  it("accepts keys config.env does not declare", () => {
+    expect(() => resolveConfig({ ...minimal, env: { GH_TOKEN: "" }, gateStack: withProxy }))
+      .not.toThrow();
+    expect(() => resolveStackFile(JSON.stringify(withProxy), LABEL, { GH_TOKEN: "" }))
+      .not.toThrow();
+  });
+});
+
 describe("gateStack file form (#186)", () => {
   it("keeps a repository-relative path, normalised, and reads nothing at load", () => {
     const r = resolveConfig({ ...minimal, gateStack: { path: "./gate//stack.json" } });
