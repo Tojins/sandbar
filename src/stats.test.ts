@@ -364,6 +364,20 @@ describe("computeStats scenario outcomes (#238)", () => {
       ["scenario-runner", 2, "high", 4],
     ]);
   });
+
+  // #240: replay's per-clause report keys on these rows.
+  it("lists every runner event that carries its round's outcomes", () => {
+    const report = computeStats(input([run("run-1", [
+      admitted(1),
+      runner(0, "completed", { outcomes: [{ id: "S1", outcome: "unverified", reason: "no-db-copy" }] }),
+      runner(1, "completed", { ...ran, durationMs: 9 }),
+      runner(2, "completed", { ...ran, durationMs: 4, outcomes: [{ id: "S1", outcome: "pass" }] }),
+    ])]));
+    expect(report.scenarioRounds).toEqual([
+      { run: "run-1", issue: 1, round: 1, outcomes: [{ id: "S1", outcome: "unverified", reason: "no-db-copy" }] },
+      { run: "run-1", issue: 1, round: 1, outcomes: [{ id: "S1", outcome: "pass" }] },
+    ]);
+  });
 });
 
 describe("computeStats prose (#182)", () => {

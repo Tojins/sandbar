@@ -330,6 +330,11 @@ const implementerEvent = (issue: number, attempt: number, usage: Record<string, 
 });
 const gateEvent = (issue: number, attempt: number, ok: boolean) =>
   ({ kind: "gate", issue, attempt, gate: "gate-1", ok, durationMs: 1 });
+const runnerEvent = (issue: number, round: number, outcomes: Record<string, string>) => ({
+  kind: "scenario-runner", issue, title: `Issue ${issue}`, attempt: round, round, invocation: 1, result: "completed",
+  outcomes: Object.entries(outcomes).map(([id, outcome]) =>
+    outcome === "unverified" ? { id, outcome, reason: "no-db-copy" } : { id, outcome }),
+});
 const terminalEvent = (issue: number, outcome: string) =>
   ({ kind: "terminal", issue, title: `Issue ${issue}`, terminal: outcome, reason: null, durationMs: 1 });
 
@@ -436,6 +441,7 @@ describe("compareReplay (#195)", () => {
         insertions: { of: 1, n: 1, min: 2, median: 2, max: 2 },
         deletions: { of: 1, n: 1, min: 0, median: 0, max: 0 },
       },
+      scenarios: {},
     });
   });
 
@@ -509,7 +515,44 @@ describe("compareReplay (#195)", () => {
       roles: {},
       gate: { green: 0, red: 0, unknown: 0 },
       diff: { files: spread([]), insertions: spread([]), deletions: spread([]) },
+      scenarios: {},
     });
+  });
+
+  // #240
+  it("counts each pinned scenario's verdict per column from each run's last round", () => {
+    const report = compareReplay({
+      cases: [replayCase(1, { scenarios: pinned(1) })],
+      originals: new Map([[1, statsOf("run-orig", [
+        admittedEvent(1),
+        runnerEvent(1, 1, { S1: "fail", S2: "fail" }),
+        runnerEvent(1, 2, { S1: "pass", S2: "unverified" }),
+        terminalEvent(1, "DONE"),
+      ])]]),
+      sessions: [records(sessionOf("base", [
+        ran(1, 1),
+        ran(2, 1),
+        { repeat: 3, run: null, issue: 1, seedSha: SEED, branch: "b-1", status: "not-run", reason: "QUOTA: out" },
+      ]), {
+        "run-r1": statsOf("run-r1", [...cycleOf(1, [null]), runnerEvent(1, 1, { S1: "pass", S2: "fail" })]),
+        "run-r2": statsOf("run-r2", [...cycleOf(1, [null]), runnerEvent(1, 1, { S1: "pass", S2: "pass" })]),
+      })],
+    });
+    const [c] = report.cases;
+    expect(c!.scenarios).toEqual([{ id: "S1", title: "Clause 1" }, { id: "S2", title: "Clause 2" }]);
+    expect(c!.columns.map((col) => col.scenarios)).toEqual([
+      { S1: { pass: 1 }, S2: { unverified: 1 } },
+      { S1: { pass: 2 }, S2: { fail: 1, pass: 1 } },
+    ]);
+  });
+
+  it("has no scenario counts for a case that pins no set", () => {
+    const [c] = compareReplay({
+      cases: [replayCase(1)],
+      originals: new Map([[1, statsOf("run-orig", [admittedEvent(1), runnerEvent(1, 1, { S1: "pass" })])]]),
+      sessions: [],
+    }).cases;
+    expect([c!.scenarios, c!.columns[0]!.scenarios]).toEqual([[], {}]);
   });
 });
 
@@ -522,10 +565,17 @@ describe("renderReplayReport (#195)", () => {
       { repeat: 2, run: "run-r2", issue: 2, seedSha: SEED, branch: "b-2", status: "not-run", reason: "QUOTA: out" },
     ]);
     const report = compareReplay({
-      cases: [replayCase(1), replayCase(2, { original: null, landed: null })],
-      originals: new Map([[1, statsOf("run-orig", cycleOf(1, [usage(100, 1000, 3000)]))]]),
+      cases: [replayCase(1, { scenarios: pinned(1) }), replayCase(2, { original: null, landed: null })],
+      originals: new Map([[1, statsOf("run-orig", [
+        ...cycleOf(1, [usage(100, 1000, 3000)]),
+        runnerEvent(1, 1, { S1: "pass", S2: "fail" }),
+      ])]]),
       sessions: [records(base, {
-        "run-r1": statsOf("run-r1", [...cycleOf(1, [usage(10, 100, 200)]), ...cycleOf(2, [null], "NEEDS-HUMAN")]),
+        "run-r1": statsOf("run-r1", [
+          ...cycleOf(1, [usage(10, 100, 200)]),
+          runnerEvent(1, 1, { S1: "pass", S2: "unverified" }),
+          ...cycleOf(2, [null], "NEEDS-HUMAN"),
+        ]),
         "run-r2": statsOf("run-r2", cycleOf(1, [usage(30, 300, 400), usage(10, 500, 900)])),
       })],
     });
@@ -557,6 +607,11 @@ describe("renderReplayReport (#195)", () => {
       "implementer output        5         5 [5..10]",
       "implementer firstContext  1000      100 [100..300]",
       "implementer peakContext   3000      200 [200..900]",
+      "",
+      "## #1 scenarios",
+      "scenario     original  base",
+      "S1 Clause 1  pass 1    pass 1 (1/2)",
+      "S2 Clause 2  fail 1    unverified 1 (1/2)",
       "",
       "## #2 Issue 2",
       "metric                    original  base",

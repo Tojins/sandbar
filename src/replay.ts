@@ -31,11 +31,15 @@
 // diff are its manifest's; the original's are its record's last terminal and
 // gate-1 and the case's landed diff. Rounds and tokens are the issue's rollup,
 // context depth its invocation rows: `first` the role's earliest
-// `firstContext`, `peak` its largest `peakContext`.
+// `firstContext`, `peak` its largest `peakContext`. A case that pins a set
+// adds a section with one row per scenario: per column, how many runs ended
+// it pass, fail or unverified, read off each run's last `scenarioRounds` row
+// for the issue; a run whose verifier never ran it judged nothing (#240).
 
 import { type IssueComment, type IssueJson, issueJsonErrors } from "./issue-anchor.js";
 import type { Terminal } from "./inner-loop.js";
 import { type ScenarioSet, scenarioSetErrors } from "./scenario-parser.js";
+import type { ScenarioOutcomeRecord } from "./events.js";
 import {
   type Cell,
   type InvocationRow,
@@ -370,6 +374,10 @@ export function spread(values: readonly (number | null)[]): Spread {
 
 export type ReplayOutcome = Outcome | "not-run";
 
+// A scenario's verdicts over a column's runs; a run that judged it nothing
+// is in none of them.
+export type ScenarioCounts = Readonly<Partial<Record<ScenarioOutcomeRecord["outcome"], number>>>;
+
 export type RoleSpread = {
   readonly input: Spread;
   readonly cached: Spread;
@@ -391,11 +399,15 @@ export type ReplayColumn = {
   // The last gate-1 per run; unknown where none ran.
   readonly gate: { readonly green: number; readonly red: number; readonly unknown: number };
   readonly diff: { readonly files: Spread; readonly insertions: Spread; readonly deletions: Spread };
+  // By scenario id, for each scenario the case pins.
+  readonly scenarios: Readonly<Record<string, ScenarioCounts>>;
 };
 
 export type ReplayCaseReport = {
   readonly issue: number;
   readonly title: string;
+  // The case's pinned scenarios; none when it pins no set.
+  readonly scenarios: readonly { readonly id: string; readonly title: string }[];
   readonly columns: readonly ReplayColumn[];
 };
 
@@ -418,13 +430,16 @@ type Sample = {
   readonly invocations: readonly InvocationRow[];
   readonly gateOk: boolean | null;
   readonly diff: DiffSize | null;
+  // The last verifier round's scenario outcomes.
+  readonly clauses: readonly ScenarioOutcomeRecord[];
 };
 
-const NOT_RUN: Sample = { outcome: "not-run", rollup: null, invocations: [], gateOk: null, diff: null };
+const NOT_RUN: Sample = { outcome: "not-run", rollup: null, invocations: [], gateOk: null, diff: null, clauses: [] };
 
-const recordOf = (report: StatsReport | undefined, issue: number): Pick<Sample, "rollup" | "invocations"> => ({
+const recordOf = (report: StatsReport | undefined, issue: number): Pick<Sample, "rollup" | "invocations" | "clauses"> => ({
   rollup: report?.issues.find((rollup) => rollup.issue === issue) ?? null,
   invocations: report?.invocations.filter((row) => row.issue === issue) ?? [],
+  clauses: report?.scenarioRounds.filter((row) => row.issue === issue).at(-1)?.outcomes ?? [],
 });
 
 function originalSample(c: ReplayCase, report: StatsReport | undefined): Sample {
@@ -460,16 +475,20 @@ function roleSpread(samples: readonly Sample[], role: Role): RoleSpread {
   };
 }
 
-function column(label: string, samples: readonly Sample[]): ReplayColumn {
-  const outcomes: Partial<Record<ReplayOutcome, number>> = {};
-  for (const { outcome } of samples) if (outcome !== null) outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
+function tally<K extends string>(keys: readonly K[]): Partial<Record<K, number>> {
+  const counts: Partial<Record<K, number>> = {};
+  for (const key of keys) counts[key] = (counts[key] ?? 0) + 1;
+  return counts;
+}
+
+function column(label: string, samples: readonly Sample[], scenarioIds: readonly string[]): ReplayColumn {
   const ran = (role: Role): boolean => samples.some((sample) =>
     sample.rollup?.tokensByRole[role] !== undefined || sample.invocations.some((row) => row.role === role));
   const gates = (ok: boolean | null): number => samples.filter((sample) => sample.gateOk === ok).length;
   return {
     label,
     runs: samples.length,
-    outcomes,
+    outcomes: tally(samples.flatMap(({ outcome }) => outcome === null ? [] : [outcome])),
     attempts: spreadOf(samples, (sample) => sample.rollup?.attempts),
     rounds: {
       gate: spreadOf(samples, (sample) => sample.rollup?.rounds.gate),
@@ -483,6 +502,10 @@ function column(label: string, samples: readonly Sample[]): ReplayColumn {
       insertions: spreadOf(samples, (sample) => sample.diff?.insertions),
       deletions: spreadOf(samples, (sample) => sample.diff?.deletions),
     },
+    scenarios: Object.fromEntries(scenarioIds.map((id) => [
+      id,
+      tally(samples.flatMap(({ clauses }) => clauses.filter((clause) => clause.id === id).map(({ outcome }) => outcome))),
+    ])),
   };
 }
 
@@ -496,17 +519,23 @@ export function compareReplay(args: {
   return {
     replayReport: 1,
     sessions: args.sessions.map(({ session: { results: _, ...session } }) => session),
-    cases: args.cases.map((c) => ({
-      issue: c.issue,
-      title: c.title,
-      columns: [
-        column("original", c.original === null ? [] : [originalSample(c, args.originals.get(c.issue))]),
-        ...args.sessions.map(({ session, runs }) => column(
-          session.label,
-          session.results.filter((result) => result.issue === c.issue).map((result) => sessionSample(result, runs)),
-        )),
-      ],
-    })),
+    cases: args.cases.map((c) => {
+      const scenarios = (c.scenarios?.scenarios ?? []).map(({ id, title }) => ({ id, title }));
+      const ids = scenarios.map(({ id }) => id);
+      return {
+        issue: c.issue,
+        title: c.title,
+        scenarios,
+        columns: [
+          column("original", c.original === null ? [] : [originalSample(c, args.originals.get(c.issue))], ids),
+          ...args.sessions.map(({ session, runs }) => column(
+            session.label,
+            session.results.filter((result) => result.issue === c.issue).map((result) => sessionSample(result, runs)),
+            ids,
+          )),
+        ],
+      };
+    }),
   };
 }
 
@@ -546,6 +575,21 @@ function caseTable(c: ReplayCaseReport): string {
   ]);
 }
 
+// A scenario's verdicts, and `n/of` when some runs judged it nothing.
+function scenarioCell(counts: ScenarioCounts, runs: number): string | null {
+  const judged = Object.values(counts).reduce((sum, n) => sum + n, 0);
+  const cell = countsCell(counts);
+  return cell === null ? null : `${cell}${judged < runs ? ` (${judged}/${runs})` : ""}`;
+}
+
+function scenarioTable(c: ReplayCaseReport): string {
+  return table(`#${c.issue} scenarios`, ["scenario", ...c.columns.map((col) => col.label)],
+    c.scenarios.map(({ id, title }) => [
+      `${id} ${title}`,
+      ...c.columns.map((col) => scenarioCell(col.scenarios[id] ?? {}, col.runs)),
+    ]));
+}
+
 export function renderReplayReport(report: ReplayReport): string {
   const { sessions } = report;
   const roles = [...new Set(sessions.flatMap((session) => Object.keys(session.routing)))];
@@ -563,6 +607,6 @@ export function renderReplayReport(report: ReplayReport): string {
         const routing = session.routing[role];
         return routing === undefined ? null : describeRouting(routing);
       })])),
-    ...report.cases.map(caseTable),
+    ...report.cases.flatMap((c) => c.scenarios.length === 0 ? [caseTable(c)] : [caseTable(c), scenarioTable(c)]),
   ].join("\n");
 }
