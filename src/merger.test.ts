@@ -548,6 +548,42 @@ describe("runMergerWithAdapter — chunk refresh (#174)", () => {
     expect(summary.failedChunkRefreshes).toEqual([]);
   });
 
+  it("merges a stacked chunk's base into it instead of the source (#243)", async () => {
+    const base = "sandbar/chunk-10-base";
+    const request = { ...refresh(), base };
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: {
+        [request.branch]: { kind: "present", ref: `refs/remotes/origin/${request.branch}` },
+        [base]: { kind: "present", ref: `refs/remotes/origin/${base}` },
+      },
+    });
+
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, refreshing(request));
+
+    expect(calls.checkouts).toEqual([`refs/remotes/origin/${request.branch}`]);
+    expect(calls.merges).toEqual([`origin/${base}`]);
+    expect(calls.chunkPushes).toEqual([{ branch: request.branch, members: [] }]);
+    expect(summary.refreshedChunks).toEqual([request]);
+  });
+
+  it("skips a stacked chunk's refresh when its base has landed since the plan", async () => {
+    const request = { ...refresh(), base: "sandbar/chunk-10-base" };
+    const { adapter, calls } = makeAdapter({
+      chunkRefs: {
+        [request.branch]: { kind: "present", ref: `refs/remotes/origin/${request.branch}` },
+      },
+    });
+
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, refreshing(request));
+
+    expect(calls.merges).toEqual([]);
+    expect(calls.chunkPushes).toEqual([]);
+    expect(summary.refreshedChunks).toEqual([]);
+    expect(summary.failedChunkRefreshes).toEqual([]);
+  });
+
   it("parks every triggering dependent when conflict resolution abandons", async () => {
     const request = refresh([400, 401]);
     const later = {
@@ -2426,6 +2462,37 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
   const chunkIssue = (n: number, root = n): IssueRef => ({
     ...issue(n),
     chunk: { root, branch: `sandbar/chunk-${root}-c` },
+  });
+
+  it("creates a stacked chunk at its base and bases its pull request there (#243)", async () => {
+    const base = "sandbar/chunk-10-base";
+    const stacked: IssueRef = {
+      ...issue(50),
+      chunk: { root: 50, branch: "sandbar/chunk-50_on_10-c", base },
+    };
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkBases: { [base]: `refs/remotes/origin/${base}` },
+      chunkRefs: { [base]: { kind: "present", ref: `refs/remotes/origin/${base}` } },
+    });
+    await runMergerWithAdapter([stacked], adapter);
+
+    expect(calls.checkouts[0]).toBe(`refs/remotes/origin/${base}`);
+    expect(calls.chunkPushes.map((push) => push.branch)).toEqual(["sandbar/chunk-50_on_10-c"]);
+    expect(calls.chunkPrBases).toEqual([base]);
+  });
+
+  it("bases a stacked chunk's pull request on the source once its base has landed", async () => {
+    const stacked: IssueRef = {
+      ...issue(50),
+      chunk: { root: 50, branch: "sandbar/chunk-50_on_10-c", base: "sandbar/chunk-10-base" },
+    };
+    const { adapter, calls } = makeAdapter({ merges: ["ok"], gates: [{ ok: true }] });
+    await runMergerWithAdapter([stacked], adapter);
+
+    expect(calls.checkouts[0]).toBe("origin/main");
+    expect(calls.chunkPrBases).toEqual([null]);
   });
 
   it("bases a first landing on origin/<sourceBranch>, merges, gates, pushes the chunk branch", async () => {

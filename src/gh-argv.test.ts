@@ -76,6 +76,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         "done",
         'printf "]\\n" >> "$log"',
         'case "$*" in',
+        '  "pr list"*"--json number") printf \'[{"number":77},{"number":78}]\' ;;',
         '  "pr list"*) printf "[]" ;;',
         '  *--json*state*) printf \'{"state":"OPEN"}\' ;;',
         "esac",
@@ -224,6 +225,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         beforeOriginWrite,
       } as unknown as Parameters<typeof realMergerAdapter>[0]).ensureChunkPullRequest({
         chunkBranch: "sandbar/chunk-42-c",
+        base: null,
         title: "Sandbar chunk #42: x",
         body: "members",
       });
@@ -238,6 +240,24 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(create?.[head + 1]).toBe("sandbar/chunk-42-c");
       const base = (create ?? []).indexOf("--base");
       expect(create?.[base + 1]).toBe("main");
+    });
+
+    it("bases a stacked chunk's PR on the branch it is stacked on (#243)", async () => {
+      await realMergerAdapter({
+        cwd: shimBin,
+        repo: REPO,
+        sourceBranch: "main",
+        beforeOriginWrite,
+      } as unknown as Parameters<typeof realMergerAdapter>[0]).ensureChunkPullRequest({
+        chunkBranch: "sandbar/chunk-50_on_42-c",
+        base: "sandbar/chunk-42-c",
+        title: "Sandbar chunk #50: x",
+        body: "members",
+      });
+
+      const [list, create] = await calls();
+      expect(list?.[(list ?? []).indexOf("--base") + 1]).toBe("sandbar/chunk-42-c");
+      expect(create?.[(create ?? []).indexOf("--base") + 1]).toBe("sandbar/chunk-42-c");
     });
   });
 
@@ -326,6 +346,21 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         ["lease"], comment,
         ["lease"], close,
       ]);
+    });
+
+    // A chunk stacked on this one has its pull request based here (#243).
+    it("retargets every open pull request based on the chunk, in the configured repo", async () => {
+      expect(await adapter().retargetPullRequests("sandbar/chunk-42-c", "main"))
+        .toEqual([77, 78]);
+
+      const [list, first, second] = await calls();
+      expect(list?.slice(0, 2)).toEqual(["pr", "list"]);
+      expect(repoFlagOf(list ?? [])).toBe("acme/app");
+      expect(list?.[(list ?? []).indexOf("--base") + 1]).toBe("sandbar/chunk-42-c");
+      expect(list?.[(list ?? []).indexOf("--state") + 1]).toBe("open");
+      expect(first).toEqual(["pr", "edit", "77", "--repo", "acme/app", "--base", "main"]);
+      expect(second).toEqual(["pr", "edit", "78", "--repo", "acme/app", "--base", "main"]);
+      expect(await records()).toEqual([list, ["lease"], first, ["lease"], second]);
     });
   });
 

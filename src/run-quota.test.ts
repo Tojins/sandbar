@@ -338,6 +338,7 @@ import { beginCleanup } from "./cleanup.js";
 import { RESTART_REQUEST_FILE } from "./restart-request.js";
 import type { StackSource } from "./stack-source.js";
 import { startStack } from "./gate-stack.js";
+import { routeChunkReviewFollowUps } from "./chunk-follow-up.js";
 
 const config: RunConfig = {
   ghOwner: "o", ghRepo: "r", developers: "anyone", cwd: "/tmp", workDir: "sandbar-run-quota-test",
@@ -648,6 +649,31 @@ describe("run quota orchestration (#109)", () => {
       severity: "warning",
       message: expect.stringContaining("sandbar/issue-383-parked"),
     }));
+  });
+
+  // The land listing is read before planning (#243); a chunk the
+  // reconciliation then finishes off must not reach the merger as well.
+  it("does not land a request whose chunk this recompute reconciled", async () => {
+    const wrapup = chunkWrapup([]);
+    seams.plan.mockResolvedValue({ ...resolution([]), landedChunks: [] });
+    seams.landRequestPullRequests.mockResolvedValue([{
+      number: wrapup.target.pullRequest,
+      headRefName: wrapup.target.branch,
+      title: wrapup.target.title,
+      labels: ["land"],
+    }]);
+    seams.reconcile.mockResolvedValueOnce({
+      reconciled: [{ ...wrapup, durationMs: 1 }],
+      closedIssues: [383],
+    });
+    seams.merger.mockResolvedValue(summary([]));
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+
+    expect(seams.merger).not.toHaveBeenCalled();
   });
 
   it("warns about retained issue branches from the live merge path", async () => {
@@ -3587,6 +3613,47 @@ describe("run quota orchestration (#109)", () => {
             kind: "deferred",
             reason: "landing window closed · lands after Mon 08:00 (Europe/Brussels)",
           },
+        }),
+      ]));
+    });
+
+    it("freezes a requested chunk for the planner and its review scan (#243)", async () => {
+      requestedWith(["land"]);
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockRejectedValueOnce(new Error("stop after a second closed poll"));
+
+      await runAt(CLOSED);
+
+      expect(seams.plan.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({ frozenChunks: new Set([target.branch]) }),
+      );
+      expect(vi.mocked(routeChunkReviewFollowUps).mock.calls[0]?.[0].chunks).toEqual([]);
+    });
+
+    it("holds a stacked chunk's request while its base is on origin (#243)", async () => {
+      const stacked = {
+        ...target,
+        root: 50,
+        branch: "sandbar/chunk-50_on_42-test",
+        base: target.branch,
+        pullRequest: 10,
+      };
+      seams.plan.mockResolvedValue({ ...resolution([]), landedChunks: [stacked] });
+      seams.landRequestPullRequests.mockResolvedValue([
+        { number: 10, headRefName: stacked.branch, title: stacked.title, labels: ["land"] },
+      ]);
+      vi.mocked(fetchOriginRefs)
+        .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+        .mockRejectedValueOnce(new Error("stop after a second poll"));
+
+      await runAt(OPEN);
+
+      expect(seams.merger).not.toHaveBeenCalled();
+      expect(eventsOf("land-request")).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          pullRequest: 10,
+          status: { kind: "deferred", reason: `stacked on ${target.branch} · lands once it lands` },
         }),
       ]));
     });

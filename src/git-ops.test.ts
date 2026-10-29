@@ -1080,6 +1080,36 @@ describe("ensureIssueBranch — a tip-seeded member with no chunk branch refuses
       ensureIssueBranch(cache, "sandbar/issue-11-mid", "main", REROOTED),
     ).rejects.toBeInstanceOf(ChunkBaseMissingError);
   });
+
+  // A stacked chunk (#243) before its first landing builds on its base.
+  it("seeds a stacked chunk's member from its base until the chunk has a branch", async () => {
+    const stacked = {
+      root: 50,
+      branch: "sandbar/chunk-50_on_10-next",
+      base: "sandbar/chunk-10-thing",
+    };
+
+    const base = await ensureIssueBranch(cache, "sandbar/issue-50-next", "main", stacked);
+
+    expect(base).toEqual({
+      ref: "refs/remotes/origin/sandbar/chunk-10-thing",
+      chunkBranch: "sandbar/chunk-10-thing",
+    });
+    expect(
+      (await git(cache, "ls-tree", "--name-only", "sandbar/issue-50-next")).stdout,
+    ).toContain("chunk.txt");
+  });
+
+  it("seeds it from the source branch once its base has landed and left origin", async () => {
+    const stacked = {
+      root: 50,
+      branch: "sandbar/chunk-50_on_9-next",
+      base: "sandbar/chunk-9-landed",
+    };
+
+    expect(await ensureIssueBranch(cache, "sandbar/issue-50-next", "main", stacked))
+      .toEqual({ ref: "origin/main", chunkBranch: null });
+  });
 });
 
 // #112 — origin's copy of the issue branch. Finalise's parking comment says

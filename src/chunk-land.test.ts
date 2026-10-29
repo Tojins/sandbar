@@ -597,6 +597,30 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(r.residue.join("\n")).toContain("pull request #9");
   });
 
+  // A chunk stacked on this one has its pull request based on this branch,
+  // and GitHub closes a pull request whose base branch is deleted (#243).
+  it("keeps the branch for a retry when the pull requests based on it cannot be retargeted", async () => {
+    const { adapter, calls } = makeWrapupAdapter({ retargetPullRequests: "gh boom" });
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+    expect(r.closed).toEqual([42, 43]);
+    expect(r.branchDeleted).toBe(false);
+    expect(calls.some((c) => c.op === "deleteChunkBranch")).toBe(false);
+    expect(r.residue).toEqual([
+      "sandbar/chunk-42-alpha is kept on origin so the next run retries retargeting " +
+        "the pull requests based on it: gh boom",
+    ]);
+    expect(chunkResidue([{ ...r, target }]).kept).toHaveLength(1);
+  });
+
+  it("does not retarget anything while members are still open", async () => {
+    const { adapter, calls } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
+    await wrapUpLandedChunk(target, adapter, { sourceBranch: "main", provenance: "sandbar" });
+    expect(calls.some((c) => c.op === "retargetPullRequests")).toBe(false);
+  });
+
   it("drops `land` even when the comment above it failed", async () => {
     // The three pull-request writes are not a transaction, and the label is
     // the one that matters: left on an OPEN pull request it is a landing the
