@@ -109,8 +109,9 @@
 //
 // With `config.janitor` (#205), git must be 2.38 or newer, for the
 // `merge-tree --write-tree` that refreshes a rolling branch. Whether or not
-// it is on, every local `sandbar/janitor-*` branch is deleted: origin owns
-// the rolling branches, and a local one is only a dead run's scratch.
+// it is on, every local `sandbar/janitor-*` branch is deleted with its clone:
+// origin owns the rolling branches, and a local one is only a dead run's
+// scratch.
 //
 // The git fetch is an answer too, not a best-effort warmup. Its failure joins
 // the ordinary invariant report and retains git's stderr (#81, absorbed by
@@ -1215,20 +1216,22 @@ export function classifySandbarBranches(
   return { unmerged, discarded, resumable, parked, closed };
 }
 
-// A local `sandbar/janitor-*` branch is a run's scratch (#205): origin owns
-// each rolling branch, and every janitor run sets its local copy to that
-// run's base. Deleting them leaves their clones to the stale-clone sweep.
-export async function deleteLocalJanitorBranches(
-  repoDir: string,
+// A local `sandbar/janitor-*` branch and its clone are a dead run's scratch
+// (#205): origin owns each rolling branch, every janitor run sets its local
+// copy to that run's base, and only a DONE run's push carries work out of it.
+// So the clone is removed outright, not reclaimed, before its branch.
+export async function deleteJanitorScratch(
+  layout: RepoLayout,
 ): Promise<readonly string[]> {
   const { stdout } = await exec("git", [
-    "for-each-ref", "--format=%(refname)", LOCAL_JANITOR_BRANCH_REFGLOB,
-  ], { cwd: repoDir });
-  const refs = stdout.split("\n").filter((ref) => ref !== "");
-  for (const ref of refs) {
-    await exec("git", ["update-ref", "-d", ref], { cwd: repoDir });
+    "for-each-ref", "--format=%(refname:lstrip=2)", LOCAL_JANITOR_BRANCH_REFGLOB,
+  ], { cwd: layout.repoDir });
+  const branches = stdout.split("\n").filter((branch) => branch !== "");
+  for (const branch of branches) {
+    await rm(worktreePathFor(layout.worktreesDir, branch), { recursive: true, force: true });
+    await exec("git", ["update-ref", "-d", `refs/heads/${branch}`], { cwd: layout.repoDir });
   }
-  return refs.map((ref) => ref.replace(/^refs\/heads\//, ""));
+  return branches;
 }
 
 // The janitor refreshes its rolling branch with `git merge-tree --write-tree`
@@ -1733,12 +1736,12 @@ export async function runPreflightAfterReachability(
     ? await resolveReadyLabelPolicy(cfg.developers)
     : null;
 
-  const scratch = await deleteLocalJanitorBranches(cfg.layout.repoDir);
+  const scratch = await deleteJanitorScratch(cfg.layout);
   if (scratch.length > 0) {
     await cfg.onEvent({
       kind: "preflight",
       action: "cleaned",
-      detail: `Cleaned up local janitor branches: ${scratch.join(", ")}`,
+      detail: `Cleaned up local janitor branches and their clones: ${scratch.join(", ")}`,
     });
   }
   const deleted = await deleteMergedSandbarBranches({
