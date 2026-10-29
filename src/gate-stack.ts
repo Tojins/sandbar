@@ -291,7 +291,7 @@ export const LOG_READ_TIMEOUT_MS = 15_000;
 // bringup failure, which is a false verdict about a branch.
 //
 // They are bounded at all because the alternative is #26's hang reached through
-// #26's own fix: `reapTimedOutStep` tolerates a failed remove on the grounds
+// #26's own fix: `reapKilledStep` tolerates a failed remove on the grounds
 // that the next gate run force-removes the container before recreating it, so
 // an unbounded remove THERE would hang the run forever holding the lock.
 export const CONTROL_TIMEOUT_MS = 120_000;
@@ -1533,7 +1533,7 @@ export async function bringUpContainers(
     // usual case but the pod was just recreated, so any leftover is stale.
     //
     // Bounded, and that bound is load-bearing rather than tidy: this remove is
-    // the fallback `reapTimedOutStep` leans on when its own remove fails, so an
+    // the fallback `reapKilledStep` leans on when its own remove fails, so an
     // unbounded one here would turn a red gate into a run that hangs forever.
     //
     // `CONTAINER_RM_ARGS`' `-v` is LIVE here and nowhere else in this module
@@ -2625,7 +2625,7 @@ async function reapKilledStep(
   await ctx.recordTeardown(container);
   const removed = await boundedPodman(
     CONTAINER_RM_ARGS(containerName),
-    LOG_READ_TIMEOUT_MS,
+    CONTROL_TIMEOUT_MS,
   );
   if (!boundedOk(removed)) {
     // Not fatal, and not silent. The verdict is already decided, and the next
