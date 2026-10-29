@@ -455,7 +455,10 @@ describe.each(installations)("$project installation units", (row) => {
     expect(unit).not.toContain("git pull");
     expect(unit).not.toContain("npm ci");
     expect(values(unit, "WorkingDirectory")).toEqual([`/home/${row.user}/${row.project}`]);
-    expect(values(unit, "EnvironmentFile")).toEqual([`/home/${row.user}/installation/sandbar.env`]);
+    expect(values(unit, "EnvironmentFile")).toEqual([
+      `/home/${row.user}/installation/sandbar.env`,
+      `-/home/${row.user}/installation/secrets.env`,
+    ]);
     // No pre-start action at all: the driver is built by the play, not by a
     // daemon start (#146).
     expect(values(unit, "ExecStartPre")).toEqual([]);
@@ -959,11 +962,17 @@ describe("multi-installation role orchestration", () => {
     expect(prepareTasks).not.toContain("driver-install.mjs");
   });
 
-  it("asserts both required files exist and names the failed path", () => {
-    const stat = taskNamed(installationTasks, "Check the required installation files");
-    expect(stat).toContain("- sandbar.config.mjs\n    - sandbar.env");
-    const refusal = taskNamed(installationTasks, "Stop unless every required installation file exists");
-    expect(refusal).toContain("- item.stat.exists");
+  it("asserts both required files exist, an optional secrets.env's owner and mode, and names the failed path", () => {
+    const stat = taskNamed(installationTasks, "Check the installation files");
+    expect(stat).toContain("- sandbar.config.mjs\n    - sandbar.env\n    - secrets.env");
+    const refusal = taskNamed(installationTasks, "Stop unless every installation file is in place");
+    expect(refusal).toContain("- item.stat.exists or item.item == 'secrets.env'");
+    expect(refusal).toContain(
+      "- not item.stat.exists or item.item == 'sandbar.config.mjs' or (item.stat.pw_name | default('')) == sandbar_user",
+    );
+    expect(refusal).toContain(
+      "- not item.stat.exists or item.item == 'sandbar.config.mjs' or (item.stat.mode | default('')) == sandbar_secret_mode",
+    );
     expect(refusal).toContain("{{ sandbar_installation_dir }}/{{ item.item }}:");
   });
 
@@ -1532,6 +1541,10 @@ describe("committed installation data and configs", () => {
     const readerPorts = installations.map((entry) => entry.reader_port);
     expect(new Set([...daemonPorts, ...readerPorts]).size)
       .toBe(daemonPorts.length + readerPorts.length);
+  });
+
+  it.each([...installationConfigs])("never reads secrets.env into the %s config (#252)", (_name, config) => {
+    expect(config).not.toContain("secrets.env");
   });
 
   it.each([

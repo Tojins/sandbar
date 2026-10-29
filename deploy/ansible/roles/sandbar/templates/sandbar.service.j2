@@ -8,6 +8,9 @@ After=podman.socket
 Type=simple
 WorkingDirectory={{ sandbar_checkout }}
 EnvironmentFile={{ sandbar_installation_dir }}/sandbar.env
+# secretEnv values (#252): the daemon reads them, and no config may readEnvFile
+# this file, so they never enter config.env. The "-" keeps it optional.
+EnvironmentFile=-{{ sandbar_installation_dir }}/secrets.env
 # No pre-start action: the driver is the box's build of main, flipped into place
 # by the converging play (#146), so a start never installs anything.
 ExecStart=/usr/bin/node {{ sandbar_driver_current }}/dist/cli.js --config {{ sandbar_installation_dir }}/sandbar.config.mjs

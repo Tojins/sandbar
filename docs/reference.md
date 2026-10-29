@@ -543,6 +543,11 @@ the names:
 
 - Only on an `inGate: false` container, which must not use `mountWorktree` or
   worktree-relative `mounts` (absolute host paths are fine).
+- On a box, the values live in `~/installation/secrets.env` (mode `0600`,
+  see [`secrets.env.example`](../secrets.env.example)), which the daemon unit
+  reads into sandbar's environment and no config reads. Never put such a key
+  in `sandbar.env`: a `secretEnv` key that is also a `config.env` key would
+  reach every agent sandbox, so sandbar refuses to start with one.
 - A key that is unset or empty fails that container's start, like a failed
   readiness check.
 - The values are masked in the start-up errors sandbar reports. What the
