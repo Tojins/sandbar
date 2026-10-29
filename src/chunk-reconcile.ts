@@ -40,8 +40,8 @@
 // working out what to reconcile answers "nothing to reconcile" — the state it
 // could not read is still there next cycle, and refusing to start a run over a
 // repair that is not urgent would be the wrong trade. The land listing here
-// is the exception: it decides which chunks are frozen (#243), so it throws. Once a target is chosen,
-// its writes are the wrap-up's, and what they could not finish comes back as
+// is the exception: it decides which chunks are frozen (#243), so it throws.
+// Once a target is chosen, its writes are the wrap-up's, and what they could not finish comes back as
 // residue the orchestrator reports.
 //
 // RESIDUE IS REPORTED, AND — unlike the merge phase's own landings — NOT

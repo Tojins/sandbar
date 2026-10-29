@@ -584,6 +584,23 @@ describe("runMergerWithAdapter — chunk refresh (#174)", () => {
     expect(summary.failedChunkRefreshes).toEqual([]);
   });
 
+  it("throws, without merging, when a stacked chunk's base cannot be read (#243)", async () => {
+    const base = "sandbar/chunk-10-base";
+    const request = { ...refresh(), base };
+    const { adapter, calls } = makeAdapter({
+      chunkRefs: {
+        [request.branch]: { kind: "present", ref: `refs/remotes/origin/${request.branch}` },
+        [base]: { kind: "unreadable", detail: "network down" },
+      },
+    });
+
+    await expect(
+      runMergerWithAdapter([], adapter, undefined, undefined, refreshing(request)),
+    ).rejects.toThrow(`origin's copy of ${base} could not be read: network down`);
+    expect(calls.merges).toEqual([]);
+    expect(calls.chunkPushes).toEqual([]);
+  });
+
   it("parks every triggering dependent when conflict resolution abandons", async () => {
     const request = refresh([400, 401]);
     const later = {

@@ -548,8 +548,10 @@ export function resolvePlan(
   const tipOf = (target: ChunkTarget): string =>
     target.base !== undefined && !chunkMembers.has(target.branch) ? target.base : target.branch;
   const stacksOn = (chunk: Chunk | undefined, root: number): boolean => {
-    for (let c = chunk; c !== undefined; c = c.base === null ? undefined : chunkByBranch.get(c.base)) {
+    const seen = new Set<Chunk>();
+    for (let c = chunk; c !== undefined && !seen.has(c); c = c.base === null ? undefined : chunkByBranch.get(c.base)) {
       if (c.root === root) return true;
+      seen.add(c);
     }
     return false;
   };
