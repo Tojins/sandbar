@@ -1460,27 +1460,27 @@ export async function wrapUpLandedJanitor(
   log: (line: string) => void | Promise<void>,
 ): Promise<JanitorWrapup> {
   const residue: string[] = [];
+  // One forge write, true when it worked; a failure is residue, not a throw.
+  const write = async (residueLine: string, act: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await act();
+      return true;
+    } catch (err) {
+      residue.push(`${residueLine}: ${detail(err)}`);
+      return false;
+    }
+  };
   if (target.pullRequest > 0) {
-    try {
-      await removeLandLabels(adapter, target);
-    } catch (err) {
-      residue.push(`the pull request #${target.pullRequest} for ${target.branch} kept its landing label: ${detail(err)}`);
-    }
-    try {
-      const outcome = await adapter.closePullRequest(target.pullRequest);
-      await log(`janitor ${target.branch}: PR #${target.pullRequest} ${outcome}`);
-    } catch (err) {
-      residue.push(`the pull request #${target.pullRequest} for ${target.branch} could not be closed: ${detail(err)}`);
-    }
+    const pr = `the pull request #${target.pullRequest} for ${target.branch}`;
+    await write(`${pr} kept its landing label`, () => removeLandLabels(adapter, target));
+    await write(`${pr} could not be closed`, () => adapter.closePullRequest(target.pullRequest));
   }
-  try {
-    await adapter.deleteJanitorBranch(target.branch);
-  } catch (err) {
-    residue.push(`${target.branch} is kept on origin so the next run retries its delete: ${detail(err)}`);
-    return { target, branchDeleted: false, residue };
-  }
-  await log(`janitor ${target.branch}: deleted on origin`);
-  return { target, branchDeleted: true, residue };
+  const branchDeleted = await write(
+    `${target.branch} is kept on origin so the next run retries its delete`,
+    () => adapter.deleteJanitorBranch(target.branch),
+  );
+  if (branchDeleted) await log(`janitor ${target.branch}: deleted on origin`);
+  return { target, branchDeleted, residue };
 }
 
 export const JANITOR_RESIDUE_BANNER = (args: {

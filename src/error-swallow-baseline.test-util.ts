@@ -21,7 +21,9 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // failure removes the snapshot, reports a removal that failed in turn, and
   // rethrows the original.
   "agent-sandbox.ts": 17,
-  "chunk-land.ts": 6,
+  // The seventh is the janitor wrap-up's (#205): a failed forge write is
+  // residue the caller reports, as each of the chunk wrap-up's is.
+  "chunk-land.ts": 7,
   "cleanup.ts": 1,
   "cli.ts": 2,
   "containers.ts": 1,

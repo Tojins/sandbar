@@ -344,7 +344,7 @@ import {
   type OriginLockHandle,
   type OriginLockRenewal,
 } from "./origin-lock.js";
-import { JANITOR_BRANCH_INFIX, type RunScope, runScope } from "./naming.js";
+import { type RunScope, janitorTaskFromStackId, runScope } from "./naming.js";
 import { type JanitorRunDeps, dueJanitorTask, realJanitorForge, runJanitor, settleJanitorRun } from "./janitor.js";
 import {
   MergerError,
@@ -2050,10 +2050,10 @@ export async function run(
 
   // Whom a landing's gate-2 or resolve attempt is about: an issue by number, or
   // the idle task a `janitor-<task>` id names (#205).
-  const landingSubject = (id: string): EventSubject =>
-    id.startsWith(JANITOR_BRANCH_INFIX)
-      ? { janitor: id.slice(JANITOR_BRANCH_INFIX.length) }
-      : { issue: Number(id) };
+  const landingSubject = (id: string): EventSubject => {
+    const task = janitorTaskFromStackId(id);
+    return task === null ? { issue: Number(id) } : { janitor: task };
+  };
 
   const recordLandingOutcome = async (outcome: MergerOutcome): Promise<void> => {
     switch (outcome.kind) {
@@ -2776,7 +2776,8 @@ export async function run(
       const mergerLandRequests = selectedLandRequests.filter(
         (request) => !heldOffSource.has(request.branch),
       );
-      if (landRequests.length > 0 || janitorLandRequests.length > 0) {
+      const landRequested = landRequests.length > 0 || janitorLandRequests.length > 0;
+      if (landRequested) {
         const named = [...landRequests, ...janitorLandRequests]
           .map((r) => `${r.branch} (PR #${r.pullRequest})`)
           .join(", ");
@@ -2867,7 +2868,7 @@ export async function run(
         hasPendingTerminals: pool.hasPendingTerminals,
         hasCandidates: pool.hasUnstarted(resolution.plan),
         hasRetries: pool.hasRetries,
-        hasLandRequests: landRequests.length > 0 || janitorLandRequests.length > 0,
+        hasLandRequests: landRequested,
         hasChunkRefreshRequests: plannedRefreshes.length > 0,
         hasCapacity: activeSlots() < config.maxParallelIssues,
         noProgressSinceLanding: pool.noProgressSinceLanding,
@@ -2887,8 +2888,7 @@ export async function run(
         sourceChangedOnPoll || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || reconciliation.janitors.length > 0 ||
-        landRequests.length > 0 || janitorLandRequests.length > 0 ||
-        landRequestSelection.refusals.length > 0 ||
+        landRequested || landRequestSelection.refusals.length > 0 ||
         heldTerminals.length > 0 ||
         chunkRefreshes.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land" ||
@@ -3088,10 +3088,7 @@ export async function run(
       // source branch needs the same worktree, the same gate-2 stack and the
       // same resolve loop a DONE branch does, and a cycle can have one without
       // the other.
-      if (
-        completedIssues.length > 0 || landRequests.length > 0 ||
-        janitorLandRequests.length > 0 || chunkRefreshes.length > 0
-      ) {
+      if (completedIssues.length > 0 || landRequested || chunkRefreshes.length > 0) {
         const landingImages = currentImages;
         // The merger runs in a dedicated worktree detached at
         // origin/<sourceBranch>, NOT a checkout anyone stands in — so the
@@ -3583,8 +3580,7 @@ export async function run(
         landedNow,
       );
       nextPlanTrigger =
-        landRequests.length > 0 || janitorLandRequests.length > 0 ||
-          chunkRefreshes.length > 0 || landedNow > 0
+        landRequested || chunkRefreshes.length > 0 || landedNow > 0
         ? "landing-finished"
         : "terminal-finalized";
       if (sourceLandings > 0) {

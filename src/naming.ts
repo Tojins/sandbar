@@ -478,6 +478,11 @@ export function janitorStackId(task: string): string {
   return `${JANITOR_BRANCH_INFIX}${task}`;
 }
 
+// `janitor-<task>` -> task, or null for an issue number or `merger`.
+export function janitorTaskFromStackId(id: string): string | null {
+  return id.startsWith(JANITOR_BRANCH_INFIX) ? id.slice(JANITOR_BRANCH_INFIX.length) : null;
+}
+
 export const LOCAL_JANITOR_BRANCH_REFGLOB = `refs/heads/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*`;
 
 export const ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS: readonly string[] = [

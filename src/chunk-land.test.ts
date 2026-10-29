@@ -794,10 +794,7 @@ describe("janitor branches on the source branch (#205)", () => {
       "closePullRequest 9",
       "deleteJanitorBranch sandbar/janitor-docs",
     ]);
-    expect(log).toEqual([
-      "janitor sandbar/janitor-docs: PR #9 closed",
-      "janitor sandbar/janitor-docs: deleted on origin",
-    ]);
+    expect(log).toEqual(["janitor sandbar/janitor-docs: deleted on origin"]);
   });
 
   it("still deletes the branch when the pull request writes fail, and reports them as residue", async () => {
