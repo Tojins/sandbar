@@ -25,12 +25,15 @@
 //
 // Only a DONE run reaches origin. Right before its push the runner checks the
 // abort flag and re-reads the pull request, discarding the run when it now
-// carries `land` (a reviewed PR never grows), then pushes the cache's branch
-// with `--force-with-lease` on the origin tip seen at the start (none: the
-// branch must not exist). A lease that no longer holds means a human pushed:
-// the run is discarded and the next one continues from their tip. Then the
-// draft pull request is ensured. Every other ending leaves origin untouched,
-// a rejected run's commits included; a rejection writes nothing to GitHub.
+// carries `land` (a reviewed PR never grows) or, for a run that continued an
+// open one, when that one is no longer the latest open PR: merged, closed or
+// replaced, it was retired, and pushing would revive it (`retired`). Then it
+// pushes the cache's branch with `--force-with-lease` on the origin tip seen
+// at the start (none: the branch must not exist). A lease that no longer
+// holds means a human pushed: the run is discarded and the next one continues
+// from their tip. Then the draft pull request is ensured. Every other ending
+// leaves origin untouched, a rejected run's commits included; a rejection
+// writes nothing to GitHub.
 //
 // Exactly two failures are caught, around the loop: `InnerLoopAbortedError`,
 // the pre-emption, is `pre-empted`; a provider's quota or credential error is
@@ -433,7 +436,9 @@ export async function runJanitor(deps: JanitorRunDeps): Promise<JanitorOutcome |
     scope,
     source: janitorSourceText(task.prompt, sourceText, sourceBranch),
   }));
-  const result = ended.outcome === "committed" ? await publish(deps, branch, rolling.lease, ended) : ended;
+  const result = ended.outcome === "committed"
+    ? await publish(deps, branch, rolling.lease, rolling.kind === "continue" ? latestPr : null, ended)
+    : ended;
 
   if (visitCounts(result.outcome)) {
     ledger = ledgerWithVisit(ledger, scope, deps.now(), new Set(scopeUnits(candidates, task.unit).keys()));
@@ -491,16 +496,21 @@ async function runLoop(
 }
 
 // A committed run's one write to origin, and its draft pull request.
+// `continued` is the open pull request the run continued, if any.
 async function publish(
   deps: JanitorRunDeps,
   branch: string,
   lease: string,
+  continued: LatestPullRequest | null,
   committed: Extract<RunEnding, { readonly outcome: "committed" }>,
 ): Promise<RunEnding> {
   if (deps.signal.aborted) return { outcome: "pre-empted" };
   const latest = await deps.forge.latestPullRequest(branch);
   if (latest?.state === "OPEN" && latest.labels.includes(LAND_LABEL)) {
     return { outcome: "pre-empted", cause: "land" };
+  }
+  if (continued !== null && (latest?.number !== continued.number || latest.state !== "OPEN")) {
+    return { outcome: "pre-empted", cause: "retired" };
   }
   await deps.beforeOriginWrite();
   if (!(await pushRollingBranch(deps.layout.repoDir, branch, lease))) {

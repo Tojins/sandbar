@@ -373,7 +373,8 @@ which has a draft pull request titled `Idle task: <name>`. A run with nothing
 to change, or one that is rejected, changes nothing on GitHub. An admissible
 issue that needs the slot pre-empts a running task, and so does a `land`
 label on its pull request; while the label is there the task does not run.
-Once that pull request is merged or closed, the next run starts a fresh branch.
+Once that pull request is merged or closed, the next run starts a fresh branch,
+and a run under way is discarded.
 When the source branch moves, a run first merges it into the rolling branch;
 on a conflict the task waits, with one comment on its pull request, until
 either branch moves. Which files were visited is kept in

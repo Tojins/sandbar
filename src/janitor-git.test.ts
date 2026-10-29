@@ -318,6 +318,27 @@ describe("the janitor's git (#205)", () => {
       expect(await originTip()).toBe(before);
     });
 
+    it.each([
+      ["closed", { number: 9, state: "CLOSED", labels: [] }],
+      ["merged", { number: 9, state: "MERGED", labels: [] }],
+      ["replaced", { number: 10, state: "OPEN", labels: [] }],
+    ] as const)("discards a continuing run whose pull request was %s meanwhile", async (_, retired) => {
+      prs = [{ number: 9, state: "OPEN", labels: [] }];
+      await commit(branch, { "src/a.ts": "earlier run\n" });
+      await fetchCache();
+      const before = await originTip();
+      const retiring = loopEnding(DONE);
+      const outcome = await run((async (...args: Parameters<typeof runInnerLoop>) => {
+        const terminal = await retiring(...args);
+        prs = [retired];
+        return terminal;
+      }) as typeof runInnerLoop);
+      expect(outcome).toBe("pre-empted");
+      expect(ended()).toMatchObject({ outcome: "pre-empted", cause: "retired" });
+      expect(await originTip()).toBe(before);
+      expect(ensured).toEqual([]);
+    });
+
     it("continues an open PR's branch through a driver merge of the moved source", async () => {
       prs = [{ number: 9, state: "OPEN", labels: [] }];
       const earlier = await commit(branch, { "src/a.ts": "earlier run\n" });
