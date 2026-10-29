@@ -113,7 +113,8 @@
 // are three disjoint places and an issue is in at most one of them. A fourth,
 // `#held`, is a pending terminal the caller may not land yet — a DONE
 // auto-lane issue while the landing window is closed (#244,
-// `landing-window.ts`), or a DONE member of a frozen chunk (#243). It stays
+// `landing-window.ts`), a DONE member of a frozen chunk (#243), or one a push
+// race kept from landing (#253, put back by `hold`). It stays
 // ongoing but is not pending, so it neither wakes a landing pass nor joins one
 // until a `holdTerminals` call no longer selects it. The pool
 // keeps one removable completion waiter; a poll winner withdraws it, so a hung
@@ -463,6 +464,12 @@ export class ContinuousPool<T, R> {
       ...released,
     );
     return held;
+  }
+
+  // Returns terminals a landing pass took but did not land to the pool, held
+  // until the next `holdTerminals` call no longer selects them.
+  hold(events: readonly SettledIssue<T, R>[]): void {
+    this.#held.push(...events);
   }
 
   takeLandingBatch(): readonly SettledIssue<T, R>[] {

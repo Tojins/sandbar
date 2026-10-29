@@ -75,6 +75,20 @@ describe("continuous pool", () => {
     expect(pool.takeLandingBatch().map((event) => event.issue.id)).toEqual(["2"]);
   });
 
+  it("holds a terminal a landing pass took back until the next holdTerminals (#253)", async () => {
+    const pool = new ContinuousPool<Issue, string>(1, (i) => i.id);
+    const [admitted] = pool.admit([issue("1")]);
+    pool.start(admitted!, Promise.resolve("raced"));
+    await pool.waitForFreedSlot();
+
+    pool.hold(pool.takeLandingBatch());
+    expect(pool.hasPendingTerminals).toBe(false);
+    expect(pool.ongoingCount).toBe(1);
+
+    expect(pool.holdTerminals(() => false)).toEqual([]);
+    expect(pool.takeLandingBatch().map((event) => event.issue.id)).toEqual(["1"]);
+  });
+
   it("serves a silent-noop retry ahead of candidates", () => {
     const pool = new ContinuousPool<Issue, string>(1, (i) => i.id);
     const target = pool.admit([issue("4")])[0]!;

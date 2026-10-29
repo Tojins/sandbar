@@ -371,7 +371,7 @@ const resolution = (plan: ReturnType<typeof issue>[]) => ({
 const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
   merged, chunkLanded: [], skipped: [], pushed, unclosed: [], mergedChunks: [],
   mergedJanitors: [], deferredChunks: [], skippedChunks: [], refreshedChunks: [],
-  failedChunkRefreshes: [],
+  failedChunkRefreshes: [], raceDeferral: null,
 });
 const chunkWrapup = (
   keptIssueBranches: readonly string[] = [],
@@ -2867,6 +2867,74 @@ describe("run quota orchestration (#109)", () => {
       },
     ]);
     expect(eventsOf("gate")[1]).not.toHaveProperty("queuedMs");
+  });
+
+  it("holds a push race's deferred issues in the pool for the next landing pass (#253)", async () => {
+    const done = issue("1");
+    seams.plan
+      .mockResolvedValueOnce(resolution([done]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({
+      type: "DONE", commits: [{ sha: "abc" }], specGaps: [],
+    });
+    seams.merger.mockImplementation(async (
+      batch: ReturnType<typeof issue>[],
+      _adapter: unknown,
+      _log: unknown,
+      _gateLog: unknown,
+      options: RunMergerOptions,
+    ) => {
+      if (seams.merger.mock.calls.length > 1) return summary(batch);
+      await options.observations.onGate("1", { ok: false, durationMs: 9, steps: [] }, "origin");
+      return {
+        ...summary([], false),
+        raceDeferral: { reason: "it moved again before the re-merged result was pushed", issues: batch },
+      };
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(seams.innerLoop).toHaveBeenCalledOnce();
+    expect(seams.merger.mock.calls.map((call) => call[0])).toEqual([[done], [done]]);
+    expect(eventsOf("notice")).toContainEqual({
+      kind: "notice",
+      message: "#1 is done and waits for the next landing pass: main moved during " +
+        "this one and it moved again before the re-merged result was pushed.",
+    });
+    expect(eventsOf("gate")).toEqual([{
+      kind: "gate", gate: "gate-2", issue: 1, title: "Issue 1", sync: "origin",
+      ok: false, durationMs: 9, steps: {},
+    }]);
+    expect(eventsOf("complaint")).not.toContainEqual(
+      expect.objectContaining({ message: expect.stringContaining("Merger halted") }),
+    );
+  });
+
+  it("a push race deferral with no issues holds nothing and says nothing (#253)", async () => {
+    seams.plan
+      .mockResolvedValueOnce(resolution([issue("1")]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({
+      type: "DONE", commits: [{ sha: "abc" }], specGaps: [],
+    });
+    seams.merger.mockResolvedValue({
+      ...summary([], false),
+      raceDeferral: { reason: "it moved again before the re-merged result was pushed", issues: [] },
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(eventsOf("notice")).not.toContainEqual(
+      expect.objectContaining({ message: expect.stringContaining("next landing pass") }),
+    );
+    expect(eventsOf("complaint")).not.toContainEqual(
+      expect.objectContaining({ message: expect.stringContaining("Merger halted") }),
+    );
   });
 
   it("continues after a rejected member and admits its successor", async () => {

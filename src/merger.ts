@@ -146,7 +146,8 @@
 // label left on would retry that same failing merge every cycle forever). A
 // push race, a forge verdict that never arrived, a `gh` that could not be
 // reached, an ORIGIN that could not be reached — none of those is a fact about
-// the chunk, so the label stays and the next run tries again. A SERVER REFUSAL
+// the chunk, so the label stays and a later pass (after a race, the next
+// one) tries again. A SERVER REFUSAL
 // is different: Git reports it as `[remote rejected]`, proving origin was
 // reached and refused this content or ref. On a Phase-A chunk push that fact is
 // attributable to the group just composed, so every member in the atomic push
@@ -209,10 +210,19 @@
 //              the cycle's merge commits, so a moved origin is always
 //              divergent. The re-merge's version collision is settled by
 //              `resolveVersionCollision` (#68) — origin's tip bumped `version`
-//              too, so it conflicts by construction. Any other conflict, a red
-//              re-gate or a second race is a hard fail; nothing has landed in
-//              any of them. A red re-gate's output goes to the gate sink
-//              under `origin-sync`, its only trace once the run halts.
+//              too, so it conflicts by construction. The re-gate is one
+//              gate-2 observation of the whole composition, keyed by the
+//              source pass's last merged unit and marked `sync: "origin"`; a
+//              red one's output goes to the gate sink under `origin-sync`.
+//              Any other conflict, a failed install, a red re-gate or a
+//              second race is no halt (#253): a direct push to the source
+//              branch mid-landing is routine. Nothing lands, no tracker
+//              write is made for the source pass, and its issues come back
+//              in `raceDeferral` for run.ts to hold for the next landing
+//              pass, which re-merges each onto the new tip through
+//              `attemptMerge` and its budgets; a requested chunk keeps `land`
+//              for that pass too. A sync that fails without conflicts, and a
+//              `fatal` or `refused` push, are not races and still halt.
 //
 //   verified — nothing reaches the source branch until the FORGE agrees. The
 //              merge result goes to a scratch integration branch, sandbar polls
@@ -1101,7 +1111,8 @@ export type ChunkLanding = {
 // repeated until a human re-applies the label — see `chunk-land.ts` on the
 // label as a queue, and note what is NOT in this list: a push race, a forge
 // verdict that never arrived and a `gh` that could not be reached all leave
-// the label alone and halt, because nothing about the chunk is wrong.
+// the label alone, because nothing about the chunk is wrong; the last two
+// halt, and a push race defers to the next landing pass (#253).
 export type ChunkLandSkipReason =
   | "branch-missing"
   | "conflict"
@@ -1166,6 +1177,22 @@ export type MergerSummary = {
   // carry the exact handoff comment Phase 4 applies to every dependent.
   readonly refreshedChunks: readonly ChunkRefresh[];
   readonly failedChunkRefreshes: readonly ChunkRefreshFailure[];
+  // Set when origin moved under the source push and the merge result could
+  // not follow it (#253): nothing landed, and `issues`, the source pass's
+  // merged issues, go to the next landing pass with no tracker write made.
+  readonly raceDeferral: RaceDeferral | null;
+};
+
+// What a push race's one follow-up ends in: the second push's verdict, or
+// the reason the merge result could not follow origin's new tip.
+type FollowedPush =
+  | Exclude<PushResult, { readonly kind: "race" }>
+  | { readonly kind: "deferred"; readonly reason: string };
+
+export type RaceDeferral = {
+  // Why the merge result could not follow origin's new tip, as a clause.
+  readonly reason: string;
+  readonly issues: readonly IssueRef[];
 };
 
 export type MergerOutcome =
@@ -1187,9 +1214,12 @@ export type MergerObservations = {
     key: string,
     step: "merge" | "gate-2" | "push",
   ) => void | Promise<void>;
+  // `sync` marks a push race's re-gate of the whole composition on origin's
+  // new tip (#253), keyed by the source pass's last merged unit.
   readonly onGate: (
     key: string,
     gate: Awaited<ReturnType<MergerAdapter["runGate"]>>,
+    sync?: "origin",
   ) => void | Promise<void>;
   // Emitted at the durable outcome boundary. durationMs is the corresponding
   // merge unit (or request decision), never elapsed time for the whole batch.
@@ -1827,6 +1857,7 @@ export async function runMergerWithAdapter(
     deferredChunks: [...deferredChunks],
     refreshedChunks: [...refreshedChunks],
     failedChunkRefreshes: [...failedChunkRefreshes],
+    raceDeferral: null,
   });
 
   const asHalt =
@@ -2537,6 +2568,7 @@ export async function runMergerWithAdapter(
       deferredChunks,
       refreshedChunks: [...refreshedChunks],
       failedChunkRefreshes: [...failedChunkRefreshes],
+      raceDeferral: null,
     };
   };
 
@@ -2851,25 +2883,32 @@ export async function runMergerWithAdapter(
     return finishWithChunkRefreshes(await settleLanding());
   }
 
-  await emit(`push attempt 1`);
-  let push = await adapter.push();
-  if (push.kind === "race") {
+  // A push race (#253): origin moved under the push, so the merge result
+  // follows its new tip once — re-merged, re-installed, re-gated, re-pushed.
+  // Whatever stops it is a deferral of the source pass, not a halt.
+  const followMovedOrigin = async (): Promise<FollowedPush> => {
     await emit(`push race; merging origin's new tip`);
     const sync = await adapter.syncWithSource();
     // Origin's new tip bumped `version` too, so this merge conflicts in the
     // version files by construction (#68), same as a merge between branches.
-    // Anything the mechanical resolution cannot finish stays a hard fail.
     const settled =
       !sync.ok &&
       sync.conflicted === true &&
       (await resolveVersionCollision(adapter, emit, "origin")) === "completed";
     if (!sync.ok && !settled) {
-      if (sync.conflicted === true) await adapter.abortMerge();
+      if (sync.conflicted === true) {
+        await adapter.abortMerge();
+        return {
+          kind: "deferred",
+          reason: `merging its new tip conflicted beyond the version files (${sync.reason})`,
+        };
+      }
+      // A fetch or merge that failed without conflicts says nothing about
+      // origin having moved.
       await emit(`sync with origin failed: ${sync.reason}`);
       throw new MergerError(
         "Push to origin source branch was rejected (origin moved during the cycle) and " +
-          `merging its new tip into the merge result failed: ${sync.reason}. ` +
-          "Nothing landed; the next run re-merges onto the new tip.",
+          `merging its new tip into the merge result failed: ${sync.reason}. Nothing landed.`,
         nothingLanded(),
       );
     }
@@ -2879,37 +2918,55 @@ export async function runMergerWithAdapter(
     // has to be about the commit that is pushed (D1, #27).
     const inst = await adapter.npmInstall();
     await emit(`install synced ok=${inst.ok}`);
-    const g = inst.ok ? await adapter.runGate() : null;
-    if (g !== null) await emit(`gate-2 synced ${formatGateFields(g)}`);
-    // Filed under its own key: the issue keys' files hold the gates of the
-    // merges this one composes, and a red here is the only evidence the halt
-    // below leaves.
-    if (g !== null && !g.ok && onGateRed) {
-      await onGateRed(ORIGIN_SYNC_GATE_KEY, {
+    if (!inst.ok) {
+      return {
+        kind: "deferred",
+        reason: "npm install failed on the merge result re-merged onto it",
+      };
+    }
+    const g = await adapter.runGate();
+    await emit(`gate-2 synced ${formatGateFields(g)}`);
+    const lastLand = landsOnHead.at(-1);
+    const lastUnit = merged.at(-1)?.id ??
+      (lastLand ? landUnitKey(lastLand) : null);
+    if (lastUnit === null) {
+      throw new Error("push race with no merged issue or land unit on HEAD");
+    }
+    await opts.observations.onGate(lastUnit, g, "origin");
+    if (!g.ok) {
+      // Filed under its own key: the issue keys' files hold the gates of the
+      // merges this one composes.
+      await onGateRed?.(ORIGIN_SYNC_GATE_KEY, {
         stdout: g.stdout,
         stderr: g.stderr,
         failedStep: g.failedStep,
         exitCode: g.exitCode,
         containerLogs: g.containerLogs,
       });
-    }
-    if (g === null || !g.ok) {
-      throw new MergerError(
-        "Push to origin source branch was rejected (origin moved during the cycle), and " +
-          `the merge result re-merged onto its new tip ${g === null ? "failed npm install" : `is gate-red (merger-gate-${ORIGIN_SYNC_GATE_KEY}.*)`}. ` +
-          "Nothing landed; the next run re-merges onto the new tip.",
-        nothingLanded(),
-      );
+      return {
+        kind: "deferred",
+        reason: `the merge result re-merged onto it is gate-red (merger-gate-${ORIGIN_SYNC_GATE_KEY}.*)`,
+      };
     }
     await emit(`push attempt 2`);
-    push = await adapter.push();
-    if (push.kind === "race") {
-      await emit(`push race retry exhausted`);
-      throw new MergerError(
-        "Push race retry exhausted: still rejected after re-merging origin's new tip and re-pushing.",
-        nothingLanded(),
-      );
-    }
+    const push = await adapter.push();
+    return push.kind === "race"
+      ? { kind: "deferred", reason: "it moved again before the re-merged result was pushed" }
+      : push;
+  };
+
+  await emit(`push attempt 1`);
+  const first = await adapter.push();
+  const push = first.kind === "race" ? await followMovedOrigin() : first;
+  if (push.kind === "deferred") {
+    await emit(
+      `push race: ${push.reason}; deferring ${merged.length} issue(s) ` +
+        `to the next landing pass`,
+    );
+    return finishWithChunkRefreshes({
+      ...nothingLanded(),
+      raceDeferral: { reason: push.reason, issues: [...merged] },
+    });
   }
   if (push.kind === "fatal") {
     await emit(`push fatal: ${push.reason}`);

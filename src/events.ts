@@ -70,6 +70,10 @@
 // report only (#82). NEEDS-STACK-CHANGE is the terminal a stack edit beyond
 // env parks with.
 //
+// A gate-2 `gate` with `sync: "origin"` is a push race's re-gate of the whole
+// composition on origin's new tip (#253): one event per gate run, attributed
+// to the source pass's last merged unit. A new optional field, so no bump.
+//
 // `deploy` (#198, `deploy-watch.ts`) is one verdict on a run of the
 // consumer's deploy workflow — green, red or unverified — with the issues
 // whose merges it shipped and, for a red, the bug issue it was filed as;
@@ -538,7 +542,7 @@ export type EventInput =
   | (EventSubject & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits?: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & { readonly kind: "gate-stack"; readonly gate: "gate-1"; readonly tipBlob: string | null; readonly classification: StackClassification["kind"]; readonly containers?: readonly string[] })
   | (EventSubject & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
-  | (EventSubject & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
+  | (EventSubject & { readonly kind: "gate"; readonly gate: "gate-2"; readonly sync?: "origin"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventSubject & ContainerResources & QualityReviewEvent & { readonly kind: "quality-review"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & StandaloneStepEvent & { readonly kind: "standalone-step" })
   | (EventSubject & ContainerResources & QualityPassEvent & { readonly kind: "quality-pass"; readonly attempt: number; readonly round: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
