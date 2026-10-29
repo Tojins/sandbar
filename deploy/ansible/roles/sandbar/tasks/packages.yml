@@ -67,3 +67,16 @@
     fail_msg: >-
       `node --version` answered {{ sandbar_node_version.stdout }}; the
       NodeSource package did not win over the distribution's.
+
+- name: Read the installed podman version
+  ansible.builtin.command: podman version --format {% raw %}'{{.Client.Version}}'{% endraw %}
+  register: sandbar_podman_version
+  changed_when: false
+
+- name: Refuse a podman older than {{ sandbar_podman_min_version }}
+  ansible.builtin.assert:
+    that: sandbar_podman_version.stdout is version(sandbar_podman_min_version, '>=')
+    fail_msg: >-
+      `podman version` answered {{ sandbar_podman_version.stdout }}; the gate
+      image's remote client is pinned for a host podman of at least
+      {{ sandbar_podman_min_version }}.

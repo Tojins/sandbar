@@ -84,6 +84,10 @@ sandbar_git_email: ""
 sandbar_operator_ssh_keys: []
 
 sandbar_node_major: 24
+# The oldest host podman the play accepts (#254), as README.md requires. The
+# gate image pins its remote client to a release no newer than this
+# (Containerfile), so a host at the floor is never behind its own client.
+sandbar_podman_min_version: "5.7.0"
 sandbar_swap_size_mb: 4096
 
 # The database volume agents copy prod-scale databases on (#200): XFS with
