@@ -33,7 +33,9 @@
 // its output appended to `db-copy-hook.log` in the sandbox's log dir; a
 // failing hook keeps the copy up and is recorded, never retried. The slot
 // holds the copy from the swap on, so a hook or log write that throws leaves
-// it for the teardown's `align(null)` to drop and release. Events
+// it for the teardown's `align(null)` to drop and release; an abort's
+// teardown that drops it while the hook runs leaves the acquisition
+// answering `none`, with no hook log and no `created` (#251). Events
 // carry reason codes only, never server output (decision 13).
 
 import { readdir, realpath, rm, stat, writeFile, appendFile, mkdir } from "node:fs/promises";
@@ -322,6 +324,9 @@ export function createDbCopySlot(opts: {
     if (opts.hooks.length > 0) {
       const hookElapsed = startTimer();
       const ran = await opts.sandbox.runHooks(opts.hooks);
+      // An abort's teardown can drop the copy while its hook runs (#251);
+      // that drop recorded and released it.
+      if (held?.lease !== lease) return { kind: "none" };
       hookMs = hookElapsed();
       held = { lease, status: { ...held.status, hook: ran.ok ? "ok" : "failed" } };
       await appendFile(
