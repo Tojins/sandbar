@@ -164,10 +164,14 @@ onCleanup(() => note("record-finalized"));
 onCleanup(() => note("origin-released"));
 onCleanup(async () => {
   note("cleanup-awaiting-renewal");
+  // The renewal answers only once the drain is waiting on it. On a timer
+  // started at boot it could answer first under a loaded suite, before the
+  // SIGINT landed, and the lease-loss callback then owned the drain and
+  // awaited itself.
+  setTimeout(() => resolveRenewal(), 50);
   await renewalInFlight;
   note("renewal-finished");
 });
-setTimeout(() => resolveRenewal(), 100);
 
 console.log("ready");
 setInterval(() => {}, 1000);
