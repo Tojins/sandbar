@@ -178,7 +178,10 @@
 // never waits for it. `await-scenario-writer` is the join before the
 // verifier. A terminal before the join aborts it in `runInnerLoop`'s finally.
 // The action that starts it has no visible phase, so it emits no `phase`
-// event; attempt 1's follows at once.
+// event; attempt 1's follows at once. A replay case's `pinnedScenarios`
+// (#240) take the task's place, settled `written` from the start: no writer
+// runs, and the verifier workspace and every round are as if it had written
+// that set.
 // With `config.databaseCopies` (#201) each sandbox cycle has a slot of the
 // run's copies (`createDbCopySlot`) for the target sibling of its stack in
 // effect at setup. Before every action the runner aligns it to that action's
@@ -342,6 +345,7 @@ import {
 import { type RunScope, sandboxNetworkNameFor, scopedResourcePrefix } from "./naming.js";
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
+import type { ScenarioSet } from "./scenario-parser.js";
 import { type ScenarioWriterTask, createScenarioWriterTask } from "./scenario-writer-run.js";
 import {
   parseAdjudicationRuling,
@@ -769,6 +773,9 @@ export type InnerLoopConfig = {
   readonly condenseAboveChars: number | null;
   // The scenario writer (#203): once per admission, beside attempt 1.
   readonly scenarioWriter: boolean;
+  // A replay case's frozen set (#240), run by the verifier in place of a
+  // written one; a run never sets it.
+  readonly pinnedScenarios?: ScenarioSet;
   readonly scenarioWriterAgent: AgentProviderName;
   readonly scenarioWriterModelId: string;
   // The verifier's scenario runner (#180), beside the white-box review.
@@ -993,7 +1000,9 @@ export async function runInnerLoop(
       await opts.onEvent(event);
     },
   };
-  const scenarioWriter = config.scenarioWriter
+  const scenarioWriter = config.pinnedScenarios !== undefined
+    ? pinnedScenarioWriter(config.pinnedScenarios)
+    : config.scenarioWriter
     ? createScenarioWriterTask({
         issue,
         config,
@@ -1043,6 +1052,18 @@ export async function runInnerLoop(
       await opts.onEvent({ kind: "phase", ...subject, attempt: phaseAttempt, phases: [] });
     }
   }
+}
+
+// A writer already settled on a set: the machine never starts it and runs
+// the set in every verifier round.
+function pinnedScenarioWriter(set: ScenarioSet): ScenarioWriterTask {
+  const outcome = { kind: "written", set } as const;
+  return {
+    status: () => ({ kind: "settled", outcome }),
+    start: () => undefined,
+    settled: async () => outcome,
+    abort: async () => undefined,
+  };
 }
 
 function toTerminal(outcome: SandboxCycleOutcome): Terminal {
