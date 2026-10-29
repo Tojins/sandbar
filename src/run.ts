@@ -355,7 +355,6 @@ import {
   CHUNK_LAND_WINDOW_PR_COMMENT,
   CHUNK_RESIDUE_RETIRED_BANNER,
   type ChunkLandTarget,
-  chunkLandDeferral,
   chunkForgeWrites,
   chunkResidue,
   describeChunkBranchDrift,
@@ -2618,15 +2617,12 @@ export async function run(
       // work: the merger never sees them.
       const heldOffSource = new Set<string>();
       for (const request of selectedLandRequests) {
-        // Nothing has grown a requested chunk: it is frozen, and its members
-        // are held off it below (#243).
-        const deferral = chunkLandDeferral(request, []);
         if (request.base !== null) {
           // Its branch carries the base's commits, which land with the base.
           landDeferrals.set(request.branch, `stacked on ${request.base} · lands once it lands`);
           heldOffSource.add(request.branch);
-        } else if (deferral !== null) {
-          landDeferrals.set(request.branch, deferredLandReason(deferral.members));
+        } else if (request.rework.length > 0) {
+          landDeferrals.set(request.branch, deferredLandReason(request.rework));
         } else if (closedUntil !== null && waitsForLandingWindow(request)) {
           landDeferrals.set(request.branch, `landing window closed · lands after ${closedUntil}`);
           heldOffSource.add(request.branch);
