@@ -111,8 +111,9 @@
 // A chunk whose pull request carries `land` or `land-hotfix` is FROZEN: a
 // reviewer approved it as it stands, and it may wait a weekend for the landing
 // window. Joining it would land work nobody reviewed, so it takes no member:
-// what is on its branch or in flight to it is all it has, it pulls in no fresh
-// blocker group, and its own root, while not on the branch, is held
+// what is on its branch is all it has (work already in flight to it is held
+// off it by `run.ts` until it lands or `land` comes off), it pulls in no
+// fresh blocker group, and its own root, while not on the branch, is held
 // (`frozen`).
 //
 // What would have joined it STACKS on it instead: a fresh group whose

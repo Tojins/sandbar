@@ -147,9 +147,10 @@ export type SchedulerSnapshot = {
 
 // A chunk refresh exists to make a future admission safe (#174), or to keep a
 // stacked chunk on its base's tip for review (#243). Once an admission-closing
-// condition is latched, neither is drain work. Keep this decision beside the scheduler precedence so
-// run.ts cannot accidentally attach refreshes to a landing pass that the drain
-// started for already-committed terminals or a human `land` request.
+// condition is latched, neither is drain work. Keep this decision beside the
+// scheduler precedence so run.ts cannot accidentally attach refreshes to a
+// landing pass that the drain started for already-committed terminals or a
+// human `land` request.
 export function chunkRefreshRequestsAreRunnable(
   state: Pick<
     SchedulerSnapshot,

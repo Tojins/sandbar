@@ -75,11 +75,11 @@
 // which queues a base-into-chunk refresh the same way (`ChunkRefresh.base`).
 // Unlike #174's, that refresh is queued for a stacked chunk on origin even
 // with no member waiting, for the base moves only once `land` is off it and
-// the stacked chunk is reviewed as built on what it has now. And when the branch a member seeds from is a FROZEN base lacking the source
-// tip, nothing may refresh it, so the member is held until the base lands. A
-// frozen chunk takes no rework either: it is held (`frozen`) and keeps the
-// chunk's `land` waiting, since only a human can say which of the two they
-// meant.
+// the stacked chunk is reviewed as built on what it has now. And when the
+// branch a member seeds from is a FROZEN base lacking the source tip, nothing
+// may refresh it, so the member is held until the base lands. A frozen chunk
+// takes no rework either: it is held (`frozen`) and keeps the chunk's `land`
+// waiting, since only a human can say which of the two they meant.
 //
 // CROSS-CHUNK dependencies stay strict, and nothing about them is relaxed. An
 // blocker present on a DIFFERENT chunk branch has not reached the source
