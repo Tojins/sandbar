@@ -203,6 +203,7 @@ import {
   installCleanupTraps,
   onCleanup,
   registerDisposable,
+  reportCleanupNotice,
   runCleanup,
   setCleanupReporter,
 } from "./cleanup.js";
@@ -1660,8 +1661,9 @@ export async function run(
     beforeOriginWrite: renewOriginLease,
   });
   // A run records its own ending (#82). One that throws is recorded by
-  // `settleJanitorRun` as `failed` and the daemon carries on: `runsPerDay`
-  // bounds a repeat. Its end wakes the scheduler, which owns what happens next.
+  // `settleJanitorRun` as `failed` and rethrown; the catch below hands it to
+  // cleanup's fatal path without awaiting the drain, which awaits `settled`.
+  // Its end wakes the scheduler, which owns what happens next.
   const startJanitor = (task: JanitorTask, loop: JanitorRunDeps["loop"]): void => {
     const controller = new AbortController();
     const timer = startTimer();
@@ -1689,8 +1691,12 @@ export async function run(
         janitor.run = null;
         pool.wakeExternal();
       },
+    }).catch((err: unknown) => {
+      void reportCleanupNotice("internal-failure", `Janitor task '${task.name}' failed`, err)
+        .then(runCleanup)
+        .finally(() => process.exit(1));
     });
-    janitor.run = { task: task.name, controller, settled };
+    janitor.run ={ task: task.name, controller, settled };
   };
   let providerExitPending: TerminalExit | null = null;
   let storageLow: LowStorage | null = null;
