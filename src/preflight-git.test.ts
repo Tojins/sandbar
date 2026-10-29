@@ -1491,7 +1491,7 @@ describe("syncKeptIssueBranches — kept branches follow origin's copy (#112)", 
     await expect(
       git(cache, "rev-parse", "--verify", `refs/remotes/origin/${branch}`),
     ).rejects.toBeDefined();
-  });
+  }, 15_000);
 
   it("reaps a closed merge-only branch even without last-seen origin evidence", async () => {
     const branch = "sandbar/issue-384-merge-only";

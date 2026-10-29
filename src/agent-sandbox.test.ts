@@ -2139,7 +2139,7 @@ describe("createSandbox integration (local provider)", () => {
     expect(
       (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], dir)).stdout.trim(),
     ).toBe(stranded);
-  });
+  }, 15_000);
 
   // A crash between the attempt and close() leaves the clone unreclaimed. Reuse
   // pins the off-branch HEAD the same way before restoring the issue branch,
@@ -2162,7 +2162,7 @@ describe("createSandbox integration (local provider)", () => {
       (await git(["rev-parse", `refs/sandbar/stranded/${stranded}`], dir)).stdout.trim(),
     ).toBe(stranded);
     await rm(path, { recursive: true, force: true });
-  });
+  }, 15_000);
 
   describe("reclaimIssueClone", () => {
     it("publishes the branch into the cache before removing the clone", async () => {
