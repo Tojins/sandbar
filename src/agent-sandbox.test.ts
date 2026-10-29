@@ -112,7 +112,9 @@ const processExited = async (pid: number): Promise<boolean> => {
   try {
     stat = await readFile(`/proc/${pid}/stat`, "utf8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+    // ESRCH: the process was reaped between the open and the read.
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ESRCH") return true;
     throw e;
   }
   return stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
