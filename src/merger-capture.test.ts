@@ -518,6 +518,39 @@ describe("resolve provider invocation (#74)", () => {
     expect(argv.join(" ")).not.toContain("CONTAINER_HOST");
   });
 
+  // Config validation refuses a runner key colliding with config.env, but not
+  // one colliding with HOME, the git identity or the egress env.
+  it("lets no gate env key override what the driver sets for the agent", () => {
+    const owned = {
+      HOME: "/tmp",
+      CODEX_HOME: "/home/agent/.codex",
+      ANTHROPIC_API_KEY: "real-credential",
+      GIT_AUTHOR_NAME: "sandbar-bot",
+      GIT_AUTHOR_EMAIL: "bot@example.test",
+      GIT_COMMITTER_NAME: "sandbar-bot",
+      GIT_COMMITTER_EMAIL: "bot@example.test",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    };
+    const { env } = buildResolveRunArgv({
+      container: "resolve-1",
+      cwd: "/merger-worktree",
+      gateAttachments: {
+        env: Object.fromEntries(Object.keys(owned).map((key) => [key, "gate-value"])),
+        mounts: [],
+      },
+      codexAuthMount: {
+        hostPath: "/state/codex-auth.json",
+        sandboxPath: "/home/agent/.codex/auth.json",
+      },
+      image: "sandbox-image",
+      credentials: { ANTHROPIC_API_KEY: "real-credential" },
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      egress: { network: "sandbar-w1-net-resolve-1", dnsArgs: [] },
+    });
+    expect(env).toMatchObject(owned);
+  });
+
   // #202: an allowlisted attempt sits on its own internal network behind its
   // proxy, with Claude Code's nonessential traffic off.
   it("puts an allowlisted resolve container on its egress network", () => {

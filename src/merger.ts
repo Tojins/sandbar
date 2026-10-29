@@ -3199,6 +3199,11 @@ export function buildResolveRunArgv(args: {
   // names none of them: `withRuntimeEnv` writes this record to the file it adds
   // to the argv it runs (#154, runtime.ts).
   const env: Record<string, string> = {
+    // Literal, as in the implementer sandbox: an empty value stays empty. It
+    // comes first so no step-runner key overrides what the driver sets below;
+    // config validation refuses only a collision with config.env, and a
+    // runner may well set HOME.
+    ...args.gateAttachments.env,
     HOME: "/tmp",
     ...(args.codexAuthMount === undefined
       ? {}
@@ -3210,8 +3215,6 @@ export function buildResolveRunArgv(args: {
         (entry): entry is [string, string] => Boolean(entry[1]),
       ),
     ),
-    // Literal, as in the implementer sandbox: an empty value stays empty.
-    ...args.gateAttachments.env,
     GIT_AUTHOR_NAME: args.botName,
     GIT_AUTHOR_EMAIL: args.botEmail,
     GIT_COMMITTER_NAME: args.botName,
