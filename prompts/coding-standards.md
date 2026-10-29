@@ -30,7 +30,8 @@ polishing it. A standards fix changes structure, never behavior.
    condition to a value, checked explicitly) or **cleans up** (logs the
    secondary failure with its cause, then rethrows the original). Everything
    else propagates; blanket defaults, log-and-continue and empty catches are
-   banned.
+   banned. A supervised run's boundary (the pool's issue loop, a janitor run)
+   classifies any rejection as the run's recorded failed outcome.
 6. **Non-atomic orchestration.** Multi-step state updates that can leave
    partial state on failure; independent async work serialized for no reason.
 7. **Wrong or idle prose.** Headers, docs and prompts are part of the change:
