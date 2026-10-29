@@ -656,8 +656,8 @@ export const CHUNK_LANDED_PR_COMMENT = (args: {
   return lines.join("\n");
 };
 
-// The opening and closing paragraphs of a landed pull request's comment, a
-// chunk's or a janitor task's.
+// The opening paragraph of a landed pull request's comment, a chunk's or a
+// janitor task's; `landedPullRequestTail` closes it.
 const landedLead = (branch: string, sourceBranch: string, provenance: LandingProvenance): string =>
   provenance === "sandbar"
     ? `${BOT_COMMENT_PREFIX} landed. \`${branch}\` was merged into ` +
