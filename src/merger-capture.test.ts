@@ -582,6 +582,7 @@ describe("resolve provider invocation (#74)", () => {
     });
     process.env["PATH"] = `${root}:${originalPath ?? ""}`;
 
+    let gateAttachmentReads = 0;
     const codexAuthMount = {
       hostPath: join(root, "codex-auth.json"),
       sandboxPath: "/var/lib/codex/auth.json",
@@ -603,7 +604,13 @@ describe("resolve provider invocation (#74)", () => {
         codexAuthMount,
         beforeOriginWrite: async () => undefined,
         runStackGate: async () => { throw new Error("not called"); },
-        gateAttachments: async () => NO_GATE_ATTACHMENTS,
+        gateAttachments: async () => {
+          gateAttachmentReads += 1;
+          return {
+            env: { CONTAINER_HOST: "unix:///run/podman/podman.sock" },
+            mounts: [{ hostPath: "fixtures/seed", containerPath: "/seed", mode: "ro" }],
+          };
+        },
       });
 
       const run = await adapter.runResolveAgent("resolve this", 1);
@@ -628,6 +635,13 @@ describe("resolve provider invocation (#74)", () => {
       ]);
       expect(run).toMatchObject({ peakMemoryBytes: 2048 });
       expect(run).not.toHaveProperty("oomKilled");
+      // #255: the stack's attachments reach the resolve container, rooted
+      // against the merger worktree, and are read again for each attempt.
+      expect(runCall.args).toContain(`${root}/fixtures/seed:/seed:ro,z`);
+      expect(runCall.containerEnv["CONTAINER_HOST"]).toBe("unix:///run/podman/podman.sock");
+      expect(gateAttachmentReads).toBe(1);
+      await adapter.runResolveAgent("resolve this", 2);
+      expect(gateAttachmentReads).toBe(2);
     } finally {
       if (originalPath === undefined) delete process.env["PATH"];
       else process.env["PATH"] = originalPath;
