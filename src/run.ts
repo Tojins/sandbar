@@ -3096,6 +3096,7 @@ export async function run(
               return gateSemaphore.run(() => stack.runGate());
             },
             stackChange: async () => stackChangeOf((await headStack()).classification),
+            gateAttachments: async () => (await headStack()).attachments,
             beforeOriginWrite: renewOriginLease,
             ...egressOf(egressContext, runRecord.emit, "resolve"),
           });

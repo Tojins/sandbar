@@ -288,6 +288,13 @@
 // the resource lifetime is held. Once the agent exec has been captured, that
 // result remains authoritative; reaping, measurement and removal failures are
 // cleanup complaints rather than landing decisions.
+// The container inherits the gate attachments the implementer sandbox does
+// (#166, #255): the env and mounts of the containers gate-2's steps run in,
+// from the stack in effect at the merger worktree's HEAD (stack-source.ts),
+// with relative mounts rooted against that worktree by gate-stack.ts's
+// `mountSpec`. Where the step runner mounts the podman socket, that is what
+// lets a gate-red resolve agent run the podman tests it is fixing. A socket
+// mount is no network path, so egress below is unchanged.
 // Behind an egress allowlist (#202, `RealAdapterDeps.egress`) each attempt's
 // container runs on its own internal network (`resolve-<n>`) with its own
 // proxy as its only DNS, started before the container and stopped, with its
@@ -426,7 +433,7 @@ import {
   summarizeGateFailure,
 } from "./gate.js";
 import type { AdmittedGate } from "./gate-semaphore.js";
-import { CONTAINER_RM_ARGS, CONTROL_TIMEOUT_MS } from "./gate-stack.js";
+import { CONTAINER_RM_ARGS, CONTROL_TIMEOUT_MS, mountSpec } from "./gate-stack.js";
 import {
   readContainerResources,
   systemContainerResourceDeps,
@@ -477,7 +484,7 @@ import {
   formatResolveAttempts,
   runResolveLoop,
 } from "./resolve-loop.js";
-import type { PromptExtension } from "./config.js";
+import type { PromptExtension, SandboxGateAttachments } from "./config.js";
 import { type StackChange, renderLandingStackChange } from "./stack-change.js";
 import {
   type Clock as TimingClock,
@@ -2962,6 +2969,9 @@ export type RealAdapterDeps = {
   readonly runStackGate: () => Promise<AdmittedGate<GateResult>>;
   // `MergerAdapter.stackChange`, read from the same stack source.
   readonly stackChange: () => Promise<StackChange | null>;
+  // What that same stack's step containers hand the resolve container
+  // (#255), as they hand the implementer sandbox (#166).
+  readonly gateAttachments: () => Promise<SandboxGateAttachments>;
   // Daemon ownership barrier (#139), immediately before each origin/tracker
   // write.
   readonly beforeOriginWrite: OriginWriteBarrier;
@@ -3174,7 +3184,8 @@ export function parseCapturedAgentRun(
 export function buildResolveRunArgv(args: {
   readonly container: string;
   readonly cwd: string;
-  readonly extraMounts: readonly string[];
+  // Rooted against `cwd`, the merger worktree, as the gate roots them (#255).
+  readonly gateAttachments: SandboxGateAttachments;
   readonly codexAuthMount?: CodexAuthMount;
   readonly image: string;
   readonly credentials: Readonly<Record<string, string | undefined>>;
@@ -3199,6 +3210,8 @@ export function buildResolveRunArgv(args: {
         (entry): entry is [string, string] => Boolean(entry[1]),
       ),
     ),
+    // Literal, as in the implementer sandbox: an empty value stays empty.
+    ...args.gateAttachments.env,
     GIT_AUTHOR_NAME: args.botName,
     GIT_AUTHOR_EMAIL: args.botEmail,
     GIT_COMMITTER_NAME: args.botName,
@@ -3226,7 +3239,7 @@ export function buildResolveRunArgv(args: {
       : ["--network", args.egress.network, ...args.egress.dnsArgs]),
     "-v",
     `${args.cwd}:/workspace`,
-    ...args.extraMounts.flatMap((mount) => ["-v", `${mount}:${mount}`]),
+    ...args.gateAttachments.mounts.flatMap((mount) => ["-v", mountSpec(args.cwd, mount)]),
     ...(args.codexAuthMount === undefined ? [] : [
       "-v",
       `${args.codexAuthMount.hostPath}:${args.codexAuthMount.sandboxPath}:z`,
@@ -3508,7 +3521,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       const runInvocation = buildResolveRunArgv({
         container,
         cwd,
-        extraMounts: [],
+        gateAttachments: await deps.gateAttachments(),
         ...(deps.mergerAgent === "codex" && deps.codexAuthMount !== undefined
           ? { codexAuthMount: deps.codexAuthMount }
           : {}),
