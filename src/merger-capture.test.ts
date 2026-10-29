@@ -36,6 +36,8 @@ import type { BoundedRuntimeResult } from "./runtime.js";
 
 const opts = (timeoutMs = 30_000) => ({ container: "c-under-test", timeoutMs });
 
+const NO_GATE_ATTACHMENTS = { env: {}, mounts: [] };
+
 // `node -e` rather than a shell, so the same script runs whatever /bin/sh is.
 const node = (script: string): [string, string[]] => [
   process.execPath,
@@ -425,7 +427,7 @@ describe("resolve provider invocation (#74)", () => {
       const { argv, env } = buildResolveRunArgv({
         container: "resolve-1",
         cwd: "/worktree",
-        extraMounts: ["/git-common"],
+        gateAttachments: NO_GATE_ATTACHMENTS,
         image: "sandbox-image",
         credentials,
         botName: "sandbar-bot",
@@ -446,7 +448,6 @@ describe("resolve provider invocation (#74)", () => {
         "sandbox-image",
         "infinity",
       ]);
-      expect(argv).toContain("/git-common:/git-common");
     },
   );
 
@@ -454,7 +455,7 @@ describe("resolve provider invocation (#74)", () => {
     const { argv, env } = buildResolveRunArgv({
       container: "resolve-1",
       cwd: "/worktree",
-      extraMounts: ["/git-common"],
+      gateAttachments: NO_GATE_ATTACHMENTS,
       image: "sandbox-image",
       credentials: {},
       botName: "sandbar-bot",
@@ -464,7 +465,7 @@ describe("resolve provider invocation (#74)", () => {
       "run", "-d", "--image-volume=ignore",
       "--name", "resolve-1",
       "--userns=keep-id:uid=1000,gid=1000", "--user", "1000:1000",
-      "-v", "/worktree:/workspace", "-v", "/git-common:/git-common",
+      "-v", "/worktree:/workspace",
       "-w", "/workspace",
       "--label", "sandbar=true",
       "--entrypoint", "sleep", "sandbox-image", "infinity",
@@ -488,13 +489,75 @@ describe("resolve provider invocation (#74)", () => {
     ]);
   });
 
+  // #255: a gate-red resolve agent runs the failing step's suite where the
+  // gate ran it, so a relative mount is rooted against the merger worktree.
+  it("gives the resolve container the gate's step-runner env and mounts", () => {
+    const { argv, env } = buildResolveRunArgv({
+      container: "resolve-1",
+      cwd: "/merger-worktree",
+      gateAttachments: {
+        env: { CONTAINER_HOST: "unix:///run/podman/podman.sock", EMPTY: "" },
+        mounts: [
+          { hostPath: "/run/user/1001/podman/podman.sock", containerPath: "/run/podman/podman.sock", mode: "rw" },
+          { hostPath: "fixtures/seed", containerPath: "/seed", mode: "ro" },
+        ],
+      },
+      image: "sandbox-image",
+      credentials: {},
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+    });
+    const mounts = argv.flatMap((arg, i) => argv[i - 1] === "-v" ? [arg] : []);
+    expect(mounts).toEqual([
+      "/merger-worktree:/workspace",
+      "/run/user/1001/podman/podman.sock:/run/podman/podman.sock:rw,z",
+      "/merger-worktree/fixtures/seed:/seed:ro,z",
+    ]);
+    expect(env["CONTAINER_HOST"]).toBe("unix:///run/podman/podman.sock");
+    expect(env["EMPTY"]).toBe("");
+    expect(argv.join(" ")).not.toContain("CONTAINER_HOST");
+  });
+
+  // Config validation refuses a runner key colliding with config.env, but not
+  // one colliding with HOME, the git identity or the egress env.
+  it("lets no gate env key override what the driver sets for the agent", () => {
+    const owned = {
+      HOME: "/tmp",
+      CODEX_HOME: "/home/agent/.codex",
+      ANTHROPIC_API_KEY: "real-credential",
+      GIT_AUTHOR_NAME: "sandbar-bot",
+      GIT_AUTHOR_EMAIL: "bot@example.test",
+      GIT_COMMITTER_NAME: "sandbar-bot",
+      GIT_COMMITTER_EMAIL: "bot@example.test",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    };
+    const { env } = buildResolveRunArgv({
+      container: "resolve-1",
+      cwd: "/merger-worktree",
+      gateAttachments: {
+        env: Object.fromEntries(Object.keys(owned).map((key) => [key, "gate-value"])),
+        mounts: [],
+      },
+      codexAuthMount: {
+        hostPath: "/state/codex-auth.json",
+        sandboxPath: "/home/agent/.codex/auth.json",
+      },
+      image: "sandbox-image",
+      credentials: { ANTHROPIC_API_KEY: "real-credential" },
+      botName: "sandbar-bot",
+      botEmail: "bot@example.test",
+      egress: { network: "sandbar-w1-net-resolve-1", dnsArgs: [] },
+    });
+    expect(env).toMatchObject(owned);
+  });
+
   // #202: an allowlisted attempt sits on its own internal network behind its
   // proxy, with Claude Code's nonessential traffic off.
   it("puts an allowlisted resolve container on its egress network", () => {
     const { argv, env } = buildResolveRunArgv({
       container: "resolve-1",
       cwd: "/worktree",
-      extraMounts: [],
+      gateAttachments: NO_GATE_ATTACHMENTS,
       image: "sandbox-image",
       credentials: {},
       botName: "sandbar-bot",
@@ -516,7 +579,7 @@ describe("resolve provider invocation (#74)", () => {
     const { argv, env } = buildResolveRunArgv({
       container: "resolve-1",
       cwd: "/worktree",
-      extraMounts: [],
+      gateAttachments: NO_GATE_ATTACHMENTS,
       codexAuthMount: {
         hostPath: "/state/codex-auth.json",
         sandboxPath: "/home/agent/.codex/auth.json",
@@ -552,6 +615,7 @@ describe("resolve provider invocation (#74)", () => {
     });
     process.env["PATH"] = `${root}:${originalPath ?? ""}`;
 
+    let gateAttachmentReads = 0;
     const codexAuthMount = {
       hostPath: join(root, "codex-auth.json"),
       sandboxPath: "/var/lib/codex/auth.json",
@@ -573,6 +637,13 @@ describe("resolve provider invocation (#74)", () => {
         codexAuthMount,
         beforeOriginWrite: async () => undefined,
         runStackGate: async () => { throw new Error("not called"); },
+        gateAttachments: async () => {
+          gateAttachmentReads += 1;
+          return {
+            env: { CONTAINER_HOST: "unix:///run/podman/podman.sock" },
+            mounts: [{ hostPath: "fixtures/seed", containerPath: "/seed", mode: "ro" }],
+          };
+        },
       });
 
       const run = await adapter.runResolveAgent("resolve this", 1);
@@ -597,6 +668,13 @@ describe("resolve provider invocation (#74)", () => {
       ]);
       expect(run).toMatchObject({ peakMemoryBytes: 2048 });
       expect(run).not.toHaveProperty("oomKilled");
+      // #255: the stack's attachments reach the resolve container, rooted
+      // against the merger worktree, and are read again for each attempt.
+      expect(runCall.args).toContain(`${root}/fixtures/seed:/seed:ro,z`);
+      expect(runCall.containerEnv["CONTAINER_HOST"]).toBe("unix:///run/podman/podman.sock");
+      expect(gateAttachmentReads).toBe(1);
+      await adapter.runResolveAgent("resolve this", 2);
+      expect(gateAttachmentReads).toBe(2);
     } finally {
       if (originalPath === undefined) delete process.env["PATH"];
       else process.env["PATH"] = originalPath;
@@ -668,6 +746,7 @@ describe("resolve provider invocation (#74)", () => {
         sandboxImage: "sandbox-image",
         env: () => undefined,
         runStackGate: async () => { throw new Error("not called"); },
+        gateAttachments: async () => NO_GATE_ATTACHMENTS,
         podman,
         captureResolveProcess,
       });
@@ -721,6 +800,7 @@ describe("resolve provider invocation (#74)", () => {
       sandboxImage: "sandbox-image",
       env: () => undefined,
       runStackGate: async () => { throw new Error("not called"); },
+      gateAttachments: async () => NO_GATE_ATTACHMENTS,
       podman,
       captureResolveProcess,
     });
@@ -796,6 +876,7 @@ describe("resolve provider invocation (#74)", () => {
       sandboxImage: "sandbox-image",
       env: () => undefined,
       runStackGate: async () => { throw new Error("not called"); },
+      gateAttachments: async () => NO_GATE_ATTACHMENTS,
       podman,
       captureResolveProcess,
       registerResolveCleanup,
@@ -893,6 +974,7 @@ describe("resolve provider invocation (#74)", () => {
       sandboxImage: "missing-image",
       env: () => undefined,
       runStackGate: async () => { throw new Error("not called"); },
+      gateAttachments: async () => NO_GATE_ATTACHMENTS,
       podman,
       captureResolveProcess,
     });
@@ -966,6 +1048,7 @@ describe("resolve provider invocation (#74)", () => {
       sandboxImage: "sandbox-image",
       env: () => undefined,
       runStackGate: async () => { throw new Error("not called"); },
+      gateAttachments: async () => NO_GATE_ATTACHMENTS,
       podman,
       captureResolveProcess,
     });
@@ -1028,6 +1111,7 @@ describe("resolve provider invocation (#74)", () => {
       sandboxImage: "sandbox-image",
       env: () => undefined,
       runStackGate: async () => { throw new Error("not called"); },
+      gateAttachments: async () => NO_GATE_ATTACHMENTS,
       podman,
       captureResolveProcess,
     });
@@ -1099,6 +1183,7 @@ describe("resolve provider invocation (#74)", () => {
       sandboxImage: "sandbox-image",
       env: () => undefined,
       runStackGate: async () => { throw new Error("not called"); },
+      gateAttachments: async () => NO_GATE_ATTACHMENTS,
       podman,
       captureResolveProcess,
       egress: { start },

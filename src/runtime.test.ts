@@ -109,7 +109,10 @@ const BUILDERS: ReadonlyArray<readonly [string, () => RuntimeInvocation]> = [
       buildResolveRunArgv({
         container: "resolve-1",
         cwd: "/worktree",
-        extraMounts: ["/git-common"],
+        gateAttachments: {
+          env: { CONTAINER_HOST: "unix:///run/podman/podman.sock", DB_PASSWORD: SECRET },
+          mounts: [{ hostPath: "/run/podman.sock", containerPath: "/run/podman/podman.sock", mode: "rw" }],
+        },
         codexAuthMount: {
           hostPath: "/state/codex-auth.json",
           sandboxPath: "/home/agent/.codex/auth.json",

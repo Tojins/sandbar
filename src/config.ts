@@ -681,11 +681,13 @@ export type ResolvedGateStack = {
   readonly steps: readonly ResolvedGateStep[];
 };
 
-// The gate-runner declarations an implementer sandbox inherits (#166). Only
+// The gate-runner declarations an implementer sandbox (#166) and a landing's
+// resolve container (#255) inherit. Only
 // containers a step actually enters contribute: a sidecar's env and mounts
 // describe that sidecar, while a runner's describe the environment in which
 // the consumer expects its suite to execute. The host paths stay worktree-
-// relative here and are rooted against the issue worktree at sandbox creation.
+// relative here and are rooted against the issue worktree at sandbox creation,
+// and against the merger worktree for a resolve attempt.
 export type SandboxGateAttachments = {
   readonly env: Readonly<Record<string, string>>;
   readonly mounts: readonly ResolvedStackMount[];
