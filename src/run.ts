@@ -95,6 +95,12 @@
 //                              issue in the pool until it opens. A chunk
 //                              stacked on another (#243) keeps its `land`
 //                              waiting until that one has landed.
+//                              When origin moves under the source push and
+//                              the merge result cannot follow it (#253), the
+//                              pass lands nothing and does not halt: its
+//                              issues are held in the pool with a notice, and
+//                              the next landing pass re-merges each onto the
+//                              new tip.
 //   Finalise:                  Per-issue branch lifecycle — push/delete the
 //                              local branch, post a bot-prefixed comment,
 //                              flip labels. Runs in TWO passes (#30): 4a
@@ -3192,7 +3198,7 @@ export async function run(
                     reason: landingTogetherReason(request),
                   }));
                 },
-                onGate: (key, gate) => {
+                onGate: (key, gate, sync) => {
                   const issueId = key.startsWith("chunk-refresh-")
                     ? key.slice("chunk-refresh-".length)
                     : key.startsWith("chunk-")
@@ -3204,6 +3210,7 @@ export async function run(
                     gate: "gate-2",
                     issue: Number(issueId),
                     ...(planned ? { title: planned.title } : {}),
+                    ...(sync === undefined ? {} : { sync }),
                     ok: gate.ok,
                     durationMs: gate.durationMs,
                     ...(gate.queuedMs === undefined ? {} : { queuedMs: gate.queuedMs }),
@@ -3391,8 +3398,26 @@ export async function run(
             pool.retry(input.issue as PlannedIssue);
           }
         }
+        // A push race the merge result could not follow (#253) landed none of
+        // them: they wait in the pool, and the next landing pass re-merges
+        // each onto origin's new tip.
+        const raceDeferred = new Set<string>();
+        if (mergerOutcome.raceDeferral) {
+          const { reason, issues } = mergerOutcome.raceDeferral;
+          for (const issue of issues) {
+            raceDeferred.add(issue.id);
+            await runRecord.emit({
+              kind: "notice",
+              message: `#${issue.id} is done and waits for the next landing pass: ` +
+                `${config.sourceBranch} moved during this one and ${reason}.`,
+            });
+          }
+          pool.hold(settled.filter((event) => raceDeferred.has(event.issue.id)));
+        }
         for (const issue of completedIssues) {
-          if (!freshAttempts.has(issue.id)) pool.finishTerminal(issue);
+          if (!freshAttempts.has(issue.id) && !raceDeferred.has(issue.id)) {
+            pool.finishTerminal(issue);
+          }
         }
       }
 

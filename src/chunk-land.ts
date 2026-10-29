@@ -69,9 +69,10 @@
 //                     tree nobody has touched.
 //   * this cycle    — a push race, a forge verdict that never arrived, a `gh`
 //                     or an origin that could not be reached. Nothing about
-//                     the chunk is wrong, so `land` STAYS and the next run
-//                     tries again. The sharp edge there is that an unreachable
-//                     origin LOOKS like the abandoned bucket's neighbour, a
+//                     the chunk is wrong, so `land` STAYS and a later pass
+//                     tries again (after a race, the next one, #253). The
+//                     sharp edge there is that an unreachable origin LOOKS
+//                     like the abandoned bucket's neighbour, a
 //                     chunk branch that is genuinely gone; `merger.ts` buys
 //                     the difference with a second question rather than
 //                     guessing (`ChunkRefLookup`), because guessing wrong

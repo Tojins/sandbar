@@ -1350,9 +1350,9 @@ describe("runMergerWithAdapter — the version collision is resolved without an 
       otherConflicts: ["src/merger.ts"],
     });
 
-    await expect(runMergerWithAdapter([issue(42)], adapter)).rejects.toBeInstanceOf(
-      MergerError,
-    );
+    const summary = await runMergerWithAdapter([issue(42)], adapter);
+
+    expect(summary.raceDeferral?.issues.map((i) => i.id)).toEqual(["42"]);
     expect(calls.aborts).toBe(1);
     expect(calls.mergeCommits).toBe(0);
     expect(calls.agentRuns).toEqual([]);
@@ -1627,7 +1627,7 @@ describe("runMergerWithAdapter — push lifecycle", () => {
     ]);
   });
 
-  it("push race + re-merge conflict: throws MergerError, no closes", async () => {
+  it("push race + a re-merge that fails without conflicts: throws MergerError, no closes", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
       gates: [{ ok: true }],
@@ -1644,20 +1644,62 @@ describe("runMergerWithAdapter — push lifecycle", () => {
     expect(calls.closes).toEqual([]);
   });
 
-  it("push race + re-merged tree gate-red: throws MergerError, no second push", async () => {
+  // #253: a moved origin is no reason to halt; the next landing pass
+  // re-merges each issue onto the new tip.
+  it.each([
+    {
+      failure: "a re-merge conflicting beyond the version files",
+      script: { pulls: ["conflict"] as const, gates: [{ ok: true }, { ok: true }] },
+      reason: /conflicted beyond the version files/,
+      pushes: 1,
+    },
+    {
+      failure: "npm install failing on the re-merged tree",
+      script: {
+        pulls: [true],
+        installs: [true, true, false],
+        gates: [{ ok: true }, { ok: true }],
+      },
+      reason: /^npm install failed/,
+      pushes: 1,
+    },
+    {
+      failure: "a red re-gate",
+      script: { pulls: [true], gates: [{ ok: true }, { ok: true }, gateRed()] },
+      reason: /gate-red \(merger-gate-origin-sync\.\*\)/,
+      pushes: 1,
+    },
+    {
+      failure: "a second race",
+      script: {
+        pulls: [true],
+        gates: [{ ok: true }, { ok: true }, { ok: true }],
+        pushes: [{ kind: "race" }, { kind: "race" }] as PushResult[],
+      },
+      reason: /moved again/,
+      pushes: 2,
+    },
+  ])("push race + $failure: no throw, nothing landed, the issues deferred", async ({
+    script,
+    reason,
+    pushes,
+  }) => {
     const { adapter, calls } = makeAdapter({
-      merges: ["ok"],
-      gates: [{ ok: true }, gateRed()],
+      merges: ["ok", "ok"],
       pushes: [{ kind: "race" }],
-      pulls: [true],
+      ...script,
+      pulls: [...script.pulls],
     });
+    const summary = await runMergerWithAdapter([issue(41), issue(42)], adapter);
 
-    await expect(runMergerWithAdapter([issue(42)], adapter)).rejects.toBeInstanceOf(
-      MergerError,
-    );
-    expect(calls.pushes).toBe(1);
-    expect(calls.gates).toBe(2);
+    expect(summary.pushed).toBe(false);
+    expect(summary.merged).toEqual([]);
+    expect(summary.raceDeferral?.issues.map((i) => i.id)).toEqual(["41", "42"]);
+    expect(summary.raceDeferral?.reason).toMatch(reason);
+    expect(calls.pushes).toBe(pushes);
     expect(calls.closes).toEqual([]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.removedLabels).toEqual([]);
   });
 
   it("push race + re-merged tree gate-red: files the re-gate's output under origin-sync", async () => {
@@ -1668,28 +1710,38 @@ describe("runMergerWithAdapter — push lifecycle", () => {
       pulls: [true],
     });
     const sunk: Array<{ key: string; stdout: string; failedStep: string | null }> = [];
-    await expect(
-      runMergerWithAdapter([issue(42)], adapter, undefined, (key, gate) => {
-        sunk.push({ key, stdout: gate.stdout, failedStep: gate.failedStep });
-      }),
-    ).rejects.toThrow("merger-gate-origin-sync.*");
+    await runMergerWithAdapter([issue(42)], adapter, undefined, (key, gate) => {
+      sunk.push({ key, stdout: gate.stdout, failedStep: gate.failedStep });
+    });
     expect(sunk).toEqual([{ key: "origin-sync", stdout: "x", failedStep: "test" }]);
   });
 
-  it("push race + still-rejected after retry: throws MergerError", async () => {
-    const { adapter, calls } = makeAdapter({
-      merges: ["ok"],
-      gates: [{ ok: true }, { ok: true }],
-      pushes: [{ kind: "race" }, { kind: "race" }],
+  it.each([
+    { verdict: "green", regate: { ok: true } as GateResp, pushes: [{ kind: "race" }, { kind: "ok" }] },
+    { verdict: "red", regate: gateRed() as GateResp, pushes: [{ kind: "race" }] },
+  ])("push race: the $verdict re-gate is one gate observation keyed by the last merged issue", async ({
+    regate,
+    pushes,
+  }) => {
+    const gates: Array<{ key: string; ok: boolean; sync: string | undefined }> = [];
+    const { adapter } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }, regate],
+      pushes: pushes as PushResult[],
       pulls: [true],
     });
+    await runMergerWithAdapter([issue(41), issue(42)], adapter, undefined, undefined, {
+      observations: {
+        onGate: (key, gate, sync) => { gates.push({ key, ok: gate.ok, sync }); },
+        onOutcome: () => undefined,
+      },
+    });
 
-    await expect(runMergerWithAdapter([issue(42)], adapter)).rejects.toBeInstanceOf(
-      MergerError,
-    );
-    expect(calls.pushes).toBe(2);
-    expect(calls.pulls).toBe(1);
-    expect(calls.closes).toEqual([]);
+    expect(gates).toEqual([
+      { key: "41", ok: true, sync: undefined },
+      { key: "42", ok: true, sync: undefined },
+      { key: "42", ok: regate.ok, sync: "origin" },
+    ]);
   });
 
   it("push fatal error: throws MergerError, no closes", async () => {

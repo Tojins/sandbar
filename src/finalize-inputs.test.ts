@@ -26,6 +26,7 @@ const summary = (over: Partial<MergerSummary> = {}): MergerSummary => ({
   skippedChunks: [],
   refreshedChunks: [],
   failedChunkRefreshes: [],
+  raceDeferral: null,
   ...over,
 });
 
