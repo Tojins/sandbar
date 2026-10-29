@@ -27,6 +27,11 @@ import {
 import { dropSandbarTraces } from "./issue-anchor.js";
 import type { IssueRef } from "./merger.js";
 import type { PushResult } from "./push-result.js";
+import { terminalFinalizeInputs } from "./finalize-inputs.js";
+import type { Terminal } from "./inner-loop.js";
+import { type LoopAction, type LoopEvent, initialState, step } from "./inner-loop-machine.js";
+import type { ScenarioSet } from "./scenario-parser.js";
+import { combineVerifier } from "./verifier.js";
 
 const LABELS: LabelConfig = DEFAULT_LABELS;
 const { handoff: HANDOFF } = DEFAULT_LABELS;
@@ -2477,5 +2482,83 @@ describe("finalizeAll", () => {
     expect(calls.reclaims).toEqual([]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([]);
+  });
+});
+
+// #238: a verifier rejection with a failing scenario reaches GitHub only in
+// its public rendering, whichever parking terminal the issue ends on.
+describe("finalize — a scenario rejection's text never reaches GitHub (#238)", () => {
+  const SENTINEL = "SENTINEL-scenario-text";
+  const set: ScenarioSet = {
+    version: 1,
+    issue: 7,
+    seed: { ref: "origin/main", sha: "seed" },
+    writer: { provider: "claude", model: "opus", effort: null },
+    scenarios: [{
+      id: "S1", title: `${SENTINEL} title`, needs: ["sql"], area: ["src"],
+      given: [`${SENTINEL} given`], when: ["w"], then: ["t"],
+    }],
+  };
+  const rejected: LoopEvent = {
+    kind: "verifier-result",
+    head: "head",
+    outcome: combineVerifier(
+      { kind: "reviewer-result", verdict: "APPROVED", prose: "<verdict>APPROVED</verdict>" },
+      {
+        kind: "reported",
+        outcomes: [{ id: "S1", outcome: "fail", observed: `${SENTINEL} rows`, evidence: ["S1/rows.txt"] }],
+      },
+      set,
+      (id) => `/runs/r/issue-7/verifier/round-1/${id}/`,
+    ),
+    scenarios: { selected: 1, pass: 0, fail: 1, unverified: 0 },
+  };
+  const complete = (fields: Partial<Extract<LoopEvent, { kind: "implementer-result" }>> = {}): LoopEvent => ({
+    kind: "implementer-result", signal: { kind: "COMPLETE" }, dirtyPaths: [], offBranch: null,
+    fastForwarded: null, commits: 1, head: "head", ...fields,
+  });
+  const listed: LoopEvent = {
+    kind: "quality-review-result", mode: "list", head: "head",
+    review: { kind: "reviewer-result", verdict: "APPROVED", prose: "" },
+  };
+  const gate = (ok: boolean): LoopEvent => ({
+    kind: "gate-result", head: "head", stackChange: null,
+    gate: { ok, failureTrace: ok ? "" : "red", failedStep: ok ? null : "test" },
+  });
+  const noReview: LoopEvent = {
+    kind: "verifier-result", head: "head", scenarios: null,
+    outcome: { kind: "harness-failed", detail: "idle" },
+  };
+  const offBranch = { branch: "sandbar/issue-7-t-7", branchSha: "a", headSha: "b", headRef: null };
+
+  // [terminal, maxReviewRounds, maxGateRounds, the events after the
+  // rejection, whether its comment quotes the verifier]
+  it.each<[string, number, number, readonly LoopEvent[], boolean]>([
+    ["the review budget", 1, 3, [], true],
+    ["a red gate", 3, 1, [complete(), listed, gate(false)], true],
+    ["a second harness failure", 3, 3, [
+      complete(), listed, gate(true), noReview, complete(), listed, gate(true), noReview,
+    ], true],
+    ["an uncommittable worktree", 3, 3, [complete({ dirtyPaths: ["?? x"] }), complete({ dirtyPaths: ["?? x"] })], false],
+    ["an off-branch HEAD", 3, 3, [complete({ offBranch }), complete({ offBranch })], false],
+  ])("on %s", async (_name, maxReviewRounds, maxGateRounds, after, quoted) => {
+    let state = step(initialState({
+      issueBranch: "sandbar/issue-7-t-7", maxQualityRounds: 3, maxGateRounds, maxReviewRounds,
+      uiPrototypeCheck: false, partitionCheck: false, scenarioWriter: { kind: "off" },
+    }), { kind: "anchor-ready" }).state;
+    let action: LoopAction | null = null;
+    for (const event of [complete(), listed, gate(true), rejected, ...after]) {
+      ({ state, action } = step(state, event));
+    }
+    if (action?.kind !== "terminate") throw new Error(`expected a terminal, got ${action?.kind}`);
+    const [input] = terminalFinalizeInputs([{
+      issue: issue(7),
+      terminal: { ...action.verdict, commits: [], specGaps: [] } as Terminal,
+    }]);
+    const { adapter, calls } = makeAdapter({ aheadOfSeed: true });
+    await finalizeOneImpl(input!, adapter, LABELS);
+    const bodies = calls.comments.map((comment) => comment.body).join("\n");
+    expect(bodies.includes("[scenario S1] failed")).toBe(quoted);
+    expect(bodies).not.toContain(SENTINEL);
   });
 });

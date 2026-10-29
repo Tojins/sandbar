@@ -8,6 +8,7 @@ import { readEnvFile, splitRoleRouting } from "sandbar";
 const cwd = "/home/sandbar/sandbar";
 const image = "localhost/sandbar-agent:latest";
 const podmanSocket = `/run/user/${process.getuid()}/podman/podman.sock`;
+const gitDir = "/workspace-git";
 const { routing, env: credentials } = splitRoleRouting(
   readEnvFile(new URL("sandbar.env", import.meta.url)),
 );
@@ -20,7 +21,7 @@ export default {
   ghOwner: "Tojins",
   ghRepo: "sandbar",
   developers: ["Tojins"],
-  requiresSandbar: "0.40.0",
+  requiresSandbar: "0.60.12",
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
   contextMdPath: "AGENTS.md",
@@ -51,6 +52,10 @@ export default {
         mounts: [
           { hostPath: podmanSocket, containerPath: "/run/podman.sock" },
           { hostPath: "/tmp", containerPath: "/tmp", mode: "rw" },
+          // The gate's tmpfs over the clone's `.git` (#98) holds at most
+          // podman's copy of it from container start; the structural checks
+          // read the live one here, read-only, through `--git-dir`.
+          { hostPath: ".git", containerPath: gitDir },
         ],
         env: {
           CONTAINER_HOST: "unix:///run/podman.sock",
@@ -60,6 +65,15 @@ export default {
     ],
     steps: [
       { name: "check", in: "runner", command: ["npm", "run", "check"] },
+      {
+        name: "version",
+        in: "runner",
+        command: [
+          "node", "scripts/structure/run.mjs", "version",
+          "--base", "origin/main", "--git-dir", gitDir,
+        ],
+        settles: ["commit-ritual"],
+      },
       {
         name: "test",
         in: "runner",

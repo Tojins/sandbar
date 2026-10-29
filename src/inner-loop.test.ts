@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,10 @@ const innerLoopMocks = vi.hoisted(() => ({
   buildQualityFixPrompt: vi.fn(async () => "quality fix prompt"),
   buildCorrectnessPrompt: vi.fn(async () => "correctness prompt"),
   buildAdjudicatorPrompt: vi.fn(async () => "adjudicator prompt"),
+  buildScenarioRunnerPrompt: vi.fn(async () => "scenario runner prompt"),
+  // The verifier workspace's file operations (#238), in the order they ran.
+  verifierFs: [] as string[],
+  runAppHook: vi.fn(async (): Promise<"ok" | "failed" | "none"> => "none"),
   measureNetDiffChars: vi.fn(async () => 0),
   branchIsAheadOfSeed: vi.fn(async () => false),
   ensureIssueBranch: vi.fn(async () => ({
@@ -39,6 +44,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   prepareSandboxLogDir: vi.fn(async (_dir: string) => undefined),
   startSandboxStack: vi.fn(),
   isAncestor: vi.fn(async (_cwd: string, _ancestor: string, _descendant: string) => true),
+  changedPaths: vi.fn(async (_cwd: string, _since: string, _head: string): Promise<readonly string[]> => []),
   fetchIssueAnchor: vi.fn(async (): Promise<IssueAnchor> => ({
     text: "Issue #1: Issue",
     json: { title: "Issue", body: "", comments: [] },
@@ -59,6 +65,7 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   buildQualityFixPrompt: innerLoopMocks.buildQualityFixPrompt,
   buildCorrectnessPrompt: innerLoopMocks.buildCorrectnessPrompt,
   buildAdjudicatorPrompt: innerLoopMocks.buildAdjudicatorPrompt,
+  buildScenarioRunnerPrompt: innerLoopMocks.buildScenarioRunnerPrompt,
   measureNetDiffChars: innerLoopMocks.measureNetDiffChars,
   branchIsAheadOfSeed: innerLoopMocks.branchIsAheadOfSeed,
 }));
@@ -104,11 +111,30 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   revParse: innerLoopMocks.revParse,
   forkPoint: innerLoopMocks.forkPoint,
   isAncestor: innerLoopMocks.isAncestor,
+  changedPaths: innerLoopMocks.changedPaths,
 }));
 
 vi.mock("./scenario-writer-run.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./scenario-writer-run.js")>()),
   createScenarioWriterTask: innerLoopMocks.createScenarioWriterTask,
+}));
+
+vi.mock("./verifier-run.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./verifier-run.js")>()),
+  prepareVerifierWorkspace: async (workspace: string) => {
+    innerLoopMocks.verifierFs.push(`prepare ${workspace}`);
+  },
+  clearRunDir: async (workspace: string) => {
+    innerLoopMocks.verifierFs.push(`clear ${workspace}`);
+  },
+  archiveRun: async (workspace: string, roundDir: string) => {
+    innerLoopMocks.verifierFs.push(`archive ${workspace} -> ${roundDir}`);
+  },
+  restageFindings: async (workspace: string, evidence: readonly { id: string; roundDir: string }[]) => {
+    const from = evidence.map(({ id, roundDir }) => `${id} from ${roundDir}`).join(",");
+    innerLoopMocks.verifierFs.push(`restage [${from}] -> ${workspace}`);
+  },
+  runAppHook: innerLoopMocks.runAppHook,
 }));
 
 vi.mock("./db-copy.js", async (importOriginal) => ({
@@ -139,8 +165,10 @@ import {
   withPartialContainerResources,
   withPartialDurationMs,
   withPartialOutput,
+  type RunOptions,
   type Sandbox,
 } from "./agent-sandbox.js";
+import type { Scenario, ScenarioSet } from "./scenario-parser.js";
 import { AgentToolsImageError } from "./agent-tools.js";
 import { EGRESS_AGENT_ENV, EgressProxyDiedError } from "./egress.js";
 import { sandboxNetworkNameFor } from "./naming.js";
@@ -1382,6 +1410,9 @@ describe("role prompt-extension wiring (#91)", () => {
     accumulated: [{ sha: "abc123" }],
     priorReviewRounds: [],
     quality: { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader },
+    scenarioLedger: { current: new Map() },
+    dbCopy: { kind: "none" },
+    verifierWorkspace: null,
   });
 
   // The lister reads its own extension (#204: as standards text, with the
@@ -1422,7 +1453,7 @@ describe("role prompt-extension wiring (#91)", () => {
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("abc123");
     innerLoopMocks.buildCorrectnessPrompt.mockRejectedValueOnce(stop);
     await expect(runVerifier(
-      { kind: "run-verifier", attempt: 1 },
+      { kind: "run-verifier", attempt: 1, scenarios: null },
       ctxWith() as unknown as Parameters<typeof runVerifier>[1],
     )).rejects.toBe(stop);
     expect(innerLoopMocks.buildCorrectnessPrompt).toHaveBeenCalledWith(
@@ -1430,6 +1461,7 @@ describe("role prompt-extension wiring (#91)", () => {
         promptExtension: { text: "correctness only" },
         priorRounds: [],
         scope: { kind: "full" },
+        productionData: false,
       }),
     );
   });
@@ -1497,7 +1529,9 @@ describe("runVerifier (#121, #180, #185)", () => {
         stackSource: inlineStackSource,
         attemptLogger: {
           writeInvocation: vi.fn(async (filename) => filenames.push(filename)),
+          verifierRoundDir: (name: string) => join("/logs/issue-91", name),
         },
+        hooks: {},
         onEvent: vi.fn(),
       },
       config: {
@@ -1515,15 +1549,18 @@ describe("runVerifier (#121, #180, #185)", () => {
       base: { ref: "origin/main" },
       accumulated: [{ sha: "head123" }],
       priorReviewRounds: [] as unknown[],
+      scenarioLedger: { current: new Map() },
       specGaps: [] as unknown[],
       invocationSequence: createAgentInvocationSequencer().startCycle(),
+      dbCopy: { kind: "none" },
+      verifierWorkspace: null,
     };
     return {
       ctx,
       sandbox,
       filenames,
       run: () => runVerifier(
-        { kind: "run-verifier", attempt: 2 },
+        { kind: "run-verifier", attempt: 2, scenarios: null },
         ctx as unknown as Parameters<typeof runVerifier>[1],
       ),
     };
@@ -1561,6 +1598,7 @@ describe("runVerifier (#121, #180, #185)", () => {
       kind: "verifier-result",
       head: "head123",
       outcome: { kind: "approved" },
+      scenarios: null,
     });
     expect(filenames).toEqual([
       "attempt-2-reviewer-1.log",
@@ -2320,6 +2358,335 @@ describe("runQualityFix (#185, #187)", () => {
   });
 });
 
+describe("runVerifier beside the scenario runner (#238)", () => {
+  const scenario = (n: number, needs: Scenario["needs"] = ["ui"]): Scenario => ({
+    id: `S${n}`,
+    title: `title ${n}`,
+    needs,
+    area: ["src"],
+    given: ["g"],
+    when: ["w"],
+    then: ["t"],
+  });
+  const set = (...scenarios: Scenario[]): ScenarioSet => ({
+    version: 1,
+    issue: 238,
+    seed: { ref: "origin/main", sha: "seed" },
+    writer: { provider: "claude", model: "opus", effort: null },
+    scenarios,
+  });
+  const ran = (stdout: string) => ({
+    stdout,
+    commits: [],
+    durationMs: 3,
+    silent: false,
+    maxGapMs: 1,
+    endedBy: "exit" as const,
+    toolCalls: 0,
+    sessionId: "s",
+  });
+  const RUNNER_REPORT = "<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n" +
+    "### S1: PASS\n### S2: FAIL\nObserved: empty\nEvidence: S2/rows.txt\n</scenario-results>";
+
+  // `whiteBox` and `runner` answer the two agents' runs, told apart by name.
+  const round = (
+    whiteBox: (options: RunOptions) => Promise<ReturnType<typeof ran>>,
+    runner: (options: RunOptions) => Promise<ReturnType<typeof ran>>,
+    overrides: { dbCopy?: DbCopyStatus; hooks?: object } = {},
+  ) => {
+    const order: string[] = [];
+    innerLoopMocks.verifierFs.length = 0;
+    // The runner's evidence is real: a FAIL is checked against it.
+    const ws = mkdtempSync(join(tmpdir(), "sandbar-verifier-ws-"));
+    mkdirSync(join(ws, "run", "S2"), { recursive: true });
+    writeFileSync(join(ws, "run", "S2", "rows.txt"), "0 rows\n");
+    innerLoopMocks.buildCorrectnessPrompt.mockReset().mockResolvedValue("correctness prompt");
+    innerLoopMocks.buildScenarioRunnerPrompt.mockReset().mockResolvedValue("runner prompt");
+    innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    innerLoopMocks.isAncestor.mockReset().mockResolvedValue(true);
+    innerLoopMocks.branchTip.mockReset().mockImplementation(async () => {
+      order.push("snapshot");
+      return "head238";
+    });
+    innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
+    innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue("refs/heads/sandbar/issue-238");
+    innerLoopMocks.runAppHook.mockReset().mockImplementation(async () => {
+      order.push("hook");
+      return "ok";
+    });
+    const events: EventInput[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      run: vi.fn(async (options: RunOptions) => {
+        order.push(`start ${options.name}`);
+        const result = await (options.name!.startsWith("scenario-runner") ? runner : whiteBox)(options);
+        order.push(`end ${options.name}`);
+        return result;
+      }),
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(),
+    } as unknown as Sandbox;
+    const ctx = {
+      ...issueCtx({ id: "238", title: "verifier", branch: "sandbar/issue-238" }),
+      sandbox,
+      worktreePath: "/worktree",
+      opts: {
+        stackSource: inlineStackSource,
+        attemptLogger: {
+          writeInvocation: vi.fn(async () => undefined),
+          verifierRoundDir: (name: string) => join("/logs/issue-238", name),
+        },
+        hooks: overrides.hooks ?? { sandbox: { beforeScenarioRun: [{ command: "prepare.sh scenario-run" }] } },
+        onEvent: (event: EventInput) => {
+          events.push(event);
+        },
+      },
+      config: {
+        issueSource: innerLoopMocks.issueSource,
+        repo: { owner: "owner", name: "repo" },
+        layout: { repoDir: "/repo" },
+        sourceBranch: "main",
+        claudeMdPath: "CLAUDE.md",
+        reviewerAgent: "codex",
+        reviewerModelId: "correctness-model",
+        scenarioRunnerAgent: "claude",
+        scenarioRunnerModelId: "runner-model",
+        maxContextChars: 600_000,
+        egress: null,
+      },
+      anchorOpts: { repoDir: "/repo", claudeMdPath: "CLAUDE.md", sourceBranch: "main" },
+      base: { ref: "origin/main" },
+      accumulated: [{ sha: "head238" }],
+      priorReviewRounds: [] as unknown[],
+      scenarioLedger: { current: new Map() },
+      specGaps: [] as unknown[],
+      sandboxStatuses: [],
+      sandboxGateAttachments: { env: {}, mounts: [] },
+      invocationSequence: createAgentInvocationSequencer().startCycle(),
+      dbCopy: overrides.dbCopy ?? { kind: "none" },
+      verifierWorkspace: ws,
+    };
+    const run = (scenarios: ScenarioSet | null, attempt = 2) => runVerifier(
+      { kind: "run-verifier", attempt, scenarios },
+      ctx as unknown as Parameters<typeof runVerifier>[1],
+    );
+    return { run, order, events, sandbox, ws };
+  };
+
+  it("starts both agents before either settles, and folds both results", async () => {
+    let release!: () => void;
+    const bothStarted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = 0;
+    const barrier = async (stdout: string) => {
+      started += 1;
+      if (started === 2) release();
+      await bothStarted;
+      return ran(stdout);
+    };
+    const r = round(
+      () => barrier("<verdict>APPROVED</verdict>"),
+      () => barrier(RUNNER_REPORT),
+    );
+    const result = await r.run(set(scenario(1), scenario(2)));
+    expect(result).toMatchObject({
+      kind: "verifier-result",
+      head: "head238",
+      outcome: {
+        kind: "rejected",
+        whiteBox: "APPROVED",
+        units: [{
+          id: "S2",
+          publicText: "[scenario S2] failed — scenario and evidence withheld; " +
+            `on the sandbar host under ${join("/logs/issue-238", "verifier", "round-2", "S2")}/`,
+        }],
+      },
+      scenarios: { selected: 2, pass: 1, fail: 1, unverified: 0 },
+    });
+    expect(r.order.filter((step) => step.startsWith("start"))).toHaveLength(2);
+  });
+
+  it("runs the app hook before the agents' snapshots, then archives and restages only the failing ids", async () => {
+    const r = round(
+      async () => ran("<verdict>APPROVED</verdict>"),
+      async () => ran(RUNNER_REPORT),
+    );
+    await r.run(set(scenario(1), scenario(2)));
+    const hook = r.order.indexOf("hook");
+    expect(hook).toBeGreaterThan(0);
+    expect(r.order.slice(hook + 1).every((step) => step !== "hook")).toBe(true);
+    expect(r.order.indexOf("snapshot", hook)).toBeGreaterThan(hook);
+    expect(innerLoopMocks.verifierFs).toEqual([
+      `clear ${r.ws}`,
+      `restage [] -> ${r.ws}`,
+      `archive ${r.ws} -> ${join("/logs/issue-238", "verifier", "round-2")}`,
+      `restage [S2 from ${join("/logs/issue-238", "verifier", "round-2")}] -> ${r.ws}`,
+    ]);
+  });
+
+  it("rethrows the runner's quota only after the white-box review settles", async () => {
+    const quota = new AgentQuotaError("claude", "5h", "closed");
+    let whiteBoxDone = false;
+    const r = round(
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        whiteBoxDone = true;
+        return ran("<verdict>APPROVED</verdict>");
+      },
+      async () => {
+        throw quota;
+      },
+    );
+    await expect(r.run(set(scenario(1)))).rejects.toBe(quota);
+    expect(whiteBoxDone).toBe(true);
+    expect(r.events.filter((event) => event.kind === "review-pass")).toHaveLength(1);
+    expect(innerLoopMocks.verifierFs).toEqual([`clear ${r.ws}`, `restage [] -> ${r.ws}`]);
+  });
+
+  it("runs no runner, no hook and no workspace step without scenarios", async () => {
+    const r = round(async () => ran("<verdict>APPROVED</verdict>"), async () => {
+      throw new Error("no runner expected");
+    });
+    await expect(r.run(null)).resolves.toMatchObject({
+      outcome: { kind: "approved" },
+      scenarios: null,
+    });
+    expect(innerLoopMocks.runAppHook).not.toHaveBeenCalled();
+    expect(innerLoopMocks.buildScenarioRunnerPrompt).not.toHaveBeenCalled();
+    expect(innerLoopMocks.verifierFs).toEqual([]);
+    expect(r.events.some((event) => event.kind === "scenario-runner")).toBe(false);
+  });
+
+  it("settles what cannot run before the runner, and hands it the rest and the copy it holds", async () => {
+    const held: DbCopyStatus = { kind: "unavailable", reason: "no-base" };
+    const r = round(
+      async () => ran("<verdict>APPROVED</verdict>"),
+      async () => ran("<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n### S2: PASS\n</scenario-results>"),
+      { dbCopy: held },
+    );
+    const result = await r.run(set(scenario(1, ["sql"]), scenario(2, ["ui"])));
+    expect(result).toMatchObject({
+      outcome: { kind: "approved" },
+      scenarios: { selected: 2, pass: 1, fail: 0, unverified: 1 },
+    });
+    expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      scenarios: [scenario(2, ["ui"])],
+      dbCopy: null,
+      appHook: "ok",
+    }));
+    expect(innerLoopMocks.buildCorrectnessPrompt)
+      .toHaveBeenCalledWith(expect.objectContaining({ productionData: false }));
+  });
+
+  it("tells the white-box review a production copy is held beside it", async () => {
+    const held: DbCopyStatus = {
+      kind: "held", holder: "scenario-runner", container: "db", dumpDate: "2026-10-27", hook: "ok",
+    };
+    const r = round(
+      async () => ran("<verdict>APPROVED</verdict>"),
+      async () => ran("<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n### S1: PASS\n</scenario-results>"),
+      { dbCopy: held },
+    );
+    await r.run(set(scenario(1, ["sql"])));
+    expect(innerLoopMocks.buildCorrectnessPrompt)
+      .toHaveBeenCalledWith(expect.objectContaining({ productionData: true }));
+    expect(innerLoopMocks.buildScenarioRunnerPrompt)
+      .toHaveBeenCalledWith(expect.objectContaining({ dbCopy: held }));
+  });
+
+  it("runs no runner when the pre-pass settled every scenario, and records that", async () => {
+    innerLoopMocks.runAppHook.mockReset();
+    const r = round(async () => ran("<verdict>APPROVED</verdict>"), async () => {
+      throw new Error("no runner expected");
+    }, { dbCopy: { kind: "unavailable", reason: "volume-low" } });
+    await expect(r.run(set(scenario(1, ["sql"])))).resolves.toMatchObject({
+      outcome: { kind: "approved" },
+      scenarios: { selected: 1, pass: 0, fail: 0, unverified: 1 },
+    });
+    expect(r.events.filter((event) => event.kind === "scenario-runner")).toEqual([
+      expect.objectContaining({ invocation: 0, result: "completed" }),
+    ]);
+  });
+
+  it("reruns a later round's failed scenarios and those the change touched, and nothing else (#239)", async () => {
+    const at = (n: number, area: string): Scenario => ({ ...scenario(n), area: [area] });
+    const written = set(at(1, "src/a"), at(2, "src/b"), at(3, "src/c"));
+    const reports = [
+      "### S1: PASS\n### S2: FAIL\nObserved: empty\nEvidence: S2/rows.txt\n### S3: PASS",
+      "### S2: PASS\n### S3: PASS",
+    ];
+    const r = round(
+      async () => ran("<verdict>APPROVED</verdict>"),
+      async () => ran(`<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n${reports.shift()}\n</scenario-results>`),
+    );
+    innerLoopMocks.changedPaths.mockReset().mockResolvedValue(["src/c/x.ts", "README.md"]);
+    await r.run(written);
+    expect(innerLoopMocks.changedPaths).not.toHaveBeenCalled();
+    await expect(r.run(written)).resolves.toMatchObject({
+      outcome: { kind: "approved" },
+      scenarios: { selected: 2, pass: 2, fail: 0, unverified: 0 },
+    });
+    expect(innerLoopMocks.changedPaths).toHaveBeenCalledWith("/worktree", "head238", "head238");
+    expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenLastCalledWith(expect.objectContaining({
+      scenarios: [written.scenarios[1], written.scenarios[2]],
+      reruns: [{ id: "S2", head: "head238", round: 2 }],
+    }));
+  });
+
+  // A round that settled the rerun before its runner ran restaged `findings/`
+  // without it, and the implementer may have touched it since.
+  it("restages a rerun's evidence from the round that archived it before the runner starts (#239)", async () => {
+    const reports = [
+      "### S2: FAIL\nObserved: empty\nEvidence: S2/rows.txt",
+      "### S2: FAIL\nObserved: still empty\nEvidence: S2/rows.txt",
+    ];
+    const r = round(async () => ran("<verdict>APPROVED</verdict>"), async () => {
+      innerLoopMocks.verifierFs.push("runner");
+      return ran(`<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n${reports.shift()}\n</scenario-results>`);
+    });
+    const written = set(scenario(2, ["ui"]));
+    const dir = (n: number) => join("/logs/issue-238", "verifier", `round-${n}`);
+    await r.run(written, 1);
+    innerLoopMocks.runAppHook.mockResolvedValueOnce("failed");
+    await expect(r.run(written, 2)).resolves.toMatchObject({ scenarios: { unverified: 1 } });
+    innerLoopMocks.verifierFs.length = 0;
+    await expect(r.run(written, 3)).resolves.toMatchObject({ scenarios: { fail: 1 } });
+    expect(innerLoopMocks.verifierFs).toEqual([
+      `clear ${r.ws}`,
+      `restage [S2 from ${dir(1)}] -> ${r.ws}`,
+      "runner",
+      `archive ${r.ws} -> ${dir(3)}`,
+      `restage [S2 from ${dir(3)}] -> ${r.ws}`,
+    ]);
+    expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenLastCalledWith(expect.objectContaining({
+      reruns: [{ id: "S2", head: "head238", round: 1 }],
+    }));
+  });
+
+  it("runs every scenario again whose head the branch no longer contains (#239)", async () => {
+    const reports = [
+      "### S1: PASS\n### S2: UNVERIFIED\nReason: no browser",
+      "### S1: PASS\n### S2: PASS",
+    ];
+    const r = round(
+      async () => ran("<verdict>APPROVED</verdict>"),
+      async () => ran(`<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n${reports.shift()}\n</scenario-results>`),
+    );
+    innerLoopMocks.changedPaths.mockReset().mockResolvedValue([]);
+    await r.run(set(scenario(1), scenario(2)));
+    innerLoopMocks.isAncestor.mockResolvedValue(false);
+    await expect(r.run(set(scenario(1), scenario(2)))).resolves.toMatchObject({
+      scenarios: { selected: 2, pass: 2 },
+    });
+    expect(innerLoopMocks.changedPaths).not.toHaveBeenCalled();
+    expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenLastCalledWith(expect.objectContaining({
+      scenarios: [scenario(1), scenario(2)],
+      reruns: [],
+    }));
+  });
+});
+
 describe("closedReviewRound (#132, #185)", () => {
   const gate = (ok: boolean) => ({
     kind: "gate-result" as const,
@@ -2328,25 +2695,82 @@ describe("closedReviewRound (#132, #185)", () => {
     stackChange: null,
   });
   const correctness = (reviewer: ReviewerResult) =>
-    ({ kind: "verifier-result" as const, head: "h", outcome: combineVerifier(reviewer) });
+    ({
+      kind: "verifier-result" as const,
+      head: "h",
+      outcome: combineVerifier(reviewer, { kind: "not-run", prepass: [] }, null, () => ""),
+      scenarios: null,
+    });
 
   it.each([
     ["a green gate, which leaves the round open", gate(true), null],
-    ["a red gate", gate(false), { head: "h", gateOk: false, correctness: "SKIPPED" }],
+    [
+      "a red gate",
+      gate(false),
+      { head: "h", gateOk: false, correctness: "SKIPPED", rejectingPasses: [], scenarios: null },
+    ],
     [
       "an approval",
       correctness({ kind: "reviewer-result", verdict: "APPROVED", prose: "" }),
-      { head: "h", gateOk: true, correctness: "APPROVED" },
+      { head: "h", gateOk: true, correctness: "APPROVED", rejectingPasses: [], scenarios: null },
     ],
     [
       "a rejection",
       correctness({ kind: "reviewer-result", verdict: "CHANGES-REQUESTED", prose: "" }),
-      { head: "h", gateOk: true, correctness: "CHANGES-REQUESTED" },
+      {
+        head: "h",
+        gateOk: true,
+        correctness: "CHANGES-REQUESTED",
+        rejectingPasses: ["correctness"],
+        scenarios: null,
+      },
     ],
     [
       "a harness failure",
       correctness({ kind: "reviewer-harness-failed", detail: "" }),
-      { head: "h", gateOk: true, correctness: "HARNESS-FAILED" },
+      { head: "h", gateOk: true, correctness: "HARNESS-FAILED", rejectingPasses: [], scenarios: null },
+    ],
+    [
+      "a scenario rejection beside an approving white-box review (#238)",
+      {
+        kind: "verifier-result" as const,
+        head: "h",
+        outcome: {
+          kind: "rejected" as const,
+          units: [{ id: "S1" as const, text: "t", publicText: "p" }],
+          whiteBox: "APPROVED" as const,
+          rejectingPasses: ["scenarios" as const],
+        },
+        scenarios: { selected: 2, pass: 1, fail: 1, unverified: 0 },
+      },
+      {
+        head: "h",
+        gateOk: true,
+        correctness: "APPROVED",
+        rejectingPasses: ["scenarios"],
+        scenarios: { selected: 2, pass: 1, fail: 1, unverified: 0 },
+      },
+    ],
+    [
+      "a rejection by both",
+      {
+        kind: "verifier-result" as const,
+        head: "h",
+        outcome: {
+          kind: "rejected" as const,
+          units: [],
+          whiteBox: "CHANGES-REQUESTED" as const,
+          rejectingPasses: ["correctness" as const, "scenarios" as const],
+        },
+        scenarios: { selected: 1, pass: 0, fail: 1, unverified: 0 },
+      },
+      {
+        head: "h",
+        gateOk: true,
+        correctness: "CHANGES-REQUESTED",
+        rejectingPasses: ["correctness", "scenarios"],
+        scenarios: { selected: 1, pass: 0, fail: 1, unverified: 0 },
+      },
     ],
     [
       "a reviewer write, which parks instead",
@@ -2378,7 +2802,13 @@ describe("runAdjudicator (#167)", () => {
     kind: "run-adjudicator" as const,
     attempt: 2,
     pass: "correctness" as const,
-    rejection: { round: 1, head: "head123", report: "false report" },
+    rejection: {
+      round: 1,
+      head: "head123",
+      report: "false report",
+      units: [{ id: "white-box", text: "false report", publicText: "false report" }],
+      whiteBox: "CHANGES-REQUESTED",
+    },
   };
 
   const context = (
@@ -2405,6 +2835,7 @@ describe("runAdjudicator (#167)", () => {
     base: { ref: "origin/main" },
     quality: { sinceImplementer: [], overrules: [], openRound: null, grader: null },
     invocationSequence: createAgentInvocationSequencer().startCycle(),
+    verifierWorkspace: null,
   } as unknown as Parameters<typeof runAdjudicator>[1]);
 
   const unchangedAdjudicatorSnapshot = () => {
@@ -2453,6 +2884,7 @@ describe("runAdjudicator (#167)", () => {
       kind: "adjudicator-result",
       head: "head123",
       ruling: "OVERRULED",
+      rulings: null,
       reasoning: "five arguments",
     });
     expect(vi.mocked(sandbox.run).mock.calls[0]![0].name).toBe("adjudicator-167-round-1");
@@ -2470,7 +2902,7 @@ describe("runAdjudicator (#167)", () => {
       transcript: "attempt-2-adjudicator-1.log",
     });
     expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenLastCalledWith(
-      expect.objectContaining({ pass: "correctness" }),
+      expect.objectContaining({ pass: "correctness", units: null }),
     );
     expect(ctx.quality.overrules).toEqual([]);
   });
@@ -2560,6 +2992,160 @@ describe("runAdjudicator (#167)", () => {
     expect(ctx.quality.overrules).toEqual([{
       round: 2, head: "head123", report: "### Tests\nmissing", ruling: "the test exists",
     }]);
+  });
+
+  // #238: the judge reads the failing scenarios' evidence as that round left
+  // it, and a write beside them does not quote its transcript.
+  it("rules a report with scenario units unit by unit, records each ruling and retires the overruled scenarios (#239)", async () => {
+    unchangedAdjudicatorSnapshot();
+    const events: EventInput[] = [];
+    const sandbox = {
+      worktreePath: "/worktree",
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(async () => undefined),
+      run: vi.fn(async () => ({
+        stdout: "S3 holds\n<ruling-white-box>UPHELD</ruling-white-box>\n<ruling-s2>OVERRULED</ruling-s2>\n" +
+          "<ruling-s3>UPHELD</ruling-s3>",
+        commits: [],
+        durationMs: 5,
+        silent: false,
+        maxGapMs: 1,
+        toolCalls: 0,
+      })),
+    } as unknown as Sandbox;
+    const ledger = new Map([
+      ["S2", { status: "fail", head: "head123", round: 1 }],
+      ["S3", { status: "fail", head: "head123", round: 1 }],
+    ]);
+    const ctx = {
+      ...context(sandbox, events),
+      scenarioLedger: { current: ledger },
+    } as unknown as Parameters<typeof runAdjudicator>[1];
+    const units = [
+      { id: "white-box" as const, text: "w", publicText: "w" },
+      { id: "S2" as const, text: "s2", publicText: "p2" },
+      { id: "S3" as const, text: "s3", publicText: "p3" },
+    ];
+
+    await expect(runAdjudicator({ ...action, rejection: { ...action.rejection, units } }, ctx))
+      .resolves.toEqual({
+        kind: "adjudicator-result",
+        head: "head123",
+        ruling: "UPHELD",
+        rulings: { "white-box": "UPHELD", S2: "OVERRULED", S3: "UPHELD" },
+        reasoning: "S3 holds",
+      });
+    expect(innerLoopMocks.buildAdjudicatorPrompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ units: ["white-box", "S2", "S3"] }),
+    );
+    expect(events.find((event) => event.kind === "adjudication")).toMatchObject({
+      pass: "correctness",
+      ruling: "UPHELD",
+      rulings: [
+        { unit: "white-box", ruling: "UPHELD" },
+        { unit: "S2", ruling: "OVERRULED" },
+        { unit: "S3", ruling: "UPHELD" },
+      ],
+    });
+    expect(ctx.scenarioLedger.current).toEqual(new Map([
+      ["S2", { status: "retired" }],
+      ["S3", { status: "fail", head: "head123", round: 1 }],
+    ]));
+    expect(ledger.get("S2")).toEqual({ status: "fail", head: "head123", round: 1 });
+  });
+
+  it("names a report of scenario units alone the scenarios pass, and retries a missing unit token (#239)", async () => {
+    unchangedAdjudicatorSnapshot();
+    const events: EventInput[] = [];
+    const outputs = ["<ruling>OVERRULED</ruling>", "<ruling-s2>OVERRULED</ruling-s2>"];
+    const sandbox = {
+      worktreePath: "/worktree",
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(async () => undefined),
+      run: vi.fn(async () => ({
+        stdout: outputs.shift(),
+        commits: [],
+        durationMs: 5,
+        silent: false,
+        maxGapMs: 1,
+        toolCalls: 0,
+      })),
+    } as unknown as Sandbox;
+    const ctx = {
+      ...context(sandbox, events),
+      scenarioLedger: { current: new Map() },
+    } as unknown as Parameters<typeof runAdjudicator>[1];
+    const rejection = {
+      ...action.rejection,
+      units: [{ id: "S2" as const, text: "s2", publicText: "p2" }],
+      whiteBox: "HARNESS-FAILED",
+    };
+
+    await expect(runAdjudicator({ ...action, rejection }, ctx)).resolves.toMatchObject({
+      ruling: "OVERRULED",
+      rulings: { S2: "OVERRULED" },
+    });
+    expect(sandbox.run).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event.kind === "adjudication")).toEqual([
+      expect.objectContaining({ pass: "scenarios", ruling: "OVERRULED", rulings: [{ unit: "S2", ruling: "OVERRULED" }] }),
+    ]);
+    expect(ctx.scenarioLedger.current).toEqual(new Map([["S2", { status: "retired" }]]));
+  });
+
+  it("restages a verifier round's findings before judging scenario units", async () => {
+    unchangedAdjudicatorSnapshot();
+    innerLoopMocks.verifierFs.length = 0;
+    innerLoopMocks.dirtyWorktreePaths
+      .mockReset()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([" M changed.ts"]);
+    const sandbox = {
+      worktreePath: "/worktree",
+      preserveWorktree: vi.fn(),
+      syncBranchToCache: vi.fn(async () => undefined),
+      run: vi.fn(async () => {
+        innerLoopMocks.verifierFs.push("judge");
+        return {
+          stdout: "SECRET rows\n<ruling>UPHELD</ruling>",
+          commits: [],
+          durationMs: 5,
+          silent: false,
+          maxGapMs: 1,
+          toolCalls: 0,
+        };
+      }),
+    } as unknown as Sandbox;
+    const ctx = {
+      ...context(sandbox),
+      verifierWorkspace: "/ws",
+      opts: {
+        ...context(sandbox).opts,
+        attemptLogger: {
+          writeInvocation: vi.fn(),
+          verifierRoundDir: (name: string) => join("/logs/issue-167", name),
+        },
+      },
+    } as unknown as Parameters<typeof runAdjudicator>[1];
+    const scenarios = {
+      ...action,
+      rejection: {
+        ...action.rejection,
+        units: [
+          { id: "white-box" as const, text: "w", publicText: "w" },
+          { id: "S2" as const, text: "s", publicText: "p" },
+        ],
+      },
+    };
+
+    const result = await runAdjudicator(scenarios, ctx);
+    expect(innerLoopMocks.verifierFs).toEqual([
+      `restage [S2 from ${join("/logs/issue-167", "verifier", "round-1")}] -> /ws`,
+      "judge",
+    ]);
+    expect(result.kind).toBe("adjudicator-wrote");
+    if (result.kind !== "adjudicator-wrote") throw new Error("expected a write");
+    expect(result.detail).toContain("attempt-2-adjudicator-1.log");
+    expect(result.detail).not.toContain("SECRET");
   });
 
   it.each([
@@ -3058,6 +3644,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         writeInvocation: vi.fn(async () => undefined),
         writeGate: vi.fn(async () => undefined),
         writeIssueSnapshot: vi.fn(async () => "issue-snapshot-1.json"),
+        verifierRoundDir: (name: string) => join("/logs/issue-1", name),
       },
       gateSemaphore: createGateSemaphore(undefined),
       dbCopies: null,
@@ -3998,6 +4585,54 @@ describe("runInnerLoop context terminals (#158)", () => {
       expect(writer.settled).toHaveBeenCalledTimes(1);
     });
 
+    // #239: the ledger is the sandbox cycle's, as the review history is. A
+    // scenario the first cycle's runner could not check, at a head the next
+    // cycle reaches unchanged, is selected again only because that ledger is
+    // new.
+    it("starts a fresh scenario ledger in a fresh HARD-ERROR cycle (#239)", async () => {
+      const logsDir = mkdtempSync(join(tmpdir(), "sandbar-ledger-"));
+      mkdirSync(join(logsDir, `issue-${issue.id}`, "verifier-workspace", "run"), { recursive: true });
+      const set: ScenarioSet = {
+        version: 1,
+        issue: Number(issue.id),
+        seed: { ref: "origin/main", sha: "fork-sha" },
+        writer: { provider: "claude", model: "opus", effort: null },
+        scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: ["src"], given: ["g"], when: ["w"], then: ["t"] }],
+      };
+      innerLoopMocks.createScenarioWriterTask.mockReturnValue(
+        fakeWriter(Promise.resolve({ kind: "written", set })),
+      );
+      let implementers = 0;
+      let reviews = 0;
+      const { sandbox, opts, events } = harness(async (options) => {
+        const name = options.name ?? "";
+        if (name.startsWith("scenario-runner-")) {
+          return {
+            ...approvedReview,
+            stdout: "<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n" +
+              "### S1: UNVERIFIED\nReason: no shell\n</scenario-results>",
+          };
+        }
+        if (name.startsWith("reviewer-") && (reviews += 1) === 1) {
+          return { ...approvedReview, stdout: "### Correctness\nwrong\n<verdict>CHANGES-REQUESTED</verdict>" };
+        }
+        if (name.startsWith("implementer-") && (implementers += 1) === 2) {
+          throw new Error("podman exec died");
+        }
+        return routine(options);
+      }, {
+        scenarioWriter: true,
+        scenarioRunnerAgent: "codex",
+        scenarioRunnerModelId: "runner-model",
+        layout: { repoDir: "/repo", worktreesDir: "/worktrees", logsDir, anchorCacheDir: "/anchor-cache" },
+      });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(events).toContainEqual(expect.objectContaining({ kind: "hard-error", retry: 1 }));
+      expect(names(sandbox).filter((name) => name.startsWith("scenario-runner-"))).toHaveLength(2);
+      await rm(logsDir, { recursive: true, force: true });
+    });
+
     it("is aborted when the admission ends before the join", async () => {
       const writer = fakeWriter(new Promise(() => undefined));
       innerLoopMocks.createScenarioWriterTask.mockReturnValue(writer);
@@ -4045,10 +4680,54 @@ describe("runInnerLoop context terminals (#158)", () => {
       expect(names(sandbox)).not.toContain("reviewer-158-round-1");
     });
 
+    // #240: a replay case's frozen set stands for a written one.
+    it("runs a pinned set in the verifier with no writer, whether or not it is on", async () => {
+      const pinned: ScenarioSet = {
+        version: 1,
+        issue: 158,
+        seed: { ref: "origin/main", sha: "fork-sha" },
+        writer: { provider: "claude", model: "m", effort: null },
+        scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: [], given: ["g"], when: ["w"], then: ["t"] }],
+      };
+      innerLoopMocks.buildScenarioRunnerPrompt.mockReset().mockResolvedValue("runner prompt");
+      const { sandbox, opts, events } = harness(routine, { scenarioWriter: true, pinnedScenarios: pinned });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(innerLoopMocks.createScenarioWriterTask).not.toHaveBeenCalled();
+      expect(names(sandbox)).toContain("scenario-runner-158-round-1");
+      expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ scenarios: pinned.scenarios }),
+      );
+      expect(events.flatMap((event) => event.kind === "phase" ? [event.phases] : [])).toEqual([
+        ["anchor"], ["implementer"], ["quality"], ["gate-1"], ["review"], [],
+      ]);
+    });
+
     it("creates no task when it is off", async () => {
       const { opts } = harness(routine, { scenarioWriter: false });
       await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
       expect(innerLoopMocks.createScenarioWriterTask).not.toHaveBeenCalled();
+    });
+
+    // #238: the verifier's workspace exists, empty and mounted read-write,
+    // exactly while the writer's task does.
+    it.each([true, false])("prepares and mounts the verifier workspace only with the writer on (%s)", async (on) => {
+      innerLoopMocks.createScenarioWriterTask.mockReturnValue(
+        fakeWriter(Promise.resolve({ kind: "none", reason: "docs" })),
+      );
+      innerLoopMocks.verifierFs.length = 0;
+      const { opts } = harness(routine, { scenarioWriter: on });
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      const workspace = join("/logs", `issue-${issue.id}`, "verifier-workspace");
+      const mounts = innerLoopMocks.createSandbox.mock.calls[0]![0].extraMounts ?? [];
+      if (on) {
+        expect(innerLoopMocks.verifierFs).toEqual([`prepare ${workspace}`]);
+        expect(mounts).toContainEqual({ hostPath: workspace, sandboxPath: "/sandbar/verifier" });
+      } else {
+        expect(innerLoopMocks.verifierFs).toEqual([]);
+        expect(mounts.some((mount: { sandboxPath: string }) => mount.sandboxPath === "/sandbar/verifier"))
+          .toBe(false);
+      }
     });
   });
 

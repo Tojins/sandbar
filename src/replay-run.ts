@@ -19,12 +19,15 @@
 // (`Merge sandbar/issue-<n>: …` on `origin/<source>`, whose merge base is the
 // seed) and from today's issue, keeping the comments made by the cutoff — the
 // admission's time, or with no record the earliest author date on the
-// branch — and flagging a body edited after it. A case with no seed source
-// fails the whole freeze; the file is written create-only.
+// branch — and flagging a body edited after it. The set that admission's
+// scenario writer filed is pinned on the case (#240). A case with no seed
+// source fails the whole freeze; the file is written create-only.
 //
 // RUN drives `runInnerLoop` directly — no planner, merger, finalize or lease,
 // which is where every origin and tracker write of `run()` lives — for every
-// case × repeat, repeat-major, `--parallel` at a time.
+// case × repeat, repeat-major, `--parallel` at a time. A case's pinned set
+// goes in as `pinnedScenarios`, and a case file that pins any set needs the
+// providers it would with the scenario writer on.
 //
 // THE CAPABILITY BOUNDARY is not an audit of call sites. Before anything else,
 // `guardReplayProcess` deletes the forge credentials from the process
@@ -124,6 +127,7 @@ import {
   stripForgeCredentials,
 } from "./replay.js";
 import { innerLoopConfigOf, rejectedEnding, sandboxEnvOf, terminalEventOf, terminalReason } from "./run.js";
+import { type ScenarioSet, scenarioSetErrors } from "./scenario-parser.js";
 import { type StackSource, openStackSource, stackSpecToken } from "./stack-source.js";
 import { type StatsReport, computeStats } from "./stats.js";
 import { readStatsInput } from "./stats-record.js";
@@ -249,6 +253,18 @@ async function earliestAuthorDate(repoDir: string, seed: string, tip: string): P
   );
 }
 
+// A file the original run wrote, refused unless it is `what`.
+async function readRecorded<T>(
+  path: string,
+  errorsOf: (value: unknown) => readonly string[],
+  what: string,
+): Promise<T> {
+  const value: unknown = JSON.parse(await readFile(path, "utf8"));
+  const errors = errorsOf(value);
+  if (errors.length > 0) throw new SandbarError(`${path} is not ${what}: ${errors.join("; ")}`);
+  return value as T;
+}
+
 type FrozenCase = { readonly case: ReplayCase } | { readonly failure: string };
 
 async function freezeCase(args: {
@@ -274,13 +290,14 @@ async function freezeCase(args: {
         `origin/${args.sourceBranch}; a case for it needs its seedSha written by hand (seedFrom: "manual")`,
     };
   }
+  const recorded = (a: RecordedAdmission, filename: string): string =>
+    join(args.logsDir, a.run, `issue-${issue}`, filename);
   let text: CaseText & { readonly issueJson: IssueJson };
   if (admission !== null && admission.issueSnapshot !== null) {
-    const path = join(args.logsDir, admission.run, `issue-${issue}`, admission.issueSnapshot);
-    const snapshot: unknown = JSON.parse(await readFile(path, "utf8"));
-    const errors = issueJsonErrors(snapshot);
-    if (errors.length > 0) throw new SandbarError(`${path} is not an issue snapshot: ${errors.join("; ")}`);
-    text = { issueFrom: "recorded", issueJson: snapshot as IssueJson };
+    text = {
+      issueFrom: "recorded",
+      issueJson: await readRecorded(recorded(admission, admission.issueSnapshot), issueJsonErrors, "an issue snapshot"),
+    };
   } else {
     const cutoff = admission?.ts ?? (merge === null ? null : await earliestAuthorDate(repoDir, seed.seedSha, merge.tip));
     if (cutoff === null) return { failure: `#${issue}: no admission time and no commit on its branch to date it by` };
@@ -294,6 +311,9 @@ async function freezeCase(args: {
       issueJson: commentsAtCutoff(current, cutoff),
     };
   }
+  const scenarios = admission === null || admission.scenarios === null
+    ? null
+    : await readRecorded<ScenarioSet>(recorded(admission, admission.scenarios), (value) => scenarioSetErrors(value, issue), "a scenario set");
   return {
     case: {
       issue,
@@ -306,6 +326,7 @@ async function freezeCase(args: {
         tip: merge.tip,
         diff: parseNumstat(await gitStdout(repoDir, ["diff", "--numstat", merge.base, merge.tip])),
       },
+      ...(scenarios === null ? {} : { scenarios }),
     },
   };
 }
@@ -317,7 +338,8 @@ function describeCase(c: ReplayCase): string {
     ? "recorded"
     : `reconstructed${c.editedAfterAdmission ? ", body edited after admission" : ""}`;
   return `#${c.issue} ${c.title}: seed ${short(c.seedSha)} (${c.seedFrom}), issue ${text}, ` +
-    `original ${c.original?.run ?? "none"}, landed ${c.landed === null ? "none" : short(c.landed.merge)}`;
+    `original ${c.original?.run ?? "none"}, landed ${c.landed === null ? "none" : short(c.landed.merge)}, ` +
+    `scenarios ${c.scenarios === undefined ? "none" : `${c.scenarios.scenarios.length} pinned`}`;
 }
 
 export async function freeze(args: {
@@ -370,6 +392,7 @@ export function replayRouting(config: ResolvedConfig): Readonly<Record<string, R
     reviewer: role(config.reviewerAgent, config.reviewerModelId, config.reviewerEffort),
     reviewerQuality: role(config.reviewerQualityAgent, config.reviewerQualityModelId, config.reviewerQualityEffort),
     adjudicator: role(config.adjudicatorAgent, config.adjudicatorModelId, config.adjudicatorEffort),
+    scenarioRunner: role(config.scenarioRunnerAgent, config.scenarioRunnerModelId, config.scenarioRunnerEffort),
   };
 }
 
@@ -537,7 +560,8 @@ async function prepareSession(
   if (graphRootSpaceIsLow(space)) throw new SandbarError(formatLowGraphRootSpace(space));
 
   const scope = runScope(lockedWorkDir);
-  const providers = requiredAgentProviders(config);
+  const pinsScenarios = cases.cases.some((c) => c.scenarios !== undefined);
+  const providers = requiredAgentProviders({ ...config, scenarioWriter: config.scenarioWriter || pinsScenarios });
   const sweep = await cleanupOrphanContainers(scope);
   for (const failure of sweep.failures) log(`replay: could not remove a leftover container:\n${failure}`);
   await reconcileImages({
@@ -627,15 +651,18 @@ async function prepareSession(
     manifest,
     repeats,
     branchImages,
-    issueConfigOf: (run) => innerLoopConfigOf(config, {
-      layout: run.layout,
-      issueSource: async () => run.case.issueJson,
-      scope,
-      env: sandboxEnv,
-      codexAuthMount,
-      agentImages,
-      // Replay sandboxes keep open egress: #223 wires the daemon's owners.
-      egress: null,
+    issueConfigOf: (run) => ({
+      ...innerLoopConfigOf(config, {
+        layout: run.layout,
+        issueSource: async () => run.case.issueJson,
+        scope,
+        env: sandboxEnv,
+        codexAuthMount,
+        agentImages,
+        // Replay sandboxes keep open egress: #223 wires the daemon's owners.
+        egress: null,
+      }),
+      ...(run.case.scenarios === undefined ? {} : { pinnedScenarios: run.case.scenarios }),
     }),
   };
 }

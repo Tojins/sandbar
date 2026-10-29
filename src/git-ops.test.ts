@@ -11,6 +11,7 @@ import {
   IssueBranchDeletedOnOriginError,
   IssueBranchDivergedError,
   branchCommitsSinceSeed,
+  changedPaths,
   dirtyWorktreePaths,
   ensureIssueBranch,
   fastForwardOffBranchHead,
@@ -1080,6 +1081,36 @@ describe("ensureIssueBranch — a tip-seeded member with no chunk branch refuses
       ensureIssueBranch(cache, "sandbar/issue-11-mid", "main", REROOTED),
     ).rejects.toBeInstanceOf(ChunkBaseMissingError);
   });
+
+  // A stacked chunk (#243) before its first landing builds on its base.
+  it("seeds a stacked chunk's member from its base until the chunk has a branch", async () => {
+    const stacked = {
+      root: 50,
+      branch: "sandbar/chunk-50_on_10-next",
+      base: "sandbar/chunk-10-thing",
+    };
+
+    const base = await ensureIssueBranch(cache, "sandbar/issue-50-next", "main", stacked);
+
+    expect(base).toEqual({
+      ref: "refs/remotes/origin/sandbar/chunk-10-thing",
+      chunkBranch: "sandbar/chunk-10-thing",
+    });
+    expect(
+      (await git(cache, "ls-tree", "--name-only", "sandbar/issue-50-next")).stdout,
+    ).toContain("chunk.txt");
+  });
+
+  it("seeds it from the source branch once its base has landed and left origin", async () => {
+    const stacked = {
+      root: 50,
+      branch: "sandbar/chunk-50_on_9-next",
+      base: "sandbar/chunk-9-landed",
+    };
+
+    expect(await ensureIssueBranch(cache, "sandbar/issue-50-next", "main", stacked))
+      .toEqual({ ref: "origin/main", chunkBranch: null });
+  });
 });
 
 // #112 — origin's copy of the issue branch. Finalise's parking comment says
@@ -1439,5 +1470,39 @@ describe("forkPoint (#203)", () => {
     const forked = await forkPoint(repo, "origin/main", "issue-1");
     expect(forked).toBe(seed);
     expect(forked).not.toBe(tip);
+  });
+});
+
+describe("changedPaths (#239)", () => {
+  let repo: string;
+  const git = (...args: string[]) => exec("git", args, { cwd: repo });
+  const sha = async (ref: string) => (await git("rev-parse", ref)).stdout.trim();
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), "sandbar-changedpaths-"));
+    await git("init", "-q", "-b", "main");
+    await git("config", "user.email", "t@t");
+    await git("config", "user.name", "t");
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  // A file moved out of a scenario's area touches that area, whatever the
+  // repo's own rename detection says.
+  it("lists a renamed file at its old path as well as its new one", async () => {
+    await git("config", "diff.renames", "true");
+    await mkdir(join(repo, "src", "billing"), { recursive: true });
+    await writeFile(join(repo, "src", "billing", "invoice.ts"), "export const total = 1;\n".repeat(20));
+    await git("add", "-A");
+    await git("commit", "-qm", "billing");
+    const since = await sha("HEAD");
+    await mkdir(join(repo, "src", "core"));
+    await git("mv", "src/billing/invoice.ts", "src/core/invoice.ts");
+    await git("commit", "-qm", "move");
+
+    expect([...await changedPaths(repo, since, await sha("HEAD"))].sort())
+      .toEqual(["src/billing/invoice.ts", "src/core/invoice.ts"]);
   });
 });

@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  LAND_HOTFIX_LABEL,
   LAND_LABEL,
   type ChunkWrapupAdapter,
   type PullRequestSummary,
@@ -44,6 +45,9 @@ function fakeAdapter(
         record("closePullRequest", String(p));
         return "closed" as const;
       },
+      async retargetPullRequests() {
+        return [];
+      },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
         return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
@@ -63,6 +67,7 @@ const chunk = (
 ): LandedChunk => ({
   root,
   branch: `sandbar/chunk-${root}-c`,
+  base: null,
   title: `t-${root}`,
   members: members.map((n) => ({ number: n, title: `t-${n}` })),
   // Ascending, which is what an unrelated pair closes in; a chain is
@@ -110,12 +115,17 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(prQueries).toBe(0);
   });
 
-  it("closes the members, drops needs-review, closes the PR and deletes the branch", async () => {
+  it("closes the members, drops needs-review and every landing label, closes the PR and deletes the branch", async () => {
     const { adapter, calls } = fakeAdapter();
     const r = await run(
       ["sandbar/chunk-42-c"],
       [chunk(42, [42, 43])],
-      [{ number: 9, headRefName: "sandbar/chunk-42-c", title: "chunk 42" }],
+      [{
+        number: 9,
+        headRefName: "sandbar/chunk-42-c",
+        title: "chunk 42",
+        labels: [LAND_LABEL, "needs-eyes", LAND_HOTFIX_LABEL],
+      }],
       adapter,
     );
 
@@ -128,6 +138,7 @@ describe("reconcileLandedChunks (#64)", () => {
       `removeLabel 43:${NEEDS_REVIEW_LABEL}`,
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
+      `removePullRequestLabel 9:${LAND_HOTFIX_LABEL}`,
       "closePullRequest 9",
       "deleteChunkBranch sandbar/chunk-42-c [42,43]",
     ]);

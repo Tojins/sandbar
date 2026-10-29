@@ -81,7 +81,7 @@ describe("readEnvFile", () => {
 });
 
 describe("splitRoleRouting", () => {
-  it("maps all thirty reserved keys to their config field names", () => {
+  it("maps all thirty-three reserved keys to their config field names", () => {
     const pairs = [
       ["SANDBAR_IMPLEMENTER_AGENT", "implementerAgent"],
       ["SANDBAR_IMPLEMENTER_MODEL_ID", "implementerModelId"],
@@ -104,6 +104,9 @@ describe("splitRoleRouting", () => {
       ["SANDBAR_SCENARIO_WRITER_AGENT", "scenarioWriterAgent"],
       ["SANDBAR_SCENARIO_WRITER_MODEL_ID", "scenarioWriterModelId"],
       ["SANDBAR_SCENARIO_WRITER_EFFORT", "scenarioWriterEffort"],
+      ["SANDBAR_SCENARIO_RUNNER_AGENT", "scenarioRunnerAgent"],
+      ["SANDBAR_SCENARIO_RUNNER_MODEL_ID", "scenarioRunnerModelId"],
+      ["SANDBAR_SCENARIO_RUNNER_EFFORT", "scenarioRunnerEffort"],
       ["SANDBAR_MERGER_AGENT", "mergerAgent"],
       ["SANDBAR_MERGER_MODEL_ID", "mergerModelId"],
       ["SANDBAR_MERGER_EFFORT", "mergerEffort"],

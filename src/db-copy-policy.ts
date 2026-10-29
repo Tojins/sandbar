@@ -25,9 +25,11 @@
 //
 // ONE COPY PER HOLDER, NEVER HANDED ON (decision 8). Who holds the copy is a
 // function of the loop's next action (`dbCopyHolderFor`), kept outside the
-// state machine because it never changes which action comes next. Today only
-// the implementer holds one: quality, gate and the verifier never do, until
-// #180's scenario runner joins the verifier. A copy is dropped at every change
+// state machine because it never changes which action comes next. The
+// implementer holds one, and so does the verifier's scenario runner (#180) in
+// a round given a written set, even one its ledger runs none of (#239), as
+// the selection is the runner's; quality, gate, the white-box review alone
+// and the adjudicator never do. A copy is dropped at every change
 // of holder and a fresh one made for the next, because the last holder's
 // experiments dirtied it. The one exception is the implementer followed by
 // the implementer (a re-prompt or a nudge round), which keeps it.
@@ -204,13 +206,15 @@ export function dbBaseComplaints(input: {
 // Who a copy is made for.
 export type DbCopyHolder = "implementer" | "scenario-runner";
 
-// Who holds the copy while `action` runs; null drops it. The verifier is
-// the white-box review alone, the correctness pass, which gets no copy; #180's
-// scenario runner will hold one there.
+// Who holds the copy while `action` runs; null drops it. A verifier round
+// given a written set gives one to its scenario runner (#180); without one it
+// is the white-box review alone, which gets none.
 export function dbCopyHolderFor(action: LoopAction): DbCopyHolder | null {
   switch (action.kind) {
     case "run-implementer":
       return "implementer";
+    case "run-verifier":
+      return action.scenarios === null ? null : "scenario-runner";
     case "run-anchor-condense":
     case "run-partition-check":
     case "run-ui-check":
@@ -220,7 +224,6 @@ export function dbCopyHolderFor(action: LoopAction): DbCopyHolder | null {
     case "run-quality-verify":
     case "run-gate":
     case "await-scenario-writer":
-    case "run-verifier":
     case "run-adjudicator":
     case "terminate":
       return null;

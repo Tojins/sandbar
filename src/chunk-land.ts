@@ -26,6 +26,13 @@
 // branch (`forge-pr.ts`), so the PR is a unique handle on the chunk — which an
 // issue is not.
 //
+// `land-hotfix` (#244) is `land` that does not wait for a closed landing
+// window (`landing-window.ts`); while one is closed, `run.ts` keeps every other
+// request out of the merger and tells its pull request why. Everything below
+// says `land` and means either: whichever of the two a pull request carries
+// is a `ChunkLandTarget.landLabels` entry, and every path that spends the
+// request takes all of them off.
+//
 // `land` is HARDCODED on the same ground as `AUTO_LAND_LABEL` in `lanes.ts`:
 // the configurable labels (`LabelConfig`) name a host's own handoff conventions,
 // while this one is protocol — a human addressing sandbar. Its SPELLING is
@@ -93,6 +100,10 @@
 //                     authoritative `ready-for-agent` is still in flight, so
 //                     landing waits, keeps `land`, and names that member on
 //                     the PR rather than closing it with feedback unbuilt.
+//   * stacked       — the chunk is stacked on another whose branch is still on
+//                     origin (#243, `ChunkLandTarget.base`). Its branch carries
+//                     that one's commits, which land with it, so `run.ts`
+//                     keeps the request out of the pass and `land` STAYS.
 //   * drifted       — no derived chunk claims this origin branch for its
 //                     encoded root, or origin carries competing branches for
 //                     that root. Since #193 a landed member answers to the
@@ -134,10 +145,11 @@
 // ---------------------------------------------------------------------------
 //
 // Close every member explicitly, drop `needs-review`, take `land` back off the
-// pull request, close it, then atomically delete the chunk branch, its member
-// refs, and each published issue branch that has no non-merge commit outside
-// the landed source tip. An issue branch with unlanded work is kept and named
-// in the durable log and run complaint.
+// pull request, close it, move the pull requests of chunks stacked on this one
+// onto the source branch (#243), then atomically delete the chunk branch, its
+// member refs, and each published issue branch that has no non-merge commit
+// outside the landed source tip. An issue branch with unlanded work is kept and
+// named in the durable log and run complaint.
 //
 // "EVERY MEMBER" MEANS EVERY MEMBER ON THE BRANCH, and that is narrower than
 // every member of the chunk. Both callers hand this wrap-up an already filtered
@@ -199,7 +211,9 @@
 //
 // THE BRANCH DELETE IS LAST AND IT IS CONDITIONAL. Deleting it is what stops
 // reconciliation firing on this chunk again, so a chunk whose members did not
-// all close keeps its branch: the next run finds it contained in the source
+// all close keeps its branch, and so does one whose stacked pull requests
+// could not be retargeted, since GitHub closes a pull request whose base is
+// deleted: the next run finds it contained in the source
 // branch, reconciles it again, and retries exactly the writes that failed. That
 // is why there is no retry loop here — the retry is the next cycle, which is a
 // better one than three `gh` attempts a second apart.
@@ -227,8 +241,8 @@
 // The wrap-up is adapter-driven, and its two callers sit at opposite ends of a
 // cycle: the merge phase passes itself (`MergerAdapter` is a superset of
 // `ChunkWrapupAdapter`), and the plan-time reconciler has no merger to pass.
-// What they need done is nevertheless the same five `gh` calls and one
-// guarded atomic `git push --delete`, so `chunkForgeWrites` below is the one
+// What they need done is nevertheless the same `gh` calls and one guarded
+// atomic `git push --delete`, so `chunkForgeWrites` below is the one
 // place that argv is spelled — the same argument `forge-pr.ts` makes one level
 // up (#62).
 // Duplicated argv is argv that drifts, and this argv CLOSES ISSUES.
@@ -247,7 +261,9 @@ import {
   type ChunkBranchDrift,
   type ChunkMember,
   NEEDS_REVIEW_LABEL,
+  LAND_HOTFIX_LABEL,
   LAND_LABEL,
+  LAND_REQUEST_LABELS,
   type LandedChunk,
 } from "./chunks.js";
 import { SandbarError } from "./errors.js";
@@ -275,7 +291,7 @@ const exec = promisify(execFile);
 // Re-exported because every consumer of this module wants the label and the
 // behaviour together, and none of them should have to know the string lives one
 // module down. `chunks.ts` owns the spelling; this file owns what it means.
-export { LAND_LABEL };
+export { LAND_HOTFIX_LABEL, LAND_LABEL };
 
 // One chunk that is to be landed on the source branch, or that already has
 // been. Built by the two selectors below and consumed by the merge phase and
@@ -284,6 +300,9 @@ export { LAND_LABEL };
 export type ChunkLandTarget = {
   readonly root: number;
   readonly branch: string;
+  // `LandedChunk.base`: the chunk branch this one is stacked on (#243). A
+  // request waits while it is non-null, for its commits land with the base.
+  readonly base: string | null;
   // The root issue's title where a member list is known, else the pull
   // request's own title. Names the chunk in the merge commit and in prose.
   readonly title: string;
@@ -302,12 +321,9 @@ export type ChunkLandTarget = {
   // The pull request carrying the chunk. 0 when there is none to act on —
   // a reconciled chunk whose PR a human already closed.
   readonly pullRequest: number;
-};
-
-export type ChunkLandOngoingIssue = {
-  readonly number: number;
-  readonly title: string;
-  readonly chunkBranch: string | null;
+  // The landing labels (`land`, `land-hotfix`) that pull request carries:
+  // what a landing or a park takes off it. Empty without one.
+  readonly landLabels: readonly string[];
 };
 
 export type ChunkLandDeferral = {
@@ -318,20 +334,17 @@ export type ChunkLandDeferral = {
 // The one chunk-specific answer both scheduler discovery and the merger use.
 // Keeping it ahead of the scheduler is what lets unrelated work stop blocking
 // safe requests without turning a genuinely deferred request into one merger
-// pass (and one PR comment) per poll (#168).
+// pass (and one PR comment) per poll (#168). `grown` is what the merger put on
+// the branch this pass; work merely in flight to it defers nothing, for a
+// requested chunk is frozen and `run.ts` holds that work off it (#243).
 export function chunkLandDeferral(
   request: ChunkLandTarget,
-  ongoing: readonly ChunkLandOngoingIssue[],
+  grown: readonly ChunkMember[],
 ): ChunkLandDeferral | null {
   if (request.rework.length > 0) {
     return { members: request.rework, reason: "rework" };
   }
-  const targeting = ongoing
-    .filter((issue) => issue.chunkBranch === request.branch)
-    .map((issue) => ({ number: issue.number, title: issue.title }));
-  return targeting.length > 0
-    ? { members: targeting, reason: "ongoing" }
-    : null;
+  return grown.length > 0 ? { members: grown, reason: "ongoing" } : null;
 }
 
 // The fields of an open pull request this module reads. `headRefName` is the
@@ -340,11 +353,16 @@ export type PullRequestSummary = {
   readonly number: number;
   readonly headRefName: string;
   readonly title: string;
+  readonly labels: readonly string[];
 };
 
 export type ChunkLandRefusal = ChunkBranchDrift & {
   readonly pullRequest: number;
+  readonly landLabels: readonly string[];
 };
+
+const landLabelsOf = (pr: PullRequestSummary | undefined): readonly string[] =>
+  pr?.labels.filter((label) => LAND_REQUEST_LABELS.includes(label)) ?? [];
 
 export type ChunkLandSelection = {
   readonly requests: readonly ChunkLandTarget[];
@@ -389,11 +407,13 @@ function targetFor(
   return {
     root: chunk?.root ?? root,
     branch,
+    base: chunk?.base ?? null,
     title: chunk?.title ?? pr?.title ?? "",
     members: chunk?.members ?? [],
     closeOrder: chunk?.closeOrder ?? [],
     rework: chunk?.rework ?? [],
     pullRequest: pr?.number ?? 0,
+    landLabels: landLabelsOf(pr),
   };
 }
 
@@ -427,7 +447,7 @@ export function selectLandRequests(
   for (const pr of pullRequestsByHead(prs).values()) {
     const drift = driftByBranch.get(pr.headRefName);
     if (drift && drift.members.length > 0) {
-      refusals.push({ ...drift, pullRequest: pr.number });
+      refusals.push({ ...drift, pullRequest: pr.number, landLabels: landLabelsOf(pr) });
       continue;
     }
     const target = targetFor(
@@ -681,6 +701,17 @@ export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
     `you would rather look again first.`;
 };
 
+// A closed landing window holds the request (#244). Nothing is merged and the
+// label stays, so the first run after the window opens lands the chunk.
+export const CHUNK_LAND_WINDOW_PR_COMMENT = (args: {
+  readonly sourceBranch: string;
+  readonly closedUntil: string;
+}): string =>
+  `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it waits for ` +
+  `the landing window: nothing lands on \`${args.sourceBranch}\` until ` +
+  `${args.closedUntil}. The label stays on, and the first run after that lands ` +
+  `it. To land it now, add \`${LAND_HOTFIX_LABEL}\`.`;
+
 export const CHUNK_BRANCH_MISSING_PR_COMMENT = (args: {
   readonly chunkBranch: string;
 }): string =>
@@ -736,7 +767,18 @@ export async function refuseLandRequest(
     refusal.pullRequest,
     CHUNK_LAND_REFUSED_PR_COMMENT(refusal),
   );
-  await adapter.removePullRequestLabel(refusal.pullRequest, LAND_LABEL);
+  await removeLandLabels(adapter, refusal);
+}
+
+// Spends the request: every landing label its pull request carried comes off,
+// whichever of them made it.
+export async function removeLandLabels(
+  adapter: Pick<ChunkWrapupAdapter, "removePullRequestLabel">,
+  request: { readonly pullRequest: number; readonly landLabels: readonly string[] },
+): Promise<void> {
+  for (const label of request.landLabels) {
+    await adapter.removePullRequestLabel(request.pullRequest, label);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -769,6 +811,11 @@ export type ChunkWrapupAdapter = {
   // landing push (see the header's `landed` bullet). Throws when it is still
   // open and would not close.
   closePullRequest(pr: number): Promise<PullRequestCloseOutcome>;
+  // Moves every open pull request based on `base` onto `onto`, returning
+  // their numbers. A chunk stacked on a landing one has its pull request based
+  // on the landing branch (#243), and GitHub closes a pull request whose base
+  // branch is deleted.
+  retargetPullRequests(base: string, onto: string): Promise<readonly number[]>;
   deleteChunkBranch(
     chunkBranch: string,
     memberIssues: readonly number[],
@@ -892,6 +939,32 @@ export function chunkForgeWrites(deps: {
       }
       if (state === "MERGED") return "merged";
       throw refused;
+    },
+    async retargetPullRequests(base, onto) {
+      let listed: unknown;
+      try {
+        const { stdout } = await exec("gh", [
+          "pr", "list", "--repo", slug(), "--base", base, "--state", "open", "--json", "number",
+        ]);
+        listed = JSON.parse(stdout.trim() || "[]");
+      } catch (err) {
+        throw wrap(`failed to list the pull requests based on ${base}`, err);
+      }
+      if (!Array.isArray(listed)) {
+        throw wrap(`failed to list the pull requests based on ${base}`, JSON.stringify(listed));
+      }
+      const numbers = listed.flatMap((pr: unknown) =>
+        typeof pr === "object" && pr !== null && "number" in pr && typeof pr.number === "number"
+          ? [pr.number]
+          : []
+      );
+      for (const n of numbers) {
+        await gh(
+          ["pr", "edit", String(n), "--repo", slug(), "--base", onto],
+          `failed to retarget pull request #${n} onto ${onto}`,
+        );
+      }
+      return numbers;
     },
     async deleteChunkBranch(chunkBranch, memberIssues, sourceBranch) {
       // Fully qualified, with leases rather than an unconditional force. The
@@ -1164,10 +1237,11 @@ export async function wrapUpLandedChunk(
       );
     }
     try {
-      await adapter.removePullRequestLabel(target.pullRequest, LAND_LABEL);
+      await removeLandLabels(adapter, target);
     } catch (err) {
       residue.push(
-        `the pull request #${target.pullRequest} for ${target.branch} kept its \`${LAND_LABEL}\` label: ${detail(err)}`,
+        `the pull request #${target.pullRequest} for ${target.branch} kept its ` +
+          `${target.landLabels.map((label) => `\`${label}\``).join("/")} label: ${detail(err)}`,
       );
     }
     let closeOutcome: PullRequestCloseOutcome | undefined;
@@ -1195,8 +1269,34 @@ export async function wrapUpLandedChunk(
   // cycle forever. `closesComplete` is vacuously true for a chunk that named
   // no member at all, which deletes the branch too — see the header for why
   // that is the right answer and what it costs.
+  //
+  // A chunk stacked on this one (#243) has its pull request based here, and
+  // the branch delete would close it: that pull request is retargeted first,
+  // and one that could not be keeps the branch, so the next run retries it.
   let branchDeleted = false;
-  if (closesComplete) {
+  const retargetFailure: unknown = closesComplete
+    ? await adapter.retargetPullRequests(target.branch, opts.sourceBranch).then(
+      async (retargeted) => {
+        for (const pr of retargeted) {
+          await log(`chunk ${target.branch}: retargeted PR #${pr} onto ${opts.sourceBranch}`);
+        }
+        return null;
+      },
+      (err: unknown) => err,
+    )
+    : null;
+  if (!closesComplete) {
+    residue.push(
+      `${target.branch} is kept on origin so the next run retries the ${
+        target.members.length - closed.length
+      } member(s) still open on it`,
+    );
+  } else if (retargetFailure !== null) {
+    residue.push(
+      `${target.branch} is kept on origin so the next run retries retargeting the ` +
+        `pull requests based on it: ${detail(retargetFailure)}`,
+    );
+  } else {
     let issueBranches: ChunkBranchRetirement | null = null;
     try {
       issueBranches = await adapter.deleteChunkBranch(
@@ -1232,12 +1332,6 @@ export async function wrapUpLandedChunk(
       }
       await log(`chunk ${target.branch}: deleted on origin`);
     }
-  } else {
-    residue.push(
-      `${target.branch} is kept on origin so the next run retries the ${
-        target.members.length - closed.length
-      } member(s) still open on it`,
-    );
   }
 
   return {
@@ -1258,7 +1352,8 @@ export async function wrapUpLandedChunk(
 // BRANCH, not the lines:
 //
 //   * KEPT     — the branch is still on origin, because a member would not
-//                close or the delete itself failed. Something WILL retry
+//                close, a stacked pull request would not retarget, or the
+//                delete itself failed. Something WILL retry
 //                this: the next cycle's reconciler finds the branch contained
 //                in the source branch and does exactly the writes that
 //                failed. Operator-actionable, and honestly described as

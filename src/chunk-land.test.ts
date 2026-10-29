@@ -17,7 +17,9 @@ import {
   CHUNK_LAND_ABANDONED_PR_COMMENT,
   CHUNK_LAND_DEFERRED_PR_COMMENT,
   CHUNK_MEMBER_CLOSED_COMMENT,
+  CHUNK_LAND_WINDOW_PR_COMMENT,
   type ChunkWrapupAdapter,
+  LAND_HOTFIX_LABEL,
   LAND_LABEL,
   type PullRequestSummary,
   refuseLandRequest,
@@ -55,6 +57,7 @@ const chunk = (
 ): LandedChunk => ({
   root,
   branch,
+  base: null,
   title,
   members: members.map(([number, t]) => ({ number, title: t })),
   // A chain, which is what `members` ascending reads as here: the deepest
@@ -71,7 +74,8 @@ const pr = (
   number: number,
   headRefName: string,
   title = "pr title",
-): PullRequestSummary => ({ number, headRefName, title });
+  labels: readonly string[] = [LAND_LABEL],
+): PullRequestSummary => ({ number, headRefName, title, labels });
 
 describe("selectLandRequests (#64)", () => {
   it("matches a land-labelled PR to its derived chunk and takes its members", () => {
@@ -87,6 +91,7 @@ describe("selectLandRequests (#64)", () => {
       {
         root: 42,
         branch: "sandbar/chunk-42-alpha",
+        base: null,
         title: "alpha",
         members: [
           { number: 42, title: "alpha" },
@@ -100,8 +105,16 @@ describe("selectLandRequests (#64)", () => {
         ],
         rework: [],
         pullRequest: 9,
+        landLabels: [LAND_LABEL],
       },
     ]);
+  });
+
+  it("carries the branch a stacked chunk waits on (#243)", () => {
+    const stacked = { ...chunk(50, "sandbar/chunk-50_on_42-gamma", [[50, "gamma"]]), base: "sandbar/chunk-42-alpha" };
+    const [target] = selectLandRequests([pr(9, "sandbar/chunk-50_on_42-gamma")], [stacked]).requests;
+    expect(target?.root).toBe(50);
+    expect(target?.base).toBe("sandbar/chunk-42-alpha");
   });
 
   it("keeps a chunk-branch PR the derivation does not know, with no members", () => {
@@ -112,11 +125,13 @@ describe("selectLandRequests (#64)", () => {
     expect(target).toEqual({
       root: 42,
       branch: "sandbar/chunk-42-alpha",
+      base: null,
       title: "Sandbar chunk #42: alpha",
       members: [],
       closeOrder: [],
       rework: [],
       pullRequest: 9,
+      landLabels: [LAND_LABEL],
     });
   });
 
@@ -187,6 +202,7 @@ describe("selectLandRequests (#64)", () => {
         derived: "sandbar/chunk-40-new-root",
       },
       pullRequest: 9,
+      landLabels: [LAND_LABEL],
     }]);
   });
 });
@@ -204,7 +220,22 @@ describe("refuseLandRequest (#176)", () => {
       derived: "sandbar/chunk-40-new-root",
     },
     pullRequest: 9,
+    landLabels: [LAND_LABEL],
   };
+
+  it("removes every land label the request carried", async () => {
+    const removed: string[] = [];
+    await refuseLandRequest(
+      { ...refusal, landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL] },
+      {
+        async commentOnPullRequest() {},
+        async removePullRequestLabel(number, label) {
+          removed.push(`${number}:${label}`);
+        },
+      },
+    );
+    expect(removed).toEqual([`9:${LAND_LABEL}`, `9:${LAND_HOTFIX_LABEL}`]);
+  });
 
   it("comments before removing land and performs no other write", async () => {
     const calls: string[] = [];
@@ -256,32 +287,44 @@ describe("refuseLandRequest (#176)", () => {
   });
 });
 
+describe("land-hotfix and the landing window (#244)", () => {
+  const requestWith = (labels: readonly string[]) =>
+    selectLandRequests([pr(9, "sandbar/chunk-42-alpha", "t", labels)], []).requests[0]!;
+
+  it("carries the pull request's landing labels, and only those", () => {
+    expect(requestWith(["bug", LAND_HOTFIX_LABEL, LAND_LABEL]).landLabels)
+      .toEqual([LAND_HOTFIX_LABEL, LAND_LABEL]);
+  });
+
+  it("tells the pull request when it lands and how to land it now", () => {
+    const body = CHUNK_LAND_WINDOW_PR_COMMENT({
+      sourceBranch: "main",
+      closedUntil: "Mon 08:00 (Europe/Brussels)",
+    });
+    expect(body).toContain("nothing lands on `main` until Mon 08:00 (Europe/Brussels)");
+    expect(body).toContain(`add \`${LAND_HOTFIX_LABEL}\``);
+  });
+});
+
 describe("chunkLandDeferral (#168)", () => {
   const target = selectLandRequests(
     [pr(9, "sandbar/chunk-42-alpha")],
     [chunk(42, "sandbar/chunk-42-alpha", [[42, "alpha"]])],
   ).requests[0]!;
 
-  it("defers only work that targets this chunk", () => {
-    expect(chunkLandDeferral(target, [
-      { number: 41, title: "other", chunkBranch: "sandbar/chunk-41-other" },
-      { number: 43, title: "follow-up", chunkBranch: target.branch },
-    ])).toEqual({
+  it("defers only for members this pass put on the branch (#243)", () => {
+    expect(chunkLandDeferral(target, [{ number: 43, title: "follow-up" }])).toEqual({
       members: [{ number: 43, title: "follow-up" }],
       reason: "ongoing",
     });
-    expect(chunkLandDeferral(target, [
-      { number: 41, title: "other", chunkBranch: "sandbar/chunk-41-other" },
-    ])).toBeNull();
+    expect(chunkLandDeferral(target, [])).toBeNull();
   });
 
   it("gives tracker-visible rework precedence", () => {
     expect(chunkLandDeferral({
       ...target,
       rework: [{ number: 42, title: "root rework" }],
-    }, [
-      { number: 43, title: "follow-up", chunkBranch: target.branch },
-    ])).toEqual({
+    }, [{ number: 43, title: "follow-up" }])).toEqual({
       members: [{ number: 42, title: "root rework" }],
       reason: "rework",
     });
@@ -299,11 +342,13 @@ describe("selectReconciliations (#64)", () => {
       {
         root: 42,
         branch: "sandbar/chunk-42-alpha",
+        base: null,
         title: "alpha",
         members: [{ number: 42, title: "alpha" }],
         closeOrder: [{ number: 42, title: "alpha" }],
         rework: [],
         pullRequest: 9,
+        landLabels: [LAND_LABEL],
       },
     ]);
   });
@@ -377,6 +422,10 @@ function makeWrapupAdapter(
         record("closePullRequest", String(p));
         return "closed" as const;
       },
+      async retargetPullRequests(base, onto) {
+        record("retargetPullRequests", `${base}->${onto}`);
+        return [];
+      },
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
         return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
@@ -400,6 +449,7 @@ const target = {
     { number: 42, title: "alpha" },
   ],
   pullRequest: 9,
+  landLabels: [LAND_LABEL],
 };
 
 describe("wrapUpLandedChunk (#64)", () => {
@@ -422,6 +472,7 @@ describe("wrapUpLandedChunk (#64)", () => {
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
+      "retargetPullRequests sandbar/chunk-42-alpha->main",
       "deleteChunkBranch sandbar/chunk-42-alpha [42,43]",
     ]);
   });
@@ -539,6 +590,30 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(r.residue.join("\n")).toContain("pull request #9");
   });
 
+  // A chunk stacked on this one has its pull request based on this branch,
+  // and GitHub closes a pull request whose base branch is deleted (#243).
+  it("keeps the branch for a retry when the pull requests based on it cannot be retargeted", async () => {
+    const { adapter, calls } = makeWrapupAdapter({ retargetPullRequests: "gh boom" });
+    const r = await wrapUpLandedChunk(target, adapter, {
+      sourceBranch: "main",
+      provenance: "sandbar",
+    });
+    expect(r.closed).toEqual([42, 43]);
+    expect(r.branchDeleted).toBe(false);
+    expect(calls.some((c) => c.op === "deleteChunkBranch")).toBe(false);
+    expect(r.residue).toEqual([
+      "sandbar/chunk-42-alpha is kept on origin so the next run retries retargeting " +
+        "the pull requests based on it: gh boom",
+    ]);
+    expect(chunkResidue([{ ...r, target }]).kept).toHaveLength(1);
+  });
+
+  it("does not retarget anything while members are still open", async () => {
+    const { adapter, calls } = makeWrapupAdapter({ "closeIssue:43": "gh boom" });
+    await wrapUpLandedChunk(target, adapter, { sourceBranch: "main", provenance: "sandbar" });
+    expect(calls.some((c) => c.op === "retargetPullRequests")).toBe(false);
+  });
+
   it("drops `land` even when the comment above it failed", async () => {
     // The three pull-request writes are not a transaction, and the label is
     // the one that matters: left on an OPEN pull request it is a landing the
@@ -570,6 +645,29 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(calls.map((c) => c.op)).toContain("closePullRequest");
     expect(r.branchDeleted).toBe(true);
     expect(r.residue.join("\n")).toContain(`kept its \`${LAND_LABEL}\` label`);
+  });
+
+  it("takes every land label off the pull request", async () => {
+    const { adapter, calls } = makeWrapupAdapter();
+    await wrapUpLandedChunk(
+      { ...target, landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL] },
+      adapter,
+      { sourceBranch: "main", provenance: "sandbar" },
+    );
+    expect(calls.filter((c) => c.op === "removePullRequestLabel").map((c) => c.arg)).toEqual([
+      `9:${LAND_LABEL}`,
+      `9:${LAND_HOTFIX_LABEL}`,
+    ]);
+  });
+
+  it("names both labels when they will not come off", async () => {
+    const { adapter } = makeWrapupAdapter({ removePullRequestLabel: "no such label" });
+    const r = await wrapUpLandedChunk(
+      { ...target, landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL] },
+      adapter,
+      { sourceBranch: "main", provenance: "sandbar" },
+    );
+    expect(r.residue.join("\n")).toContain("kept its `land`/`land-hotfix` label");
   });
 
   it("skips the pull request entirely when there is none", async () => {

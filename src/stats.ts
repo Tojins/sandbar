@@ -33,9 +33,8 @@
 // population and `n` the measured part of it, and an aggregate of nothing
 // measured has null statistics, never 0. Quantiles are nearest-rank. A token
 // sum is null where no invocation in it reported that bucket. The rows for
-// scenario outcomes (#180), quality rule groups (#204) and DB copies (#201)
-// are empty until those issues emit their events; each adds its own reducer
-// arm here.
+// quality rule groups (#204) and DB copies (#201) are empty until those issues
+// emit their events; each adds its own reducer arm here.
 //
 // The janitor (#205) counts `janitor-run` events per task and outcome. Its
 // `tokens` stay unmeasured: a janitor run's agent events are dropped as
@@ -46,6 +45,15 @@
 // `perIssue` their sizes, and `writerFailed` the writers that ended in a
 // failure. An aborted writer and one that wrote are neither. A writer event
 // is an invocation row of role `scenario-writer` when it ran at all.
+//
+// Scenario outcomes (#238) are read off `review-round.scenarios`, one
+// round at a time: `pass`, `fail` and `unverified` sum them, and
+// `passes.scenarios` counts each round that selected scenarios, rejected when
+// one failed. A `scenario-runner` event that ran is an invocation row of role
+// `scenario-runner`. An adjudication that ruled unit by unit (#239) counts
+// one ruling per unit: the white-box unit's under `adjudication.correctness`,
+// each scenario's under `adjudication.scenarios`; its invocation row's role
+// stays `adjudicator:<pass>`.
 //
 // Anchors (#217) are one sample per `issue-anchor` event — every loop's
 // opening step — sized before the trace drop, after it, and as the roles
@@ -58,12 +66,14 @@
 //
 // `gates` and `terminals` list every gate run and every terminal in the
 // window, in record order, for a reader that keys on their typed fields
-// rather than on the rollups (reflect, #182).
+// rather than on the rollups (reflect, #182). `scenarioRounds` does the same
+// for each `scenario-runner` event that carries the round's outcomes by
+// scenario id, which replay's per-clause report reads (#240).
 
 import type { StatsEvent, StatsInput, StatsWindow } from "./stats-record.js";
 import { proseKey } from "./stats-record.js";
 import type { DeployOutcome } from "./deploy-watch.js";
-import type { UsageFields } from "./events.js";
+import type { ScenarioOutcomeRecord, UsageFields } from "./events.js";
 import type { Lane } from "./lanes.js";
 
 export type Agg = {
@@ -142,6 +152,13 @@ export type GateRow = {
   readonly ok: boolean;
   // Empty when the record names no red step.
   readonly redSteps: readonly string[];
+};
+
+export type ScenarioRoundRow = {
+  readonly run: string;
+  readonly issue: number;
+  readonly round: number;
+  readonly outcomes: readonly ScenarioOutcomeRecord[];
 };
 
 export type TerminalRow = {
@@ -255,6 +272,7 @@ export type StatsReport = {
   readonly invocations: readonly InvocationRow[];
   readonly gates: readonly GateRow[];
   readonly terminals: readonly TerminalRow[];
+  readonly scenarioRounds: readonly ScenarioRoundRow[];
 };
 
 export function agg(values: readonly (number | null | undefined)[]): Agg {
@@ -339,6 +357,15 @@ type WriterEvent = Extract<StatsEvent, { kind: "scenario-writer" }> & {
   readonly durationMs: number;
 };
 
+// A scenario runner that ran; a pre-pass round or a prompt over budget has
+// no agent fields.
+type RunnerEvent = Extract<StatsEvent, { kind: "scenario-runner" }> & {
+  readonly provider: string;
+  readonly model: string;
+  readonly effort: string | null;
+  readonly durationMs: number;
+};
+
 const WRITER_FAILED: ReadonlySet<string> = new Set([
   "failed", "input-too-large", "quota", "credential",
 ]);
@@ -351,12 +378,25 @@ type CondenserEvent = Extract<StatsEvent, { kind: "issue-anchor" }> & {
   readonly durationMs: number;
 };
 
-const isAgentEvent = (event: StatsEvent): event is AgentEvent | CondenserEvent | WriterEvent =>
+type InvocationEvent = AgentEvent | CondenserEvent | WriterEvent | RunnerEvent;
+
+// An adjudication's rulings by the pass each ruled on: one per unit when it
+// ruled unit by unit (#239), the white-box unit's under `correctness`.
+const rulingsOf = (
+  event: Extract<StatsEvent, { kind: "adjudication" }>,
+): readonly { readonly pass: AdjudicatedPass; readonly ruling: "UPHELD" | "OVERRULED" }[] =>
+  event.rulings?.map(({ unit, ruling }) => ({
+    pass: unit === "white-box" ? "correctness" : "scenarios",
+    ruling,
+  })) ?? [{ pass: event.pass, ruling: event.ruling }];
+
+const isAgentEvent = (event: StatsEvent): event is InvocationEvent =>
   event.kind === "issue-anchor" ? event.provider !== undefined
     : event.kind === "scenario-writer" ? event.durationMs !== undefined
+    : event.kind === "scenario-runner" ? event.provider !== undefined
     : AGENT_KINDS.has(event.kind);
 
-const roleOf = (event: AgentEvent | CondenserEvent | WriterEvent): Role =>
+const roleOf = (event: InvocationEvent): Role =>
   event.kind === "issue-anchor" ? "condenser"
     : event.kind === "quality-review" ? (event.mode === "list" ? "quality-list" : "quality-verify")
     : event.kind === "quality-pass" ? "quality-fix"
@@ -367,7 +407,7 @@ const roleOf = (event: AgentEvent | CondenserEvent | WriterEvent): Role =>
 
 function invocationRow(
   run: string,
-  event: AgentEvent | CondenserEvent | WriterEvent,
+  event: InvocationEvent,
   prose: ReadonlyMap<string, string> | null,
 ): Row {
   const transcript = event.kind === "resolve-attempt" ? null : event.transcript ?? null;
@@ -420,6 +460,7 @@ export function computeStats(input: StatsInput): StatsReport {
   const invocations: Row[] = [];
   const gates: GateRow[] = [];
   const terminals: TerminalRow[] = [];
+  const scenarioRounds: ScenarioRoundRow[] = [];
   const passes: Record<PassName, Mutable<PassCount>> = {
     "gate-1": { runs: 0, rejected: 0 },
     "quality-list": { runs: 0, rejected: 0 },
@@ -435,6 +476,7 @@ export function computeStats(input: StatsInput): StatsReport {
   const gate2 = { runs: 0, red: 0 };
   const anchors: Extract<StatsEvent, { kind: "issue-anchor" }>[] = [];
   const scenarioSets: { readonly issue: number; readonly size: number }[] = [];
+  const scenarioOutcomes = { pass: 0, fail: 0, unverified: 0 };
   let writerFailed = 0;
   const deploys = new Map<string, DeployOutcome>();
   const janitorRuns: Extract<StatsEvent, { kind: "janitor-run" }>[] = [];
@@ -523,6 +565,12 @@ export function computeStats(input: StatsInput): StatsReport {
           if (cycle !== undefined && event.result === "completed") cycle.reviewRounds += 1;
           break;
         case "review-round": {
+          if (event.scenarios !== undefined) {
+            count(passes.scenarios, event.scenarios.fail > 0);
+            scenarioOutcomes.pass += event.scenarios.pass;
+            scenarioOutcomes.fail += event.scenarios.fail;
+            scenarioOutcomes.unverified += event.scenarios.unverified;
+          }
           const judged = cycle?.unjudged.splice(0) ?? [];
           if (!VERDICTS.has(event.correctness)) break;
           count(passes.correctness, event.correctness === "CHANGES-REQUESTED");
@@ -538,9 +586,16 @@ export function computeStats(input: StatsInput): StatsReport {
           }
           if (WRITER_FAILED.has(event.result)) writerFailed += 1;
           break;
+        case "scenario-runner":
+          if (event.outcomes !== undefined) {
+            scenarioRounds.push({ run, issue: event.issue, round: event.round, outcomes: event.outcomes });
+          }
+          break;
         case "adjudication":
-          adjudication[event.pass].rulings += 1;
-          if (event.ruling === "OVERRULED") adjudication[event.pass].overruled += 1;
+          for (const { pass, ruling } of rulingsOf(event)) {
+            adjudication[pass].rulings += 1;
+            if (ruling === "OVERRULED") adjudication[pass].overruled += 1;
+          }
           break;
         case "janitor-run":
           janitorRuns.push(event);
@@ -603,9 +658,7 @@ export function computeStats(input: StatsInput): StatsReport {
     scenarios: {
       issues: new Set(scenarioSets.map((set) => set.issue)).size,
       perIssue: agg(scenarioSets.map((set) => set.size)),
-      pass: 0,
-      fail: 0,
-      unverified: 0,
+      ...scenarioOutcomes,
       writerFailed,
     },
     qualityGroups: {},
@@ -639,6 +692,7 @@ export function computeStats(input: StatsInput): StatsReport {
     invocations,
     gates,
     terminals,
+    scenarioRounds,
   };
 }
 

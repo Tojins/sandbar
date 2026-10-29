@@ -48,6 +48,8 @@
 // `gitStdout` is the one "run git in this directory, hand back stdout" call,
 // with an optional stdin, for the callers that have no richer need (replay,
 // #195: its cache is built by `update-ref --stdin`).
+// `changedPaths` lists what a range changed, a rename at both its paths so a
+// file moved out of a scenario's area still touches it (#239).
 //
 // `hasNonMergeCommitOutside` is the shared safety test for retiring issue
 // branches (#177, #179). Chunk wrap-up applies it to origin's freshly fetched
@@ -351,6 +353,14 @@ export const isAncestor = async (
     throw err;
   }
 };
+
+export const changedPaths = async (
+  cwd: string,
+  since: string,
+  head: string,
+): Promise<readonly string[]> =>
+  (await gitStdout(cwd, ["diff", "--name-only", "--no-renames", "-z", `${since}..${head}`]))
+    .split("\0").filter((path) => path !== "");
 
 const fetchOriginIssueBranch = async (
   repoDir: string,
@@ -671,6 +681,9 @@ export class IssueBranchDivergedError extends Error {
 //     seeding stays a plain branch cut from one origin-owned ref, so the issue
 //     diff never inherits a synthetic source catch-up merge. A failed fetch
 //     does not fall through to the next arm — see `fetchOriginChunkBranch`.
+//   - `seed: "tip"`, no chunk branch yet, and the chunk is STACKED (#243,
+//     `ChunkTarget.base`) → the base's tip, where the merge phase creates the
+//     branch; or, once the base has landed and left origin, the source branch.
 //   - `seed: "tip"` and the cache can name no branch → `ChunkBaseMissingError`.
 //     The ordinary argument says this cannot happen: a chained member plans
 //     only once a blocker of its own carries its origin member ref contained
@@ -757,6 +770,14 @@ async function chunkOrSourceBase(
   if (chunk.seed === "source") return sourceBranchBase(sourceBranch);
   const ref = await fetchOriginChunkBranch(repoDir, chunk.branch);
   if (ref !== null) return { ref, chunkBranch: chunk.branch };
+  if (chunk.base !== undefined) {
+    // A stacked chunk before its first landing: the base is under all of it.
+    // A base gone from origin has landed, so the source branch carries it.
+    const baseRef = await fetchOriginChunkBranch(repoDir, chunk.base);
+    return baseRef === null
+      ? sourceBranchBase(sourceBranch)
+      : { ref: baseRef, chunkBranch: chunk.base };
+  }
   // Everything else needs the tip, and there is none to name. Never the
   // source branch: that would build this member on a tree missing the work
   // it is chained behind, and nothing downstream would reject it.

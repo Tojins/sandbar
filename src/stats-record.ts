@@ -116,7 +116,7 @@ const V6_KINDS = {
   "quality-review": true, "quality-pass": true, "review-pass": true, adjudication: true,
   "resolve-attempt": true, container: true, "review-round": true, repair: true,
   "hard-error": true, terminal: true, landed: true, finalise: true, deploy: true,
-  "egress-refused": true, egress: true,
+  "egress-refused": true, egress: true, "scenario-runner": true,
   "db-base": true, "db-copy": true, "janitor-start": true, "janitor-run": true,
 } as const satisfies Record<RunEvent["kind"], true>;
 

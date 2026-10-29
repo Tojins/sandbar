@@ -204,8 +204,8 @@ const cfg = resolveDatabaseCopies({
 })!;
 
 describe("dbCopyHolderFor", () => {
-  // One action of every kind; only the kind is read.
-  const kinds: readonly [LoopAction["kind"], DbCopyHolder | null][] = [
+  // One action of every other kind; only the kind is read.
+  const kinds: readonly [Exclude<LoopAction["kind"], "run-verifier">, DbCopyHolder | null][] = [
     ["run-anchor-condense", null],
     ["run-partition-check", null],
     ["run-ui-check", null],
@@ -216,13 +216,25 @@ describe("dbCopyHolderFor", () => {
     ["run-quality-verify", null],
     ["run-gate", null],
     ["await-scenario-writer", null],
-    ["run-verifier", null],
     ["run-adjudicator", null],
     ["terminate", null],
   ];
 
   it.each(kinds)("%s is held by %s", (kind, holder) => {
     expect(dbCopyHolderFor({ kind } as LoopAction)).toBe(holder);
+  });
+
+  // #180: the scenario runner holds one only in a round that runs scenarios.
+  it("gives a verifier round's copy to its scenario runner, and none to the white-box review alone", () => {
+    const set = {
+      version: 1,
+      issue: 1,
+      seed: { ref: "origin/main", sha: "seed" },
+      writer: { provider: "claude", model: "opus", effort: null },
+      scenarios: [],
+    } as const;
+    expect(dbCopyHolderFor({ kind: "run-verifier", attempt: 1, scenarios: set })).toBe("scenario-runner");
+    expect(dbCopyHolderFor({ kind: "run-verifier", attempt: 1, scenarios: null })).toBeNull();
   });
 });
 

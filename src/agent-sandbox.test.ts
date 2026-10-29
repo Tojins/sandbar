@@ -112,7 +112,9 @@ const processExited = async (pid: number): Promise<boolean> => {
   try {
     stat = await readFile(`/proc/${pid}/stat`, "utf8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+    // ESRCH: the process was reaped between the open and the read.
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ESRCH") return true;
     throw e;
   }
   return stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
@@ -694,6 +696,19 @@ describe("parseCodexJsonLine", () => {
     expect(speech.peakContext).toBeUndefined();
   });
 
+  // The conversation a later run resumes by id (#238): the first one named.
+  it("keeps the session the stream named, never as speech", () => {
+    const speech = createAgentSpeechAccumulator();
+    expect(speech.sessionId).toBeUndefined();
+    speech.ingest([
+      { type: "session_id", sessionId: "s-1" },
+      { type: "text", text: "hi" },
+      { type: "session_id", sessionId: "s-2" },
+    ]);
+    expect(speech.sessionId).toBe("s-1");
+    expect(speech.spoken).toBe("hi");
+  });
+
   it("replaces repeated usage measurements instead of summing them", () => {
     const speech = createAgentSpeechAccumulator();
     speech.ingest([
@@ -936,6 +951,13 @@ describe("codex command line", () => {
     );
   });
 
+  it("resumeSession becomes an exec-resume of that thread, prompt still on stdin (#238)", () => {
+    const cmd = codex("m", { resumeSession: "t-1" }).buildPrintCommand({ prompt: "nudge" });
+    expect(cmd.command).toContain("codex exec resume 't-1' --json");
+    expect(cmd.command).not.toContain("--last");
+    expect(cmd.stdin).toBe("nudge");
+  });
+
   it("shell-escapes the model and omits the bypass flag when not requested", () => {
     const cmd = codex("a'b").buildPrintCommand({ prompt: "p" });
     expect(cmd.command).toContain("--model 'a'\\''b'");
@@ -998,6 +1020,13 @@ describe("claudeCode", () => {
     expect(claudeCode("m").buildPrintCommand({ prompt: "p" }).command).not.toContain(
       "--continue",
     );
+  });
+
+  it("resumeSession adds --resume <id> before the stdin prompt (#238)", () => {
+    const cmd = claudeCode("m", { resumeSession: "s-1" }).buildPrintCommand({ prompt: "nudge" });
+    expect(cmd.command).toContain(" --resume 's-1' -p -");
+    expect(cmd.command).not.toContain("--continue");
+    expect(cmd.stdin).toBe("nudge");
   });
 
   // `--effort <level>` (#130), verbatim and only when asked for: absent must

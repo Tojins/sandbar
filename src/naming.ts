@@ -300,6 +300,12 @@ export function sandboxDbCopyContainerNameFor(
 //   sandbar/issue-<n>-<slug>     one issue's work, landed by the merger
 //   sandbar/chunk-<root>-<slug>  one review-gated CHUNK (#54 §2), landed only
 //                                after a human has reviewed it
+//   sandbar/chunk-<root>_on_<base>-<slug>
+//                                a chunk STACKED on chunk <base>: cut from its
+//                                tip while that chunk's pull request carried
+//                                `land` (#243). The base is in the name because
+//                                every poll, and a restart, reads it back; `_`
+//                                never appears in a slug.
 //   sandbar/member-<n>           landing-only origin membership ref (#93)
 //   sandbar/janitor-<task>       one idle task's rolling branch (#205), below
 //
@@ -495,8 +501,13 @@ export function issueBranchName(issue: number, title: string): string {
   return `${BRANCH_PREFIX}${ISSUE_BRANCH_INFIX}${issue}-${kebabSlug(title)}`;
 }
 
-export function chunkBranchName(rootIssue: number, title: string): string {
-  return `${BRANCH_PREFIX}${CHUNK_BRANCH_INFIX}${rootIssue}-${kebabSlug(title)}`;
+export function chunkBranchName(
+  rootIssue: number,
+  title: string,
+  baseRoot: number | null = null,
+): string {
+  const stacked = baseRoot === null ? "" : `_on_${baseRoot}`;
+  return `${BRANCH_PREFIX}${CHUNK_BRANCH_INFIX}${rootIssue}${stacked}-${kebabSlug(title)}`;
 }
 
 // Reverse of the branch-naming convention: pull the number out of a branch of
@@ -506,16 +517,22 @@ export function chunkBranchName(rootIssue: number, title: string): string {
 // `<prefix><infix><n>` with no slug is still matched so the parser doesn't
 // hinge on slug presence, and a branch of the OTHER shape reads as null rather
 // than as a number of the wrong kind.
-function numberFromBranch(branch: string, infix: string): number | null {
+function afterInfix(branch: string, infix: string): string | null {
   for (const prefix of ALL_BRANCH_PREFIXES) {
     if (!branch.startsWith(prefix)) continue;
     const rest = branch.slice(prefix.length);
-    if (!rest.startsWith(infix)) return null;
-    const m = rest.slice(infix.length).match(/^(\d+)(?:-|$)/);
-    return m ? Number(m[1]) : null;
+    return rest.startsWith(infix) ? rest.slice(infix.length) : null;
   }
   return null;
 }
+
+function numberFromBranch(branch: string, infix: string): number | null {
+  const m = afterInfix(branch, infix)?.match(/^(\d+)(?:-|$)/);
+  return m ? Number(m[1]) : null;
+}
+
+const chunkShape = (branch: string): RegExpMatchArray | null =>
+  afterInfix(branch, CHUNK_BRANCH_INFIX)?.match(/^(\d+)(?:_on_(\d+))?(?:-|$)/) ?? null;
 
 // `<prefix>issue-<n>-<slug>` -> n.
 export function issueNumberFromBranch(branch: string): number | null {
@@ -529,7 +546,15 @@ export function issueNumberFromMemberBranch(branch: string): number | null {
 // `<prefix>chunk-<root>-<slug>` -> root. Null for an issue branch, which is
 // what lets a caller tell the issue and chunk shapes apart by asking both.
 export function rootIssueFromChunkBranch(branch: string): number | null {
-  return numberFromBranch(branch, CHUNK_BRANCH_INFIX);
+  const m = chunkShape(branch);
+  return m ? Number(m[1]) : null;
+}
+
+// `<prefix>chunk-<root>_on_<base>-<slug>` -> base. Null for a chunk cut from
+// the source branch, and for anything that is not a chunk branch.
+export function baseRootFromChunkBranch(branch: string): number | null {
+  const base = chunkShape(branch)?.[2];
+  return base === undefined ? null : Number(base);
 }
 
 // ---------------------------------------------------------------------------

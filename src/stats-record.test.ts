@@ -111,8 +111,8 @@ describe("normalisers (#194)", () => {
       ignoredKinds: { "quality-review": 1 },
     });
     expect(normalizeV6([
-      runStart(6), event({ kind: "scenario-runner" }), event({ kind: "scenario-runner" }),
-    ])).toEqual({ events: [runStart(6)], ignoredKinds: { "scenario-runner": 2 } });
+      runStart(6), event({ kind: "future-kind" }), event({ kind: "future-kind" }),
+    ])).toEqual({ events: [runStart(6)], ignoredKinds: { "future-kind": 2 } });
   });
 
   it("counts a janitor run's events apart and drops them (#205)", () => {
@@ -166,7 +166,7 @@ describe("readStatsInput (#194)", () => {
       runStart(EVENT_SCHEMA_VERSION),
       { kind: "review-pass", issue: 7, seq: 2, ts: "x", transcript: "attempt-1-reviewer-1.log" },
       { kind: "review-pass", issue: 7, seq: 3, ts: "x", transcript: "attempt-1-reviewer-2.log" },
-      { kind: "scenario-runner", issue: 7, seq: 4, ts: "x" },
+      { kind: "future-kind", issue: 7, seq: 4, ts: "x" },
     ]));
     await mkdir(join(logs, "run-2026-09-05T00-00-00-000Z", "issue-7"));
     await writeFile(
@@ -191,7 +191,7 @@ describe("readStatsInput (#194)", () => {
         { run: "run-2026-09-05T00-00-00-000Z", schemaVersion: 6, driver: "sandbar test" },
       ]);
     expect(input.runs[0]?.events[1]).toMatchObject({ kind: "adjudication", pass: "correctness" });
-    expect(input.ignoredKinds).toEqual({ "scenario-runner": 1 });
+    expect(input.ignoredKinds).toEqual({ "future-kind": 1 });
     // The second transcript's log is gone: its prose is absent, not empty.
     expect([...input.runs[1]!.prose]).toEqual([
       ["7/attempt-1-reviewer-1.log", "<verdict>APPROVED</verdict>"],

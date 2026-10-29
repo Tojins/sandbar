@@ -46,9 +46,9 @@ export const DEFAULT_READINESS_TIMEOUT_MS = 60_000;
 export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
 
 // The handoff label sandbar APPLIES when it parks an issue for a human. It is
-// NOT auto-created by sandbar (#8) — a host must define it in its repo, and a
-// missing/misconfigured label fails loud at finalize time rather than being
-// silently swallowed.
+// NOT auto-created by the run (#8) — a host must define it in its repo, by
+// hand or with `sandbar labels sync` (#245), and a missing/misconfigured
+// label fails loud at finalize time rather than being silently swallowed.
 //
 // `handoff` is the single "the agent stopped, a human acts next" label (#242).
 // Every park — a NEEDS-INFO question, a missing UI prototype, a partition
@@ -67,6 +67,19 @@ export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
 // in only one of those places would silently desync the queue.
 export type LabelConfig = {
   readonly handoff: string;
+};
+
+// One entry of `config.labelSync` (#245), read only by `sandbar labels sync`.
+// A name that is one of sandbar's protocol labels (label-sync.ts) overrides
+// its canonical description or colour; any other name is a host label and
+// must give both. `from` declares a rename: the repo's `from` label is edited
+// into `name`, so the issues that carry it keep it.
+export type LabelDeclaration = {
+  readonly name: string;
+  readonly description?: string;
+  // Six hex digits without `#`, as `gh label create --color` takes it.
+  readonly color?: string;
+  readonly from?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -107,6 +120,7 @@ export type PromptRole =
   | "reviewer"
   | "reviewerQuality"
   | "scenarioWriter"
+  | "scenarioRunner"
   | "merger";
 export type PromptExtension =
   | { readonly text: string }
@@ -149,6 +163,7 @@ const PROMPT_ROLES: readonly PromptRole[] = [
   "reviewer",
   "reviewerQuality",
   "scenarioWriter",
+  "scenarioRunner",
   "merger",
 ];
 
@@ -207,6 +222,49 @@ function resolveLabels(labels: Partial<LabelConfig> | undefined): LabelConfig {
     );
   }
   return { ...DEFAULT_LABELS, ...labels };
+}
+
+const LABEL_DECLARATION_KEYS = new Set(["name", "description", "color", "from"]);
+
+// The shape of each entry, with colours lowercased the way GitHub answers
+// them. Rules over the whole set (duplicates, a rename onto a declared name,
+// a host label missing a field) need the protocol set, so they live in
+// label-sync.ts's `declaredLabels`.
+function resolveLabelSync(value: unknown): readonly LabelDeclaration[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new SandbarError("config.labelSync must be an array of { name, description?, color?, from? }.");
+  }
+  return value.map((entry: unknown, i): LabelDeclaration => {
+    const field = `config.labelSync[${i}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new SandbarError(`${field} must be an object.`);
+    }
+    const unknownKeys = Object.keys(entry).filter((key) => !LABEL_DECLARATION_KEYS.has(key));
+    if (unknownKeys.length > 0) {
+      throw new SandbarError(
+        `${field} has unknown field ${unknownKeys.map((k) => JSON.stringify(k)).join(", ")}; ` +
+          "expected name, description, color, from.",
+      );
+    }
+    const { name, description, color, from } = entry as Record<string, unknown>;
+    // Non-empty because `gh` sends an empty description as no change at all.
+    const text = (key: string, v: unknown): string => {
+      if (typeof v !== "string" || v.trim() === "") {
+        throw new SandbarError(`${field}.${key} must be a non-empty string.`);
+      }
+      return v;
+    };
+    if (color !== undefined && (typeof color !== "string" || !/^[0-9a-fA-F]{6}$/.test(color))) {
+      throw new SandbarError(`${field}.color must be six hex digits without "#", got ${JSON.stringify(color)}.`);
+    }
+    return {
+      name: text("name", name),
+      ...(description === undefined ? {} : { description: text("description", description) }),
+      ...(color === undefined ? {} : { color: color.toLowerCase() }),
+      ...(from === undefined ? {} : { from: text("from", from) }),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -724,6 +782,27 @@ export type DeployWatchConfig = {
   readonly timeoutMs?: number;
 };
 
+// The landing window (#244, `landing-window.ts`): one weekly span, in one IANA
+// zone, during which sandbar lands nothing on the source branch. Each end is a
+// weekday and a 24-hour wall-clock time, e.g. `"Fri 12:00"`; `closedFrom` is
+// inclusive, `closedUntil` exclusive, and the span may wrap the week.
+export type LandingWindowConfig = {
+  readonly timeZone: string;
+  readonly closedFrom: string;
+  readonly closedUntil: string;
+};
+
+export const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
+
+// A weekly wall-clock time: as written, and as minutes since Monday 00:00.
+export type WeekTime = { readonly text: string; readonly minuteOfWeek: number };
+
+export type LandingWindowSettings = {
+  readonly timeZone: string;
+  readonly closedFrom: WeekTime;
+  readonly closedUntil: WeekTime;
+};
+
 // One `egress.allow` entry (#202). A string is a preset name (`"npm"`,
 // `"packagist"`), a `host`, a `*.suffix` (subdomains only, never the apex) or a
 // `host:port`; the object form names its ports and may reach addresses in the
@@ -976,6 +1055,12 @@ export type RunConfig = {
   // that snapshot.
   readonly scenarioWriter?: boolean;
   readonly scenarioWriterModelId?: string;
+  // The verifier's scenario runner (#180): beside the white-box review, it
+  // runs the written scenarios against the branch. It follows the reviewer's
+  // CLI, and takes the reviewer's model and effort only while it also runs
+  // that CLI, as the adjudicator takes its model. A path in
+  // `promptExtensions.scenarioRunner` is probed in the issue worktree.
+  readonly scenarioRunnerModelId?: string;
   readonly mergerModelId?: string;
   // `npm run reflect`'s two steps (#182, #208), never run by the daemon: the
   // tagger labels findings against a closed vocabulary ("sonnet"), the
@@ -1003,6 +1088,7 @@ export type RunConfig = {
   readonly adjudicatorAgent?: AgentProviderName;
   readonly condenserAgent?: AgentProviderName;
   readonly scenarioWriterAgent?: AgentProviderName;
+  readonly scenarioRunnerAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
   readonly reflectTaggerAgent?: AgentProviderName;
   readonly reflectSynthesizerAgent?: AgentProviderName;
@@ -1015,7 +1101,8 @@ export type RunConfig = {
   // the first invocation, loudly. A claude-routed role that leaves it unset
   // gets the driver default beside its default model — implementer, UI
   // checker and reviewer `high`, reviewer-quality and merger `medium`, the
-  // adjudicator the reviewer's, the reflect tagger `medium` and its
+  // adjudicator the reviewer's, the scenario runner the reviewer's while it
+  // runs the reviewer's CLI, the reflect tagger `medium` and its
   // synthesizer `high`; the condenser (#217) and the scenario writer (#203)
   // have none. A role routed elsewhere
   // has no driver default either:
@@ -1030,6 +1117,7 @@ export type RunConfig = {
   readonly adjudicatorEffort?: string;
   readonly condenserEffort?: string;
   readonly scenarioWriterEffort?: string;
+  readonly scenarioRunnerEffort?: string;
   readonly mergerEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
@@ -1118,6 +1206,13 @@ export type RunConfig = {
   // (#242).
   readonly labels?: Partial<LabelConfig>;
 
+  // The labels `sandbar labels sync` (#245) makes the repo match beside the
+  // protocol labels sandbar declares itself: host labels with their
+  // description and colour, overrides of a protocol label's description or
+  // colour, and renames (`from`). The run loop never reads it and never
+  // creates a label (#8). Default: none, so a sync covers the protocol labels.
+  readonly labelSync?: readonly LabelDeclaration[];
+
   // Extra host paths copied into each issue worktree. A string keeps the
   // original behaviour exactly: it is joined to `cwd` and mirrored at that
   // same entry beneath the worktree. `{ from, to }` (#144 decision 7) separates
@@ -1149,6 +1244,14 @@ export type RunConfig = {
   // Watch the consumer's deploy workflow and file a bug for a red run (#198).
   // Default: unset, no watch.
   readonly deployWatch?: DeployWatchConfig;
+
+  // Weekly hours during which nothing lands on the source branch (#244), e.g.
+  // `{ timeZone: "Europe/Brussels", closedFrom: "Fri 12:00", closedUntil:
+  // "Mon 08:00" }`. While it is closed a chunk's `land` request and a DONE
+  // auto-lane issue wait for it to open; `land-hotfix` on a chunk's pull
+  // request lands regardless. That label must exist in the repo to be used,
+  // like `land`. Default: unset, always open.
+  readonly landingWindow?: LandingWindowConfig;
 
   // An outbound allowlist for every agent sandbox, its siblings, the gate
   // stacks and the merger's resolve container (#202, `egress.ts`). GitHub and
@@ -1235,8 +1338,8 @@ export type RunConfig = {
 // merely `Required<>`d because resolution changes their TYPE, not just their
 // presence: `labels` widens from Partial to the fully-populated vocabulary,
 // `gateStack` and `mergeMode` become their resolved-and-validated forms,
-// `deployWatch`, `databaseCopies` and `janitor` are null when they are off,
-// and `egress` is `open` without an allowlist.
+// `deployWatch`, `landingWindow`, `databaseCopies` and `janitor` are null
+// when they are off, and `egress` is `open` without an allowlist.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
@@ -1244,6 +1347,7 @@ export type ResolvedConfig = Required<
     | "gateStack"
     | "mergeMode"
     | "deployWatch"
+    | "landingWindow"
     | "databaseCopies"
     | "janitor"
     | "requiresSandbar"
@@ -1254,6 +1358,7 @@ export type ResolvedConfig = Required<
     | "adjudicatorEffort"
     | "condenserEffort"
     | "scenarioWriterEffort"
+    | "scenarioRunnerEffort"
     | "mergerEffort"
     | "reflectTaggerEffort"
     | "reflectSynthesizerEffort"
@@ -1273,6 +1378,7 @@ export type ResolvedConfig = Required<
   readonly adjudicatorEffort?: string;
   readonly condenserEffort?: string;
   readonly scenarioWriterEffort?: string;
+  readonly scenarioRunnerEffort?: string;
   readonly mergerEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
@@ -1283,6 +1389,7 @@ export type ResolvedConfig = Required<
   readonly gateStack: ResolvedStackSource;
   readonly mergeMode: ResolvedMergeMode;
   readonly deployWatch: DeployWatchSettings | null;
+  readonly landingWindow: LandingWindowSettings | null;
   readonly egress: ResolvedEgress;
   readonly databaseCopies: DatabaseCopiesSettings | null;
   readonly janitor: { readonly tasks: readonly JanitorTask[] } | null;
@@ -1673,6 +1780,64 @@ function resolveJanitorPrompt(field: string, prompt: unknown): JanitorTaskPrompt
     `${field} must be "standards", { file: "<repository-relative path>" } or ` +
       `{ skill: "<slug>" } (got ${JSON.stringify(prompt)}).`,
   );
+}
+
+// `.mjs` is type-checked by nothing, so every field is checked here. The zone
+// is whatever `Intl` accepts, so a misspelt one refuses the run rather than
+// silently comparing against some other clock.
+export function resolveLandingWindow(
+  window: LandingWindowConfig | undefined,
+): LandingWindowSettings | null {
+  if (window === undefined) return null;
+  if (!isRecord(window)) {
+    throw new SandbarError(
+      "config.landingWindow must be { timeZone, closedFrom, closedUntil }.",
+    );
+  }
+  const { timeZone } = window;
+  if (typeof timeZone !== "string" || !isTimeZone(timeZone)) {
+    throw new SandbarError(
+      "config.landingWindow.timeZone must be an IANA time zone, e.g. " +
+        `"Europe/Brussels" (got ${JSON.stringify(timeZone)}).`,
+    );
+  }
+  const closedFrom = weekTime("landingWindow.closedFrom", window.closedFrom);
+  const closedUntil = weekTime("landingWindow.closedUntil", window.closedUntil);
+  if (closedFrom.minuteOfWeek === closedUntil.minuteOfWeek) {
+    throw new SandbarError(
+      "config.landingWindow.closedFrom and closedUntil must differ " +
+        `(both are ${JSON.stringify(closedFrom.text)}).`,
+    );
+  }
+  return { timeZone, closedFrom, closedUntil };
+}
+
+function isTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return true;
+  } catch (err) {
+    if (err instanceof RangeError) return false;
+    throw err;
+  }
+}
+
+function weekTime(field: string, raw: unknown): WeekTime {
+  const match = typeof raw === "string"
+    ? /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([01]\d|2[0-3]):([0-5]\d)$/.exec(raw)
+    : null;
+  if (match === null) {
+    throw new SandbarError(
+      `config.${field} must be a weekday and a 24-hour time, e.g. "Fri 12:00" ` +
+        `(got ${JSON.stringify(raw)}).`,
+    );
+  }
+  const [text, day, hour, minute] = match;
+  const dayIndex = WEEKDAYS.findIndex((weekday) => weekday === day);
+  return {
+    text,
+    minuteOfWeek: dayIndex * 24 * 60 + Number(hour) * 60 + Number(minute),
+  };
 }
 
 const DEFAULT_EGRESS_PORTS: readonly number[] = [443, 80];
@@ -3210,6 +3375,18 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     config.adjudicatorAgent === undefined || adjudicatorAgent === reviewerAgent
       ? config.reviewerModelId
       : undefined;
+  // The scenario runner (#180) follows the reviewer on the adjudicator's
+  // rule, its effort included, so routing the reviewer elsewhere moves both
+  // verifier agents at once.
+  const scenarioRunnerAgent = parseAgentProviderName(
+    "scenarioRunnerAgent",
+    config.scenarioRunnerAgent ?? reviewerAgent,
+  );
+  const runnerFollowsReviewer =
+    config.scenarioRunnerAgent === undefined || scenarioRunnerAgent === reviewerAgent;
+  const inheritedScenarioRunnerModelId = runnerFollowsReviewer
+    ? config.reviewerModelId
+    : undefined;
   const condenseAboveChars = config.condenseAboveChars === undefined
     ? DEFAULT_CONDENSE_ABOVE_CHARS
     : config.condenseAboveChars === null
@@ -3277,6 +3454,16 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
   }
   if (scenarioWriter) {
     assertRoleModelIdNamed("scenarioWriter", scenarioWriterAgent, config.scenarioWriterModelId);
+    assertRoleModelIdNamed(
+      "scenarioRunner",
+      scenarioRunnerAgent,
+      config.scenarioRunnerModelId ?? inheritedScenarioRunnerModelId,
+      {
+        agentField:
+          config.scenarioRunnerAgent === undefined ? "reviewerAgent" : "scenarioRunnerAgent",
+        modelField: "scenarioRunnerModelId",
+      },
+    );
   }
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
   const reflectTaggerAgent = parseAgentProviderName(
@@ -3303,6 +3490,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "adjudicatorEffort",
     "condenserEffort",
     "scenarioWriterEffort",
+    "scenarioRunnerEffort",
     "mergerEffort",
     "reflectTaggerEffort",
     "reflectSynthesizerEffort",
@@ -3344,6 +3532,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     condenserModelId: condenserModelId ?? DEFAULT_CONDENSER_MODEL_ID,
     scenarioWriter,
     scenarioWriterModelId: config.scenarioWriterModelId ?? DEFAULT_SCENARIO_WRITER_MODEL_ID,
+    scenarioRunnerModelId:
+      config.scenarioRunnerModelId ??
+      inheritedScenarioRunnerModelId ??
+      DEFAULT_REVIEWER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
     reflectTaggerModelId: config.reflectTaggerModelId ?? DEFAULT_REFLECT_TAGGER_MODEL_ID,
     reflectSynthesizerModelId:
@@ -3355,6 +3547,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     adjudicatorAgent,
     condenserAgent,
     scenarioWriterAgent,
+    scenarioRunnerAgent,
     mergerAgent,
     reflectTaggerAgent,
     reflectSynthesizerAgent,
@@ -3372,6 +3565,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       config.adjudicatorEffort ??
       config.reviewerEffort ??
       claudeEffort(adjudicatorAgent, DEFAULT_REVIEWER_EFFORT),
+    scenarioRunnerEffort:
+      config.scenarioRunnerEffort ??
+      (runnerFollowsReviewer ? config.reviewerEffort : undefined) ??
+      claudeEffort(scenarioRunnerAgent, DEFAULT_REVIEWER_EFFORT),
     mergerEffort:
       config.mergerEffort ?? claudeEffort(mergerAgent, DEFAULT_MERGER_EFFORT),
     reflectTaggerEffort:
@@ -3428,15 +3625,18 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
         : requirePositiveInteger("maxConcurrentGates", config.maxConcurrentGates),
     copyToWorktree: resolveCopyToWorktree(config.copyToWorktree, cwd),
     labels: resolveLabels(config.labels),
+    labelSync: resolveLabelSync(config.labelSync),
     gateStack,
     mergeMode: resolveMergeMode(config.mergeMode, sourceBranch),
     deployWatch: resolveDeployWatch(config.deployWatch),
+    landingWindow: resolveLandingWindow(config.landingWindow),
     egress: resolveEgress(config.egress, requiredAgentProviders({
       uiPrototypeCheck,
       condenseAboveChars,
       condenserAgent,
       scenarioWriter,
       scenarioWriterAgent,
+      scenarioRunnerAgent,
       implementerAgent,
       uiCheckAgent,
       reviewerAgent,

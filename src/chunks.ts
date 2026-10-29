@@ -105,6 +105,33 @@
 // the one issue that straddles, which waits for one side to land and close.
 //
 // ---------------------------------------------------------------------------
+// Frozen chunks: stack, never join (#243)
+// ---------------------------------------------------------------------------
+//
+// A chunk whose pull request carries `land` or `land-hotfix` is FROZEN: a
+// reviewer approved it as it stands, and it may wait a weekend for the landing
+// window. Joining it would land work nobody reviewed, so it takes no member:
+// what is on its branch is all it has (work already in flight to it is held
+// off it by `run.ts` until it lands or `land` comes off), it pulls in no
+// fresh blocker group, and its own root, while not on the branch, is held
+// (`frozen`).
+//
+// What would have joined it STACKS on it instead: a fresh group whose
+// blockers land innermost on a frozen chunk is a chunk of its own, named
+// `sandbar/chunk-<root>_on_<base>-<slug>` (`naming.ts`) and cut from the frozen
+// tip. Innermost, because a stacked chunk carries its base: an issue blocked
+// by members of both joins the stacked one. The base is in the branch name so
+// every later poll reads it back: a stacked chunk stays one after `land` comes
+// off, and `Chunk.base` names the base's branch while origin carries it. A
+// stacked branch contains its base's member refs too; those answer to the base.
+//
+// The rest is downstream of `Chunk.base`: the plan seeds members from the
+// stacked tip (or the base's, before the stacked branch exists) and refreshes
+// it onto a base that moved, the merger creates the branch at the base and
+// bases its pull request there, `run.ts` holds its `land` until the base has
+// landed, and the base's wrap-up retargets that pull request (`chunk-land.ts`).
+//
+// ---------------------------------------------------------------------------
 // Why the walk is topological, over a union-find
 // ---------------------------------------------------------------------------
 //
@@ -171,7 +198,11 @@
 // every self-referencing issue an in-degree Kahn's could never retire.
 
 import type { Lane } from "./lanes.js";
-import { chunkBranchName, rootIssueFromChunkBranch } from "./naming.js";
+import {
+  baseRootFromChunkBranch,
+  chunkBranchName,
+  rootIssueFromChunkBranch,
+} from "./naming.js";
 
 // The display label a review-gated issue carries once its work is on its chunk
 // branch: OPEN and still to be reviewed. Sandbar writes and later removes it,
@@ -192,6 +223,13 @@ export const NEEDS_REVIEW_LABEL = "needs-review";
 // above and the one `lanes.ts` gives for `auto-land`: it is protocol a human
 // uses to address sandbar, not a host's handoff vocabulary.
 export const LAND_LABEL = "land";
+
+// `land`, but past a closed landing window (#244, `landing-window.ts`): a
+// hotfix a human wants on the source branch now. Otherwise it is `land` in
+// every respect, and both are taken off together.
+export const LAND_HOTFIX_LABEL = "land-hotfix";
+
+export const LAND_REQUEST_LABELS: readonly string[] = [LAND_LABEL, LAND_HOTFIX_LABEL];
 
 // An issue named as part of a chunk, in the one form the review surface needs
 // it: a number and the title a human reads next to it (#62).
@@ -255,6 +293,10 @@ export type ChunkTarget = {
   // member: their work has to sit on top of what the chunk branch carries.
   // Absent reads as "tip", the answer that can only refuse, never mis-seed.
   readonly seed?: "source" | "tip";
+  // The branch of the chunk this one is stacked on (#243), while origin
+  // carries it: where `branch` is created, and the tip a member seeds from
+  // until `branch` exists. Absent for a chunk cut from the source branch.
+  readonly base?: string;
 };
 
 // A chunk that must catch up to the source branch before one or more chained
@@ -264,6 +306,9 @@ export type ChunkTarget = {
 export type ChunkRefresh = {
   readonly root: number;
   readonly branch: string;
+  // What is merged in: the branch of the chunk this one is stacked on when
+  // `branch` lacks its tip (#243), else null for the source branch.
+  readonly base: string | null;
   readonly title: string;
   readonly dependents: readonly ChunkMember[];
 };
@@ -294,6 +339,9 @@ export type Chunk = {
   // current title. This function remains pure because origin's branch names
   // are an explicit input.
   readonly branch: string;
+  // The branch of the chunk this one is stacked on, while origin carries it
+  // (see "Frozen chunks"); null for a chunk of the source branch.
+  readonly base: string | null;
 };
 
 // A chunk that has WORK ON ORIGIN, and what the consumers of the review
@@ -304,6 +352,8 @@ export type Chunk = {
 export type LandedChunk = {
   readonly root: number;
   readonly branch: string;
+  // `Chunk.base`: while it is non-null this chunk cannot land.
+  readonly base: string | null;
   // The ROOT issue's current title. Names the chunk in the merge commit a
   // landing writes and in the prose it posts (#64), whether or not the root is
   // among `members`. Its slug may differ from an existing branch after a title
@@ -350,10 +400,14 @@ export type LandedChunk = {
   readonly tips: readonly ChunkMember[];
 };
 
-// Why an issue got no chunk. All four mean "wait", never "give up".
+// Why an issue got no chunk. All five mean "wait", never "give up".
 //
 //   joins-two-chunks  — placing it would join two or more UNDERWAY chunks (the
 //                       join rule above). Resolves when those chunks land.
+//   frozen            — it is the root a FROZEN chunk is named after, and not on
+//                       that chunk's branch ("Frozen chunks" above). Resolves
+//                       when the chunk lands or `land` comes off. The planner
+//                       also holds rework of a frozen chunk's member with it.
 //   unchunked-blocker — a blocker of its own has no chunk, so neither can it.
 //                       The transitive shadow of the other reasons.
 //   cycle             — it is inside a `## Blocked by` cycle, or downstream of
@@ -363,6 +417,7 @@ export type LandedChunk = {
 //                       own once it does.
 export type ChunkBlockReason =
   | "joins-two-chunks"
+  | "frozen"
   | "unchunked-blocker"
   | "cycle"
   | "unsettled";
@@ -422,6 +477,9 @@ export type DeriveChunksOptions = {
   // In-flight issues and the chunk their dispatched `ChunkTarget` names.
   // Fixed at dispatch, so it is identity, not a second opinion about it.
   readonly inFlight?: ReadonlyMap<number, ChunkTarget>;
+  // Origin chunk branches whose open pull request carries `land` or
+  // `land-hotfix`: frozen (see "Frozen chunks" above).
+  readonly frozen?: ReadonlySet<string>;
   // The pending graph the caller accepts as settled (see "Settling" above):
   // fresh components start only when today's `pendingGraph` equals it.
   // Undefined disables the gate — every fresh component starts — which is
@@ -439,6 +497,31 @@ export function deriveChunks(
 ): ChunkDerivation {
   const originChunks = options.originChunks ?? new Map<string, ReadonlySet<number>>();
   const inFlight = options.inFlight ?? new Map<number, ChunkTarget>();
+  const frozenRoots = new Set(
+    [...options.frozen ?? []].flatMap((branch) => rootIssueFromChunkBranch(branch) ?? []),
+  );
+  // Root -> the root it is stacked on, as every known chunk branch names it.
+  const stackedOn = new Map<number, number>();
+  for (const branch of [...originChunks.keys(), ...[...inFlight.values()].map((t) => t.branch)]) {
+    const root = rootIssueFromChunkBranch(branch);
+    const base = baseRootFromChunkBranch(branch);
+    if (root !== null && base !== null) stackedOn.set(root, base);
+  }
+  // Whether `root`'s branch carries `other`'s work: the same chunk, or one it
+  // is stacked on, directly or not.
+  const carries = (root: number, other: number): boolean => {
+    const seen = new Set<number>();
+    for (let r: number | undefined = root; r !== undefined && !seen.has(r); r = stackedOn.get(r)) {
+      if (r === other) return true;
+      seen.add(r);
+    }
+    return false;
+  };
+  // The roots in `roots` no other one in it carries.
+  const innermost = (roots: Iterable<number>): number[] => {
+    const all = [...new Set(roots)];
+    return all.filter((r) => !all.some((o) => o !== r && carries(o, r)));
+  };
   const gated = new Map<number, ChunkIssue>();
   for (const issue of issues) {
     if (lanes.get(issue.number)?.lane === "review") gated.set(issue.number, issue);
@@ -470,10 +553,11 @@ export function deriveChunks(
 
   // Identity of every UNDERWAY issue: the root its chunk already answers to.
   // An in-flight member's dispatched target wins; a landed member answers to
-  // the root encoded in the branch carrying its member ref. A ref inherited
-  // through the source branch can make several branches contain one member, so
-  // prefer a root connected to it, then the lowest — the older chunk, which is
-  // the one that inherited copies came from.
+  // the root encoded in the branch carrying its member ref. A stacked branch
+  // contains its base's member refs, and those answer to the base. A ref
+  // inherited through the source branch can make several branches contain one
+  // member, so prefer a root connected to it, then the lowest — the older
+  // chunk, which is the one that inherited copies came from.
   const containing = new Map<number, number[]>();
   for (const [branch, members] of originChunks) {
     const root = rootIssueFromChunkBranch(branch);
@@ -491,7 +575,8 @@ export function deriveChunks(
       identityOf.set(number, dispatched.root);
       continue;
     }
-    const roots = [...new Set(containing.get(number) ?? [])].sort(ascending);
+    const all = [...new Set(containing.get(number) ?? [])];
+    const roots = all.filter((r) => !all.some((o) => o !== r && carries(r, o))).sort(ascending);
     if (roots.length === 0) continue;
     const connected = roots.filter(
       (r) => gated.has(r) && whole.find(r) === whole.find(number),
@@ -501,16 +586,24 @@ export function deriveChunks(
   const underwayRoots = new Set(identityOf.values());
 
   // Groups are built by union-find; a group's identity is the underway root it
-  // answers to, or absent while it is FRESH. Two identities never meet in one
+  // answers to, or absent while it is FRESH. A fresh group may be stacked on a
+  // frozen root instead. Two identities, or two stacks, never meet in one
   // group: every union below is refused, or held, when it would do that.
   const groups = new UnionFind();
   const identity = new Map<number, number>();
+  const stack = new Map<number, number>();
   const identityOfGroup = (n: number): number | undefined => identity.get(groups.find(n));
+  const stackOfGroup = (n: number): number | undefined => stack.get(groups.find(n));
   const join = (a: number, b: number): void => {
     const id = identityOfGroup(a) ?? identityOfGroup(b);
+    const on = stackOfGroup(a) ?? stackOfGroup(b);
     const top = groups.union(a, b);
     if (id !== undefined) identity.set(top, id);
+    else if (on !== undefined) stack.set(top, on);
   };
+  // Whether the chunk `root` names can take in a fresh group stacked on `on`.
+  const takes = (root: number, on: number | undefined): boolean =>
+    !frozenRoots.has(root) && (on === undefined || carries(root, on));
   for (const [number, root] of identityOf) {
     groups.add(number);
     identity.set(groups.find(number), root);
@@ -528,26 +621,37 @@ export function deriveChunks(
     reached.add(number);
     // Every blocker is decided by now: placed in a group, or held.
     const blockers = parents.get(number) ?? [];
-    if (identityOf.has(number)) {
+    const id = identityOf.get(number);
+    if (id !== undefined) {
       // Underway already. It keeps its identity whatever its edges say, and
-      // pulls in any FRESH blocker group — the join rule, read from below.
+      // pulls in any FRESH blocker group it can take — the join rule, read
+      // from below.
       for (const b of blockers) {
-        if (groups.has(b) && identityOfGroup(b) === undefined) join(number, b);
+        if (groups.has(b) && identityOfGroup(b) === undefined && takes(id, stackOfGroup(b))) {
+          join(number, b);
+        }
       }
     } else {
       const unchunked = blockers.filter((b) => !groups.has(b));
-      const ids = new Set(
-        blockers
-          .map(identityOfGroup)
-          .filter((id): id is number => id !== undefined),
+      // The chunks its blockers land on, a fresh group's by its stack: it
+      // joins the innermost one, or stacks on it when that one is frozen.
+      const into = innermost(
+        blockers.flatMap((b) => identityOfGroup(b) ?? stackOfGroup(b) ?? []),
       );
       if (unchunked.length > 0) {
         held.set(number, { issue: number, reason: "unchunked-blocker", blockers: unchunked });
-      } else if (ids.size > 1) {
+      } else if (into.length > 1) {
         held.set(number, { issue: number, reason: "joins-two-chunks", blockers });
       } else {
+        const [target] = into;
         groups.add(number);
-        for (const b of blockers) join(number, b);
+        if (target !== undefined && frozenRoots.has(target)) stack.set(number, target);
+        for (const b of blockers) {
+          const theirs = identityOfGroup(b);
+          if (theirs === undefined || (theirs === target && !frozenRoots.has(target))) {
+            join(number, b);
+          }
+        }
       }
     }
 
@@ -583,17 +687,20 @@ export function deriveChunks(
 
   // A fresh group holding the very issue an underway chunk is named after is
   // that chunk's: the root belongs to the chunk it names. Holding two such
-  // issues would join two underway chunks, so it is held instead.
+  // issues would join two underway chunks, so it is held instead, and so is
+  // one a frozen chunk is named after, which cannot take it.
   for (const [top, members] of membersOf) {
     if (identity.has(top)) continue;
     const named = [...new Set(members.filter((m) => underwayRoots.has(m)))];
-    if (named.length === 1) identity.set(top, named[0]!);
-    else if (named.length > 1) {
-      for (const m of members) {
-        held.set(m, { issue: m, reason: "joins-two-chunks", blockers: named });
-      }
-      membersOf.delete(top);
+    const [only] = named;
+    if (only === undefined) continue;
+    if (named.length === 1 && takes(only, stack.get(top))) {
+      identity.set(top, only);
+      continue;
     }
+    const reason = named.length === 1 && frozenRoots.has(only) ? "frozen" : "joins-two-chunks";
+    for (const m of members) held.set(m, { issue: m, reason, blockers: named });
+    membersOf.delete(top);
   }
 
   // The settling comparison: every review-gated issue no underway chunk
@@ -619,6 +726,7 @@ export function deriveChunks(
   );
 
   const byRoot = new Map<number, number[]>();
+  const freshStack = new Map<number, number>();
   for (const [top, members] of membersOf) {
     let root = identity.get(top);
     if (root === undefined) {
@@ -632,6 +740,8 @@ export function deriveChunks(
       root = members.find(
         (m) => !(parents.get(m) ?? []).some((p) => inGroup.has(p)),
       ) ?? members[0]!;
+      const on = stack.get(top);
+      if (on !== undefined) freshStack.set(root, on);
     }
     const existing = byRoot.get(root);
     if (existing) existing.push(...members);
@@ -662,8 +772,14 @@ export function deriveChunks(
       ? originBranches[0]!
       : originBranches.length === 0 && dispatched !== undefined
       ? dispatched
-      : chunkBranchName(root, gated.get(root)?.title ?? "");
-    chunks.push({ root, members, parentless, branch });
+      : chunkBranchName(root, gated.get(root)?.title ?? "", freshStack.get(root) ?? null);
+    // Stacked while origin carries exactly one branch for the base root; once
+    // the base has landed, its branch is gone and this chunk is the source
+    // branch's like any other.
+    const baseRoot = baseRootFromChunkBranch(branch);
+    const baseBranches = baseRoot === null ? [] : originBranchesByRoot.get(baseRoot) ?? [];
+    const base = baseBranches.length === 1 ? baseBranches[0]! : null;
+    chunks.push({ root, members, parentless, branch, base });
     for (const member of members) chunkOf.set(member, root);
   }
   chunks.sort((a, b) => a.root - b.root);
@@ -819,6 +935,7 @@ export function landedChunksOf(
     out.push({
       root: chunk.root,
       branch: chunk.branch,
+      base: chunk.base,
       title: byNumber.get(chunk.root)?.title ?? "",
       members: members.map(asMember),
       closeOrder: closeOrderOfChunkMembers(

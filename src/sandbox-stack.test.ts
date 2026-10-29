@@ -850,6 +850,18 @@ describe("startSandboxStack (#44 D3)", () => {
       expect(t.records.map((r) => r.name)).toEqual(["db-dbcopy", "app", "db"]);
     });
 
+    it("at swap-out after stop only forgets the copy, whose teardown is recorded once", async () => {
+      const t = timeline();
+      const stack = await t.start();
+      await copyOf(stack);
+      await stack.stop();
+      t.ops.length = 0;
+      await stack.swapDbCopyOut();
+      expect(t.ops).toEqual([]);
+      expect(t.records.filter((r) => r.container === COPY)).toHaveLength(1);
+      await expect(stack.swapDbCopyOut()).rejects.toThrow(/runs no database copy/);
+    });
+
     it("refuses a second copy, and a copy of a container that is not a sibling", async () => {
       const t = timeline();
       const stack = await t.start();

@@ -5,6 +5,7 @@ import {
   type Scenario,
   parseScenarioWriter,
   renderScenario,
+  scenarioSetErrors,
   scenarioTouched,
 } from "./scenario-parser.js";
 
@@ -183,5 +184,66 @@ describe("scenarioTouched", () => {
   it("reads an area entry with a trailing slash as the directory", () => {
     expect(scenarioTouched({ ...touched, area: ["app/Invoices/"] }, ["app/Invoices/Show.php"]))
       .toBe(true);
+  });
+});
+
+describe("scenarioSetErrors (#240)", () => {
+  const stored = (n: number) =>
+    ({ id: `S${n}`, title: "t", needs: ["cli"], area: [], given: ["g"], when: ["w"], then: ["t"] });
+  const set = {
+    version: 1,
+    issue: 7,
+    seed: { ref: "origin/main", sha: "a".repeat(40) },
+    writer: { provider: "claude", model: "m", effort: null },
+    scenarios: [stored(1), stored(2)],
+  };
+
+  it("accepts a set the writer filed", () => {
+    expect(scenarioSetErrors(set, 7)).toEqual([]);
+    expect(scenarioSetErrors({ ...set, writer: { ...set.writer, effort: "high" } }, 7)).toEqual([]);
+  });
+
+  it("lists every violation, not the first", () => {
+    expect(scenarioSetErrors({
+      version: 2,
+      issue: 0,
+      seed: { ref: "origin/main" },
+      writer: { provider: "claude", model: "m" },
+      scenarios: [
+        { ...stored(1), title: "", needs: ["cli", "cli"], area: "src" },
+        { ...stored(3), needs: ["gui"], given: [], when: "w", then: [7] },
+        "S3",
+      ],
+    }, 7)).toEqual([
+      "version is not 1",
+      "issue is not a positive integer",
+      "seed is not { ref, sha }",
+      "writer is not { provider, model, effort }",
+      "scenarios[0].title is not a non-empty string",
+      "scenarios[0].needs is not a list of distinct ui, api, sql, integration, cli",
+      "scenarios[0].area is not a list of strings",
+      "scenarios[1].id is not S2",
+      "scenarios[1].needs is not a list of distinct ui, api, sql, integration, cli",
+      "scenarios[1].given is not a non-empty list of strings",
+      "scenarios[1].when is not a non-empty list of strings",
+      "scenarios[1].then is not a non-empty list of strings",
+      "scenarios[2] is not an object",
+    ]);
+  });
+
+  it("refuses a set written for another issue", () => {
+    expect(scenarioSetErrors(set, 8)).toEqual(["issue is not 8"]);
+  });
+
+  it.each([
+    ["no object", null, ["is not an object"]],
+    ["no scenarios", { ...set, scenarios: [] }, [`scenarios is not a list of 1 to ${MAX_SCENARIOS} scenarios`]],
+    [
+      "too many scenarios",
+      { ...set, scenarios: Array.from({ length: MAX_SCENARIOS + 1 }, (_, i) => stored(i + 1)) },
+      [`scenarios is not a list of 1 to ${MAX_SCENARIOS} scenarios`],
+    ],
+  ])("refuses %s", (_, value, errors) => {
+    expect(scenarioSetErrors(value, 7)).toEqual(errors);
   });
 });

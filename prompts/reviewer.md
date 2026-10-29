@@ -39,7 +39,7 @@ blocks. {{historyScope}}
 A change requested in an earlier round may not be reversed without naming that
 round and explaining why its request was wrong.
 
-Your role is strictly advisory. You must not modify the branch.
+{{dbNotice}}Your role is strictly advisory. You must not modify the branch.
 Do not run any command that writes under `.git` (including commit, checkout,
 reset, branch, worktree, gc, or prune), do not modify files, push, or run gate
 commands. Read-only investigation only.

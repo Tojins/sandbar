@@ -16,8 +16,9 @@
 // provider boundary: config.env retains its allowlist fallback semantics while
 // the gate's own env stays literal, and the provider sees one final record.
 // `Sandbox.runHooks` (#201) runs in-sandbox hooks on demand after setup —
-// `onDbCopyReady`, after each database copy is swapped in — and answers a
-// failure or timeout with its output instead of throwing: a failed migration
+// `onDbCopyReady`, after each database copy is swapped in, and
+// `beforeScenarioRun`, before a verifier round runs scenarios (#238) — and
+// answers a failure or timeout with its output instead of throwing: a failed migration
 // on a copy is evidence for the agent, never a reason to rebuild the sandbox.
 //
 // A provider's parser answers in seven registers and the difference between
@@ -44,6 +45,8 @@
 // `background_tasks`, carries the count Claude's last `background_tasks_changed`
 // listed: it holds off the completion grace while tasks are pending (#192)
 // and rides onto the run result for the inner loop's nudge choice (#191).
+// `session_id`, the conversation claude or codex named first, rides out the
+// same way, so a later run can resume that session by id (#238).
 //
 // Load-bearing behaviours that look optional but are NOT (a naive port
 // re-introduces a crash/hang on sandbar's parallel `Promise.allSettled` path):
@@ -268,6 +271,11 @@ export type SandboxHooks = {
     // migrations to it. Valid only with `config.databaseCopies`; run by
     // `Sandbox.runHooks`, whose failure is reported and never retried.
     onDbCopyReady?: ReadonlyArray<SandboxHook>;
+    // Before each verifier round that runs scenarios (#180), after the copy
+    // and its `onDbCopyReady`, so the app the runner drives is served from the
+    // head under review. Run by `Sandbox.runHooks`; a failure makes the
+    // scenarios that need the app unverified and is never retried.
+    beforeScenarioRun?: ReadonlyArray<SandboxHook>;
   };
 };
 
@@ -342,6 +350,7 @@ export type AgentSpeechAccumulator = {
   readonly firstContext: number | undefined;
   readonly rateLimit: RateLimitMeasurement | undefined;
   readonly backgroundTasks: number | undefined;
+  readonly sessionId: string | undefined;
 };
 
 export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
@@ -356,6 +365,7 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
   let firstCommand: { readonly contextTokens?: number } | undefined;
   let rateLimit: RateLimitMeasurement | undefined;
   let backgroundTasks: number | undefined;
+  let sessionId: string | undefined;
   return {
     ingest(events) {
       for (const event of events) {
@@ -373,6 +383,7 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
         else if (event.type === "tool_call") firstCommand ??= event;
         else if (event.type === "rate_limit") rateLimit = event.measurement;
         else if (event.type === "background_tasks") backgroundTasks = event.count;
+        else if (event.type === "session_id") sessionId ??= event.sessionId;
       }
     },
     get accumulated() {
@@ -402,6 +413,9 @@ export function createAgentSpeechAccumulator(): AgentSpeechAccumulator {
     get backgroundTasks() {
       return backgroundTasks;
     },
+    get sessionId() {
+      return sessionId;
+    },
   };
 }
 
@@ -420,6 +434,11 @@ export type ClaudeCodeOptions = {
   // (inner-loop.ts) is the consumer; the reviewer's two passes stopped being
   // one since #121 deleted the resume between them.
   continueSession?: boolean;
+  // `--resume <id>`: resume the conversation the stream named
+  // (`SandboxRunResult.sessionId`). Where another agent shares the sandbox,
+  // "most recent" may be the other agent's, so the verifier's scenario runner
+  // (#238) names its own. Never set with `continueSession`.
+  resumeSession?: string | undefined;
 };
 
 export type Mount = {
@@ -613,6 +632,9 @@ export type SandboxRunResult = ContainerResources & {
   // The sandbox waits while tasks are listed (#192), so a run that ended with
   // some listed ended anyway — its process exited — and those tasks with it.
   readonly backgroundTasks?: number;
+  // The conversation the provider named (claude's session, codex's thread),
+  // which `resumeSession` continues by id. Absent when it named none.
+  readonly sessionId?: string;
 };
 
 export type AgentRunEndedBy = "exit" | "result-then-silence";
@@ -692,6 +714,8 @@ export type CreateSandboxOptions = {
   // same-trust sandboxes that already hold the credential readable. Codex's
   // reload-before-refresh protocol requires one file per serialized stream;
   // separate writable copies rotate one token family away from each other.
+  // The verifier's workspace (#238) is the other writable one: the scenario
+  // runner's evidence, which the host archives out of it after each round.
   extraMounts?: readonly Mount[];
   // Run-owned callers route recoverable cleanup/preservation notices into the
   // event record. Standalone callers retain the terminal renderer.
@@ -1084,7 +1108,9 @@ export const claudeCode = (
       ? " --dangerously-skip-permissions"
       : "";
     const effortFlag = options?.effort ? ` --effort ${options.effort}` : "";
-    const continueFlag = options?.continueSession ? " --continue" : "";
+    const continueFlag = options?.resumeSession !== undefined
+      ? ` --resume ${shellEscape(options.resumeSession)}`
+      : options?.continueSession ? " --continue" : "";
     return {
       command: `claude --print --verbose${skipPerms} --output-format stream-json --model ${shellEscape(model)}${effortFlag}${continueFlag} -p -`,
       stdin: prompt,
@@ -1332,6 +1358,9 @@ export type CodexOptions = {
   // returned. The promise nudge (inner-loop.ts) is the consumer; the
   // reviewer's two passes are cold since #121.
   continueSession?: boolean;
+  // `codex exec resume <id>`: the thread the stream named, for the reason
+  // ClaudeCodeOptions.resumeSession gives. Never set with `continueSession`.
+  resumeSession?: string | undefined;
 };
 
 export const codex = (model: string, options?: CodexOptions): AgentProvider => ({
@@ -1344,7 +1373,9 @@ export const codex = (model: string, options?: CodexOptions): AgentProvider => (
     const bypass = dangerouslySkipPermissions
       ? " --dangerously-bypass-approvals-and-sandbox"
       : "";
-    const resume = options?.continueSession ? " resume --last" : "";
+    const resume = options?.resumeSession !== undefined
+      ? ` resume ${shellEscape(options.resumeSession)}`
+      : options?.continueSession ? " resume --last" : "";
     const effortFlag = options?.effort
       ? ` -c ${shellEscape(`model_reasoning_effort=${options.effort}`)}`
       : "";
@@ -2554,6 +2585,7 @@ type InvokeAgentResult = {
   firstContext?: number;
   rateLimit?: RateLimitMeasurement;
   backgroundTasks?: number;
+  sessionId?: string;
 };
 
 const invokeAgent = async (
@@ -2884,6 +2916,7 @@ const invokeAgent = async (
         ...(speech.backgroundTasks === undefined
           ? {}
           : { backgroundTasks: speech.backgroundTasks }),
+        ...(speech.sessionId === undefined ? {} : { sessionId: speech.sessionId }),
         toolCalls: speech.toolCalls,
       });
     };
@@ -3027,6 +3060,7 @@ const measuredAgentRun = async <T extends InvokeAgentResult>(
       ...(iter.firstContext === undefined ? {} : { firstContext: iter.firstContext }),
       ...(iter.rateLimit === undefined ? {} : { rateLimit: iter.rateLimit }),
       ...(iter.backgroundTasks === undefined ? {} : { backgroundTasks: iter.backgroundTasks }),
+      ...(iter.sessionId === undefined ? {} : { sessionId: iter.sessionId }),
       toolCalls: iter.toolCalls,
       ...resources,
     },
@@ -3322,6 +3356,7 @@ export const createSandbox = async (
       result, signalMs, maxGapMs, endedBy, usage, toolCalls, peakContext, firstContext, rateLimit,
       silent,
       backgroundTasks,
+      sessionId,
     } = invoked;
 
     const commits = await collectCommits();
@@ -3338,6 +3373,7 @@ export const createSandbox = async (
       ...(firstContext === undefined ? {} : { firstContext }),
       ...(rateLimit === undefined ? {} : { rateLimit }),
       ...(backgroundTasks === undefined ? {} : { backgroundTasks }),
+      ...(sessionId === undefined ? {} : { sessionId }),
       toolCalls,
     };
   };

@@ -138,6 +138,13 @@ export default {
 
   // Rename the handoff label every park applies, if it differs in this repository.
   // labels: { handoff: "needs-human" },
+  // What `sandbar labels sync` makes the repo's labels match, beside the
+  // protocol labels sandbar declares itself: host labels (description and
+  // colour required), a protocol label's description, and renames (`from`).
+  // labelSync: [
+  //   { name: "ready-for-human", description: "Triaged for a human", color: "d93f0b" },
+  //   { name: "needs-human", from: "needs-info" },
+  // ],
   // Copy host-only paths into each issue worktree before setup runs.
   // copyToWorktree: [],
 
@@ -157,6 +164,12 @@ export default {
   // `notifyLogin`, who must not be the token's own login. The `deploy-red`
   // label (or `label`) and `ready-for-human` must already exist.
   // deployWatch: { workflow: "deploy.yml", notifyLogin: "your-login" },
+
+  // Weekly hours in which nothing lands on the source branch: a chunk's
+  // `land` and a DONE auto-lane issue wait for the window to open, while
+  // `land-hotfix` on a chunk's pull request lands regardless (create that
+  // label to use it). Ends are "<Mon..Sun> HH:MM" in `timeZone`.
+  // landingWindow: { timeZone: "Europe/Brussels", closedFrom: "Fri 12:00", closedUntil: "Mon 08:00" },
 
   // Allow sandboxes, gates and resolve containers to reach only GitHub, the
   // model APIs of the providers in use and these hosts; every refused host is

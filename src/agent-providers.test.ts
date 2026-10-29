@@ -205,6 +205,24 @@ describe("requiredAgentProviders", () => {
     expect(requiredAgentProviders({ ...roles, scenarioWriter: false })).toEqual(["claude"]);
   });
 
+  it("adds the scenario runner's provider only while the writer is on (#180)", () => {
+    const roles = {
+      uiPrototypeCheck: true,
+      condenseAboveChars: null,
+      condenserAgent: "claude",
+      implementerAgent: "claude",
+      uiCheckAgent: "claude",
+      reviewerAgent: "claude",
+      reviewerQualityAgent: "claude",
+      adjudicatorAgent: "claude",
+      mergerAgent: "claude",
+      scenarioWriterAgent: "claude",
+      scenarioRunnerAgent: "codex",
+    } as const;
+    expect(requiredAgentProviders({ ...roles, scenarioWriter: true })).toEqual(["claude", "codex"]);
+    expect(requiredAgentProviders({ ...roles, scenarioWriter: false })).toEqual(["claude"]);
+  });
+
   it("is just claude for the default routing", () => {
     expect(
       requiredAgentProviders({
@@ -426,6 +444,15 @@ describe("buildAgentProvider", () => {
         continueSession: true,
       }).buildPrintCommand({ prompt: "p" }).command,
     ).toContain("resume --last");
+  });
+
+  it("routes resumeSession to each provider's resume of that session, never beside continueSession (#238)", () => {
+    expect(buildAgentProvider("claude", "opus", { resumeSession: "s-1" })
+      .buildPrintCommand({ prompt: "p" }).command).toContain("--resume 's-1'");
+    expect(buildAgentProvider("codex", "m", { resumeSession: "t-1" })
+      .buildPrintCommand({ prompt: "p" }).command).toContain("resume 't-1'");
+    expect(() => buildAgentProvider("claude", "opus", { continueSession: true, resumeSession: "s-1" }))
+      .toThrow(/either continues the latest session or resumes a named one/);
   });
 
   // The third per-call knob (#130): one option, each provider's own spelling.

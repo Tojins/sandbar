@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-Read @AGENTS.md first: its rules apply to every commit (starting with: bump the
-version in the same commit). It is shared with the sandbar agents, which get it
+Read @AGENTS.md first: its rules apply to every commit (starting with: every
+branch bumps the version). It is shared with the sandbar agents, which get it
 as an anchor doc directly.
 
 This file is a **map**. The authoritative design notes are the header comments
@@ -15,6 +15,8 @@ cited GitHub issue (`#N`) and the commit history.
 - `npm run check` — `tsc --noEmit`; the only static gate (no linter).
 - `npm test` — rebuild, then `vitest run`.
 - `npx vitest run src/<file>.test.ts [-t "<name>"]` — one file / one test.
+- `npm run structure` — the structural checks sandbar's gate runs as steps
+  (`scripts/structure/`, #183): today `version`, the branch's bump.
 
 Node ≥ 20.6, ESM, NodeNext: imports in `src/` use `.js` even for `.ts` files.
 
@@ -31,7 +33,10 @@ dispatches `gate` (#45, `src/gate-run.ts`), `ui` (#132), `pulled-images`,
 `config-digest` (#190, `src/config-digest.ts`) and `db-base` (#201,
 `src/db-base.ts`; pure layer `db-copy-policy.ts`): with
 `config.databaseCopies`, a systemd timer beside the daemon imports each new
-dump into a base datadir and swaps `<root>/current` to it.
+dump into a base datadir and swaps `<root>/current` to it. `labels sync`
+(#245, `src/label-sync.ts`) creates or updates the protocol labels and
+`config.labelSync`'s, renames, never deletes; the run itself still never
+creates a label (#8).
 `npm run stats` (`src/stats-cli.ts`, #194) is a repo script, not a verb: the
 factory scorecard over run records (`stats-record.ts` reads, `stats.ts`
 reduces); nothing in the daemon imports it.
@@ -41,10 +46,13 @@ tagger and a synthesizer (`reflect.ts`, cached, sandboxed in `reflectScope`)
 turn them into proposals, and writes the report (`reflect-report.ts`) under
 `<stateDir>/reflect/`; `--no-agents` stops at the tables.
 `npm run replay` (`src/replay-cli.ts`, args in `replay-args.ts`, #195) is a third, and HUMAN-ONLY: `freeze`
-writes a case file of past issues at their seeds, `run` drives
+writes a case file of past issues at their seeds, each pinning the scenario
+set its original admission wrote (#240), `run` drives
 `runInnerLoop` over it k times into `<workDir>/replay/sessions/<label>/` with
-no forge credential (`replay-run.ts`; pure layer `replay.ts`), and `report`
-sets each case's original run beside the sessions as spreads
+no forge credential, a pinned set in the writer's place (`replay-run.ts`;
+pure layer `replay.ts`), and `report`
+sets each case's original run beside the sessions as spreads, with
+pass/fail/unverified per pinned scenario
 (`compareReplay`, every run read through `computeStats`); the daemon,
 `cli.ts`, `index.ts`, prompts and reflect never import or name it.
 `scripts/stats-classify.mjs` (#209) classes the `--json --with-prose` report's
@@ -58,8 +66,10 @@ and the gate stack (`config.gateStack`, #24).
 
 1. **Plan** — deterministic, no LLM. `plan-resolver.ts` (queue label, actor
    filter #136, `## Blocked by`), `lanes.ts`, `chunks.ts` (chunks are derived
-   components of review-gated issues), `chunk-follow-up.ts` (PR review →
-   re-queue members, #95), `chunk-reconcile.ts` (finish already-merged chunks).
+   components of review-gated issues; one whose PR carries `land` is frozen,
+   and new connected work stacks on it as `sandbar/chunk-<root>_on_<base>-…`,
+   #243), `chunk-follow-up.ts` (PR review → re-queue members, #95),
+   `chunk-reconcile.ts` (finish already-merged chunks).
 2. **Inner loop** — `inner-loop-machine.ts` (pure state machine) +
    `inner-loop.ts` (I/O). One sandbox per issue: anchor condenser (#217, only
    above `condenseAboveChars`, once per thread change, falls back
@@ -69,7 +79,15 @@ and the gate stack (`config.gateStack`, #24).
    report, `standards-groups.ts`, #204; then a fixer that writes commits →
    read-only verify, #187) → gate-1 → verifier
    (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
-   patch-scoped from round 2) → adjudicator on dispute of either pass (#167).
+   patch-scoped from round 2; beside it, when the writer wrote a set, the
+   scenario runner, `verifier-run.ts` with its grammar in
+   `scenario-runner-parser.ts` (#238), runs the scenarios in the issue
+   sandbox; each round's evidence is archived in the run's log tree and only a
+   failing scenario's restaged in `/sandbar/verifier/findings`; later rounds
+   rerun only failed, unrun and touched scenarios, by a per-cycle ledger in
+   `verifier.ts`, #239) → adjudicator on dispute of either pass (#167),
+   unit by unit beside a scenario unit (`adjudication-parser.ts`), retiring
+   each scenario it overrules.
    Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`. Read-only
    roles that write park the issue. Beside attempt 1, the scenario writer
    (#203, `scenario-writer-run.ts`, grammar in `scenario-parser.ts`) runs once
@@ -78,9 +96,11 @@ and the gate stack (`config.gateStack`, #24).
    verifier; its failure changes nothing.
 3. **Landing** — serialized, in an ephemeral worktree at `origin/<source>`
    (#10): `merger.ts`, `merger-worktree.ts`, `resolve-loop.ts` (#67),
-   `version-conflict.ts` (#68), `forge-verify.ts` (`mergeMode`, #22),
+   `version-conflict.ts` (#68, #235), `forge-verify.ts` (`mergeMode`, #22),
    `chunk-land.ts` / `chunk-pr.ts` / `forge-pr.ts` (chunk branches, draft PRs,
-   `land` label #64).
+   `land` label #64). With `config.landingWindow`, nothing lands on the
+   source branch while it is closed but a `land-hotfix` chunk
+   (`landing-window.ts`, #244).
 4. **Finalise** — `finalize.ts` + `finalize-inputs.ts`: branch publish, bot
    comments, label flips.
 
@@ -104,8 +124,9 @@ graphroot; startup and quiescence sweep the run's copies.
 `db-copy.ts` makes one reflink copy of the base per issue and a slot swaps it
 into the sandbox stack beside its target sibling (`swapDbCopyIn`/`Out`),
 then runs `onDbCopyReady` (`Sandbox.runHooks`). The inner loop aligns the
-slot before every action (`dbCopyHolderFor`): only the implementer holds a
-copy, a fresh one each round.
+slot before every action (`dbCopyHolderFor`): the implementer holds a copy, a
+fresh one each round, and so does the scenario runner in a verifier round given
+a written set.
 
 ## Invariants — where they live
 
@@ -160,9 +181,12 @@ copy, a fresh one each round.
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
   configured, +0.2k an enforced egress allowlist, +0.6k a held database
   copy); quality lister 5.6k for the built-in group, 2.8k + its group for a
-  project group; verify 6.0k, fixer 5.4k; verifier white-box 4.1k;
-  adjudicator 1.1k + the report; UI check 1.6k and partition
-  check 1.5k + the issue anchor; scenario writer 2.2k + the issue anchor;
+  project group; verify 6.0k, fixer 5.4k; verifier white-box 4.1k (+0.1k
+  beside a held copy); scenario runner 1.9k + its scenarios (no issue
+  anchor; +2.3k sandbox-stack, +0.2k egress, +0.6k a held copy, +0.2k a
+  failed app hook, +0.2k a rerun);
+  adjudicator 1.1k + the report (1.5k + 0.1k a unit ruled unit by unit); UI check 1.6k and partition
+  check 1.5k + the issue anchor; scenario writer 2.4k + the issue anchor;
   a janitor task anchor (`prompts/janitor-task.md`, in place of the issue
   anchor) 1.0k + its scope + its prompt source;
   resolve 1.2k + anchor + paths/trace; reflect

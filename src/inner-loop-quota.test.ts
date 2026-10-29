@@ -137,6 +137,7 @@ const runInnerLoop = (
       writeGate: vi.fn(),
       writeIssueSnapshot: vi.fn(async () => "issue-snapshot-1.json"),
       startInvocationCycle: () => invocationSequencer.startCycle(),
+      verifierRoundDir: (name: string) => `/logs/${name}`,
     },
     gateSemaphore: createGateSemaphore(undefined),
   });

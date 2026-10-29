@@ -14,8 +14,8 @@
 // second installation. The hook belongs here, rather than in `index.ts`,
 // because `run(config)` receives an object that its library caller has already
 // imported; changing that caller's module resolution would be an unrelated
-// global side effect. All six bin modes use `loadConfig`, so run, gate, ui,
-// pulled-images, config-digest and db-base share the same hook.
+// global side effect. All seven bin modes use `loadConfig`, so run, gate, ui,
+// pulled-images, config-digest, db-base and labels sync share the same hook.
 //
 // The four constraints, written down so they are decisions and not drift:
 //   - EXACTLY ONE flag that carries configuration: `--config`. Every flag that
@@ -50,6 +50,7 @@ import { configDigest } from "./config-digest.js";
 import { dbBaseTargetOf, runDbBaseJob } from "./db-base.js";
 import { pulledImagesOf } from "./ensure-images.js";
 import { GATE_EXIT_NO_VERDICT, runGateCommand } from "./gate-run.js";
+import { declaredLabels, renderLabelSync, syncLabels } from "./label-sync.js";
 import { run } from "./run.js";
 import { repoLayout } from "./repo-cache.js";
 import { readStackFrom } from "./stack-source.js";
@@ -88,6 +89,10 @@ const CONFIG_DIGEST_SUBCOMMAND = "config-digest";
 // into a base for agents' copies. A systemd timer runs it beside the daemon,
 // never inside it, so a restart neither kills nor waits on an import.
 const DB_BASE_SUBCOMMAND = "db-base";
+// Creates and updates the labels a host needs (#245), only when invoked: the
+// run never creates a label (#8). Two words, the one verb with an object.
+const LABELS_SUBCOMMAND = "labels";
+const LABELS_SYNC = "sync";
 
 const USAGE = `Usage: sandbar [--config <path>]
        sandbar gate [--config <path>] [--worktree <path>] [--keep]
@@ -95,6 +100,7 @@ const USAGE = `Usage: sandbar [--config <path>]
        sandbar pulled-images [--config <path>]
        sandbar config-digest [--config <path>]
        sandbar db-base [--config <path>] [--force]
+       sandbar labels sync [--config <path>]
 
   --config <path>   Config file to load. Default: ./${DEFAULT_CONFIG_FILE}
                     (resolved against the current directory). The file is an
@@ -120,6 +126,10 @@ order: it changes exactly when what a daemon fixes at startup changes.
 and makes it current, unless that dump was already attempted with the target
 container's server; it exits 0 when it imported or had nothing to do, and 1
 when the import failed. A stack file is read from the config's cwd.
+\`sandbar labels sync\` creates or updates the repo's labels to match sandbar's
+protocol labels and config.labelSync, carries out declared renames, and lists
+the labels it was not told about without deleting them; a second run changes
+nothing.
 
   --worktree <path> The tree to gate. Default: the current directory.
   --keep            Leave the stack up afterwards, to inspect a red gate. The
@@ -135,6 +145,7 @@ export type ParsedArgs =
   | { readonly kind: "pulled-images"; readonly configPath: string }
   | { readonly kind: "config-digest"; readonly configPath: string }
   | { readonly kind: "db-base"; readonly configPath: string; readonly force: boolean }
+  | { readonly kind: "labels-sync"; readonly configPath: string }
   | {
       readonly kind: "gate";
       readonly configPath: string;
@@ -159,7 +170,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const isPulledImages = argv[0] === PULLED_IMAGES_SUBCOMMAND;
   const isConfigDigest = argv[0] === CONFIG_DIGEST_SUBCOMMAND;
   const isDbBase = argv[0] === DB_BASE_SUBCOMMAND;
-  const rest = isGate || isUi || isPulledImages || isConfigDigest || isDbBase
+  const isLabelsSync = argv[0] === LABELS_SUBCOMMAND && argv[1] === LABELS_SYNC;
+  const rest = isLabelsSync
+    ? argv.slice(2)
+    : isGate || isUi || isPulledImages || isConfigDigest || isDbBase
     ? argv.slice(1)
     : argv;
 
@@ -252,6 +266,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (isPulledImages) return { kind: "pulled-images", configPath: resolvedConfigPath };
   if (isConfigDigest) return { kind: "config-digest", configPath: resolvedConfigPath };
   if (isDbBase) return { kind: "db-base", configPath: resolvedConfigPath, force };
+  if (isLabelsSync) return { kind: "labels-sync", configPath: resolvedConfigPath };
   return isGate
     ? {
         kind: "gate",
@@ -357,6 +372,18 @@ export async function main(
       log: (line) => console.log(line),
     });
     return outcome === "import-failed" ? 1 : 0;
+  }
+  if (parsed.kind === "labels-sync") {
+    const config = resolveConfig(
+      withDefaultCwd(await loadConfig(configPath), configPath),
+    );
+    const plan = await syncLabels({
+      repo: { owner: config.ghOwner, name: config.ghRepo },
+      cwd: config.cwd,
+      declared: declaredLabels(config.labels, config.labelSync),
+    });
+    for (const line of renderLabelSync(plan)) console.log(line);
+    return 0;
   }
   if (parsed.kind === "ui") {
     const config = resolveConfig(

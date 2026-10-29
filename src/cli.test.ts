@@ -243,6 +243,26 @@ describe("parseArgs: the db-base subcommand (#201)", () => {
   });
 });
 
+describe("parseArgs: the labels sync subcommand (#245)", () => {
+  it("is two words and takes the same config-path contract as a run", () => {
+    expect(parseArgs(["labels", "sync"])).toEqual({
+      kind: "labels-sync",
+      configPath: "sandbar.config.mjs",
+    });
+    expect(parseArgs(["labels", "sync", "--config", "other.mjs"])).toEqual({
+      kind: "labels-sync",
+      configPath: "other.mjs",
+    });
+  });
+
+  it("refuses `labels` without `sync`, and the other subcommands' flags", () => {
+    expect(() => parseArgs(["labels"])).toThrow(/Unrecognised argument 'labels'/);
+    expect(() => parseArgs(["labels", "list"])).toThrow(/Unrecognised argument 'labels'/);
+    expect(() => parseArgs(["labels", "sync", "--force"])).toThrow(/sandbar db-base/);
+    expect(() => parseArgs(["labels", "sync", "extra"])).toThrow(/Unrecognised argument 'extra'/);
+  });
+});
+
 // The bin's headline behaviour. A test that runs from the directory it points
 // at cannot see this — `process.cwd()` and `dirname(configPath)` coincide and
 // it passes with the default deleted — so every case here names a config path
