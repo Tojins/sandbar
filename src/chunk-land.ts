@@ -765,12 +765,13 @@ export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
 };
 
 // A closed landing window holds the request (#244). Nothing is merged and the
-// label stays, so the first run after the window opens lands the chunk.
+// label stays, so the first run after the window opens lands the branch: a
+// chunk's, or a janitor task's (#205).
 export const CHUNK_LAND_WINDOW_PR_COMMENT = (args: {
   readonly sourceBranch: string;
   readonly closedUntil: string;
 }): string =>
-  `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it waits for ` +
+  `${BOT_COMMENT_PREFIX} this pull request is labelled \`${LAND_LABEL}\`, and it waits for ` +
   `the landing window: nothing lands on \`${args.sourceBranch}\` until ` +
   `${args.closedUntil}. The label stays on, and the first run after that lands ` +
   `it. To land it now, add \`${LAND_HOTFIX_LABEL}\`.`;
