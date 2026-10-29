@@ -67,9 +67,11 @@
 //
 // A fixer that exits normally with no commits disputes the latest report:
 // once per head, that report goes to the adjudicator. OVERRULED approves the
-// head for the quality pass and continues to gate-1. UPHELD charges
-// `maxQualityRounds` and runs the fixer once more with the ruling attached; a
-// second refusal at the same head takes the budget-exhausted path. A report
+// head for the quality pass and continues to gate-1, unless the report also
+// held step findings: those stay open, so the pass is charged and the fixer
+// runs again on them alone. UPHELD charges `maxQualityRounds` and runs the
+// fixer once more with the ruling attached; a second refusal at the same head
+// takes the budget-exhausted path. A report
 // that held only step findings is never adjudicated: a step's verdict is
 // mechanical, so its refusal goes straight to gate-1.
 //
@@ -283,7 +285,12 @@ export type LoopState = {
   readonly qualityAdjudicatedHeads: readonly string[];
   // What the adjudicator now running was asked to judge.
   readonly adjudicating:
-    | { readonly pass: "quality"; readonly rejection: PendingRejection }
+    | {
+        readonly pass: "quality";
+        readonly rejection: PendingRejection;
+        // The report's gate-step findings, which no ruling closes (#247).
+        readonly stepFindings: string | null;
+      }
     | { readonly pass: "correctness"; readonly rejection: VerifierRejection }
     | null;
   readonly uiPrototypeCheck: boolean;
@@ -571,8 +578,9 @@ export type LoopEvent =
       readonly head: string;
       readonly commits: number;
       readonly exited: "completed" | "failed";
-      // The report it was given held only gate-step findings (#247).
-      readonly stepOnlyReport: boolean;
+      // The gate-step findings of the report it was given (#247), and whether
+      // they were all it held; null when it held none.
+      readonly steps: { readonly findings: string; readonly only: boolean } | null;
     }
   | {
       readonly kind: "gate-result";
@@ -1264,7 +1272,7 @@ function onQualityFixResult(
     // refusal after an upheld ruling at the same head is out of road. A
     // step's verdict is mechanical, so a report of nothing else has nothing
     // to adjudicate.
-    if (event.stepOnlyReport || state.qualityAdjudicatedHeads.includes(event.head)) {
+    if (event.steps?.only === true || state.qualityAdjudicatedHeads.includes(event.head)) {
       return toGate(next, "CHANGES-REQUESTED");
     }
     const rejection: PendingRejection = {
@@ -1276,7 +1284,7 @@ function onQualityFixResult(
       state: {
         ...next,
         phase: "needs-adjudicator",
-        adjudicating: { pass: "quality", rejection },
+        adjudicating: { pass: "quality", rejection, stepFindings: event.steps?.findings ?? null },
       },
       action: {
         kind: "run-adjudicator",
@@ -1516,7 +1524,9 @@ function onAdjudicatorResult(
   const ruled: LoopState = { ...state, adjudicating: null };
   if (adjudicating.pass === "quality") {
     if (event.ruling === "OVERRULED") {
-      return toGate({ ...ruled, qualityApprovedHead: event.head }, "OVERRULED");
+      return adjudicating.stepFindings === null
+        ? toGate({ ...ruled, qualityApprovedHead: event.head }, "OVERRULED")
+        : chargeQuality({ ...ruled, qualityReport: adjudicating.stepFindings });
     }
     return chargeQuality({
       ...ruled,

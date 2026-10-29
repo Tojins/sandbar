@@ -96,9 +96,11 @@
 // containers (standalone-steps.ts, #247): each failed one is a finding in the
 // fold, each run a `standalone-step` event, each fan-out's output one
 // `standalone-steps` log. The ledger keeps the model-written part of the
-// latest report (`listerReport`) apart from that fold: a verify and a quality
-// adjudicator read only it, and the fixer's result says whether its report
-// held gate-step findings alone. A stack with no standalone step adds nothing
+// latest report (`listerReport`) and its step findings apart from that fold:
+// a verify and a quality adjudicator read only the former, and the fixer's
+// result carries the latter, saying whether they were all its report held. A
+// quality OVERRULED clears `listerReport`, leaving the step findings to the
+// next fixer alone. A stack with no standalone step adds nothing
 // to any of this. The quality fixer runs in this same writable sandbox,
 // committing under a `<botName> (quality)` author the host sets for that
 // invocation only; its text is ignored. Whatever it leaves,
@@ -1265,6 +1267,7 @@ async function runSandboxCycle(
     openRound: null,
     grader: null,
     listerReport: null,
+    stepFindings: null,
   };
   const scenarioLedger: { current: ScenarioLedger } = { current: new Map() };
   const specGaps: SpecGap[] = [];
@@ -1971,8 +1974,11 @@ export type QualityLedger = {
   // The model-written part of the latest CHANGES-REQUESTED quality report,
   // null when that report held only gate-step findings (#247). The
   // machine's report is the whole fold, which the fixer reads; a verify and a
-  // quality adjudicator read only this.
+  // quality adjudicator read only this. An overrule leaves it null.
   listerReport: string | null;
+  // The gate-step findings of the latest fan-out (#247), null when it had
+  // none. No ruling closes them.
+  stepFindings: string | null;
 };
 
 function passGrader(quality: QualityLedger): QualityGrader {
@@ -2562,8 +2568,10 @@ export async function runQualityList(
   const reviews = settled.flatMap((result, i) => result.status === "fulfilled"
     ? [{ group: listers[i]!.group, review: reviewerResult(result.value, "quality") }]
     : []);
-  const folded = combineGroupReviews(reviews, early.status === "fulfilled" ? early.value : []);
+  const findings = early.status === "fulfilled" ? early.value : [];
+  const folded = combineGroupReviews(reviews, findings);
   quality.listerReport = folded.listerReport;
+  quality.stepFindings = joinStepFindings(findings);
   return { kind: "quality-review-result", mode: "list", head, review: folded.review };
 }
 
@@ -2606,6 +2614,7 @@ export async function runQualityVerify(
   if (rerun.status === "rejected") throw rerun.reason;
   const review = reviewerResult(verified.value, "quality");
   quality.listerReport = changesRequested(review);
+  quality.stepFindings = joinStepFindings(rerun.value);
   return {
     kind: "quality-review-result",
     mode: "verify",
@@ -2613,6 +2622,9 @@ export async function runQualityVerify(
     review: combineVerifyReview(review, rerun.value),
   };
 }
+
+const joinStepFindings = (findings: readonly string[]): string | null =>
+  findings.length === 0 ? null : findings.join("\n\n");
 
 // A review's report when it requested changes.
 const changesRequested = (review: ReviewerResult): string | null =>
@@ -2892,7 +2904,9 @@ export async function runQualityFix(
     head: await requireIssueTip(ctx, "after the quality fixer"),
     commits,
     exited,
-    stepOnlyReport: quality.listerReport === null,
+    steps: quality.stepFindings === null
+      ? null
+      : { findings: quality.stepFindings, only: quality.listerReport === null },
   };
 }
 
@@ -3595,6 +3609,7 @@ export async function runAdjudicator(
           report,
           ruling: reasoning,
         });
+        ctx.quality.listerReport = null;
       }
       if (rulings !== null) {
         ctx.scenarioLedger.current = retire(

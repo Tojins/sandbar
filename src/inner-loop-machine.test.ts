@@ -161,14 +161,15 @@ const fixed = (
     startHead = "head",
     head = commits === 0 ? startHead : "fixed",
     exited = "completed",
-    stepOnlyReport = false,
+    steps = null,
   }: {
     readonly startHead?: string;
     readonly head?: string;
     readonly exited?: "completed" | "failed";
-    readonly stepOnlyReport?: boolean;
+    readonly steps?: { readonly findings: string; readonly only: boolean } | null;
   } = {},
-): LoopEvent => ({ kind: "quality-fix-result", startHead, head, commits, exited, stepOnlyReport });
+): LoopEvent => ({ kind: "quality-fix-result", startHead, head, commits, exited, steps });
+const stepFinding = "[step: lint] src/a.ts:3 inline it";
 // A quality pass whose lister approves outright.
 const quality: LoopEvent = listed(approved());
 const qualityApproved = { verdict: "APPROVED", rounds: 0 } as const;
@@ -455,13 +456,13 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
 
   // #247: a gate step's verdict is mechanical, so there is nothing to rule on.
   it("sends a fixer that commits nothing for a step-only report straight to gate-1", () => {
-    const r = step(listedRejection().state, fixed(0, { stepOnlyReport: true }));
+    const r = step(listedRejection().state, fixed(0, { steps: { findings: report, only: true } }));
     expect(asGate(r.action).quality).toEqual({ verdict: "CHANGES-REQUESTED", rounds: 0 });
     expect(r.state.adjudicating).toBeNull();
   });
 
   it("verifies a fixer that committed for a step-only report, as for any report", () => {
-    const r = step(listedRejection().state, fixed(1, { stepOnlyReport: true }));
+    const r = step(listedRejection().state, fixed(1, { steps: { findings: report, only: true } }));
     expect(r.action).toMatchObject({ kind: "run-quality-verify", anchor: "head", report });
   });
 
@@ -486,6 +487,19 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
       attempt: 2,
       scope: { kind: "since", sha: "head" },
     });
+  });
+
+  // #247: the adjudicator rules on the model-written findings alone.
+  it("charges a mixed report's step findings alone, approving nothing, when the adjudicator overrules", () => {
+    const r = stepAll(listedRejection().state, [
+      fixed(0, { steps: { findings: stepFinding, only: false } }),
+      { kind: "adjudicator-result", head: "head", ruling: "OVERRULED", rulings: null, reasoning: "covered" },
+    ]);
+    expect(r.action).toEqual({ kind: "run-quality-fix", attempt: 1, fixRound: 2, report: stepFinding, ruling: null });
+    expect(r.state.qualityFailures).toBe(1);
+    expect(r.state.qualityApprovedHead).toBeNull();
+    const refused = step(r.state, fixed(0, { steps: { findings: stepFinding, only: true } }));
+    expect(asGate(refused.action).quality).toEqual({ verdict: "CHANGES-REQUESTED", rounds: 1 });
   });
 
   it("runs the fixer once more with an upheld ruling, charged to the pass", () => {

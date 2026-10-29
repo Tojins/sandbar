@@ -952,7 +952,7 @@ describe("silent implementer attempt policy (#116)", () => {
     latestReviewerFeedback: Parameters<
       typeof runImplementer
     >[0]["latestReviewerFeedback"] = null,
-    quality: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null },
+    quality: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null, stepFindings: null },
   ) => {
     innerLoopMocks.headMismatch.mockReset().mockResolvedValue(mismatch);
     innerLoopMocks.fastForwardOffBranchHead.mockReset().mockImplementation(
@@ -1423,7 +1423,7 @@ describe("role prompt-extension wiring (#91)", () => {
     base: { ref: "origin/main" },
     accumulated: [{ sha: "abc123" }],
     priorReviewRounds: [],
-    quality: { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader, listerReport: null },
+    quality: { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader, listerReport: null, stepFindings: null },
     scenarioLedger: { current: new Map() },
     dbCopy: { kind: "none" },
     verifierWorkspace: null,
@@ -1736,7 +1736,7 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
   // next. Every run yields once, so parallel runs overlap.
   const reviewer = (
     outputs: Readonly<Record<string, readonly (string | Error)[]>>,
-    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader, listerReport: "### Tests\nsrc/a.ts:3" },
+    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader, listerReport: "### Tests\nsrc/a.ts:3", stepFindings: null },
   ) => {
     innerLoopMocks.buildQualityReviewPrompt.mockReset().mockResolvedValue("quality review prompt");
     innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
@@ -1832,7 +1832,7 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
     const overrule = { round: 1, head: "h0", report: "r", ruling: "fine" };
     const { ctx, sandbox, events, filenames, list, peak } = reviewer(
       { sandbar: ["### Tests\nsrc/a.ts:3\n<verdict>CHANGES-REQUESTED</verdict>"], project: approve },
-      { sinceImplementer: [], overrules: [overrule], openRound: null, grader: null, listerReport: null },
+      { sinceImplementer: [], overrules: [overrule], openRound: null, grader: null, listerReport: null, stepFindings: null },
     );
     await expect(list(listAction)).resolves.toEqual({
       kind: "quality-review-result",
@@ -1905,7 +1905,7 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
   it("lists by the rules a step of the source tip's gate stack settles (#183)", async () => {
     const { ctx, list } = reviewer(
       { sandbar: approve, project: approve },
-      { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null },
+      { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null, stepFindings: null },
     );
     const current = vi.fn(async () => ({
       stack: {
@@ -1931,7 +1931,7 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
     const settled = new Set(["missing-tests"] as const);
     const { ctx, verify } = reviewer(
       { verify: approve },
-      { sinceImplementer: [], overrules: [], openRound: null, grader: { standards: sentinel, settled }, listerReport: null },
+      { sinceImplementer: [], overrules: [], openRound: null, grader: { standards: sentinel, settled }, listerReport: null, stepFindings: null },
     );
     const current = vi.fn();
     ctx.opts.stackSource = { ...inlineStackSource, current } as unknown as typeof inlineStackSource;
@@ -1947,7 +1947,7 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
   it("rejects a verify that runs before any lister read the standards", async () => {
     const { verify } = reviewer(
       { verify: approve },
-      { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null },
+      { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null, stepFindings: null },
     );
     await expect(verify(verifyAction)).rejects.toThrow(/before any lister read the standards/);
   });
@@ -2095,7 +2095,7 @@ describe("runQualityFix (#185, #187)", () => {
     | { readonly kind: "error"; readonly error: Error };
   const fixer = (
     outcomes: Outcome | readonly Outcome[],
-    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader, listerReport: "### Tests\nsrc/a.ts:3" },
+    ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader, listerReport: "### Tests\nsrc/a.ts:3", stepFindings: null },
   ) => {
     const queue = Array.isArray(outcomes) ? [...outcomes] : null;
     innerLoopMocks.buildQualityFixPrompt.mockReset().mockResolvedValue("quality fix prompt");
@@ -2190,7 +2190,7 @@ describe("runQualityFix (#185, #187)", () => {
   it("rejects a fixer that runs before any lister read the standards", async () => {
     const { run } = fixer(
       { kind: "exit" },
-      { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null },
+      { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null, stepFindings: null },
     );
     await expect(run()).rejects.toThrow(/before any lister read the standards/);
   });
@@ -2257,7 +2257,7 @@ describe("runQualityFix (#185, #187)", () => {
       head: "fixer-head",
       commits: 2,
       exited: "completed",
-      stepOnlyReport: false,
+      steps: null,
     });
     expect(innerLoopMocks.settleQualityResidue).toHaveBeenCalledWith(
       "/worktree",
@@ -2298,7 +2298,7 @@ describe("runQualityFix (#185, #187)", () => {
       head: "fixer-head",
       commits: 4,
       exited: "failed",
-      stepOnlyReport: false,
+      steps: null,
     });
     expect(sandbox.run).toHaveBeenCalledTimes(QUALITY_FIXER_MAX_INVOCATIONS);
     expect(vi.mocked(sandbox.run).mock.calls[1]![0].name)
@@ -2805,7 +2805,7 @@ describe("closedReviewRound (#132, #185)", () => {
     ],
     [
       "a fixer result",
-      { kind: "quality-fix-result" as const, startHead: "h", head: "h", commits: 1, exited: "completed" as const, stepOnlyReport: false },
+      { kind: "quality-fix-result" as const, startHead: "h", head: "h", commits: 1, exited: "completed" as const, steps: null },
       null,
     ],
   ] as const)("closes on %s", (_name, event, expected) => {
@@ -2849,7 +2849,7 @@ describe("runAdjudicator (#167)", () => {
       adjudicatorModelId: "judge-model",
     },
     base: { ref: "origin/main" },
-    quality: { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null },
+    quality: { sinceImplementer: [], overrules: [], openRound: null, grader: null, listerReport: null, stepFindings: null },
     invocationSequence: createAgentInvocationSequencer().startCycle(),
     verifierWorkspace: null,
   } as unknown as Parameters<typeof runAdjudicator>[1]);
@@ -3011,6 +3011,7 @@ describe("runAdjudicator (#167)", () => {
     expect(ctx.quality.overrules).toEqual([{
       round: 2, head: "head123", report: "### Tests\nmissing", ruling: "the test exists",
     }]);
+    expect(ctx.quality.listerReport).toBeNull();
   });
 
   // #238: the judge reads the failing scenarios' evidence as that round left
@@ -3722,7 +3723,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       stdout: "### Standards\nsrc/b.ts:2 is a thin wrapper\n<verdict>CHANGES-REQUESTED</verdict>",
     };
     // Listers answer `lister`, a verify `verify`; the fixer's one invocation
-    // commits `q1`.
+    // commits `q1`, and a quality adjudicator overrules.
     const wire = (
       { lister, verify, maxQualityRounds = 3 }: {
         readonly lister: typeof approvedReview;
@@ -3736,6 +3737,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         if (name.startsWith("quality-list-")) return lister;
         if (name.startsWith("quality-verify-")) return verify;
         if (name.startsWith("quality-fix-")) return { ...approvedReview, stdout: "" };
+        if (name.startsWith("quality-adjudicator-")) return { ...approvedReview, stdout: "<ruling>OVERRULED</ruling>" };
         return name.startsWith("reviewer-") ? approvedReview : completeRun;
       }, { maxQualityRounds });
       const writeStandaloneSteps = vi.fn(async () => undefined);
@@ -3823,6 +3825,27 @@ describe("runInnerLoop context terminals (#158)", () => {
       await runInnerLoop(issue, opts);
       expect(names(sandbox)).toEqual(["implementer", "quality-list", "quality-fix", "reviewer"]);
       expect(reviewRound(events)).toMatchObject({ quality: "CHANGES-REQUESTED", qualityRounds: 0 });
+    });
+
+    it("keeps a mixed report's red step open when the adjudicator overrules the rest, and fixes it in the same attempt", async () => {
+      const { opts, sandbox, stack, events } = wire(
+        { lister: changesRequested, verify: approvedReview },
+        [stepRun("failed")],
+        [stepRun("passed")],
+      );
+      const residue = { dirtyPaths: [], strandedHead: null, rewoundTip: null };
+      innerLoopMocks.settleQualityResidue.mockReset()
+        .mockResolvedValueOnce({ commits: [], residue })
+        .mockResolvedValueOnce({ commits: [{ sha: "q1" }], residue });
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(names(sandbox)).toEqual([
+        "implementer", "quality-list", "quality-fix", "quality-adjudicator", "quality-fix", "quality-verify", "reviewer",
+      ]);
+      const [mixed, stepOnly] = fixReports();
+      expect(stepOnly).toBe(mixed!.slice(mixed!.indexOf("[step: lint]")));
+      expect(verifyReports()).toEqual([null]);
+      expect(stack.runGate).toHaveBeenCalledOnce();
+      expect(reviewRound(events)).toMatchObject({ attempt: 1, quality: "APPROVED", qualityRounds: 1 });
     });
 
     it("adds nothing to a stack with no standalone step, and hands the verify the fixer's report", async () => {
