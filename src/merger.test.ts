@@ -3064,6 +3064,38 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     },
   });
 
+  it("a push race on a chunk-only cycle keys the re-gate by the chunk and defers no issue (#253)", async () => {
+    const gates: Array<{ key: string; sync: string | undefined }> = [];
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }, { ok: true }],
+      pushes: [{ kind: "race" }, { kind: "ok" }],
+      pulls: [true],
+      chunkRefs: originHas(44),
+    });
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...landing(request(44)),
+      observations: {
+        onGate: (key, _gate, sync) => { gates.push({ key, sync }); },
+        onOutcome: () => undefined,
+      },
+    });
+
+    expect(gates).toContainEqual({ key: "chunk-44", sync: "origin" });
+    expect(summary.raceDeferral).toBeNull();
+
+    const red = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }, gateRed()],
+      pushes: [{ kind: "race" }],
+      pulls: [true],
+      chunkRefs: originHas(44),
+    });
+    const deferred = await runMergerWithAdapter([], red.adapter, undefined, undefined, landing(request(44)));
+    expect(deferred.raceDeferral?.issues).toEqual([]);
+    expect(deferred.pushed).toBe(false);
+  });
+
   it("emits every durable outcome shape and both initial and resolve gate observations", async () => {
     const outcomes: unknown[] = [];
     const gates: Array<{ key: string; gate: unknown }> = [];

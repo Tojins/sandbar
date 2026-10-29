@@ -1151,6 +1151,12 @@ export type MergerSummary = {
   readonly raceDeferral: RaceDeferral | null;
 };
 
+// What a push race's one follow-up ends in: the second push's verdict, or
+// the reason the merge result could not follow origin's new tip.
+type FollowedPush =
+  | Exclude<PushResult, { readonly kind: "race" }>
+  | { readonly kind: "deferred"; readonly reason: string };
+
 export type RaceDeferral = {
   // Why the merge result could not follow origin's new tip, as a clause.
   readonly reason: string;
@@ -2813,10 +2819,7 @@ export async function runMergerWithAdapter(
   // A push race (#253): origin moved under the push, so the merge result
   // follows its new tip once — re-merged, re-installed, re-gated, re-pushed.
   // Whatever stops it is a deferral of the source pass, not a halt.
-  const followMovedOrigin = async (): Promise<
-    | Exclude<PushResult, { readonly kind: "race" }>
-    | { readonly kind: "deferred"; readonly reason: string }
-  > => {
+  const followMovedOrigin = async (): Promise<FollowedPush> => {
     await emit(`push race; merging origin's new tip`);
     const sync = await adapter.syncWithSource();
     // Origin's new tip bumped `version` too, so this merge conflicts in the
@@ -2856,9 +2859,12 @@ export async function runMergerWithAdapter(
     }
     const g = await adapter.runGate();
     await emit(`gate-2 synced ${formatGateFields(g)}`);
-    // The early return above leaves a merged issue or a chunk on HEAD.
+    const lastChunk = chunkMergesOnHead.at(-1);
     const lastUnit = merged.at(-1)?.id ??
-      `chunk-${chunkMergesOnHead.at(-1)!.target.root}`;
+      (lastChunk ? `chunk-${lastChunk.target.root}` : null);
+    if (lastUnit === null) {
+      throw new Error("push race with no merged issue or chunk on HEAD");
+    }
     await opts.observations.onGate(lastUnit, g, "origin");
     if (!g.ok) {
       // Filed under its own key: the issue keys' files hold the gates of the

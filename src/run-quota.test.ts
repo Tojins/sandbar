@@ -2906,6 +2906,31 @@ describe("run quota orchestration (#109)", () => {
     );
   });
 
+  it("a push race deferral with no issues holds nothing and says nothing (#253)", async () => {
+    seams.plan
+      .mockResolvedValueOnce(resolution([issue("1")]))
+      .mockResolvedValue(resolution([]));
+    seams.innerLoop.mockResolvedValue({
+      type: "DONE", commits: [{ sha: "abc" }], specGaps: [],
+    });
+    seams.merger.mockResolvedValue({
+      ...summary([], false),
+      raceDeferral: { reason: "it moved again before the re-merged result was pushed", issues: [] },
+    });
+    vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`EXIT:${code}`);
+    }) as never);
+
+    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    expect(seams.merger).toHaveBeenCalledOnce();
+    expect(eventsOf("notice")).not.toContainEqual(
+      expect.objectContaining({ message: expect.stringContaining("next landing pass") }),
+    );
+    expect(eventsOf("complaint")).not.toContainEqual(
+      expect.objectContaining({ message: expect.stringContaining("Merger halted") }),
+    );
+  });
+
   it("continues after a rejected member and admits its successor", async () => {
     const issues = [issue("1"), issue("2")];
     seams.plan.mockImplementation(async (_repo, options: { excluded?: Set<number> }) =>
