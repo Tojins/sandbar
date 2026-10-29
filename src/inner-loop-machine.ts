@@ -60,13 +60,18 @@
 // standards. A lister or verify that produced no review after its retry, or a
 // fixer that crashed on its retry too, also continues to gate-1; the runner
 // owns those retries. The lister's result may be the runner's fold of one
-// lister per rule group (#204); this machine reads it as one review.
+// lister per rule group (#204); this machine reads it as one review. A lister
+// or verify result may also carry findings from the runner's early run of the
+// stack's standalone gate steps (#247), which this machine reads as open items
+// like any other.
 //
 // A fixer that exits normally with no commits disputes the latest report:
 // once per head, that report goes to the adjudicator. OVERRULED approves the
 // head for the quality pass and continues to gate-1. UPHELD charges
 // `maxQualityRounds` and runs the fixer once more with the ruling attached; a
-// second refusal at the same head takes the budget-exhausted path.
+// second refusal at the same head takes the budget-exhausted path. A report
+// that held only step findings is never adjudicated: a step's verdict is
+// mechanical, so its refusal goes straight to gate-1.
 //
 // Three independent budgets bound non-convergence (#129, #143, #185, #187).
 // `gateFailures` counts red gate-1 results AND every attempt that failed to
@@ -566,6 +571,8 @@ export type LoopEvent =
       readonly head: string;
       readonly commits: number;
       readonly exited: "completed" | "failed";
+      // The report it was given held only gate-step findings (#247).
+      readonly stepOnlyReport: boolean;
     }
   | {
       readonly kind: "gate-result";
@@ -1254,8 +1261,10 @@ function onQualityFixResult(
   const report = requireQualityReport(state);
   if (event.commits === 0) {
     // A fixer that changed nothing disputes the report. Once per head; a
-    // refusal after an upheld ruling at the same head is out of road.
-    if (state.qualityAdjudicatedHeads.includes(event.head)) {
+    // refusal after an upheld ruling at the same head is out of road. A
+    // step's verdict is mechanical, so a report of nothing else has nothing
+    // to adjudicate.
+    if (event.stepOnlyReport || state.qualityAdjudicatedHeads.includes(event.head)) {
       return toGate(next, "CHANGES-REQUESTED");
     }
     const rejection: PendingRejection = {

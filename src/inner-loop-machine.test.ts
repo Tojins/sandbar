@@ -157,12 +157,18 @@ const verified = (review: ReviewerResult, head = "fixed"): LoopEvent => ({
 });
 const fixed = (
   commits = 1,
-  { startHead = "head", head = commits === 0 ? startHead : "fixed", exited = "completed" }: {
+  {
+    startHead = "head",
+    head = commits === 0 ? startHead : "fixed",
+    exited = "completed",
+    stepOnlyReport = false,
+  }: {
     readonly startHead?: string;
     readonly head?: string;
     readonly exited?: "completed" | "failed";
+    readonly stepOnlyReport?: boolean;
   } = {},
-): LoopEvent => ({ kind: "quality-fix-result", startHead, head, commits, exited });
+): LoopEvent => ({ kind: "quality-fix-result", startHead, head, commits, exited, stepOnlyReport });
 // A quality pass whose lister approves outright.
 const quality: LoopEvent = listed(approved());
 const qualityApproved = { verdict: "APPROVED", rounds: 0 } as const;
@@ -445,6 +451,18 @@ describe("inner-loop-machine — the quality pass (#187)", () => {
       fixRound: 1,
       rejection: { round: 1, head: "head", report },
     });
+  });
+
+  // #247: a gate step's verdict is mechanical, so there is nothing to rule on.
+  it("sends a fixer that commits nothing for a step-only report straight to gate-1", () => {
+    const r = step(listedRejection().state, fixed(0, { stepOnlyReport: true }));
+    expect(asGate(r.action).quality).toEqual({ verdict: "CHANGES-REQUESTED", rounds: 0 });
+    expect(r.state.adjudicating).toBeNull();
+  });
+
+  it("verifies a fixer that committed for a step-only report, as for any report", () => {
+    const r = step(listedRejection().state, fixed(1, { stepOnlyReport: true }));
+    expect(r.action).toMatchObject({ kind: "run-quality-verify", anchor: "head", report });
   });
 
   it("approves the head for the quality pass when the adjudicator overrules", () => {
