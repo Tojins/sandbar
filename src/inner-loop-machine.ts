@@ -588,7 +588,7 @@ export type LoopEvent =
   | {
       readonly kind: "adjudicator-result";
       readonly head: string;
-      // UPHELD exactly when some unit in `rulings` is.
+      // With `rulings`, UPHELD exactly when some unit is.
       readonly ruling: AdjudicationRuling;
       // Each unit's ruling, keyed by unit id, for a verifier report with
       // scenario units; null for one ruled as a whole.

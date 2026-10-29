@@ -141,8 +141,8 @@
 // only the change since the last of those heads that HEAD still contains
 // (`reviewScope`). Harness failures add no
 // entry, and a fresh HARD-ERROR cycle resets the history, the quality
-// ledger and the scenario ledger. An optional `<spec-gap>` declared by the white-box review is
-// accumulated beside that history but around the state machine, preserved
+// ledger and the scenario ledger. An optional `<spec-gap>` declared by the
+// white-box review is accumulated beside that history but around the state machine, preserved
 // across fresh cycles, and carried on every terminal for finalise to record
 // (#108).
 // Each implementer invocation publishes its private clone's issue ref to the
@@ -3525,11 +3525,12 @@ export async function runAdjudicator(
 // beside it (verifier-run.ts), both cold and read-only, run only on a green
 // gate-1 at the head the quality pass left. A round runs the written scenarios
 // the cycle's ledger selects, from the paths changed since each head it holds
-// (#239), and advances the ledger by what they came to. Before the agents start, the round's `run/` is emptied, the
-// `beforeScenarioRun` hook serves the app from this head and the pre-pass
-// settles what cannot run; the white-box picture is measured, still anchored at
-// the seed, and from its second round on the review reads the change since the
-// last head an earlier round reviewed. Both agents settle before anything is
+// (#239), and advances the ledger by what they came to. Before the agents
+// start, the round's `run/` is emptied, the `beforeScenarioRun` hook serves
+// the app from this head and the pre-pass settles what cannot run; the
+// white-box picture is measured, still anchored at the seed, and from its
+// second round on the review reads the change since the last head an earlier
+// round reviewed. Both agents settle before anything is
 // decided: a throw from either is rethrown, the white-box review's first.
 // Then the round's evidence is archived and the failing scenarios' restaged,
 // and `combineVerifier` folds the two results. reviewer-run.ts owns what the
@@ -3697,8 +3698,8 @@ export async function runVerifier(
   };
 }
 
-// The paths changed since each head the ledger's selection reads, "all"
-// since one `head` no longer contains.
+// The paths changed since each head the ledger's selection reads, or "all"
+// for a head `head` no longer contains.
 async function changedSince(
   worktreePath: string,
   ledger: ScenarioLedger,
