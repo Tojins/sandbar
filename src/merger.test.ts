@@ -3027,6 +3027,32 @@ describe("runMergerWithAdapter — landing a janitor branch (#205)", () => {
     expect(summary.skippedChunks).toEqual([]);
   });
 
+  it("parks it with the issues' composition when the forge rejects it, deleting nothing", async () => {
+    const outcomes: MergerOutcome[] = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: originHasJanitor,
+      heads: ["cycle-base", "p1", "verified"],
+    });
+
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...janitorLanding,
+      observations: { onOutcome: (outcome) => { outcomes.push(outcome); }, onGate: () => undefined },
+      verified: {
+        adapter: makeVerifyFake({ checkConclusion: "failure" }).verify,
+        options: { ...VERIFIED_OPTIONS, maxRounds: 0 },
+      },
+    });
+
+    expect(outcomes).toEqual([
+      { kind: "janitor-parked", target: janitor, reason: "forge-unverified", durationMs: expect.any(Number) },
+    ]);
+    expect(calls.prLabelRemovals).toEqual([{ pr: 9, label: LAND_LABEL }]);
+    expect(calls.janitorBranchDeletes).toEqual([]);
+    expect(summary.mergedJanitors).toEqual([]);
+  });
+
   it("parks a branch origin no longer has", async () => {
     const outcomes: MergerOutcome[] = [];
     const { adapter, calls } = makeAdapter({ merges: [] });

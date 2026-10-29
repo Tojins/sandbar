@@ -1233,6 +1233,21 @@ export type ChunkWrapup = ChunkWrapupResult & {
 const detail = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
+// One forge write: its result when it worked, null when it failed with the
+// failure filed as a residue line.
+async function attempt<T>(
+  residue: string[],
+  residueLine: string,
+  act: () => Promise<T>,
+): Promise<{ readonly value: T } | null> {
+  try {
+    return { value: await act() };
+  } catch (err) {
+    residue.push(`${residueLine}: ${detail(err)}`);
+    return null;
+  }
+}
+
 /**
  * Close the chunk out: members, labels, pull request, branch.
  *
@@ -1286,15 +1301,13 @@ export async function wrapUpLandedChunk(
       // no chunk, delete it, and close nothing.
       break;
     }
-    try {
-      await adapter.removeLabel(member.number, NEEDS_REVIEW_LABEL);
-    } catch (err) {
-      // Benign, and said so: the planner never reads this display label, and
-      // the issue is already closed.
-      residue.push(
-        `#${member.number} is closed but kept its \`${NEEDS_REVIEW_LABEL}\` label (harmless): ${detail(err)}`,
-      );
-    }
+    // Benign, and said so: the planner never reads this display label, and
+    // the issue is already closed.
+    await attempt(
+      residue,
+      `#${member.number} is closed but kept its \`${NEEDS_REVIEW_LABEL}\` label (harmless)`,
+      () => adapter.removeLabel(member.number, NEEDS_REVIEW_LABEL),
+    );
   }
   await log(
     `chunk ${target.branch}: closed ${closed.length}/${target.members.length} member(s)`,
@@ -1318,8 +1331,9 @@ export async function wrapUpLandedChunk(
     //
     // Comment FIRST all the same: it is what explains the other two, and a
     // label that vanished with no note is worse than a note with no label.
-    try {
-      await adapter.commentOnPullRequest(
+    const pr = `the pull request #${target.pullRequest} for ${target.branch}`;
+    await attempt(residue, `${pr} landed but could not be commented on`, () =>
+      adapter.commentOnPullRequest(
         target.pullRequest,
         CHUNK_LANDED_PR_COMMENT({
           chunkBranch: target.branch,
@@ -1328,28 +1342,18 @@ export async function wrapUpLandedChunk(
           closed: target.members.filter((m) => closed.includes(m.number)),
           unclosed,
         }),
-      );
-    } catch (err) {
-      residue.push(
-        `the pull request #${target.pullRequest} for ${target.branch} landed but could not be commented on: ${detail(err)}`,
-      );
-    }
-    try {
-      await removeLandLabels(adapter, target);
-    } catch (err) {
-      residue.push(
-        `the pull request #${target.pullRequest} for ${target.branch} kept its ` +
-          `${target.landLabels.map((label) => `\`${label}\``).join("/")} label: ${detail(err)}`,
-      );
-    }
-    let closeOutcome: PullRequestCloseOutcome | undefined;
-    try {
-      closeOutcome = await adapter.closePullRequest(target.pullRequest);
-    } catch (err) {
-      residue.push(
-        `the pull request #${target.pullRequest} for ${target.branch} could not be closed: ${detail(err)}`,
-      );
-    }
+      ),
+    );
+    await attempt(
+      residue,
+      `${pr} kept its ${target.landLabels.map((label) => `\`${label}\``).join("/")} label`,
+      () => removeLandLabels(adapter, target),
+    );
+    const closeOutcome: PullRequestCloseOutcome | undefined = (
+      await attempt(residue, `${pr} could not be closed`, () =>
+        adapter.closePullRequest(target.pullRequest),
+      )
+    )?.value;
     if (closeOutcome === "closed") {
       await log(`chunk ${target.branch}: closed PR #${target.pullRequest}`);
     } else if (closeOutcome === "merged") {
@@ -1395,19 +1399,18 @@ export async function wrapUpLandedChunk(
         `pull requests based on it: ${detail(retargetFailure)}`,
     );
   } else {
-    let issueBranches: ChunkBranchRetirement | null = null;
-    try {
-      issueBranches = await adapter.deleteChunkBranch(
-        target.branch,
-        target.members.map((member) => member.number),
-        opts.sourceBranch,
-      );
-    } catch (err) {
-      residue.push(
-        `the chunk branch ${target.branch} is landed but could not be deleted on origin: ${detail(err)}`,
-      );
-    }
-    if (issueBranches !== null) {
+    const deleted = await attempt(
+      residue,
+      `the chunk branch ${target.branch} is landed but could not be deleted on origin`,
+      () =>
+        adapter.deleteChunkBranch(
+          target.branch,
+          target.members.map((member) => member.number),
+          opts.sourceBranch,
+        ),
+    );
+    if (deleted !== null) {
+      const issueBranches = deleted.value;
       branchDeleted = true;
       keptIssueBranches = issueBranches.keptIssueBranches;
       if (issueBranches.cache === "stale") {
@@ -1461,25 +1464,19 @@ export async function wrapUpLandedJanitor(
   log: (line: string) => void | Promise<void>,
 ): Promise<JanitorWrapup> {
   const residue: string[] = [];
-  // One forge write, true when it worked; a failure is residue, not a throw.
-  const write = async (residueLine: string, act: () => Promise<unknown>): Promise<boolean> => {
-    try {
-      await act();
-      return true;
-    } catch (err) {
-      residue.push(`${residueLine}: ${detail(err)}`);
-      return false;
-    }
-  };
   if (target.pullRequest > 0) {
     const pr = `the pull request #${target.pullRequest} for ${target.branch}`;
-    await write(`${pr} kept its landing label`, () => removeLandLabels(adapter, target));
-    await write(`${pr} could not be closed`, () => adapter.closePullRequest(target.pullRequest));
+    await attempt(residue, `${pr} kept its landing label`, () => removeLandLabels(adapter, target));
+    await attempt(residue, `${pr} could not be closed`, () =>
+      adapter.closePullRequest(target.pullRequest),
+    );
   }
-  const branchDeleted = await write(
-    `${target.branch} is kept on origin so the next run retries its delete`,
-    () => adapter.deleteJanitorBranch(target.branch),
-  );
+  const branchDeleted =
+    (await attempt(
+      residue,
+      `${target.branch} is kept on origin so the next run retries its delete`,
+      () => adapter.deleteJanitorBranch(target.branch),
+    )) !== null;
   if (branchDeleted) await log(`janitor ${target.branch}: deleted on origin`);
   return { target, branchDeleted, residue };
 }

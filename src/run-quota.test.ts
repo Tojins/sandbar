@@ -3822,6 +3822,90 @@ describe("run quota orchestration (#109)", () => {
         })]);
       });
 
+      it("records a parked landing with its reason", async () => {
+        seams.merger.mockImplementation(async (
+          _batch: unknown, _adapter: unknown, _log: unknown, _gate: unknown,
+          options: RunMergerOptions,
+        ) => {
+          await options.observations.onOutcome({
+            kind: "janitor-parked", target: janitorTarget, reason: "conflict", durationMs: 5,
+          });
+          return summary([]);
+        });
+
+        await runJanitorAt(OPEN);
+
+        expect(eventsOf("janitor-land")).toEqual([expect.objectContaining({
+          task: "docs", pullRequest: 77, outcome: "parked", reason: "conflict",
+        })]);
+      });
+
+      it("files its gate-2 and resolve attempts under the task, not an issue", async () => {
+        seams.merger.mockImplementation(async (
+          _batch: unknown, _adapter: unknown, _log: unknown, _gate: unknown,
+          options: RunMergerOptions,
+        ) => {
+          await options.observations.onGate("janitor-docs", { ok: true, durationMs: 3, steps: [] });
+          await options.onResolveAttempt("janitor-docs", {
+            issueId: "janitor-docs", attempt: 1, container: "c", end: "exit", exitCode: 0,
+            signal: null, durationMs: 4, stdout: "", stderr: "",
+          } as never);
+          return summary([]);
+        });
+
+        await runJanitorAt(OPEN);
+
+        for (const kind of ["gate", "resolve-attempt"]) {
+          const [event] = eventsOf(kind);
+          expect(event).toEqual(expect.objectContaining({ janitor: "docs" }));
+          expect(event).not.toHaveProperty("issue");
+        }
+      });
+
+      it("complains once about the residue a landed wrap-up left", async () => {
+        seams.merger.mockResolvedValue({
+          ...summary([]),
+          mergedJanitors: [{
+            target: janitorTarget, branchDeleted: false, residue: ["could not delete sandbar/janitor-docs"],
+          }],
+        });
+
+        await runJanitorAt(OPEN);
+
+        expect(eventsOf("complaint").filter((event) => event.severity === "warning")).toEqual([
+          expect.objectContaining({
+            message: expect.stringContaining("could not delete sandbar/janitor-docs"),
+          }),
+        ]);
+      });
+
+      it("reconciles a branch already on the source, reports its residue and does not hand it to the merger", async () => {
+        const reconciled = {
+          target: janitorTarget, branchDeleted: false, residue: ["kept its landing label"], durationMs: 9,
+        };
+        seams.reconcile.mockImplementation(async (options: {
+          onJanitorReconciled?: (janitor: typeof reconciled) => Promise<void>;
+        }) => {
+          await options.onJanitorReconciled?.(reconciled);
+          return { reconciled: [], closedIssues: [], janitors: [reconciled] };
+        });
+
+        await runJanitorAt(OPEN);
+
+        expect(seams.merger).not.toHaveBeenCalled();
+        // One per poll: the reconciler is mocked to find it on each.
+        expect(eventsOf("janitor-land")).not.toHaveLength(0);
+        for (const event of eventsOf("janitor-land")) {
+          expect(event).toEqual(expect.objectContaining({
+            task: "docs", pullRequest: 77, outcome: "reconciled", durationMs: 9,
+          }));
+        }
+        expect(eventsOf("complaint").filter((event) => event.severity === "warning")).not.toHaveLength(0);
+        for (const event of eventsOf("complaint").filter((e) => e.severity === "warning")) {
+          expect(event.message).toContain("kept its landing label");
+        }
+      });
+
       it("holds it while the landing window is closed", async () => {
         await runJanitorAt(CLOSED);
 

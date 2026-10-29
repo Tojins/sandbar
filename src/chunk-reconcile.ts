@@ -304,10 +304,6 @@ function labelNames(raw: unknown): readonly string[] | null {
 export type ReconcileResult = {
   // One entry per chunk branch found already on the source branch, in root
   // order. Empty is the overwhelmingly common answer.
-  readonly reconciled: readonly ReconciledChunk[];
-  // Every issue closed across all of them, which is what the caller adds to its
-  // "already merged this run" exclusion set.
-  readonly closedIssues: readonly number[];
   // What a wrap-up could not finish stays on the entry it belongs to and is
   // deliberately NOT flattened into one list here. Two different things fail:
   // a chunk whose branch is still on origin, which the next cycle's reconciler
@@ -316,6 +312,10 @@ export type ReconcileResult = {
   // holding, and a caller that guesses promises a repair that is not coming.
   // `chunkResidue` in `chunk-land.ts` is the split, and it is what `run.ts`
   // reports off.
+  readonly reconciled: readonly ReconciledChunk[];
+  // Every issue closed across all of them, which is what the caller adds to its
+  // "already merged this run" exclusion set.
+  readonly closedIssues: readonly number[];
   // Janitor rolling branches (#205) found already on the source branch.
   readonly janitors: readonly ReconciledJanitor[];
 };
