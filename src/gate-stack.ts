@@ -699,9 +699,22 @@ export function healthCheckArgs(c: ResolvedStackContainer): string[] {
 // default one with its resolver intact — the joiners inherit that, and behind
 // an egress allowlist they inherit the anchor's internal network and its
 // proxy's `--dns` the same way (#202).
+//
+// `none` is `--network none`, for a standalone step's copy of its container
+// (standalone-steps.ts, #247): it joins nothing, so nothing it runs can reach
+// a sibling, the gate's pod or the network.
 export type ContainerAttachment =
   | { readonly kind: "pod"; readonly podName: string }
-  | { readonly kind: "netns"; readonly anchorContainerName: string };
+  | { readonly kind: "netns"; readonly anchorContainerName: string }
+  | { readonly kind: "none" };
+
+const attachArgs = (attach: ContainerAttachment): readonly string[] => {
+  switch (attach.kind) {
+    case "pod": return ["--pod", attach.podName];
+    case "netns": return ["--network", `container:${attach.anchorContainerName}`];
+    case "none": return ["--network", "none"];
+  }
+};
 
 // What this module's own stack is called in the messages it raises. The sandbox
 // stack passes its own (`BringUpCtx.label`), which is the only reason this is a
@@ -714,6 +727,8 @@ export function containerRunArgs(opts: {
   readonly container: ResolvedStackContainer;
   readonly worktreePath: string;
   readonly hideWorktreeGit: boolean;
+  // A standalone step's copy (#247) reads the worktree and never writes it.
+  readonly readOnlyWorktree: boolean;
 }): RuntimeInvocation {
   const { container: c } = opts;
   // Consumer env first, sandbar's reserved key last: the spread keeps the
@@ -726,9 +741,7 @@ export function containerRunArgs(opts: {
     "-d",
     "--name",
     opts.containerName,
-    ...(opts.attach.kind === "pod"
-      ? ["--pod", opts.attach.podName]
-      : ["--network", `container:${opts.attach.anchorContainerName}`]),
+    ...attachArgs(opts.attach),
     // Never provision the anonymous volume podman's default creates for the
     // image's builtin `VOLUME` directives (#50). It is never reused, so it buys
     // nothing and costs one lock out of the host's 2048 — see the header.
@@ -739,9 +752,12 @@ export function containerRunArgs(opts: {
     ...healthCheckArgs(c),
   ];
   if (c.mountWorktree !== null) {
-    args.push("-v", `${opts.worktreePath}:${c.mountWorktree}:rw,z`);
+    args.push("-v", `${opts.worktreePath}:${c.mountWorktree}:${opts.readOnlyWorktree ? "ro" : "rw"},z`);
     // A gate consumes files, never repository state (#98). Hide the clone's
     // real object store just as the former gitlink was unusable in-container.
+    // Podman copies the hidden directory up into the tmpfs, so under a
+    // read-only worktree too a step's `git` reads the clone's history and
+    // writes only that private copy.
     if (opts.hideWorktreeGit === true) {
       args.push("--tmpfs", `${c.mountWorktree}/.git:rw,nosuid,nodev,noexec`);
     }
@@ -1549,6 +1565,7 @@ export async function bringUpContainers(
       container: c,
       worktreePath: ctx.worktreePath,
       hideWorktreeGit: ctx.hideWorktreeGit,
+      readOnlyWorktree: false,
     });
     const started = await withRuntimeEnv(runInvocation, (argv) =>
       boundedPodman(argv, CONTROL_TIMEOUT_MS),

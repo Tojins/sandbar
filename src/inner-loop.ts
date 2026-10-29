@@ -90,14 +90,25 @@
 // owns their one cold retry), each invocation recorded as a `quality-review`
 // event. The lister step is a fan-out the state machine never sees (#204):
 // one lister per rule group, all at once in this sandbox, settled together and
-// folded by `combineGroupReviews` into the one result the machine reads. Its
-// fixer runs in this same writable sandbox, committing under a
-// `<botName> (quality)` author the host sets for that invocation only; its
-// text is ignored. Whatever it leaves, `settleQualityResidue` (git-ops.ts)
-// discards uncommitted residue, puts HEAD back on the branch (with #127's
-// repair where it applies), keeps every commit it made and records what was
-// discarded. An invocation that fails (`AgentError`, idle or completion
-// timeout) is settled the same way and retried once; the state machine hears
+// folded by `combineGroupReviews` into the one result the machine reads.
+// Beside the listers, and again beside each verify, the standalone steps of
+// the stack gate-1 would run at that head run early in copies of their
+// containers (standalone-steps.ts, #247): each failed one is a finding in the
+// fold, each run a `standalone-step` event, each fan-out's output one
+// `standalone-steps` log. The ledger keeps the model-written part of the
+// latest report (`listerReport`) and its step findings apart from that fold:
+// a verify and a quality adjudicator read only the former, and the fixer's
+// result carries the latter, saying whether they were all its report held. A
+// quality OVERRULED clears `listerReport`, leaving the step findings to the
+// next fixer alone. A stack with no standalone step adds nothing
+// to any of this. The quality fixer runs in this same writable sandbox,
+// committing under a `<botName> (quality)` author the host sets for that
+// invocation only; its text is ignored. Whatever it leaves,
+// `settleQualityResidue` (git-ops.ts) discards uncommitted residue, puts HEAD
+// back on the branch (with #127's repair where it applies), keeps every commit
+// it made and records what was discarded. An invocation that fails
+// (`AgentError`, idle or completion timeout) is settled the same way and
+// retried once; the state machine hears
 // only whether the last one exited normally and how many commits the step
 // made. The fixer's commits since the implementer's last attempt are handed to
 // the next implementer prompt. Every quality report an adjudicator overrules
@@ -325,6 +336,7 @@ import {
   type LoopEvent,
   type LoopState,
   type QualityOutcome,
+  type ReviewerResult,
   type Verdict,
   decideAfterTerminal,
   initialAction,
@@ -366,6 +378,12 @@ import {
 } from "./sandbox-stack.js";
 import { stackChangeOf, type StackChange } from "./stack-change.js";
 import { combineGroupReviews, readQualityStandards } from "./standards-groups.js";
+import {
+  combineVerifyReview,
+  renderStandaloneLog,
+  runStandaloneSteps,
+  stepFindings,
+} from "./standalone-steps.js";
 import {
   type BoundStack,
   type HeadStack,
@@ -1248,6 +1266,8 @@ async function runSandboxCycle(
     overrules: [],
     openRound: null,
     grader: null,
+    listerReport: null,
+    stepFindings: null,
   };
   const scenarioLedger: { current: ScenarioLedger } = { current: new Map() };
   const specGaps: SpecGap[] = [];
@@ -1951,6 +1971,14 @@ export type QualityLedger = {
   // What the latest lister read at the source tip (#204, #183): its fixer
   // and verify grade by the same version, so one pass is one grader.
   grader: QualityGrader | null;
+  // The model-written part of the latest CHANGES-REQUESTED quality report,
+  // null when that report held only gate-step findings (#247). The
+  // machine's report is the whole fold, which the fixer reads; a verify and a
+  // quality adjudicator read only this. An overrule leaves it null.
+  listerReport: string | null;
+  // The gate-step findings of the latest fan-out (#247), null when it had
+  // none. No ruling closes them.
+  stepFindings: string | null;
 };
 
 function passGrader(quality: QualityLedger): QualityGrader {
@@ -2477,11 +2505,12 @@ export const qualityAuthorEnv = (
 // The quality listers (#187, #204): one cold, read-only review of the branch
 // per rule group of the standards the source tip has, all at once. The
 // lister step opens the round's record and reads the standards its fixer and
-// verify reuse. Every lister's picture is measured before any runs; all of
-// them settle before the step returns, so none is left running in the sandbox,
-// and a provider closure or size refusal from any one then stops the step as
-// a single lister's would. `combineGroupReviews` folds the rest into one
-// result.
+// verify reuse. Every lister's picture is measured before any runs; the early
+// run of the stack's standalone steps (#247) starts beside them, and all of
+// them settle before the step returns, so none is left running, and a
+// provider closure or size refusal from any one then stops the step as a
+// single lister's would. `combineGroupReviews` folds the rest, step findings
+// included, into one result.
 export async function runQualityList(
   action: Extract<LoopAction, { kind: "run-quality-list" }>,
   ctx: ExecuteActionCtx,
@@ -2517,15 +2546,18 @@ export async function runQualityList(
   if (largest > config.maxContextChars) {
     return overQualityBudget(ctx, largest, "listers");
   }
-  const settled = await Promise.allSettled(listers.map((lister) => runQualityReviewer(ctx, {
-    attempt: action.attempt,
-    mode: "list",
-    scope: action.scope.kind === "full" ? "full" : `since:${action.scope.sha}`,
-    group: lister.group.id,
-    prompt: lister.prompt,
-    measuredContextChars: lister.measuredContextChars,
-  })));
-  const failures = settled.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+  const [early, ...settled] = await Promise.allSettled([
+    standaloneStepFindings(ctx, { attempt: action.attempt, mode: "list" }, head),
+    ...listers.map((lister) => runQualityReviewer(ctx, {
+      attempt: action.attempt,
+      mode: "list",
+      scope: action.scope.kind === "full" ? "full" : `since:${action.scope.sha}`,
+      group: lister.group.id,
+      prompt: lister.prompt,
+      measuredContextChars: lister.measuredContextChars,
+    })),
+  ]);
+  const failures = [early, ...settled].flatMap((result) => result.status === "rejected" ? [result.reason] : []);
   if (failures.length > 0) {
     throw failures.find((err) =>
       err instanceof AgentQuotaError ||
@@ -2533,28 +2565,32 @@ export async function runQualityList(
       err instanceof PartitionRequiredError
     ) ?? failures[0];
   }
-  return {
-    kind: "quality-review-result",
-    mode: "list",
-    head,
-    review: combineGroupReviews(settled.flatMap((result, i) => result.status === "fulfilled"
-      ? [{ group: listers[i]!.group, review: reviewerResult(result.value, "quality") }]
-      : [])),
-  };
+  const reviews = settled.flatMap((result, i) => result.status === "fulfilled"
+    ? [{ group: listers[i]!.group, review: reviewerResult(result.value, "quality") }]
+    : []);
+  const findings = early.status === "fulfilled" ? early.value : [];
+  const folded = combineGroupReviews(reviews, findings);
+  quality.listerReport = folded.listerReport;
+  quality.stepFindings = joinStepFindings(findings);
+  return { kind: "quality-review-result", mode: "list", head, review: folded.review };
 }
 
 // A quality verify (#187): a cold, read-only review of what changed since the
-// head before the fixer, against the report the fixer was given and every
-// rule group the pass's listers read. Its picture is measured before it runs.
+// head before the fixer, against the model-written part of the report the
+// fixer was given and every rule group the pass's listers read, beside a rerun
+// of every standalone step (#247), since the fixer's commits can break one the
+// report did not name. Its picture is measured before either runs; both settle
+// before the step returns. `combineVerifyReview` folds them.
 export async function runQualityVerify(
   action: Extract<LoopAction, { kind: "run-quality-verify" }>,
   ctx: ExecuteActionCtx,
 ): Promise<Extract<LoopEvent, { kind: "quality-review-result" | "context-over-budget" }>> {
+  const { quality } = ctx;
   const head = await requireIssueTip(ctx, "before the quality verify");
   const prompt = await buildQualityReviewPrompt({
     ...branchRoleInputs(ctx),
-    ...passGrader(ctx.quality),
-    mode: { kind: "verify", anchor: action.anchor, report: action.report },
+    ...passGrader(quality),
+    mode: { kind: "verify", anchor: action.anchor, report: quality.listerReport },
   });
   const measuredContextChars = contextChars(
     prompt,
@@ -2563,20 +2599,80 @@ export async function runQualityVerify(
   if (measuredContextChars > ctx.config.maxContextChars) {
     return overQualityBudget(ctx, measuredContextChars, "verify");
   }
-  const outcome = await runQualityReviewer(ctx, {
-    attempt: action.attempt,
-    mode: "verify",
-    scope: `since:${action.anchor}`,
-    fixRound: action.fixRound,
-    prompt,
-    measuredContextChars,
-  });
+  const [verified, rerun] = await Promise.allSettled([
+    runQualityReviewer(ctx, {
+      attempt: action.attempt,
+      mode: "verify",
+      scope: `since:${action.anchor}`,
+      fixRound: action.fixRound,
+      prompt,
+      measuredContextChars,
+    }),
+    standaloneStepFindings(ctx, { attempt: action.attempt, mode: "verify", fixRound: action.fixRound }, head),
+  ]);
+  if (verified.status === "rejected") throw verified.reason;
+  if (rerun.status === "rejected") throw rerun.reason;
+  const review = reviewerResult(verified.value, "quality");
+  quality.listerReport = changesRequested(review);
+  quality.stepFindings = joinStepFindings(rerun.value);
   return {
     kind: "quality-review-result",
     mode: "verify",
     head,
-    review: reviewerResult(outcome, "quality"),
+    review: combineVerifyReview(review, rerun.value),
   };
+}
+
+const joinStepFindings = (findings: readonly string[]): string | null =>
+  findings.length === 0 ? null : findings.join("\n\n");
+
+// A review's report when it requested changes.
+const changesRequested = (review: ReviewerResult): string | null =>
+  review.kind === "reviewer-result" && review.verdict === "CHANGES-REQUESTED" ? review.prose : null;
+
+// The early run of the stack gate-1 would run at `head` (#247): its
+// standalone steps, as quality findings, none without such a step. Every run
+// is recorded, and each fan-out's output filed whatever it came to.
+async function standaloneStepFindings(
+  ctx: ExecuteActionCtx,
+  fanOut: { readonly attempt: number } & (
+    | { readonly mode: "list" }
+    | { readonly mode: "verify"; readonly fixRound: number }
+  ),
+  head: string,
+): Promise<readonly string[]> {
+  const { opts, worktreePath } = ctx;
+  const { branchImages } = opts;
+  const runs = await runStandaloneSteps({
+    scope: ctx.config.scope,
+    stackId: ctx.issue.id,
+    stack: (await opts.stackSource.forHead(worktreePath, head)).stack,
+    worktreePath,
+    images: branchImages === undefined ? null : (only) => branchImages.resolve(worktreePath, only),
+    signal: opts.signal,
+  });
+  if (runs.length === 0) return [];
+  const log = ctx.invocationSequence.filename({ role: "standalone-steps", ...fanOut });
+  await opts.attemptLogger.writeStandaloneSteps(log, renderStandaloneLog(runs));
+  for (const run of runs) {
+    await opts.onEvent({
+      kind: "standalone-step",
+      ...ctx.subject.event,
+      ...fanOut,
+      round: fanOut.attempt,
+      step: run.step.name,
+      container: run.step.in,
+      image: run.image,
+      head,
+      result: run.result,
+      exitCode: run.exitCode,
+      durationMs: run.durationMs,
+      detail: run.detail,
+      log,
+      ...containerResourcesOf(run),
+    });
+  }
+  return stepFindings(runs);
 }
 
 const overQualityBudget = (
@@ -2808,6 +2904,9 @@ export async function runQualityFix(
     head: await requireIssueTip(ctx, "after the quality fixer"),
     commits,
     exited,
+    steps: quality.stepFindings === null
+      ? null
+      : { findings: quality.stepFindings, only: quality.listerReport === null },
   };
 }
 
@@ -3321,6 +3420,14 @@ export async function enforceReadOnlyAgentSnapshot(
   );
 }
 
+// The machine never adjudicates a report of gate-step findings alone (#247).
+function requireListerReport(quality: QualityLedger): string {
+  if (quality.listerReport === null) {
+    throw new Error("a quality adjudication of a report with no model-written findings");
+  }
+  return quality.listerReport;
+}
+
 // The cold judge of one unchanged rejection (#167, #187): a verifier
 // report the implementer committed nothing for, or a quality report the fixer
 // committed nothing for. A verifier OVERRULED ends the issue as approved, or
@@ -3331,6 +3438,8 @@ export async function enforceReadOnlyAgentSnapshot(
 // `findings/` is restaged from that round's archive (#238), whatever the
 // implementer did to it; beside a scenario unit, a write's detail names the
 // judge's transcript rather than quoting it, as it may quote the evidence.
+// A quality report is judged on its model-written findings alone (#247): its
+// gate-step findings are mechanical, so they stay open whatever the ruling.
 export async function runAdjudicator(
   action: Extract<LoopAction, { kind: "run-adjudicator" }>,
   ctx: ExecuteActionCtx,
@@ -3339,6 +3448,7 @@ export async function runAdjudicator(
 }>> {
   const { issue, sandbox, opts, config } = ctx;
   const { rejection } = action;
+  const report = action.pass === "quality" ? requireListerReport(ctx.quality) : rejection.report;
   const scenarioUnits = action.pass === "correctness"
     ? action.rejection.units.flatMap((unit) => (unit.id === "white-box" ? [] : [unit.id]))
     : [];
@@ -3354,7 +3464,7 @@ export async function runAdjudicator(
     ...branchRoleInputs(ctx),
     pass: action.pass,
     head: rejection.head,
-    report: rejection.report,
+    report,
     units,
   });
   const measuredContextChars = contextChars(
@@ -3496,9 +3606,10 @@ export async function runAdjudicator(
         ctx.quality.overrules.push({
           round: rejection.round,
           head: rejection.head,
-          report: rejection.report,
+          report,
           ruling: reasoning,
         });
+        ctx.quality.listerReport = null;
       }
       if (rulings !== null) {
         ctx.scenarioLedger.current = retire(

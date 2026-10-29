@@ -16,7 +16,9 @@
 //   - `env-only` — the container names and order, every container field but
 //     `env`, and the steps are all equal. Adding, removing or changing an env
 //     key all count as env. A step's `settles` is a step field, so no branch
-//     drops its own prompts' rule prose (#183);
+//     drops its own prompts' rule prose (#183), and so is `standalone`, so no
+//     branch moves its own steps into or out of the quality pass's early run
+//     (#247);
 //   - `non-env` — anything else, and a branch stack file that is missing or
 //     does not validate. Differences name fields, never values.
 //

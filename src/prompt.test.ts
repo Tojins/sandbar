@@ -852,15 +852,14 @@ describe("renderQualityReviewSlot (#187)", () => {
       mode: list(scope, overrules, group),
       changedSinceStat,
     });
-  const renderVerify = (changedSinceStat: string | null = " fixed | 2 +") =>
+  const renderVerify = (
+    changedSinceStat: string | null = " fixed | 2 +",
+    report: string | null = "### Tests\nsrc/a.ts:3 is uncovered\n<verdict>CHANGES-REQUESTED</verdict>",
+  ) =>
     renderQualityReviewSlot({
       ...qualityInputs,
       ...picture,
-      mode: {
-        kind: "verify",
-        anchor: "fff0000",
-        report: "### Tests\nsrc/a.ts:3 is uncovered\n<verdict>CHANGES-REQUESTED</verdict>",
-      },
+      mode: { kind: "verify", anchor: "fff0000", report },
       changedSinceStat,
     });
 
@@ -951,6 +950,16 @@ describe("renderQualityReviewSlot (#187)", () => {
     expect(slot).toMatch(/restate in full every finding still open/);
     expect(slot).not.toContain("There is no limit on length.");
     expect(slot).not.toContain("## Prior review rounds");
+  });
+
+  // #247: a report of gate-step findings alone; the runner reruns the steps.
+  it("judges only the fixer's own lines when no reviewer finding was reported", () => {
+    const slot = renderVerify(" fixed | 2 +", null);
+    expect(slot).toContain(
+      "starting from `fff0000`:\n\n(No reviewer findings: the fixer was handed only gate-step findings",
+    );
+    expect(slot).toContain("Judge only point 2, the fixer's own lines.)");
+    expect(slot).not.toContain("(no report prose)");
   });
 
   it("refuses a verify without its stat", () => {

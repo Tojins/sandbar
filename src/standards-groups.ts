@@ -30,10 +30,14 @@
 // ONE LISTER PER GROUP. The quality pass runs one read-only lister per group
 // in parallel (inner-loop.ts), and `combineGroupReviews` folds their results
 // into the one result the state machine reads. Findings are concatenated
-// verbatim, each under a `[group: <id>]` line, and never merged by a model:
-// a write anywhere is a write; any CHANGES-REQUESTED is one, naming each group
-// that produced no review; all APPROVED approves; otherwise the pass produced
-// no review, so no approved head is recorded and the next pass lists again.
+// verbatim, each under a `[group: <id>]` line, and never merged by a model.
+// The early run of the stack's standalone steps (standalone-steps.ts, #247)
+// settles beside them, and each step finding counts as one more
+// CHANGES-REQUESTED entry, after the groups': a write anywhere is a write;
+// any CHANGES-REQUESTED or step finding is CHANGES-REQUESTED, naming each
+// group that produced no review; all APPROVED with no finding approves;
+// otherwise the pass produced no review, so no approved head is recorded and
+// the next pass lists again.
 //
 // THE GRADER COMES FROM THE SOURCE TIP. `readQualityStandards` reads a `{ path }`
 // extension from the bare cache's `origin/<sourceBranch>` as last fetched, the
@@ -222,32 +226,43 @@ export function renderStandards(s: QualityStandards, lens: QualityLens): string 
 
 const groupTag = (group: RuleGroup): string => `[group: ${group.id}]`;
 
-// The listers' results, in group order, as the one result of the pass.
-export function combineGroupReviews(reviews: readonly GroupReview[]): ReviewerResult {
+// The listers' results, in group order, and then the early run's step
+// findings (standalone-steps.ts, #247), as the one result of the pass, with
+// its model-written part: null unless a lister requested changes.
+export function combineGroupReviews(
+  reviews: readonly GroupReview[],
+  stepFindings: readonly string[],
+): { readonly review: ReviewerResult; readonly listerReport: string | null } {
   if (reviews.length === 0) throw new Error("a quality pass combined no group reviews");
   const tagged = (kind: "reviewer-wrote" | "reviewer-harness-failed"): string[] =>
     reviews.flatMap(({ group, review }) =>
       review.kind === kind ? [`${groupTag(group)} ${review.detail}`] : []);
   const wrote = tagged("reviewer-wrote");
-  if (wrote.length > 0) return { kind: "reviewer-wrote", detail: wrote.join("\n\n") };
+  if (wrote.length > 0) {
+    return { review: { kind: "reviewer-wrote", detail: wrote.join("\n\n") }, listerReport: null };
+  }
   const requested = reviews.flatMap(({ group, review }) =>
     review.kind === "reviewer-result" && review.verdict === "CHANGES-REQUESTED"
       ? [`${groupTag(group)} ${group.name}\n\n${stripVerdictTokens(review.prose).trim()}`]
       : []);
   const failed = reviews.filter(({ review }) => review.kind === "reviewer-harness-failed");
-  if (requested.length > 0) {
+  const noReview = failed.map(({ group }) => `${groupTag(group)} produced no review this pass.`);
+  if (requested.length + stepFindings.length > 0) {
     return {
-      kind: "reviewer-result",
-      verdict: "CHANGES-REQUESTED",
-      prose: [
-        ...requested,
-        ...failed.map(({ group }) => `${groupTag(group)} produced no review this pass.`),
-      ].join("\n\n"),
+      review: {
+        kind: "reviewer-result",
+        verdict: "CHANGES-REQUESTED",
+        prose: [...requested, ...stepFindings, ...noReview].join("\n\n"),
+      },
+      listerReport: requested.length > 0 ? [...requested, ...noReview].join("\n\n") : null,
     };
   }
-  return failed.length === 0
-    ? { kind: "reviewer-result", verdict: "APPROVED", prose: "" }
-    : { kind: "reviewer-harness-failed", detail: tagged("reviewer-harness-failed").join("\n\n") };
+  return {
+    review: failed.length === 0
+      ? { kind: "reviewer-result", verdict: "APPROVED", prose: "" }
+      : { kind: "reviewer-harness-failed", detail: tagged("reviewer-harness-failed").join("\n\n") },
+    listerReport: null,
+  };
 }
 
 // The groups the consumer exposed to the janitor (#205), rendered as one set;

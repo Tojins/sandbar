@@ -20,7 +20,10 @@
 // gate or a rejection marks its own bar. A quality lister or verify row names
 // its mode and verdict, a lister's also its rule group (#204); the fixer's row
 // names its commits and whatever the host discarded after it; a round's row
-// names how its quality pass ended when that was not an approval.
+// names how its quality pass ended when that was not an approval. Each early
+// run of a standalone gate step (#247) is a feed row naming the step, the
+// fan-out it ran beside and its result; it opens no span of its own, since it
+// runs inside the quality step.
 // The anchor step (#217) is a pre-attempt phase like the UI check: no lane
 // span, and a feed row naming how it ended and what it dropped, warning when
 // the thread fell back uncondensed.
@@ -334,6 +337,14 @@ function feedText(event: RunEvent): FeedEvent | null {
         : event.verdict === null && event.result !== "completed" && event.result !== "failed"
           ? "bad"
           : "";
+      break;
+    case "standalone-step":
+      text = `round ${event.round} · step ${event.step} (${event.mode}) · ${
+        event.result === "failed"
+          ? `failed exit ${event.exitCode}`
+          : event.result === "timed-out" ? "timed out" : event.result
+      }`;
+      tone = event.result === "passed" ? "good" : event.result === "failed" ? "bad" : "warn";
       break;
     case "review-pass":
       text = `round ${event.round} · correctness pass · invocation ${event.invocation}`;

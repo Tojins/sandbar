@@ -1131,3 +1131,34 @@ describe("egress feed rows (#202)", () => {
     expect(state.run.complaints).toEqual([]);
   });
 });
+
+// #247: every early run of a standalone step is a feed row; the phase stays
+// the quality step's.
+describe("standalone-step feed rows (#247)", () => {
+  it("names the step, the fan-out it ran beside and its result", () => {
+    const step = {
+      kind: "standalone-step", issue: 7, attempt: 2, round: 2, step: "lint", container: "app",
+      image: "app:gate", head: "abc", durationMs: 300, log: "attempt-2-standalone-steps-list.log",
+    };
+    const rows = [
+      { kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "d", configPath: null,
+        workdir: "/w", maxParallelIssues: 1, pid: 1 },
+      { ...step, mode: "list", result: "failed", exitCode: 1, detail: null },
+      { ...step, mode: "verify", fixRound: 1, result: "passed", exitCode: 0, detail: null },
+      { ...step, mode: "verify", fixRound: 2, result: "timed-out", exitCode: null, detail: null },
+      { ...step, mode: "list", result: "unavailable", exitCode: null, detail: "no image" },
+    ];
+    const state = reduceRunEvents(
+      rows.map((row, i) => at(i + 1, `2026-10-29T09:0${i}:00Z`, row)),
+      { now: new Date("2026-10-29T10:00:00Z"), pidAlive: false },
+    );
+    expect(state.events.map((e) => [e.issue, e.text, e.tone])).toEqual([
+      [7, "round 2 · step lint (list) · unavailable", "warn"],
+      [7, "round 2 · step lint (verify) · timed out", "warn"],
+      [7, "round 2 · step lint (verify) · passed", "good"],
+      [7, "round 2 · step lint (list) · failed exit 1", "bad"],
+      [null, "run started", "dim"],
+    ]);
+    expect(state.run.complaints).toEqual([]);
+  });
+});

@@ -14,7 +14,11 @@
 // approved a head, a stat of what changed since that head as its only review
 // surface, plus every quality report an adjudicator overruled with its
 // ruling; its fixer gets the latest CHANGES-REQUESTED report (and an upheld
-// ruling); its verify gets that report and a stat of what the fixer changed.
+// ruling); its verify gets the model-written part of that report, or a
+// no-findings note when it held only gate-step findings (#247), and a stat of
+// what the fixer changed. A red standalone gate step's output reaches the
+// fixer as one more finding, and a rule such a step settles still keeps its
+// prose out of the fixer's prompt, since that output describes itself.
 // All three grade by the standards inline, as the runner read them at the
 // source tip (standards-groups.ts, #204), never an @ref into the branch they
 // grade; the implementer keeps the built-in text plus its extension's @ref
@@ -133,6 +137,7 @@ const REVIEWER_QUALITY_DIMENSIONS_GROUP_TPL = loadTemplate("reviewer-quality-dim
 const REVIEWER_QUALITY_LISTING_TPL = loadTemplate("reviewer-quality-listing");
 const REVIEWER_QUALITY_LISTING_SINCE_TPL = loadTemplate("reviewer-quality-listing-since");
 const REVIEWER_QUALITY_VERIFY_TPL = loadTemplate("reviewer-quality-verify");
+const REVIEWER_QUALITY_VERIFY_NO_FINDINGS_TPL = loadTemplate("reviewer-quality-verify-no-findings");
 const REVIEWER_QUALITY_OVERRULES_TPL = loadTemplate("reviewer-quality-overrules");
 const QUALITY_FIXER_TPL = loadTemplate("quality-fixer");
 const QUALITY_FIXER_RULING_TPL = loadTemplate("quality-fixer-ruling");
@@ -430,7 +435,9 @@ export type QualityReviewMode =
   | {
       readonly kind: "verify";
       readonly anchor: string;
-      readonly report: string;
+      // The model-written part of the report the fixer was given; null when it
+      // held only gate-step findings (#247), which the runner reruns instead.
+      readonly report: string | null;
     };
 
 // What every quality role grades by: the built-in standards plus
@@ -1214,7 +1221,7 @@ export function renderQualityReviewSlot(inputs: QualityReviewSlotRender): string
   const qualityMode = mode.kind === "verify"
     ? render(REVIEWER_QUALITY_VERIFY_TPL, {
         anchor: mode.anchor,
-        report: reportProse(mode.report),
+        report: mode.report === null ? REVIEWER_QUALITY_VERIFY_NO_FINDINGS_TPL : reportProse(mode.report),
       })
     : anchor === null
       ? render(REVIEWER_QUALITY_LISTING_TPL, {

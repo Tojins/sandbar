@@ -36,6 +36,11 @@
 // An idle janitor run (#205) logs like an issue, under `janitor-<task>/`: its
 // logger is cached per task the same way, so the invocation sequence spans
 // every run of that task in the process.
+// The quality pass's early run of the standalone gate steps (#247) files
+// one log per fan-out from the same sequence, green or red:
+// `attempt-<n>-standalone-steps-list.log` beside the listers and
+// `attempt-<n>-standalone-steps-verify-<k>.log` beside a verify, a banner per
+// step above its output.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -52,6 +57,7 @@ import { formatContainerResources } from "./container-resources.js";
 export type AttemptLogger = {
   writeInvocation(filename: string, record: AgentInvocationRecord): Promise<void>;
   writeGate(filename: string, gate: AttemptGateRecord): Promise<void>;
+  writeStandaloneSteps(filename: string, log: string): Promise<void>;
   startInvocationCycle(): AgentInvocationSequence;
   writeIssueSnapshot(issue: IssueJson): Promise<string>;
   writeScenarios(set: ScenarioSet): Promise<string>;
@@ -85,6 +91,15 @@ export type AgentInvocationIdentity =
   | { readonly role: "scenario-runner"; readonly attempt: number; readonly invocation: number }
   | { readonly role: "adjudicator"; readonly attempt: number; readonly invocation: number }
   | { readonly role: "gate"; readonly attempt: number }
+  // The early run of the standalone gate steps (#247): one file per fan-out,
+  // beside the listers or beside a verify.
+  | { readonly role: "standalone-steps"; readonly attempt: number; readonly mode: "list" }
+  | {
+      readonly role: "standalone-steps";
+      readonly attempt: number;
+      readonly mode: "verify";
+      readonly fixRound: number;
+    }
   // Not a file: the directory a verifier round's scenario evidence is
   // archived in, numbered like the round's other artefacts.
   | { readonly role: "verifier-round"; readonly attempt: number }
@@ -125,6 +140,10 @@ export function agentInvocationFilename(identity: AgentInvocationIdentity): stri
       return `attempt-${identity.attempt}-adjudicator-${identity.invocation}.log`;
     case "gate":
       return `attempt-${identity.attempt}-gate.log`;
+    case "standalone-steps":
+      return `attempt-${identity.attempt}-standalone-steps-${
+        identity.mode === "list" ? "list" : `verify-${identity.fixRound}`
+      }.log`;
     case "verifier-round":
       return join("verifier", `round-${identity.attempt}`);
     case "anchor-condense":
@@ -275,6 +294,10 @@ async function makeIssueLogger(dir: string): Promise<IssueLogger> {
       return filename;
     },
     verifierRoundDir: (name) => join(dir, name),
+    // Create-only, green fan-outs included, as gate-1's are (#153).
+    async writeStandaloneSteps(filename, log) {
+      await writeFile(join(dir, filename), log, { flag: "wx" });
+    },
     async writeScenarios(set) {
       const path = join(dir, `scenarios-${nextScenarios++}.json`);
       await writeFile(path, `${JSON.stringify(set, null, 2)}\n`, { flag: "wx" });

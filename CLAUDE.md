@@ -76,7 +76,10 @@ and the gate stack (`config.gateStack`, #24).
    uncondensed), partition check (#158), UI check (#126), then implementer
    attempts → quality pass (read-only listers, one per rule group of the
    standards as the source tip has them, run in parallel and folded into one
-   report, `standards-groups.ts`, #204; then a fixer that writes commits →
+   report, `standards-groups.ts`, #204; beside them and beside each verify,
+   the stack's `standalone` gate steps run early in networkless, read-only
+   copies of their containers and a red one is a finding in that report,
+   `standalone-steps.ts`, #247; then a fixer that writes commits →
    read-only verify, #187) → gate-1 → verifier
    (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
    patch-scoped from round 2; beside it, when the writer wrote a set, the
@@ -161,7 +164,9 @@ a written set.
   verdict is about a clean, on-branch commit (D1, #27, #127). A step's
   `settles` (#183) names rules it checks mechanically; while one does, the
   implementer and quality prompts drop that rule's prose fragment
-  (`prompts/quality-tests-missing-*.md`, `prompts/commit-ritual-*.md`).
+  (`prompts/quality-tests-missing-*.md`, `prompts/commit-ritual-*.md`). A
+  `standalone` step (#247) also runs early for the quality fixer; gate-1
+  still runs it and decides.
 - **Providers**: `agent-providers.ts` (closed set, credentials), per-role
   agent/model/effort routing (`env.ts`, `env-file.ts`), `codex-auth.ts`.
 - **Tokens**: literal-only scanning in `token-scan.ts` (#113); prompt prose in
@@ -174,7 +179,9 @@ a written set.
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
   configured, +0.2k an enforced egress allowlist, +0.6k a held database
   copy); quality lister 5.6k for the built-in group, 2.8k + its group for a
-  project group; verify 6.0k, fixer 5.4k; verifier white-box 4.1k (+0.1k
+  project group; verify 6.0k (+0.1k when the report held only gate-step
+  findings), fixer 5.4k (its report +0.2k and the output's tail per red
+  standalone step, #247); verifier white-box 4.1k (+0.1k
   beside a held copy); scenario runner 1.9k + its scenarios (no issue
   anchor; +2.3k sandbox-stack, +0.2k egress, +0.6k a held copy, +0.2k a
   failed app hook, +0.2k a rerun);

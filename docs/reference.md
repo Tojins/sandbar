@@ -480,6 +480,7 @@ loses `land`, and either gets a comment listing what differs.
 | `command` | Argv. Exit 0 is green. |
 | `timeoutMs` | Default `900000` (15 min). A timeout fails the step. |
 | `settles` | Rules this step checks mechanically: `"missing-tests"`, `"commit-ritual"`. While a step settles a rule, the agents' prompts leave out the prose that asks for it. Default `[]`. |
+| `standalone` | The step needs only its own container's image, env and mounts plus the worktree, read-only: no other container, no network, no earlier step, nothing the container's own process, `readiness` or `postReadyCommands` set up. The quality pass then also runs it early, in a networkless copy of its container, and hands a failure to its fixer, so a cheap lint red costs no new implementer attempt. The gate still runs it and decides. Its container must set `mountWorktree`. Default `false`; a driver older than 0.65.0 ignores it. |
 
 ### Readiness
 

@@ -24,6 +24,7 @@ import {
   sandboxContainerNameFor,
   scopedResourcePrefix,
   stackContainerNameFor,
+  standaloneContainerNameFor,
   ALL_BRANCH_INFIXES,
   ALL_BRANCH_PREFIXES,
   ALL_RESOURCE_PREFIXES,
@@ -342,6 +343,16 @@ describe("gate-stack resource names (#24)", () => {
     expect(sandboxContainerNameFor(S, "42", "db")).toContain(
       scopedResourcePrefix(S),
     );
+  });
+
+  // #247. The copy and the gate container run the same container definition
+  // for the same stack, so only the infix keeps one rm -f off the other.
+  it("names a standalone step's copy apart from the gate's and the sandbox's containers", () => {
+    const copy = standaloneContainerNameFor(S, "42", "app");
+    expect(copy).toBe(`sandbar-${S}-standalone-42-app`);
+    expect(copy).not.toBe(stackContainerNameFor(S, "42", "app"));
+    expect(copy).not.toBe(sandboxContainerNameFor(S, "42", "app"));
+    expect(copy.startsWith(scopedResourcePrefix(S))).toBe(true);
   });
 
   // #201: `sandbar db-base` holds no run lock. Its scope comes from the base

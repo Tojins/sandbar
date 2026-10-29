@@ -294,6 +294,10 @@ function resolveLabelSync(value: unknown): readonly LabelDeclaration[] {
 // A step may claim to settle rules (`settles`, #183): the prompts drop the
 // prose of every rule a step of the stack in effect settles, so the claim
 // comes and goes with its step and, for a file, from the same source tip.
+// A step may also claim to be `standalone` (#247): the quality pass then runs
+// it early as well, in a networkless copy of its container
+// (standalone-steps.ts). Both claims are the consumer's; sandbar checks only
+// that a standalone step's container mounts the worktree.
 //
 // This replaces the single `dbSidecar` + two fixed `gateCommands` of #20/#15.
 // The sidecar dissolved into `containers[]` the moment the pod removed the need
@@ -524,12 +528,22 @@ export type GateStep = {
   // The rules this step checks mechanically (#183). While a step of the stack
   // in effect settles a rule, the prompts leave out the prose that asks an
   // agent for it (prompt.ts), so no lister or fixer spends tokens on it and
-  // its red reaches the implementer as a gate trace. The claim lives on the
-  // step rather than in a top-level flag so that removing the step brings the
-  // prose back. Sandbar cannot see whether the step checks what it claims: a
-  // step that settles a rule it does not check opens a hole of the consumer's
-  // own. Default: [].
+  // its red reaches the implementer as a gate trace — on a `standalone` step
+  // it reaches the quality fixer first, and the implementer only when the
+  // quality pass did not clear it. The claim lives on the step rather than in
+  // a top-level flag so that removing the step brings the prose back. Sandbar
+  // cannot see whether the step checks what it claims: a step that settles a
+  // rule it does not check opens a hole of the consumer's own. Default: [].
   readonly settles?: readonly SettledRule[];
+  // This step needs only its own container's image, env and mounts plus the
+  // worktree, read-only (#247): no other container, no network, no earlier
+  // step, and none of what its container's own process, `readiness` or
+  // `postReadyCommands` set up. The quality pass then also runs it early, in
+  // a copy of that container, and hands a red to the quality fixer as a
+  // finding; gate-1 still runs it, and only gate-1 decides. Sandbar cannot
+  // verify the claim: a step that makes it falsely hands the fixer a red it
+  // cannot fix. Default: false.
+  readonly standalone?: boolean;
 };
 
 // The closed set of rules a gate step may settle (#183). `missing-tests`: a
@@ -650,6 +664,7 @@ export type ResolvedGateStep = {
   // Deduplicated, in `SETTLED_RULES` order, so a reordered list is not a
   // stack change (stack-change.ts).
   readonly settles: readonly SettledRule[];
+  readonly standalone: boolean;
 };
 
 export type ResolvedGateStack = {
@@ -2057,6 +2072,7 @@ const STEP_REQUIRED: FieldShapes<GateStep, true> = {
 const STEP_OPTIONAL: FieldShapes<GateStep, false> = {
   timeoutMs: [isNumber, "a number"],
   settles: [isStrings, "a list of strings"],
+  standalone: [isBoolean, "a boolean"],
 };
 
 function checkFieldShapes(
@@ -2234,12 +2250,24 @@ export function resolveGateStack(
           `does not know (have: ${SETTLED_RULES.join(", ")}).`,
       );
     }
+    // A copy of a container that mounts nothing could not see the code under
+    // test, so its early run would judge the image instead.
+    const standalone = step.standalone ?? false;
+    if (standalone && containers.find((c) => c.name === step.in)?.mountWorktree === null) {
+      throw new SandbarError(
+        `${label}: step '${step.name}' is standalone but runs in ` +
+          `'${step.in}', which does not set 'mountWorktree'. A standalone ` +
+          "step also runs early in a copy of its container, and that copy " +
+          "has to see the code under test.",
+      );
+    }
     steps.push({
       name: step.name,
       in: step.in,
       command: step.command,
       timeoutMs,
       settles: SETTLED_RULES.filter((rule) => settles.includes(rule)),
+      standalone,
     });
   }
 
