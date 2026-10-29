@@ -40,11 +40,12 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   "finalize.ts": 4,
   // An idle janitor run (#205) classifies merge-tree's exit 1 as a conflict,
   // a push refused for a stale lease as a lease failure, and its loop's abort
-  // and provider errors as outcomes; anything else is rethrown. The fourth
-  // classifies a lease lost to cleanup as cleanup's to record, and records any
-  // other failure as the run's `failed` outcome, its complaint included, as
-  // the pool records a rejected issue.
-  "janitor.ts": 4,
+  // and provider errors as outcomes; anything else is rethrown. The settle
+  // classifies a lease lost to cleanup as cleanup's to record and a forge or
+  // git fault (SandbarError, or a failed child with an exit code) as the run's
+  // `failed` outcome, its complaint included, as the pool records a rejected
+  // issue; any other error is rethrown.
+  "janitor.ts": 3,
   "forge-verify.ts": 6,
   "gate-run.ts": 2,
   // The three-state origin lookup (#112) reads as a swallow to the pattern and
@@ -78,7 +79,8 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // through `stopAtStartup` like every other post-lock startup fault: the fault
   // is recorded as a complaint and a halted exit, and cleanup releases the
   // origin lease — none of which happens if it escapes `run()` instead.
-  "run.ts": 11,
+  // The thirteenth hands a janitor run's non-fault error to cleanup's fatal path (#232).
+  "run.ts": 12,
   // The scenario writer (#203): a run, and the host steps around it, that
   // failed with anything but sandbar's own SandbarError are its named
   // failures, and that is rethrown; a container that would not close is

@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { EventInput } from "./events.js";
+import { SandbarError } from "./errors.js";
 import { settleJanitorRun } from "./janitor.js";
 import { OriginLeaseLostDuringCleanupError } from "./origin-lock.js";
 
@@ -25,9 +26,9 @@ describe("settleJanitorRun (#205)", () => {
     return { settled, events, ended: () => ended };
   };
 
-  it("records a run that throws as a complaint and a failed run, settles, and frees the slot", async () => {
+  it("records a run that throws a forge or git fault as a complaint and a failed run, settles, and frees the slot", async () => {
     const { settled, events, ended } = settle(async () => {
-      throw new Error("boom");
+      throw new SandbarError("boom");
     });
     // The record is the run's outcome: a rejection here would stop the daemon,
     // every issue in flight with it, over one janitor run's forge hiccup.
@@ -40,6 +41,24 @@ describe("settleJanitorRun (#205)", () => {
       },
     ]);
     expect(events[0]).toMatchObject({ message: expect.stringContaining("boom") });
+    expect(ended()).toBe(1);
+  });
+
+  it("records a failed git child by its exit code", async () => {
+    const { settled, events } = settle(async () => {
+      throw Object.assign(new Error("gh failed"), { code: 1 });
+    });
+    await expect(settled).resolves.toBeUndefined();
+    expect(events.map((e) => e.kind)).toEqual(["complaint", "janitor-run"]);
+  });
+
+  it("rethrows any other error unrecorded, and frees the slot", async () => {
+    const bug = new TypeError("bug");
+    const { settled, events, ended } = settle(async () => {
+      throw bug;
+    });
+    await expect(settled).rejects.toBe(bug);
+    expect(events).toEqual([]);
     expect(ended()).toBe(1);
   });
 
