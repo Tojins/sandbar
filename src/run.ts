@@ -1659,9 +1659,9 @@ export async function run(
     sourceBranch: config.sourceBranch,
     beforeOriginWrite: renewOriginLease,
   });
-  // A run records its own ending (#82). One that throws is recorded here as
-  // `failed` and the daemon carries on: `runsPerDay` bounds a repeat. Its
-  // end wakes the scheduler, which owns what happens next.
+  // A run records its own ending (#82). One that throws is recorded by
+  // `settleJanitorRun` as `failed` and the daemon carries on: `runsPerDay`
+  // bounds a repeat. Its end wakes the scheduler, which owns what happens next.
   const startJanitor = (task: JanitorTask, loop: JanitorRunDeps["loop"]): void => {
     const controller = new AbortController();
     const timer = startTimer();

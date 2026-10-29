@@ -35,7 +35,8 @@
 // Exactly two failures are caught, around the loop: `InnerLoopAbortedError`,
 // the pre-emption, is `pre-empted`; a provider's quota or credential error is
 // `failed` (the run's provider state has already heard it). Anything else
-// propagates to `settleJanitorRun`, which records the run as `failed`.
+// propagates to `settleJanitorRun`, which records the run as `failed` and
+// settles: the daemon carries on, and `runsPerDay` bounds a repeat.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -302,8 +303,10 @@ export type JanitorRunDeps = {
 };
 
 // A run as the daemon holds it: one that throws is recorded as a complaint and
-// a `failed` run, then rethrown to the unhandled-rejection trap. A lease lost
-// to cleanup is cleanup's to record. `onEnd` runs either way.
+// a `failed` run, and that record is its outcome. Nothing awaits a run but
+// cleanup, so a rethrow would reach the unhandled-rejection trap and stop the
+// daemon with every issue in flight. A lease lost to cleanup is cleanup's to
+// record. `onEnd` runs either way.
 export async function settleJanitorRun(args: {
   readonly task: string;
   readonly run: () => Promise<unknown>;
@@ -328,7 +331,6 @@ export async function settleJanitorRun(args: {
       scope: [],
       durationMs: args.durationMs(),
     });
-    throw err;
   } finally {
     args.onEnd();
   }

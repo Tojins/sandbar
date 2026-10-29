@@ -1,6 +1,6 @@
-// #205 — a janitor run as the daemon holds it: a failure is recorded and
-// rethrown, a lease lost to cleanup is cleanup's, and the slot is freed
-// either way.
+// #205 — a janitor run as the daemon holds it: a failure is recorded and the
+// daemon carries on, a lease lost to cleanup is cleanup's, and the slot is
+// freed either way.
 import { describe, expect, it } from "vitest";
 
 import type { EventInput } from "./events.js";
@@ -25,12 +25,13 @@ describe("settleJanitorRun (#205)", () => {
     return { settled, events, ended: () => ended };
   };
 
-  it("records a run that throws as a complaint and a failed run, rethrows, and frees the slot", async () => {
-    const boom = new Error("boom");
+  it("records a run that throws as a complaint and a failed run, settles, and frees the slot", async () => {
     const { settled, events, ended } = settle(async () => {
-      throw boom;
+      throw new Error("boom");
     });
-    await expect(settled).rejects.toBe(boom);
+    // A rejection here would reach cleanup's unhandled-rejection trap and stop
+    // the daemon, every issue in flight with it.
+    await expect(settled).resolves.toBeUndefined();
     expect(events).toEqual([
       { kind: "complaint", severity: "error", message: expect.stringContaining("Janitor task 'tidy' failed: ") },
       {
