@@ -10,8 +10,9 @@
 // order. Under it come a `needs:` line (distinct members of SCENARIO_NEEDS), an
 // `area:` line (repo-relative paths, which need not exist at the seed), then
 // the clauses: Given+, When+, Then+, with `And` extending the clause above it;
-// a comma straight after the keyword (`And, …`) is dropped. Blank lines are ignored; a line indented two or more spaces continues the
-// clause above it. Any other line is a violation. A set holds 1 to
+// a comma straight after the keyword (`And, …`) is dropped. Blank lines are
+// ignored; a line indented two or more spaces continues the clause above it.
+// Any other line is a violation. A set holds 1 to
 // MAX_SCENARIOS scenarios: the cap protects a runner's context budget and is
 // never what sizes the set, which is the prompt's job. Every violation is
 // listed in the one NO-SIGNAL reprompt, so a single correction can fix all.

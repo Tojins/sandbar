@@ -49,7 +49,7 @@ type Draft = {
   observed: string | null;
   readonly evidence: string[];
   reason: string | null;
-  // The field the next indented line continues.
+  // The field the next indented line belongs to.
   current: Field | null;
   readonly problems: string[];
 };

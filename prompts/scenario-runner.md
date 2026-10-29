@@ -40,6 +40,5 @@ Reason: why it could not be checked (required for UNVERIFIED)
 ```
 
 A line indented two spaces continues the line above it; under `Evidence:` it
-is one more path. An evidence path is
-relative to `/sandbar/verifier/run/`, starts with the scenario's own `S<n>/`
-and names a file you saved.
+is one more path. An evidence path is relative to `/sandbar/verifier/run/`,
+starts with the scenario's own `S<n>/` and names a file you saved.
