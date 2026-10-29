@@ -2353,16 +2353,16 @@ function checkSecretEnvOutsideConfigEnv(
   configEnv: Readonly<Record<string, string>>,
   label: string,
 ): void {
-  for (const c of stack.containers) {
-    const leaked = c.secretEnv.filter((key) => Object.hasOwn(configEnv, key));
-    if (leaked.length === 0) continue;
-    throw new SandbarError(
-      `${label}: container '${c.name}' has secretEnv key(s) ` +
-        `${leaked.join(", ")}, which config.env also declares, so every agent ` +
-        "sandbox would receive the secret. Take them out of what config.env " +
-        "reads; on a box their values belong in secrets.env.",
-    );
-  }
+  const leaked = stack.containers.flatMap((c) =>
+    c.secretEnv
+      .filter((key) => Object.hasOwn(configEnv, key))
+      .map((key) => `${key} (container '${c.name}')`));
+  if (leaked.length === 0) return;
+  throw new SandbarError(
+    `${label}: config.env also declares secretEnv key(s) ${leaked.join(", ")}, ` +
+      "so every agent sandbox would receive the secret. Take them out of what " +
+      "config.env reads; on a box their values belong in secrets.env.",
+  );
 }
 
 // Flatten the environment in which gate STEPS run into the one sandbox
