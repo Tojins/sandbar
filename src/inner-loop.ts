@@ -307,7 +307,7 @@ import {
   dirtyWorktreePaths,
   ensureIssueBranch,
   fastForwardOffBranchHead,
-  gitStdout,
+  changedPaths,
   headMismatch,
   isAncestor,
   settleQualityResidue,
@@ -3708,8 +3708,7 @@ async function changedSince(
   return new Map(await Promise.all(ledgerHeads(ledger).map(async (since) => [
     since,
     await isAncestor(worktreePath, since, head)
-      ? (await gitStdout(worktreePath, ["diff", "--name-only", "-z", `${since}..${head}`]))
-        .split("\0").filter((path) => path !== "")
+      ? await changedPaths(worktreePath, since, head)
       : "all" as const,
   ] as const)));
 }

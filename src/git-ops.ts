@@ -47,8 +47,9 @@
 //
 // `gitStdout` is the one "run git in this directory, hand back stdout" call,
 // with an optional stdin, for the callers that have no richer need (replay,
-// #195: its cache is built by `update-ref --stdin`; the verifier's changed
-// paths, #239).
+// #195: its cache is built by `update-ref --stdin`).
+// `changedPaths` lists what a range changed, a rename at both its paths so a
+// file moved out of a scenario's area still touches it (#239).
 //
 // `hasNonMergeCommitOutside` is the shared safety test for retiring issue
 // branches (#177, #179). Chunk wrap-up applies it to origin's freshly fetched
@@ -352,6 +353,14 @@ export const isAncestor = async (
     throw err;
   }
 };
+
+export const changedPaths = async (
+  cwd: string,
+  since: string,
+  head: string,
+): Promise<readonly string[]> =>
+  (await gitStdout(cwd, ["diff", "--name-only", "--no-renames", "-z", `${since}..${head}`]))
+    .split("\0").filter((path) => path !== "");
 
 const fetchOriginIssueBranch = async (
   repoDir: string,

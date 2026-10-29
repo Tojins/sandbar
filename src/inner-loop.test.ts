@@ -44,7 +44,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   prepareSandboxLogDir: vi.fn(async (_dir: string) => undefined),
   startSandboxStack: vi.fn(),
   isAncestor: vi.fn(async (_cwd: string, _ancestor: string, _descendant: string) => true),
-  gitStdout: vi.fn(async (_cwd: string, _args: readonly string[]) => ""),
+  changedPaths: vi.fn(async (_cwd: string, _since: string, _head: string): Promise<readonly string[]> => []),
   fetchIssueAnchor: vi.fn(async (): Promise<IssueAnchor> => ({
     text: "Issue #1: Issue",
     json: { title: "Issue", body: "", comments: [] },
@@ -111,7 +111,7 @@ vi.mock("./git-ops.js", async (importOriginal) => ({
   revParse: innerLoopMocks.revParse,
   forkPoint: innerLoopMocks.forkPoint,
   isAncestor: innerLoopMocks.isAncestor,
-  gitStdout: innerLoopMocks.gitStdout,
+  changedPaths: innerLoopMocks.changedPaths,
 }));
 
 vi.mock("./scenario-writer-run.js", async (importOriginal) => ({
@@ -2618,17 +2618,14 @@ describe("runVerifier beside the scenario runner (#238)", () => {
       async () => ran("<verdict>APPROVED</verdict>"),
       async () => ran(`<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n${reports.shift()}\n</scenario-results>`),
     );
-    innerLoopMocks.gitStdout.mockReset().mockResolvedValue("src/c/x.ts\0README.md\0");
+    innerLoopMocks.changedPaths.mockReset().mockResolvedValue(["src/c/x.ts", "README.md"]);
     await r.run(written);
-    expect(innerLoopMocks.gitStdout).not.toHaveBeenCalled();
+    expect(innerLoopMocks.changedPaths).not.toHaveBeenCalled();
     await expect(r.run(written)).resolves.toMatchObject({
       outcome: { kind: "approved" },
       scenarios: { selected: 2, pass: 2, fail: 0, unverified: 0 },
     });
-    expect(innerLoopMocks.gitStdout).toHaveBeenCalledWith(
-      "/worktree",
-      ["diff", "--name-only", "-z", "head238..head238"],
-    );
+    expect(innerLoopMocks.changedPaths).toHaveBeenCalledWith("/worktree", "head238", "head238");
     expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenLastCalledWith(expect.objectContaining({
       scenarios: [written.scenarios[1], written.scenarios[2]],
       reruns: [{ id: "S2", head: "head238" }],
@@ -2644,13 +2641,13 @@ describe("runVerifier beside the scenario runner (#238)", () => {
       async () => ran("<verdict>APPROVED</verdict>"),
       async () => ran(`<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n${reports.shift()}\n</scenario-results>`),
     );
-    innerLoopMocks.gitStdout.mockReset().mockResolvedValue("");
+    innerLoopMocks.changedPaths.mockReset().mockResolvedValue([]);
     await r.run(set(scenario(1), scenario(2)));
     innerLoopMocks.isAncestor.mockResolvedValue(false);
     await expect(r.run(set(scenario(1), scenario(2)))).resolves.toMatchObject({
       scenarios: { selected: 2, pass: 2 },
     });
-    expect(innerLoopMocks.gitStdout).not.toHaveBeenCalled();
+    expect(innerLoopMocks.changedPaths).not.toHaveBeenCalled();
     expect(innerLoopMocks.buildScenarioRunnerPrompt).toHaveBeenLastCalledWith(expect.objectContaining({
       scenarios: [scenario(1), scenario(2)],
       reruns: [],
