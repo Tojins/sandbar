@@ -18,6 +18,7 @@ import {
   readQualityStandards,
   renderStandards,
 } from "./standards-groups.js";
+import { type StandaloneStepRun, combineVerifyReview, stepFindings } from "./standalone-steps.js";
 
 const exec = promisify(execFile);
 
@@ -223,11 +224,72 @@ describe("combineGroupReviews (#204)", () => {
   ])("%s", (_name, results, expected) => {
     const groups = [sandbar, naming, tests];
     const reviews = results.map((review, i) => ({ group: groups[i]!, review }));
-    expect(combineGroupReviews(reviews)).toEqual(expected);
+    expect(combineGroupReviews(reviews, [])).toEqual(expected);
   });
 
   it("refuses an empty fan-out rather than approving it", () => {
-    expect(() => combineGroupReviews([])).toThrow(/no group reviews/);
+    expect(() => combineGroupReviews([], [])).toThrow(/no group reviews/);
+  });
+
+  // #247: each early step run, as `stepFindings` renders it, beside the
+  // groups. Only a failed step is a finding.
+  describe("beside the early run of the standalone steps (#247)", () => {
+    const step = { name: "lint", in: "app", command: ["lint"], timeoutMs: 1000, settles: [], standalone: true };
+    const base = { step, image: "app:gate", durationMs: 3, output: "src/a.ts:1 inline it" };
+    const columns: readonly (readonly [string, readonly StandaloneStepRun[]])[] = [
+      ["no standalone step", []],
+      ["a passed step", [{ ...base, result: "passed", exitCode: 0, detail: null }]],
+      ["a failed step", [{ ...base, result: "failed", exitCode: 1, detail: null }]],
+      ["a timed-out step", [{ ...base, result: "timed-out", exitCode: null, detail: null }]],
+      ["an unavailable step", [{ ...base, result: "unavailable", exitCode: null, detail: "no image" }]],
+    ];
+    const finding = stepFindings([{ ...base, result: "failed", exitCode: 1, detail: null }])[0]!;
+    const changes = (...prose: string[]): ReviewerResult =>
+      ({ kind: "reviewer-result", verdict: "CHANGES-REQUESTED", prose: prose.join("\n\n") });
+    const s1 = `[group: sandbar] ${sandbar.name}\n\ns1`;
+    const noReview = "[group: sandbar] produced no review this pass.";
+
+    // Each row: the groups' results, then what the pass is without a finding
+    // and with one.
+    const rows: readonly (readonly [string, readonly ReviewerResult[], ReviewerResult, ReviewerResult])[] = [
+      ["every group approved", [approved, approved, approved],
+        { kind: "reviewer-result", verdict: "APPROVED", prose: "" }, changes(finding)],
+      ["a group requested changes", [requested("s1"), approved, approved], changes(s1), changes(s1, finding)],
+      ["some groups failed", [failed("dead"), approved, approved],
+        { kind: "reviewer-harness-failed", detail: "[group: sandbar] dead" }, changes(finding, noReview)],
+      ["every group failed", [failed("dead"), failed("gone"), failed("lost")],
+        { kind: "reviewer-harness-failed", detail: "[group: sandbar] dead\n\n[group: naming] gone\n\n[group: tests] lost" },
+        changes(finding, noReview, "[group: naming] produced no review this pass.",
+          "[group: tests] produced no review this pass.")],
+      ["a group wrote", [wrote("a.ts"), approved, approved],
+        { kind: "reviewer-wrote", detail: "[group: sandbar] a.ts" },
+        { kind: "reviewer-wrote", detail: "[group: sandbar] a.ts" }],
+    ];
+
+    it.each(rows.flatMap(([row, results, without, withFinding]) => columns.map(([column, runs]) =>
+      [`${row}, ${column}`, results, runs, column === "a failed step" ? withFinding : without] as const)))(
+      "folds %s",
+      (_name, results, runs, expected) => {
+        const groups = [sandbar, naming, tests];
+        const reviews = results.map((review, i) => ({ group: groups[i]!, review }));
+        expect(combineGroupReviews(reviews, stepFindings(runs))).toEqual(expected);
+      },
+    );
+
+    // The verify's fold (#247), with the same columns.
+    const verifyRows: readonly (readonly [string, ReviewerResult, ReviewerResult])[] = [
+      ["an approved verify", approved, changes(finding)],
+      ["a verify with items open", requested("v1"), changes("v1", finding)],
+      ["a verify that produced no review", failed("dead"), failed("dead")],
+      ["a verify that wrote", wrote("a.ts"), wrote("a.ts")],
+    ];
+    it.each(verifyRows.flatMap(([row, review, withFinding]) => columns.map(([column, runs]) =>
+      [`${row}, ${column}`, review, runs, column === "a failed step" ? withFinding : review] as const)))(
+      "folds %s",
+      (_name, review, runs, expected) => {
+        expect(combineVerifyReview(review, stepFindings(runs))).toEqual(expected);
+      },
+    );
   });
 });
 

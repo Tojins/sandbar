@@ -2539,7 +2539,7 @@ export async function runQualityList(
     head,
     review: combineGroupReviews(settled.flatMap((result, i) => result.status === "fulfilled"
       ? [{ group: listers[i]!.group, review: reviewerResult(result.value, "quality") }]
-      : [])),
+      : []), []),
   };
 }
 

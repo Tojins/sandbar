@@ -91,6 +91,7 @@ const BUILDERS: ReadonlyArray<readonly [string, () => RuntimeInvocation]> = [
         container: gateContainer({ DB_PASSWORD: SECRET }),
         worktreePath: "/wt",
         hideWorktreeGit: true,
+        readOnlyWorktree: false,
       }),
   ],
   ["stepExecArgs", () => stepExecArgs("sandbar-42-app", ["npm", "test"])],

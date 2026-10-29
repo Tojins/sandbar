@@ -192,6 +192,22 @@ export function stackContainerNameFor(
   return `${scopedResourcePrefix(scope)}${stackId}-${name}`;
 }
 
+// A standalone step's copy of its gate container (#247):
+//
+//   standalone copy   sandbar-<scope>-standalone-<stackId>-<containerName>
+//
+// The `standalone-` infix keeps it clear of the gate container of the same
+// stack and of a sandbox sibling (`sbx-`): stack ids are issue numbers,
+// `janitor-<task>` or `merger`, never the literal `standalone`. The scoped
+// prefix puts it in the orphan sweep with everything else (#28).
+export function standaloneContainerNameFor(
+  scope: RunScope,
+  stackId: string,
+  name: string,
+): string {
+  return `${scopedResourcePrefix(scope)}standalone-${stackId}-${name}`;
+}
+
 // ---------------------------------------------------------------------------
 // Sandbox-stack container names (#44)
 //

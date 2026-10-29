@@ -317,6 +317,7 @@ describe("containerRunArgs", () => {
     attach: { kind: "pod", podName: "sandbar-pod-42" } as const,
     worktreePath: "/wt",
     hideWorktreeGit: true,
+    readOnlyWorktree: false,
   };
 
   it("joins the pod and names the container", () => {
