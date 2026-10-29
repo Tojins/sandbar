@@ -356,6 +356,7 @@ import {
 import { landingClosedUntil, waitsForLandingWindow } from "./landing-window.js";
 import { postLaneOverrideNotices } from "./lanes.js";
 import {
+  type BuildPlanOptions,
   type PlanResolution,
   type PlannedIssue,
   type ReadyLabelPolicy,
@@ -2400,7 +2401,15 @@ export async function run(
       // restart would: its ledger is written last, so the retried recompute
       // may repeat a completed prefix but never loses a review.
       const planned = await readTracker(async () => {
-        let initial = await buildPlan(repo, planOptions);
+        // A chunk whose pull request carries a landing label is frozen
+        // (#243), so these are read before planning, and a failed read fails
+        // the recompute: read as none, a frozen chunk would take new members.
+        const landPullRequests = await fetchLandRequestPullRequests(repo);
+        const frozenOptions: BuildPlanOptions = {
+          ...planOptions,
+          frozenChunks: new Set(landPullRequests.map((pr) => pr.headRefName)),
+        };
+        let initial = await buildPlan(repo, frozenOptions);
         // The chunk-review scan (#95). Every chunk with work on origin is asked
         // whether a human has requested changes on its pull request, and each
         // review that has not already been handled is routed to and re-queues
@@ -2410,9 +2419,12 @@ export async function run(
         // RE-PLANNED when it re-queues anything. The existing issues are handed
         // back rather than re-listed: the listing `gh issue list` serves lags a
         // label flip by seconds (#96), so it may not carry the re-queue this
-        // cycle made.
+        // cycle made. A frozen chunk is not asked: rework would move the head
+        // its reviewer labelled, so its reviews wait until `land` comes off.
         const followUps = await routeChunkReviewFollowUps({
-          chunks: initial.landedChunks,
+          chunks: initial.landedChunks.filter(
+            (chunk) => !frozenOptions.frozenChunks.has(chunk.branch),
+          ),
           adapter: followUpAdapter,
           log: (line) => runRecord.emit({ kind: "follow-up", action: "route", detail: line }).then(() => undefined),
         });
@@ -2424,11 +2436,11 @@ export async function run(
             detail: `Re-queued ${followUps.length} chunk member(s): ${filed}`,
           });
           initial = await buildPlan(repo, {
-            ...planOptions,
+            ...frozenOptions,
             extraCandidates: followUps,
           });
         }
-        return { resolution: initial, followUps };
+        return { resolution: initial, followUps, frozenOptions, landPullRequests };
       });
       if ("failure" in planned) {
         if (await recoverFromRefRefreshFailure("Tracker read", [planned.failure]) === "exit") {
@@ -2436,7 +2448,7 @@ export async function run(
         }
         continue;
       }
-      const { followUps } = planned.value;
+      const { followUps, frozenOptions, landPullRequests } = planned.value;
       let resolution = planned.value.resolution;
 
       // ---------------------------------------------------------------------
@@ -2484,7 +2496,7 @@ export async function run(
         // The reconciliation is already recorded, so a failed re-plan retries
         // from a recompute that finds those chunks gone.
         const replanned = await readTracker(() => buildPlan(repo, {
-          ...planOptions,
+          ...frozenOptions,
           extraCandidates: followUps,
         }));
         if ("failure" in replanned) {
@@ -2553,12 +2565,14 @@ export async function run(
           }) });
       }
 
-      // What a human has asked to land, read AFTER the reconciliation so a
-      // chunk it just finished off is not also merged again by the merge phase
-      // (its branch is gone by then, which the merger would park on, but
-      // asking in this order means it never gets there).
+      // What a human has asked to land, less any chunk the reconciliation just
+      // finished off: it is not merged again by the merge phase (its branch is
+      // gone by then, which the merger would park on).
+      const reconciledBranches = new Set(
+        reconciliation.reconciled.map((chunk) => chunk.target.branch),
+      );
       const landRequestSelection = selectLandRequests(
-        await fetchLandRequestPullRequests(repo),
+        landPullRequests.filter((pr) => !reconciledBranches.has(pr.headRefName)),
         resolution.landedChunks,
         resolution.chunkNameDrifts,
       );
@@ -2584,7 +2598,10 @@ export async function run(
       const landDeferrals = new Map<string, string>();
       for (const request of selectedLandRequests) {
         const deferral = chunkLandDeferral(request, ongoingForChunkLanding);
-        if (deferral !== null) {
+        if (request.base !== null) {
+          // Its branch carries the base's commits, which land with the base.
+          landDeferrals.set(request.branch, `stacked on ${request.base} · lands once it lands`);
+        } else if (deferral !== null) {
           landDeferrals.set(request.branch, deferredLandReason(deferral.members));
         } else if (closedUntil !== null && waitsForLandingWindow(request)) {
           landDeferrals.set(request.branch, `landing window closed · lands after ${closedUntil}`);

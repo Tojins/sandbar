@@ -191,6 +191,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
+  type Chunk,
   type ChunkBranchDrift,
   type ChunkIssue,
   type ChunkRefresh,
@@ -201,7 +202,7 @@ import {
   landedChunksOf,
 } from "./chunks.js";
 import { DEFAULT_MAX_PARALLEL_ISSUES } from "./config.js";
-import { SandbarError } from "./errors.js";
+import { isExitCode, SandbarError } from "./errors.js";
 import {
   DEFAULT_LANE,
   type Lane,
@@ -213,6 +214,7 @@ import {
   LOCAL_ISSUE_BRANCH_REFGLOBS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
   ORIGIN_MEMBER_BRANCH_REFGLOBS,
+  baseRootFromChunkBranch,
   branchNameFromOriginRef,
   issueBranchName,
   issueNumberFromMemberBranch,
@@ -380,6 +382,11 @@ export type ResolvePlanOptions = {
   readonly defaultLane?: Lane;
   readonly chunkMembers?: ReadonlyMap<string, ReadonlySet<number>>;
   readonly chunksContainingSource?: ReadonlySet<string>;
+  // Stacked chunk branches that contain the tip of the branch they are
+  // stacked on (#243).
+  readonly chunksContainingBase?: ReadonlySet<string>;
+  // Chunk branches whose pull request carries `land` or `land-hotfix`.
+  readonly frozenChunks?: ReadonlySet<string>;
   readonly ongoing?: ReadonlySet<number>;
   // In-flight issues and the chunk target each was dispatched with (null for
   // the auto lane). A dispatched target is chunk IDENTITY (#193): it makes the
@@ -403,6 +410,8 @@ export function resolvePlan(
   const defaultLane = options.defaultLane ?? DEFAULT_LANE;
   const chunkMembers = options.chunkMembers ?? new Map<string, ReadonlySet<number>>();
   const chunksContainingSource = options.chunksContainingSource ?? new Set<string>();
+  const chunksContainingBase = options.chunksContainingBase ?? new Set<string>();
+  const frozenChunks = options.frozenChunks ?? new Set<string>();
   const ongoing = options.ongoing ?? new Set<number>();
   const trustedReady = options.trustedReady ?? new Set<number>();
   const queueVerdict = (candidate: IssueSummary): ReadyQueueVerdict =>
@@ -460,10 +469,12 @@ export function resolvePlan(
     {
       originChunks: chunkMembers,
       inFlight,
+      frozen: frozenChunks,
       settledGraph: options.settledGraph,
     },
   );
   const chunkByRoot = new Map(chunks.map((c) => [c.root, c] as const));
+  const chunkByBranch = new Map(chunks.map((c) => [c.branch, c] as const));
   const chunkBlockOf = new Map(blocked.map((b) => [b.issue, b.reason] as const));
   const originBranchesByRoot = chunkBranchesByRoot(originChunkBranches);
   const ambiguousChunkRoots = new Set(
@@ -513,22 +524,40 @@ export function resolvePlan(
       .map((m) => ({ number: m, title: titleOf.get(m) ?? "" }));
     // A parentless member that has not landed builds on nothing in the
     // chunk, so it seeds from the source branch; everything else seeds from
-    // the tip its blockers or its own earlier work are on (#193).
-    const seed = chunk.parentless.includes(n) && !isOnDerivedChunk(n)
+    // the tip its blockers or its own earlier work are on (#193). So does
+    // every member of a stacked chunk: the base is under all of it (#243).
+    const seed = chunk.base === null && chunk.parentless.includes(n) && !isOnDerivedChunk(n)
       ? "source"
       : "tip";
-    return { root: chunk.root, branch: chunk.branch, landed, seed };
+    const target = { root: chunk.root, branch: chunk.branch, landed, seed } as const;
+    return chunk.base === null ? target : { ...target, base: chunk.base };
+  };
+  // The branch a member of `target`'s chunk is seeded from: its own, or
+  // before origin has that, the one it is stacked on.
+  const tipOf = (target: ChunkTarget): string =>
+    target.base !== undefined && !chunkMembers.has(target.branch) ? target.base : target.branch;
+  const stacksOn = (chunk: Chunk | undefined, root: number): boolean => {
+    for (let c = chunk; c !== undefined; c = c.base === null ? undefined : chunkByBranch.get(c.base)) {
+      if (c.root === root) return true;
+    }
+    return false;
   };
 
   // CLOSED means the blocker's work is on the source branch. Membership in the
-  // SAME chunk means it is on the branch this issue will be worked on. Nothing
-  // else counts — a blocker on another chunk branch, or a dependent with no
-  // chunk at all, leaves `theirs`/`ours` unequal (or undefined) and the issue
-  // blocked. Header, "When is a blocker satisfied?" (#59).
+  // SAME chunk means it is on the branch this issue will be worked on, and so
+  // does membership in a chunk the dependent's is stacked on, once the branch
+  // the dependent is seeded from carries it. Nothing else counts — a blocker
+  // on another chunk branch, or a dependent with no chunk at all, leaves the
+  // issue blocked. Header, "When is a blocker satisfied?" (#59, #243).
   const sameChunkMembership = (blocker: number, dependent: number): boolean => {
     if (!isOnDerivedChunk(blocker)) return false;
     const theirs = chunkOf.get(blocker);
-    return theirs !== undefined && theirs === chunkOf.get(dependent);
+    const ours = chunkOf.get(dependent);
+    if (theirs === undefined || ours === undefined) return false;
+    if (theirs === ours) return true;
+    const target = chunkTargetOf(dependent);
+    return target !== null && stacksOn(chunkByRoot.get(ours), theirs) &&
+      (chunkMembers.get(tipOf(target))?.has(blocker) ?? false);
   };
   const blockerSatisfied = (blocker: number, dependent: number): boolean => {
     if (issueFacts.get(blocker)?.state === "CLOSED") return true;
@@ -539,7 +568,12 @@ export function resolvePlan(
     | { readonly kind: "omitted"; readonly reason: "closed" | "not-ready" | "published" | "waiting" | "excluded" }
     | { readonly kind: "label-actor"; readonly actor: string | null }
     | { readonly kind: "blocked"; readonly by: readonly number[] }
-    | { readonly kind: "chunk-refresh"; readonly branch: string; readonly by: readonly number[] }
+    | {
+        readonly kind: "chunk-refresh";
+        readonly branch: string;
+        readonly base: string | null;
+        readonly by: readonly number[];
+      }
     | { readonly kind: "held"; readonly why?: HeldReason }
     | { readonly kind: "ongoing" }
     | { readonly kind: "eligible" };
@@ -581,11 +615,20 @@ export function resolvePlan(
     const chained = blockers.some((blocker) =>
       sameChunkMembership(blocker, c.number)
     );
-    if (
-      target !== null && chained && closedOnly.length > 0 &&
-      !chunksContainingSource.has(target.branch)
-    ) {
-      return { kind: "chunk-refresh", branch: target.branch, by: closedOnly };
+    if (target !== null) {
+      // Nothing goes onto a frozen chunk's branch, rework included (#243).
+      if (frozenChunks.has(target.branch)) return { kind: "held", why: "frozen" };
+      const tip = tipOf(target);
+      // A stacked chunk catches up with a base that moved before it takes
+      // another member, the way #174 catches a chunk up with the source.
+      if (target.base !== undefined && tip === target.branch && !chunksContainingBase.has(tip)) {
+        return { kind: "chunk-refresh", branch: tip, base: target.base, by: [] };
+      }
+      if (chained && closedOnly.length > 0 && !chunksContainingSource.has(tip)) {
+        return frozenChunks.has(tip)
+          ? { kind: "held", why: "frozen" }
+          : { kind: "chunk-refresh", branch: tip, base: null, by: closedOnly };
+      }
     }
     // LAST, so the waiting resolution names "held" only for issues that would
     // otherwise have been eligible. A review-gated issue that is also blocked,
@@ -640,15 +683,17 @@ export function resolvePlan(
   // scheduler exclusion. An ongoing issue is excluded from re-admission but
   // must still defer its chunk's landing. A member waiting for its chunk to
   // refresh is likewise work this run intends to admit once its base is safe;
-  // landing the chunk first would ship the exact code queued for rework. A
-  // CLOSED, waiting or blocked member cannot be worked and therefore must not
-  // hold the request open forever.
+  // landing the chunk first would ship the exact code queued for rework. So
+  // does rework held because its chunk is frozen (#243): the human asked for
+  // both, and only they can say which. A CLOSED, waiting or blocked member
+  // cannot be worked and therefore must not hold the request open forever.
   const trackerReadyNumbers = new Set(
     classified
       .filter(({ candidate, disposition }) => {
         const authoritative = issueFacts.get(candidate.number);
         return (disposition.kind === "eligible" ||
           disposition.kind === "chunk-refresh" || disposition.kind === "ongoing" ||
+          (disposition.kind === "held" && disposition.why === "frozen") ||
           (disposition.kind === "omitted" && disposition.reason === "excluded")) &&
           authoritative?.labels.includes(READY_LABEL);
       })
@@ -681,9 +726,11 @@ export function resolvePlan(
     if (admitted.has(c.number) || disposition.kind === "omitted") continue;
     const reason: WaitingReason = disposition.kind === "eligible"
       ? { kind: "no-slot" }
-      : disposition.kind === "chunk-refresh" && !selectedNumbers.has(c.number)
-      ? { kind: "no-slot" }
-      : disposition;
+      : disposition.kind !== "chunk-refresh"
+      ? disposition
+      : selectedNumbers.has(c.number)
+      ? { kind: "chunk-refresh", branch: disposition.branch, by: disposition.by }
+      : { kind: "no-slot" };
     waiting.push({ issue: c.number, title: c.title, reason });
   }
   waiting.sort((a, b) => a.issue - b.issue);
@@ -693,20 +740,21 @@ export function resolvePlan(
       disposition.kind !== "chunk-refresh" ||
       !selectedNumbers.has(candidate.number)
     ) continue;
-    const target = chunkTargetOf(candidate.number);
-    if (target === null) continue;
+    const chunk = chunkByBranch.get(disposition.branch);
+    if (chunk === undefined) continue;
     const dependent = { number: candidate.number, title: candidate.title };
-    const existing = refreshes.get(target.branch);
+    const existing = refreshes.get(chunk.branch);
     if (existing) {
-      refreshes.set(target.branch, {
+      refreshes.set(chunk.branch, {
         ...existing,
         dependents: [...existing.dependents, dependent],
       });
     } else {
-      refreshes.set(target.branch, {
-        root: target.root,
-        branch: target.branch,
-        title: titleOf.get(target.root) ?? "",
+      refreshes.set(chunk.branch, {
+        root: chunk.root,
+        branch: chunk.branch,
+        base: disposition.base,
+        title: titleOf.get(chunk.root) ?? "",
         dependents: [dependent],
       });
     }
@@ -901,6 +949,36 @@ export async function readChunksContainingSource(
       .filter(Boolean)
       .map(branchNameFromOriginRef),
   );
+}
+
+/**
+ * Stacked origin chunk branches that contain the tip of the one origin chunk
+ * branch they are stacked on (#243). A base with no branch has landed, and
+ * one with several is drift; neither is a base to catch up with.
+ */
+export async function readChunksContainingBase(
+  repoDir: string,
+  branches: readonly string[],
+): Promise<ReadonlySet<string>> {
+  const byRoot = chunkBranchesByRoot(branches);
+  const contained = new Set<string>();
+  for (const branch of branches) {
+    const baseRoot = baseRootFromChunkBranch(branch);
+    const [base, ...more] = baseRoot === null ? [] : byRoot.get(baseRoot) ?? [];
+    if (base === undefined || more.length > 0) continue;
+    try {
+      await exec("git", [
+        "merge-base",
+        "--is-ancestor",
+        `refs/remotes/origin/${base}`,
+        `refs/remotes/origin/${branch}`,
+      ], { cwd: repoDir });
+      contained.add(branch);
+    } catch (err) {
+      if (!isExitCode(err, 1)) throw err;
+    }
+  }
+  return contained;
 }
 
 async function fetchIssueSummaries(
@@ -1131,6 +1209,10 @@ export type BuildPlanOptions = {
   // filtered out on the usual grounds. Deduped against the listing by number,
   // the listing winning, so an index that HAS caught up decides.
   readonly extraCandidates?: readonly IssueSummary[];
+  // See `ResolvePlanOptions`: the heads of the open pull requests carrying a
+  // landing label, read by the caller, which also selects land requests from
+  // them.
+  readonly frozenChunks: ReadonlySet<string>;
 };
 
 export async function buildPlan(
@@ -1149,6 +1231,10 @@ export async function buildPlan(
   const chunksContainingSource = await readChunksContainingSource(
     options.repoDir,
     options.sourceBranch,
+  );
+  const chunksContainingBase = await readChunksContainingBase(
+    options.repoDir,
+    [...chunkMembers.keys()],
   );
   const chunkMemberNumbers = [
     ...new Set([...chunkMembers.values()].flatMap((ns) => [...ns])),
@@ -1189,6 +1275,8 @@ export async function buildPlan(
       defaultLane: options.defaultLane,
       chunkMembers,
       chunksContainingSource,
+      chunksContainingBase,
+      frozenChunks: options.frozenChunks,
       ongoing: options.ongoing,
       inFlight: options.inFlight,
       settledGraph: options.settledGraph,

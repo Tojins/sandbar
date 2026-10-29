@@ -93,6 +93,7 @@ type Calls = {
   pushes: number;
   pulls: number;
   chunkBases: string[];
+  chunkPrBases: (string | null)[];
   checkouts: string[];
   chunkPushes: {
     branch: string;
@@ -193,6 +194,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     pushes: 0,
     pulls: 0,
     chunkBases: [],
+    chunkPrBases: [],
     checkouts: [],
     chunkPushes: [],
     chunkPrs: [],
@@ -409,9 +411,11 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     // remote-tracking ref, or nothing for a chunk that has never landed — in
     // which case the real adapter falls back to the source branch, so this
     // does too.
-    async chunkBase(branch) {
+    async chunkBase(branch, base) {
       calls.chunkBases.push(branch);
-      return script.chunkBases?.[branch] ?? "origin/main";
+      return script.chunkBases?.[branch] ??
+        (base === null ? undefined : script.chunkBases?.[base]) ??
+        "origin/main";
     },
     // #64. Unlike `chunkBase` there is no fallback: a chunk branch origin does
     // not have cannot be landed, and one origin could not be asked about is not
@@ -453,6 +457,9 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       if (e) throw new SandbarError(e);
       return "closed" as const;
     },
+    async retargetPullRequests() {
+      return [];
+    },
     async checkoutDetached(ref) {
       calls.checkouts.push(ref);
       calls.order.push("checkout");
@@ -471,8 +478,9 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
         repoDir: "/host/.sandbar/repo.git",
       };
     },
-    async ensureChunkPullRequest({ chunkBranch, title, body }) {
+    async ensureChunkPullRequest({ chunkBranch, base, title, body }) {
       calls.chunkPrs.push({ chunkBranch, title, body });
+      calls.chunkPrBases.push(base);
       calls.order.push("chunk-pr");
       const r = script.chunkPrs?.[prIdx++] ?? { number: 7, url: "u7" };
       if (r instanceof Error) throw r;
@@ -496,6 +504,7 @@ function gateRed(): { ok: false } & MergerGateOutput {
 const refresh = (dependents = [400]): ChunkRefresh => ({
   root: 245,
   branch: "sandbar/chunk-245-root",
+  base: null,
   title: "Root",
   dependents: dependents.map((number) => ({ number, title: `t-${number}` })),
 });
@@ -2842,6 +2851,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
   ): ChunkLandTarget => ({
     root,
     branch: `sandbar/chunk-${root}-c`,
+    base: null,
     title: `chunk ${root}`,
     members: members.map((n) => ({ number: n, title: `t-${n}` })),
     // A chain, so the deepest member closes first and the root last — the
@@ -3601,6 +3611,7 @@ describe("runMergerWithAdapter — a merge result that changes the gate stack be
     const request: ChunkLandTarget = {
       root: 42,
       branch: "sandbar/chunk-42-c",
+      base: null,
       title: "chunk 42",
       members: [{ number: 42, title: "t-42" }],
       closeOrder: [{ number: 42, title: "t-42" }],

@@ -500,12 +500,13 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
   });
 });
 
-// Discovery FAILS SOFT, and this is the half of that claim a fake adapter can
-// never show: what the readers do with a `gh` that answered something they
-// cannot read. These run at PLAN time, before anything else in the cycle, so a
-// throw out of one is not a degraded reconciliation — it is a run that does not
-// start, over a repair that was never urgent.
-describe("the forge readers fail soft (#64)", () => {
+// Reconciliation discovery FAILS SOFT, and this is the half of that claim a
+// fake adapter can never show: what the readers do with a `gh` that answered
+// something they cannot read. These run at PLAN time, before anything else in
+// the cycle, so a throw out of one is not a degraded reconciliation — it is a
+// run that does not start, over a repair that was never urgent. The land
+// listing is the exception: it decides which chunks are frozen (#243).
+describe("the forge readers fail soft (#64), but for the land listing (#243)", () => {
   let shimBin: string;
   let originalPath: string | undefined;
   const REPO_REF = { owner: "acme", name: "app" };
@@ -535,15 +536,15 @@ describe("the forge readers fail soft (#64)", () => {
 
   const LAND = [{ name: "land" }];
 
-  it("answers 'no requests' when gh cannot be run at all", async () => {
+  it("throws for land requests, and answers none for branches, when gh cannot be run at all", async () => {
     await shimAnswering(null);
-    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
+    await expect(fetchLandRequestPullRequests(REPO_REF)).rejects.toThrow();
     expect(
       await fetchPullRequestsForBranches(REPO_REF, ["sandbar/chunk-42-c"]),
     ).toEqual([]);
   });
 
-  it("answers 'no requests' when only one of the two land listings fails", async () => {
+  it("throws when only one of the two land listings fails", async () => {
     await writeFile(
       join(shimBin, "gh"),
       `#!/bin/sh\ncase "$*" in *land-hotfix*) exit 1;; esac\ncat <<'SANDBAR_EOF'\n${JSON.stringify([
@@ -551,12 +552,12 @@ describe("the forge readers fail soft (#64)", () => {
       ])}\nSANDBAR_EOF\n`,
       { mode: 0o755 },
     );
-    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
+    await expect(fetchLandRequestPullRequests(REPO_REF)).rejects.toThrow();
   });
 
-  it("answers 'no requests' on output that is not JSON at all", async () => {
+  it("throws for land requests on output that is not JSON at all", async () => {
     await shimAnswering("gh: could not resolve to a Repository");
-    expect(await fetchLandRequestPullRequests(REPO_REF)).toEqual([]);
+    await expect(fetchLandRequestPullRequests(REPO_REF)).rejects.toThrow(SyntaxError);
   });
 
   it("drops the unreadable entries and keeps the rest", async () => {

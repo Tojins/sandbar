@@ -883,6 +883,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     expect(r.chunkRefreshes).toEqual([{
       root: 245,
       branch,
+      base: null,
       title: "Issue 245",
       dependents: [{ number: 400, title: "Issue 400" }],
     }]);
@@ -906,6 +907,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     expect(r.chunkRefreshes).toEqual([{
       root: 245,
       branch,
+      base: null,
       title: "Issue 245",
       dependents: [
         { number: 400, title: "Issue 400" },
@@ -1555,6 +1557,7 @@ describe("resolvePlan landed chunks (#63, #64)", () => {
       {
         root: 10,
         branch: "sandbar/chunk-10-root",
+        base: null,
         title: "Root",
         members: [
           { number: 10, title: "Root" },

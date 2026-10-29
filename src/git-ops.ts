@@ -671,6 +671,9 @@ export class IssueBranchDivergedError extends Error {
 //     seeding stays a plain branch cut from one origin-owned ref, so the issue
 //     diff never inherits a synthetic source catch-up merge. A failed fetch
 //     does not fall through to the next arm — see `fetchOriginChunkBranch`.
+//   - `seed: "tip"`, no chunk branch yet, and the chunk is STACKED (#243,
+//     `ChunkTarget.base`) → the base's tip, where the merge phase creates the
+//     branch; or, once the base has landed and left origin, the source branch.
 //   - `seed: "tip"` and the cache can name no branch → `ChunkBaseMissingError`.
 //     The ordinary argument says this cannot happen: a chained member plans
 //     only once a blocker of its own carries its origin member ref contained
@@ -757,6 +760,14 @@ async function chunkOrSourceBase(
   if (chunk.seed === "source") return sourceBranchBase(sourceBranch);
   const ref = await fetchOriginChunkBranch(repoDir, chunk.branch);
   if (ref !== null) return { ref, chunkBranch: chunk.branch };
+  if (chunk.base !== undefined) {
+    // A stacked chunk before its first landing: the base is under all of it.
+    // A base gone from origin has landed, so the source branch carries it.
+    const baseRef = await fetchOriginChunkBranch(repoDir, chunk.base);
+    return baseRef === null
+      ? sourceBranchBase(sourceBranch)
+      : { ref: baseRef, chunkBranch: chunk.base };
+  }
   // Everything else needs the tip, and there is none to name. Never the
   // source branch: that would build this member on a tree missing the work
   // it is chained behind, and nothing downstream would reject it.

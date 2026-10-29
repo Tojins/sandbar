@@ -40,6 +40,7 @@ import {
   ORIGIN_MEMBER_BRANCH_REFGLOBS,
   SANDBAR_BRANCH_REFGLOBS,
   STRANDED_HEAD_REFGLOB,
+  baseRootFromChunkBranch,
   branchNameFromOriginRef,
   chunkBranchName,
   issueBranchName,
@@ -152,6 +153,16 @@ describe("branch names (#58)", () => {
   it("round-trips each shape through its own parser", () => {
     expect(issueNumberFromBranch(issueBranchName(7, "Foo bar"))).toBe(7);
     expect(rootIssueFromChunkBranch(chunkBranchName(7, "Foo bar"))).toBe(7);
+    expect(baseRootFromChunkBranch(chunkBranchName(7, "Foo bar"))).toBeNull();
+  });
+
+  it("names the chunk a stacked chunk is cut from, and no slug can fake one", () => {
+    const stacked = chunkBranchName(50, "Fix foo", 8);
+    expect(stacked).toBe("sandbar/chunk-50_on_8-fix-foo");
+    expect(rootIssueFromChunkBranch(stacked)).toBe(50);
+    expect(baseRootFromChunkBranch(stacked)).toBe(8);
+    expect(baseRootFromChunkBranch(chunkBranchName(50, "On 8"))).toBeNull();
+    expect(baseRootFromChunkBranch("sandbar/issue-50_on_8-foo")).toBeNull();
   });
 
   // The load-bearing half: a chunk branch read as an issue branch would send a

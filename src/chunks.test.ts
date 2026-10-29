@@ -263,6 +263,7 @@ describe("deriveChunks — join, never merge (#193)", () => {
       members: [10, 20, 30],
       parentless: [10, 20],
       branch: "sandbar/chunk-10-a",
+      base: null,
     }]);
     expect(d.blocked).toEqual([]);
   });
@@ -319,6 +320,7 @@ describe("deriveChunks — join, never merge (#193)", () => {
       members: [751, 753],
       parentless: [751, 753],
       branch: "sandbar/chunk-751-a",
+      base: null,
     }]);
   });
 
@@ -594,6 +596,7 @@ describe("landedChunksOf (#63, #64)", () => {
       {
         root: 42,
         branch: "sandbar/chunk-42-first",
+        base: null,
         title: "First",
         members: [
           { number: 42, title: "First" },

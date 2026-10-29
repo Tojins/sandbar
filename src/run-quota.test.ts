@@ -3050,6 +3050,7 @@ describe("run quota orchestration (#109)", () => {
     const target = {
       root: 42,
       branch: "sandbar/chunk-42-test",
+      base: null,
       title: "Chunk 42",
       members: [{ number: 42, title: "Issue 42" }],
       closeOrder: [{ number: 42, title: "Issue 42" }],
@@ -3332,6 +3333,7 @@ describe("run quota orchestration (#109)", () => {
     const target = {
       root: 42,
       branch: "sandbar/chunk-42-test",
+      base: null,
       title: "Chunk 42",
       members: [{ number: 42, title: "Issue 42" }],
       closeOrder: [{ number: 42, title: "Issue 42" }],
@@ -3529,6 +3531,7 @@ describe("run quota orchestration (#109)", () => {
     const target = {
       root: 42,
       branch: "sandbar/chunk-42-test",
+      base: null,
       title: "Chunk 42",
       members: [{ number: 42, title: "Issue 42" }],
       closeOrder: [{ number: 42, title: "Issue 42" }],

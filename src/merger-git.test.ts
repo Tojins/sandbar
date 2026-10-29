@@ -290,7 +290,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     git(origin, "rev-parse", branch).catch(() => null);
 
   it("bases on origin/<sourceBranch> when origin has no such chunk branch", async () => {
-    expect(await adapter().chunkBase("sandbar/chunk-1-c")).toBe("origin/main");
+    expect(await adapter().chunkBase("sandbar/chunk-1-c", null)).toBe("origin/main");
   });
 
   // #64 — the three answers, and the one git fact that separates two of them:
@@ -372,13 +372,13 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     // caught by a rejected push, never by a tracker write.
     await git(wt, "remote", "set-url", "origin", join(root, "gone.git"));
 
-    expect(await adapter().chunkBase("sandbar/chunk-1-c")).toBe("origin/main");
+    expect(await adapter().chunkBase("sandbar/chunk-1-c", null)).toBe("origin/main");
   });
 
   it("bases on origin's chunk branch when it exists, fetching it into the merger clone", async () => {
     await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
 
-    const base = await adapter().chunkBase("sandbar/chunk-1-c");
+    const base = await adapter().chunkBase("sandbar/chunk-1-c", null);
 
     expect(base).toBe("refs/remotes/origin/sandbar/chunk-1-c");
     // The point of the explicit refspec: the remote-tracking ref really is in
@@ -823,7 +823,7 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
   it("checks out a ref detached, leaving HEAD on no branch", async () => {
     await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/chunk-1-c");
     const a = adapter();
-    const base = await a.chunkBase("sandbar/chunk-1-c");
+    const base = await a.chunkBase("sandbar/chunk-1-c", null);
 
     await a.checkoutDetached(base);
 

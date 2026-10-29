@@ -293,6 +293,9 @@ export { LAND_HOTFIX_LABEL, LAND_LABEL };
 export type ChunkLandTarget = {
   readonly root: number;
   readonly branch: string;
+  // `LandedChunk.base`: the chunk branch this one is stacked on (#243). A
+  // request waits while it is non-null, for its commits land with the base.
+  readonly base: string | null;
   // The root issue's title where a member list is known, else the pull
   // request's own title. Names the chunk in the merge commit and in prose.
   readonly title: string;
@@ -406,6 +409,7 @@ function targetFor(
   return {
     root: chunk?.root ?? root,
     branch,
+    base: chunk?.base ?? null,
     title: chunk?.title ?? pr?.title ?? "",
     members: chunk?.members ?? [],
     closeOrder: chunk?.closeOrder ?? [],
@@ -809,6 +813,11 @@ export type ChunkWrapupAdapter = {
   // landing push (see the header's `landed` bullet). Throws when it is still
   // open and would not close.
   closePullRequest(pr: number): Promise<PullRequestCloseOutcome>;
+  // Moves every open pull request based on `base` onto `onto`, returning
+  // their numbers. A chunk stacked on a landing one has its pull request based
+  // on the landing branch (#243), and GitHub closes a pull request whose base
+  // branch is deleted.
+  retargetPullRequests(base: string, onto: string): Promise<readonly number[]>;
   deleteChunkBranch(
     chunkBranch: string,
     memberIssues: readonly number[],
@@ -932,6 +941,32 @@ export function chunkForgeWrites(deps: {
       }
       if (state === "MERGED") return "merged";
       throw refused;
+    },
+    async retargetPullRequests(base, onto) {
+      let listed: unknown;
+      try {
+        const { stdout } = await exec("gh", [
+          "pr", "list", "--repo", slug(), "--base", base, "--state", "open", "--json", "number",
+        ]);
+        listed = JSON.parse(stdout.trim() || "[]");
+      } catch (err) {
+        throw wrap(`failed to list the pull requests based on ${base}`, err);
+      }
+      if (!Array.isArray(listed)) {
+        throw wrap(`failed to list the pull requests based on ${base}`, JSON.stringify(listed));
+      }
+      const numbers = listed.flatMap((pr: unknown) =>
+        typeof pr === "object" && pr !== null && "number" in pr && typeof pr.number === "number"
+          ? [pr.number]
+          : []
+      );
+      for (const n of numbers) {
+        await gh(
+          ["pr", "edit", String(n), "--repo", slug(), "--base", onto],
+          `failed to retarget pull request #${n} onto ${onto}`,
+        );
+      }
+      return numbers;
     },
     async deleteChunkBranch(chunkBranch, memberIssues, sourceBranch) {
       // Fully qualified, with leases rather than an unconditional force. The
@@ -1236,8 +1271,34 @@ export async function wrapUpLandedChunk(
   // cycle forever. `closesComplete` is vacuously true for a chunk that named
   // no member at all, which deletes the branch too — see the header for why
   // that is the right answer and what it costs.
+  //
+  // A chunk stacked on this one (#243) has its pull request based here, and
+  // the branch delete would close it: that pull request is retargeted first,
+  // and one that could not be keeps the branch, so the next run retries it.
   let branchDeleted = false;
-  if (closesComplete) {
+  const retargetFailure: unknown = closesComplete
+    ? await adapter.retargetPullRequests(target.branch, opts.sourceBranch).then(
+      async (retargeted) => {
+        for (const pr of retargeted) {
+          await log(`chunk ${target.branch}: retargeted PR #${pr} onto ${opts.sourceBranch}`);
+        }
+        return null;
+      },
+      (err: unknown) => err,
+    )
+    : null;
+  if (!closesComplete) {
+    residue.push(
+      `${target.branch} is kept on origin so the next run retries the ${
+        target.members.length - closed.length
+      } member(s) still open on it`,
+    );
+  } else if (retargetFailure !== null) {
+    residue.push(
+      `${target.branch} is kept on origin so the next run retries retargeting the ` +
+        `pull requests based on it: ${detail(retargetFailure)}`,
+    );
+  } else {
     let issueBranches: ChunkBranchRetirement | null = null;
     try {
       issueBranches = await adapter.deleteChunkBranch(
@@ -1273,12 +1334,6 @@ export async function wrapUpLandedChunk(
       }
       await log(`chunk ${target.branch}: deleted on origin`);
     }
-  } else {
-    residue.push(
-      `${target.branch} is kept on origin so the next run retries the ${
-        target.members.length - closed.length
-      } member(s) still open on it`,
-    );
   }
 
   return {

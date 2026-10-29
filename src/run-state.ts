@@ -220,6 +220,7 @@ const heldText = (why: HeldReason | undefined): string => {
   switch (why) {
     case "unsettled": return "held: waiting for the issue graph to settle";
     case "joins-two-chunks": return "held: would join two chunks";
+    case "frozen": return "held: its chunk's pull request carries land";
     case "unchunked-blocker": return "held: a blocker has no chunk";
     case "cycle": return "held: in a blocked-by cycle";
     case "drifted-branches": return "held: several chunk branches name its root";
