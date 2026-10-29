@@ -1194,3 +1194,30 @@ describe("janitor runner feed rows (#205)", () => {
     expect(live.finished).toEqual([]);
   });
 });
+
+describe("janitor land feed rows (#205)", () => {
+  it("shows a landing's outcome as a feed line, parked one in the bad tone, never as an issue", () => {
+    const land = (n: number, extra: Record<string, unknown>) =>
+      at(n, `2026-10-28T08:0${n}:00Z`, {
+        kind: "janitor-land", task: "tidy", branch: "sandbar/janitor-tidy", durationMs: 5, ...extra,
+      } as never);
+    const events = [
+      at(1, "2026-10-28T08:00:00Z", {
+        kind: "run-start", schemaVersion: EVENT_SCHEMA_VERSION, driver: "sandbar", configPath: null,
+        workdir: "/r", maxParallelIssues: 2, pid: 1,
+      }),
+      land(2, { pullRequest: 12, outcome: "landed" }),
+      land(3, { pullRequest: 12, outcome: "parked", reason: "conflict" }),
+      land(4, { pullRequest: 0, outcome: "reconciled" }),
+    ];
+    const live = reduceRunEvents(events, { now: new Date("2026-10-28T08:10:00Z"), pidAlive: true });
+
+    expect(live.events.slice(0, 3).map(({ text, tone }) => ({ text, tone }))).toEqual([
+      { text: "janitor tidy reconciled", tone: "good" },
+      { text: "janitor tidy parked · conflict · PR #12", tone: "bad" },
+      { text: "janitor tidy landed · PR #12", tone: "good" },
+    ]);
+    expect(live.pool).toEqual([]);
+    expect(live.finished).toEqual([]);
+  });
+});

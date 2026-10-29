@@ -19,6 +19,10 @@
 //      listing the repository's pull requests, because the branches here are
 //      normally zero and never many.
 //
+// An idle janitor task's rolling branch (#205) found contained by the same
+// first question is retired too, by `wrapUpLandedJanitor`. It has no members,
+// so the second question is never asked of it.
+//
 // It runs at PLAN time, which is the whole of what makes it defense in depth.
 // It needs no merger worktree, no gate stack and no DONE branch, so it still
 // runs on the cycle that plans nothing and merges nothing — which is exactly
@@ -65,10 +69,13 @@ import { promisify } from "node:util";
 import {
   type ChunkWrapup,
   type ChunkWrapupAdapter,
+  type JanitorWrapup,
   type PullRequestSummary,
   chunkForgeWrites,
+  selectJanitorReconciliations,
   selectReconciliations,
   wrapUpLandedChunk,
+  wrapUpLandedJanitor,
 } from "./chunk-land.js";
 import { type LandedChunk, LAND_REQUEST_LABELS } from "./chunks.js";
 import { hasExitCode } from "./errors.js";
@@ -76,6 +83,8 @@ import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
   ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
   ORIGIN_CHUNK_BRANCH_REFGLOBS,
+  ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS,
+  ORIGIN_JANITOR_BRANCH_REFGLOB,
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
 } from "./naming.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
@@ -109,10 +118,10 @@ async function capture(
 }
 
 /**
- * Origin's chunk branches whose tips are already contained in
+ * Origin's chunk and janitor branches whose tips are already contained in
  * `origin/<sourceBranch>`, as branch names.
  *
- * Fetches first, with the same chunk and member refspecs preflight uses:
+ * Fetches first, with the same chunk, member and janitor refspecs preflight uses:
  * preflight runs once at startup and this runs every cycle, so a chunk a human merged twenty
  * minutes into a run is invisible without it. `--prune` on those same
  * destinations is what stops a branch somebody deleted on origin answering
@@ -128,7 +137,7 @@ async function capture(
  * Returning empty is the same fail-soft the rest of discovery here uses: the
  * state is still there next cycle.
  */
-export async function findLandedChunkBranches(
+export async function findLandedBranches(
   repoDir: string,
   sourceBranch: string,
 ): Promise<readonly string[]> {
@@ -141,6 +150,7 @@ export async function findLandedChunkBranches(
       sourceBranch,
       ...ORIGIN_CHUNK_BRANCH_FETCH_REFSPECS,
       ...ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
+      ...ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS,
       "--quiet",
     ],
     repoDir,
@@ -148,7 +158,12 @@ export async function findLandedChunkBranches(
   if (!fetched.ok) return [];
   const listed = await capture(
     "git",
-    ["for-each-ref", "--format=%(refname)", ...ORIGIN_CHUNK_BRANCH_REFGLOBS],
+    [
+      "for-each-ref",
+      "--format=%(refname)",
+      ...ORIGIN_CHUNK_BRANCH_REFGLOBS,
+      ORIGIN_JANITOR_BRANCH_REFGLOB,
+    ],
     repoDir,
   );
   if (!listed.ok) return [];
@@ -289,10 +304,6 @@ function labelNames(raw: unknown): readonly string[] | null {
 export type ReconcileResult = {
   // One entry per chunk branch found already on the source branch, in root
   // order. Empty is the overwhelmingly common answer.
-  readonly reconciled: readonly ReconciledChunk[];
-  // Every issue closed across all of them, which is what the caller adds to its
-  // "already merged this run" exclusion set.
-  readonly closedIssues: readonly number[];
   // What a wrap-up could not finish stays on the entry it belongs to and is
   // deliberately NOT flattened into one list here. Two different things fail:
   // a chunk whose branch is still on origin, which the next cycle's reconciler
@@ -301,6 +312,12 @@ export type ReconcileResult = {
   // holding, and a caller that guesses promises a repair that is not coming.
   // `chunkResidue` in `chunk-land.ts` is the split, and it is what `run.ts`
   // reports off.
+  readonly reconciled: readonly ReconciledChunk[];
+  // Every issue closed across all of them, which is what the caller adds to its
+  // "already merged this run" exclusion set.
+  readonly closedIssues: readonly number[];
+  // Janitor rolling branches (#205) found already on the source branch.
+  readonly janitors: readonly ReconciledJanitor[];
 };
 
 export type ReconciledChunk = ChunkWrapup & {
@@ -309,8 +326,11 @@ export type ReconciledChunk = ChunkWrapup & {
   readonly durationMs: number;
 };
 
+export type ReconciledJanitor = JanitorWrapup & { readonly durationMs: number };
+
 /**
- * Find and finish every chunk that is already on the source branch.
+ * Find and finish every chunk and janitor branch that is already on the
+ * source branch.
  *
  * Returns an empty result — never throws — when there is nothing to do, which
  * is the state of every host on the auto lane and of nearly every cycle on the
@@ -332,6 +352,9 @@ export async function reconcileLandedChunks(cfg: {
   readonly onReconciled?: (
     chunk: ReconciledChunk,
   ) => void | Promise<void>;
+  readonly onJanitorReconciled?: (
+    janitor: ReconciledJanitor,
+  ) => void | Promise<void>;
   readonly clock?: Clock;
   // Test seam. The real one talks to `gh` and to origin.
   readonly adapter?: ChunkWrapupAdapter;
@@ -348,12 +371,12 @@ export async function reconcileLandedChunks(cfg: {
   // Logging is a required side effect: losing it would hide reconciliation
   // writes from the durable run record (#99).
   const log = async (line: string): Promise<void> => cfg.log?.(line);
-  const landed = await (cfg.findLanded ?? findLandedChunkBranches)(
+  const landed = await (cfg.findLanded ?? findLandedBranches)(
     repoDir,
     cfg.sourceBranch,
   );
   if (landed.length === 0) {
-    return { reconciled: [], closedIssues: [] };
+    return { reconciled: [], closedIssues: [], janitors: [] };
   }
   const prs = await (cfg.findPullRequests ?? fetchPullRequestsForBranches)(
     cfg.repo,
@@ -392,5 +415,20 @@ export async function reconcileLandedChunks(cfg: {
     reconciled.push(reconciledChunk);
     closedIssues.push(...wrapup.closed);
   }
-  return { reconciled, closedIssues };
+  const janitors: ReconciledJanitor[] = [];
+  for (const target of selectJanitorReconciliations(landed, prs)) {
+    await log(`reconcile ${target.branch}: already on ${cfg.sourceBranch}`);
+    const targetTimer = startTimer(cfg.clock);
+    const janitor = {
+      ...await wrapUpLandedJanitor(target, adapter, {
+        sourceBranch: cfg.sourceBranch,
+        provenance: "reconciled",
+        log,
+      }),
+      durationMs: targetTimer(),
+    };
+    await cfg.onJanitorReconciled?.(janitor);
+    janitors.push(janitor);
+  }
+  return { reconciled, closedIssues, janitors };
 }

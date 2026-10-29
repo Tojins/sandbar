@@ -21,7 +21,7 @@ export const ERROR_SWALLOW_BASELINE: Readonly<Record<string, number>> = {
   // failure removes the snapshot, reports a removal that failed in turn, and
   // rethrows the original.
   "agent-sandbox.ts": 17,
-  "chunk-land.ts": 6,
+  "chunk-land.ts": 2,
   "cleanup.ts": 1,
   "cli.ts": 2,
   "containers.ts": 1,

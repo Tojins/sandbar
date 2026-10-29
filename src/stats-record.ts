@@ -118,7 +118,7 @@ const V6_KINDS = {
   "hard-error": true, terminal: true, landed: true, finalise: true, deploy: true,
   "egress-refused": true, egress: true, "scenario-runner": true,
   "db-base": true, "db-copy": true, "standalone-step": true, "janitor-start": true,
-  "janitor-run": true,
+  "janitor-run": true, "janitor-land": true,
 } as const satisfies Record<RunEvent["kind"], true>;
 
 const knownKinds = (

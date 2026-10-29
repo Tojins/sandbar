@@ -122,6 +122,11 @@
 // it started has an empty scope and no `janitor-start`. A held task is a
 // `notice`. New kinds, so no bump; a recompute the run's end woke is
 // trigger `janitor-finished`.
+// `janitor-land` (#205) is a janitor branch's `land` request settled:
+// `landed` by the merger, `parked` with the skip reason, or `reconciled`
+// once found already on the source branch. Gate-2 and resolve-attempt events
+// of its landing name the task (`EventSubject`). A new kind and union
+// member, so no bump.
 //
 // `scenario-runner` (#180, #238) is one invocation of the verifier's
 // scenario runner, beside the white-box review's `review-pass` in the same
@@ -498,6 +503,17 @@ export type EventInput =
       readonly scope: readonly string[];
       readonly durationMs: number;
     }
+  | {
+      readonly kind: "janitor-land";
+      readonly task: string;
+      readonly branch: string;
+      // 0 when the branch had no pull request to act on.
+      readonly pullRequest: number;
+      readonly outcome: "landed" | "parked" | "reconciled";
+      // Why a `parked` one did not land.
+      readonly reason?: string;
+      readonly durationMs: number;
+    }
   | DbBaseEvent
   | DbCopyEvent
   | {
@@ -522,13 +538,13 @@ export type EventInput =
   | (EventSubject & ContainerResources & { readonly kind: "implementer"; readonly attempt: number; readonly signal: "COMPLETE" | "NEEDS-INFO" | "NEEDS-UI-PROTOTYPE" | "NO-SIGNAL" | "QUOTA" | "CREDENTIAL" | "FAILED"; readonly commits?: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly signalMs?: number; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & { readonly kind: "gate-stack"; readonly gate: "gate-1"; readonly tipBlob: string | null; readonly classification: StackClassification["kind"]; readonly containers?: readonly string[] })
   | (EventSubject & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
-  | (EventIssue & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
+  | (EventSubject & { readonly kind: "gate"; readonly gate: "gate-2"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventSubject & ContainerResources & QualityReviewEvent & { readonly kind: "quality-review"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & StandaloneStepEvent & { readonly kind: "standalone-step" })
   | (EventSubject & ContainerResources & QualityPassEvent & { readonly kind: "quality-pass"; readonly attempt: number; readonly round: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "adjudication"; readonly pass: "quality" | "correctness" | "scenarios"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly rulings?: readonly UnitRuling[]; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
-  | (EventIssue & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields })
+  | (EventSubject & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields })
   | (EgressSubject & EgressRefusal & { readonly kind: "egress-refused" })
   | (EgressSubject & EgressSummaryEvent & { readonly kind: "egress" })
   | (ContainerResources & { readonly kind: "container"; readonly stack: "gate" | "sandbox"; readonly name: string; readonly container: string; readonly lifecycle: "issue" | "attempt"; readonly durationMs: number } & Partial<EventSubject>)

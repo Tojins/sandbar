@@ -19,8 +19,9 @@ type Recorded = { readonly op: string; readonly arg: string };
 
 function fakeAdapter(
   fail: Partial<Record<string, string>> = {},
-): { adapter: ChunkWrapupAdapter; calls: Recorded[] } {
+): { adapter: ChunkWrapupAdapter; calls: Recorded[]; bodies: string[] } {
   const calls: Recorded[] = [];
+  const bodies: string[] = [];
   const record = (op: string, arg: string): void => {
     calls.push({ op, arg });
     const err = fail[`${op}:${arg}`] ?? fail[op];
@@ -28,6 +29,7 @@ function fakeAdapter(
   };
   return {
     calls,
+    bodies,
     adapter: {
       async closeIssue(n) {
         record("closeIssue", String(n));
@@ -35,8 +37,9 @@ function fakeAdapter(
       async removeLabel(n, label) {
         record("removeLabel", `${n}:${label}`);
       },
-      async commentOnPullRequest(p) {
+      async commentOnPullRequest(p, body) {
         record("commentOnPullRequest", String(p));
+        bodies.push(body);
       },
       async removePullRequestLabel(p, label) {
         record("removePullRequestLabel", `${p}:${label}`);
@@ -51,6 +54,9 @@ function fakeAdapter(
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
         return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
+      },
+      async deleteJanitorBranch(b) {
+        record("deleteJanitorBranch", b);
       },
     },
   };
@@ -110,7 +116,7 @@ describe("reconcileLandedChunks (#64)", () => {
       },
     });
 
-    expect(r).toEqual({ reconciled: [], closedIssues: [] });
+    expect(r).toEqual({ reconciled: [], closedIssues: [], janitors: [] });
     expect(calls).toEqual([]);
     expect(prQueries).toBe(0);
   });
@@ -155,6 +161,36 @@ describe("reconcileLandedChunks (#64)", () => {
       op: "deleteChunkBranch",
       arg: "sandbar/chunk-42-c [42]",
     });
+  });
+
+  it("retires a janitor branch already on the source branch and records it (#205)", async () => {
+    const { adapter, calls, bodies } = fakeAdapter();
+    const recorded: unknown[] = [];
+    const r = await reconcileLandedChunks({
+      repoDir: REPO_DIR,
+      repo: REPO,
+      sourceBranch: "main",
+      chunks: [],
+      adapter,
+      beforeOriginWrite: async () => undefined,
+      findLanded: async () => ["sandbar/janitor-docs"],
+      findPullRequests: async () => [
+        { number: 9, headRefName: "sandbar/janitor-docs", title: "Idle task: docs", labels: [LAND_LABEL] },
+      ],
+      onJanitorReconciled: (janitor) => { recorded.push(janitor.target.task); },
+    });
+
+    expect(r.reconciled).toEqual([]);
+    expect(r.janitors.map((janitor) => janitor.branchDeleted)).toEqual([true]);
+    expect(recorded).toEqual(["docs"]);
+    expect(calls).toEqual([
+      { op: "commentOnPullRequest", arg: "9" },
+      { op: "removePullRequestLabel", arg: `9:${LAND_LABEL}` },
+      { op: "closePullRequest", arg: "9" },
+      { op: "deleteJanitorBranch", arg: "sandbar/janitor-docs" },
+    ]);
+    expect(bodies.join("\n")).toContain("was already contained in `main`");
+    expect(bodies.join("\n")).not.toContain("passed the gate");
   });
 
   it("deletes a landed branch the derivation knows nothing about", async () => {

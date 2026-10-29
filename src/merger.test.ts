@@ -3,12 +3,13 @@ import { classifyAgentRunEnd } from "./agent-run-end.js";
 
 import { SandbarError } from "./errors.js";
 import type { PushOutcome, VerifyAdapter } from "./forge-verify.js";
-import type { ChunkRefLookup, MergerGateOutput } from "./merger.js";
+import type { ChunkLandingOptions, ChunkRefLookup, MergerGateOutput } from "./merger.js";
 import {
   CHUNK_LAND_STACK_CHANGE_PR_COMMENT,
   LAND_HOTFIX_LABEL,
   LAND_LABEL,
   type ChunkLandTarget,
+  type JanitorLandTarget,
 } from "./chunk-land.js";
 import { NEEDS_REVIEW_LABEL, type ChunkRefresh } from "./chunks.js";
 import type { StackChange } from "./stack-change.js";
@@ -22,6 +23,7 @@ import {
   groupByChunk,
   type IssueRef,
   type MergerAdapter,
+  type MergerOutcome,
   type RunMergerOptions,
   type PushResult,
   DISCARD_MERGER_OBSERVATIONS,
@@ -107,6 +109,8 @@ type Calls = {
   prComments: { pr: number; body: string }[];
   prLabelRemovals: { pr: number; label: string }[];
   prCloses: number[];
+  // #205
+  janitorBranchDeletes: string[];
   // #68: the mechanical version resolution, observed as what it wrote, what it
   // staged and whether it completed the merge itself.
   fileWrites: { path: string; contents: string }[];
@@ -204,6 +208,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     prComments: [],
     prLabelRemovals: [],
     prCloses: [],
+    janitorBranchDeletes: [],
     fileWrites: [],
     staged: [],
     mergeCommits: 0,
@@ -459,6 +464,10 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     },
     async retargetPullRequests() {
       return [];
+    },
+    async deleteJanitorBranch(branch) {
+      calls.janitorBranchDeletes.push(branch);
+      calls.order.push("janitor-branch-delete");
     },
     async checkoutDetached(ref) {
       calls.checkouts.push(ref);
@@ -2964,6 +2973,122 @@ describe("groupByChunk (#60)", () => {
 // pin is that it shares the source pass (one gate, one push, one verified
 // round), that a failure takes `land` off rather than retrying forever, and
 // that the wrap-up runs only after the source branch has actually moved.
+describe("runMergerWithAdapter — landing a janitor branch (#205)", () => {
+  const janitor: JanitorLandTarget = {
+    task: "docs",
+    branch: "sandbar/janitor-docs",
+    title: "Idle task: docs",
+    pullRequest: 9,
+    landLabels: [LAND_LABEL],
+  };
+  const janitorLanding = { chunkLanding: { requests: [], janitor: [janitor], sourceBranch: "main" } };
+  const originHasJanitor: Record<string, ChunkRefLookup> = {
+    "sandbar/janitor-docs": { kind: "present", ref: "refs/remotes/origin/sandbar/janitor-docs" },
+  };
+
+  it("merges origin's copy through gate-2, lands it, then retires it without writing to an issue", async () => {
+    const outcomes: MergerOutcome[] = [];
+    const gateKeys: string[] = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"], gates: [{ ok: true }], chunkRefs: originHasJanitor,
+    });
+
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...janitorLanding,
+      observations: {
+        onOutcome: (outcome) => { outcomes.push(outcome); },
+        onGate: (key) => { gateKeys.push(key); },
+      },
+    });
+
+    expect(calls.merges).toEqual(["refs/remotes/origin/sandbar/janitor-docs"]);
+    expect(gateKeys).toEqual(["janitor-docs"]);
+    expect(calls.pushes).toBe(1);
+    expect(outcomes).toEqual([
+      { kind: "janitor-on-source", target: janitor, durationMs: expect.any(Number) },
+    ]);
+    expect(summary.mergedJanitors).toEqual([{ target: janitor, branchDeleted: true, residue: [] }]);
+    expect(calls.order.slice(calls.order.indexOf("pr-comment"))).toEqual([
+      "pr-comment", "pr-unlabel", "pr-close", "janitor-branch-delete",
+    ]);
+    expect(calls.prComments).toEqual([
+      { pr: 9, body: expect.stringContaining("`sandbar/janitor-docs` was merged into `main`") },
+    ]);
+    expect(calls.janitorBranchDeletes).toEqual(["sandbar/janitor-docs"]);
+    expect(calls.bodies).toEqual([]);
+    expect(calls.closes).toEqual([]);
+    expect(calls.chunkBranchDeletes).toEqual([]);
+  });
+
+  it("parks an abandoned merge on its pull request, with the task in place of an issue for the resolve agent", async () => {
+    const outcomes: MergerOutcome[] = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>ABANDON</promise><reason>irreconcilable</reason>" }],
+      chunkRefs: originHasJanitor,
+    });
+
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...janitorLanding,
+      observations: { onOutcome: (outcome) => { outcomes.push(outcome); }, onGate: () => undefined },
+    });
+
+    expect(calls.bodies).toEqual([]);
+    expect(calls.agentPrompts[0]).toContain("idle task `docs`");
+    expect(outcomes).toEqual([
+      { kind: "janitor-parked", target: janitor, reason: "conflict", durationMs: expect.any(Number) },
+    ]);
+    expect(calls.prComments.map((comment) => comment.pr)).toEqual([9]);
+    expect(calls.prLabelRemovals).toEqual([{ pr: 9, label: LAND_LABEL }]);
+    expect(calls.pushes).toBe(0);
+    expect(calls.janitorBranchDeletes).toEqual([]);
+    expect(summary.mergedJanitors).toEqual([]);
+    expect(summary.skippedChunks).toEqual([]);
+  });
+
+  it("parks it with the issues' composition when the forge rejects it, deleting nothing", async () => {
+    const outcomes: MergerOutcome[] = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      chunkRefs: originHasJanitor,
+      heads: ["cycle-base", "p1", "verified"],
+    });
+
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...janitorLanding,
+      observations: { onOutcome: (outcome) => { outcomes.push(outcome); }, onGate: () => undefined },
+      verified: {
+        adapter: makeVerifyFake({ checkConclusion: "failure" }).verify,
+        options: { ...VERIFIED_OPTIONS, maxRounds: 0 },
+      },
+    });
+
+    expect(outcomes).toEqual([
+      { kind: "janitor-parked", target: janitor, reason: "forge-unverified", durationMs: expect.any(Number) },
+    ]);
+    expect(calls.prLabelRemovals).toEqual([{ pr: 9, label: LAND_LABEL }]);
+    expect(calls.janitorBranchDeletes).toEqual([]);
+    expect(summary.mergedJanitors).toEqual([]);
+  });
+
+  it("parks a branch origin no longer has", async () => {
+    const outcomes: MergerOutcome[] = [];
+    const { adapter, calls } = makeAdapter({ merges: [] });
+
+    await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...janitorLanding,
+      observations: { onOutcome: (outcome) => { outcomes.push(outcome); }, onGate: () => undefined },
+    });
+
+    expect(calls.merges).toEqual([]);
+    expect(outcomes).toEqual([
+      { kind: "janitor-parked", target: janitor, reason: "branch-missing", durationMs: expect.any(Number) },
+    ]);
+    expect(calls.prComments[0]?.body).toContain("origin has no `sandbar/janitor-docs`");
+  });
+});
+
 describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
   const request = (
     root: number,
@@ -2986,8 +3111,8 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
 
   const landing = (
     ...requests: readonly ChunkLandTarget[]
-  ): { chunkLanding: { requests: readonly ChunkLandTarget[]; sourceBranch: string } } => ({
-    chunkLanding: { requests, sourceBranch: "main" },
+  ): { chunkLanding: ChunkLandingOptions } => ({
+    chunkLanding: { requests, janitor: [], sourceBranch: "main" },
   });
 
   const originHas = (
@@ -3734,7 +3859,7 @@ describe("runMergerWithAdapter — a merge result that changes the gate stack be
       },
     });
     const summary = await runMergerWithAdapter([], adapter, undefined, undefined, {
-      chunkLanding: { requests: [request], sourceBranch: "main" },
+      chunkLanding: { requests: [request], janitor: [], sourceBranch: "main" },
     });
 
     expect(summary.skippedChunks).toEqual([{ target: expect.objectContaining({ branch: request.branch }), reason: "stack-change" }]);

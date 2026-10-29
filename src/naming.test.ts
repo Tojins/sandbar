@@ -53,6 +53,7 @@ import {
   janitorBranchName,
   janitorStackId,
   janitorTaskFromBranch,
+  janitorTaskFromStackId,
   kebabSlug,
   parseIssueMergeSubject,
   rootIssueFromChunkBranch,
@@ -542,6 +543,15 @@ describe("janitor branches (#205)", () => {
     expect(janitorBranchName("tidy-tests")).toBe("sandbar/janitor-tidy-tests");
     expect(janitorTaskFromBranch(janitorBranchName("tidy-tests"))).toBe("tidy-tests");
     expect(janitorStackId("tidy-tests")).toBe("janitor-tidy-tests");
+  });
+
+  it.each([
+    ["janitor-docs", "docs"],
+    ["12", null],
+    ["chunk-12", null],
+    ["merger", null],
+  ])("reads the stack id %s as task %s", (id, task) => {
+    expect(janitorTaskFromStackId(id)).toBe(task);
   });
 
   it.each([

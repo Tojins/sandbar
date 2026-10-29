@@ -138,6 +138,9 @@ export type IssueRef = {
   readonly id: string;
   readonly title: string;
   readonly branch: string;
+  // The primary anchor in place of the issue text `id` names, for a unit no
+  // issue is behind: an idle janitor branch (#205).
+  readonly anchor?: string;
 };
 
 export type ResolveMode =
@@ -360,7 +363,7 @@ export async function runResolveLoop(
   deps: ResolveLoopDeps,
   log: ResolveLogger = () => undefined,
 ): Promise<ResolveOutcome> {
-  const primaryIssueAnchor = await adapter.getIssueBody(issue.id);
+  const primaryIssueAnchor = issue.anchor ?? await adapter.getIssueBody(issue.id);
   const others = relatedIssues.filter((r) => r.id !== issue.id);
 
   // The journal the abandon comment is written from, and the paths it names.

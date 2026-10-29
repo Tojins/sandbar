@@ -466,16 +466,22 @@ export function janitorBranchName(task: string): string {
   return `${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}${task}`;
 }
 
-// `sandbar/janitor-<task>` -> task, or null for any other shape.
-export function janitorTaskFromBranch(branch: string): string | null {
-  const prefix = `${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}`;
-  if (!branch.startsWith(prefix)) return null;
-  const task = branch.slice(prefix.length);
+export function janitorStackId(task: string): string {
+  return `${JANITOR_BRANCH_INFIX}${task}`;
+}
+
+// `janitor-<task>` -> task, or null for an issue number, `chunk-<root>` or `merger`.
+export function janitorTaskFromStackId(id: string): string | null {
+  if (!id.startsWith(JANITOR_BRANCH_INFIX)) return null;
+  const task = id.slice(JANITOR_BRANCH_INFIX.length);
   return JANITOR_TASK_RE.test(task) && task.length <= JANITOR_TASK_MAX_CHARS ? task : null;
 }
 
-export function janitorStackId(task: string): string {
-  return `${JANITOR_BRANCH_INFIX}${task}`;
+// `sandbar/janitor-<task>` -> task, or null for any other shape.
+export function janitorTaskFromBranch(branch: string): string | null {
+  return branch.startsWith(BRANCH_PREFIX)
+    ? janitorTaskFromStackId(branch.slice(BRANCH_PREFIX.length))
+    : null;
 }
 
 export const LOCAL_JANITOR_BRANCH_REFGLOB = `refs/heads/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*`;
@@ -483,6 +489,8 @@ export const LOCAL_JANITOR_BRANCH_REFGLOB = `refs/heads/${BRANCH_PREFIX}${JANITO
 export const ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS: readonly string[] = [
   `+refs/heads/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*:refs/remotes/origin/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*`,
 ];
+
+export const ORIGIN_JANITOR_BRANCH_REFGLOB = `refs/remotes/origin/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*`;
 
 // `git for-each-ref --format=%(refname:short)` renders the remote-tracking
 // namespaces above as `origin/<branch>`. Membership consumers need the branch
