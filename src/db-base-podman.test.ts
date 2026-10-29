@@ -84,11 +84,19 @@ async function rowsIn(root: string, base: string): Promise<string> {
       await new Promise((done) => setTimeout(done, 500));
     }
   }
-  const { stdout } = await exec(RUNTIME, [
-    "exec", name, "mariadb", "-uroot", "app", "-N", "-e", "SELECT id, email FROM t ORDER BY id",
-  ]);
+  // A remote client's exec can exit 0 having delivered none of its output on
+  // a loaded host; a trailing marker tells that apart from an empty table.
+  const END = "rows-end\n";
+  let stdout = "";
+  for (let tries = 0; tries < 5 && !stdout.endsWith(END); tries++) {
+    ({ stdout } = await exec(RUNTIME, [
+      "exec", name, "mariadb", "-uroot", "app", "-N", "-e",
+      "SELECT id, email FROM t ORDER BY id; SELECT 'rows-end'",
+    ]));
+  }
   await exec(RUNTIME, ["rm", "-f", "-t", "0", name]);
-  return stdout;
+  if (!stdout.endsWith(END)) throw new Error(`the check query delivered no complete output: ${JSON.stringify(stdout)}`);
+  return stdout.slice(0, -END.length);
 }
 
 describe.runIf(available)("sandbar db-base against real podman", () => {
