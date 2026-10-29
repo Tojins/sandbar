@@ -203,6 +203,59 @@ describe("sandbox gate attachments (#166)", () => {
   });
 });
 
+describe("a secretEnv key that config.env declares (#252)", () => {
+  const LABEL = "gate/stack.json at origin/main";
+  const stack = minimal.gateStack as GateStackConfig;
+  const withProxy = {
+    ...stack,
+    containers: [
+      ...stack.containers,
+      {
+        name: "proxy",
+        image: "localhost/proxy",
+        inSandbox: true,
+        inGate: false,
+        secretEnv: ["ADFINITY_USER", "ADFINITY_TOKEN"],
+      },
+    ],
+  };
+
+  it("refuses an inline stack, naming every shared key", () => {
+    expect(() => resolveConfig({
+      ...minimal,
+      env: { ADFINITY_TOKEN: "", ADFINITY_USER: "u", GH_TOKEN: "" },
+      gateStack: withProxy,
+    })).toThrow(
+      /^config\.gateStack: config\.env also declares secretEnv key\(s\) ADFINITY_USER \(container 'proxy'\), ADFINITY_TOKEN \(container 'proxy'\), so/,
+    );
+  });
+
+  it("refuses a stack file, naming the label", () => {
+    expect(() => resolveStackFile(JSON.stringify(withProxy), LABEL, { ADFINITY_TOKEN: "" }))
+      .toThrow(/^gate\/stack\.json at origin\/main: config\.env also declares secretEnv key\(s\) ADFINITY_TOKEN \(container 'proxy'\), so/);
+  });
+
+  it("names the shared keys of every container, and only those", () => {
+    const sibling = (name: string, secretEnv: string[]) =>
+      ({ name, image: "localhost/x", inSandbox: true, inGate: false, secretEnv });
+    const twoSiblings = {
+      ...stack,
+      containers: [...stack.containers, sibling("first", ["A_KEY", "B_KEY"]), sibling("second", ["C_KEY"])],
+    };
+    const env = { B_KEY: "", C_KEY: "", GH_TOKEN: "" };
+    const shared = /config\.env also declares secretEnv key\(s\) B_KEY \(container 'first'\), C_KEY \(container 'second'\), so/;
+    expect(() => resolveConfig({ ...minimal, env, gateStack: twoSiblings })).toThrow(shared);
+    expect(() => resolveStackFile(JSON.stringify(twoSiblings), LABEL, env)).toThrow(shared);
+  });
+
+  it("accepts keys config.env does not declare", () => {
+    expect(() => resolveConfig({ ...minimal, env: { GH_TOKEN: "" }, gateStack: withProxy }))
+      .not.toThrow();
+    expect(() => resolveStackFile(JSON.stringify(withProxy), LABEL, { GH_TOKEN: "" }))
+      .not.toThrow();
+  });
+});
+
 describe("gateStack file form (#186)", () => {
   it("keeps a repository-relative path, normalised, and reads nothing at load", () => {
     const r = resolveConfig({ ...minimal, gateStack: { path: "./gate//stack.json" } });

@@ -288,6 +288,10 @@ function resolveLabelSync(value: unknown): readonly LabelDeclaration[] {
 // may name `secretEnv` — env keys valued from the daemon's environment at
 // sibling bringup — and it may not mount the worktree, so a credential reaches
 // neither a verdict, the implementer sandbox, nor code the agent can edit.
+// Nor may a `secretEnv` key be a `config.env` key (#252), which every agent
+// sandbox receives. Like the step-env collision, that is checked wherever a
+// stack meets config.env: at load for an inline stack, and each time a stack
+// file is resolved, so preflight's opening of the stack refuses the run.
 //
 // Two forms (#186). The inline stack is validated here, at load. A stack file
 // (`{ path }`) is only a path at load: the run reads it from the source tip
@@ -2095,6 +2099,7 @@ function resolveStackSource(
 ): ResolvedStackSource {
   if (!("path" in gateStack)) {
     const stack = resolveGateStack(gateStack);
+    checkSecretEnvOutsideConfigEnv(stack, env, INLINE_STACK_LABEL);
     return {
       kind: "inline",
       stack,
@@ -2252,6 +2257,7 @@ export function resolveStackFile(
     checkFieldShapes(label, `steps[${i}]`, s, STEP_REQUIRED, STEP_OPTIONAL));
   // The shapes above are exactly what this type promises.
   const stack = resolveGateStack({ containers, steps } as GateStackConfig, label);
+  checkSecretEnvOutsideConfigEnv(stack, configEnv, label);
   return { stack, attachments: sandboxGateAttachmentsOf(stack, configEnv, label) };
 }
 
@@ -2457,6 +2463,25 @@ export function resolveGateStack(
   }
 
   return { containers, steps };
+}
+
+// A `secretEnv` key that is also a `config.env` key (#252) reaches every agent
+// sandbox through config.env, whichever installation file valued it.
+function checkSecretEnvOutsideConfigEnv(
+  stack: ResolvedGateStack,
+  configEnv: Readonly<Record<string, string>>,
+  label: string,
+): void {
+  const leaked = stack.containers.flatMap((c) =>
+    c.secretEnv
+      .filter((key) => Object.hasOwn(configEnv, key))
+      .map((key) => `${key} (container '${c.name}')`));
+  if (leaked.length === 0) return;
+  throw new SandbarError(
+    `${label}: config.env also declares secretEnv key(s) ${leaked.join(", ")}, ` +
+      "so every agent sandbox would receive the secret. Take them out of what " +
+      "config.env reads; on a box their values belong in secrets.env.",
+  );
 }
 
 // Flatten the environment in which gate STEPS run into the one sandbox

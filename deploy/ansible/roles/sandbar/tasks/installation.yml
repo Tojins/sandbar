@@ -1,24 +1,27 @@
 ---
-- name: Check the required installation files
+# secrets.env is optional (#252); when present it is held to sandbar.env's
+# owner and mode, because the unit reads it into the daemon's environment.
+- name: Check the installation files
   ansible.builtin.stat:
     path: "{{ sandbar_installation_dir }}/{{ item }}"
   loop:
     - sandbar.config.mjs
     - sandbar.env
+    - secrets.env
   register: sandbar_installation_files
 
-- name: Stop unless every required installation file exists
+- name: Stop unless every installation file is in place
   ansible.builtin.assert:
     that:
-      - item.stat.exists
-      - item.item != 'sandbar.env' or (item.stat.pw_name | default('')) == sandbar_user
-      - item.item != 'sandbar.env' or (item.stat.mode | default('')) == sandbar_secret_mode
+      - item.stat.exists or item.item == 'secrets.env'
+      - not item.stat.exists or item.item == 'sandbar.config.mjs' or (item.stat.pw_name | default('')) == sandbar_user
+      - not item.stat.exists or item.item == 'sandbar.config.mjs' or (item.stat.mode | default('')) == sandbar_secret_mode
     fail_msg: >-
       {{ sandbar_installation_dir }}/{{ item.item }}:
       {{ 'missing' if not item.stat.exists
          else 'owner ' ~ (item.stat.pw_name | default('unknown')) ~
               ', mode ' ~ (item.stat.mode | default('unknown')) }}.
-      Place it as {{ sandbar_user }}{% if item.item == 'sandbar.env' %} with
+      Place it as {{ sandbar_user }}{% if item.item != 'sandbar.config.mjs' %} with
       mode {{ sandbar_secret_mode }}{% endif %}, or set config_src to copy it,
       then rerun the play.
     quiet: true

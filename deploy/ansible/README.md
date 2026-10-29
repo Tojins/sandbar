@@ -22,6 +22,8 @@ The user's private `~/installation/` holds:
 - `sandbar.config.mjs`, which imports helpers from `"sandbar"` and explicitly
   sets `cwd` to the consumer clone;
 - `sandbar.env`, mode `0600`;
+- optionally `secrets.env`, mode `0600`: the values of `inGate: false`
+  siblings' `secretEnv` keys, read by the unit and never by the config;
 - any files the config maps into worktrees with `{ from, to }` entries;
 - `config-digest`, mode `0600`, which the play writes: the gate stack and
   images its daemon was last asked to restart into (see below); and
@@ -32,7 +34,8 @@ are the real source copies deployed by `group_vars/all.yml`. `config_src` is opt
 the role copies that directory into `~/installation/`; when absent, `scp`,
 another Ansible role, or a clone may place the same files. The role always
 creates the directory and always asserts `sandbar.config.mjs` and `sandbar.env`
-exist, naming a missing path before it installs either unit.
+exist, naming a missing path before it installs either unit; a `secrets.env`
+that exists must have `sandbar.env`'s owner and mode.
 
 ## What the role provides
 
@@ -415,9 +418,14 @@ as that installation's user:
 1. Create `~/installation/sandbar.env` with mode `0600`. It contains `GH_TOKEN`,
    provider credentials, and optional `SANDBAR_*` routing values consumed by
    `splitRoleRouting`.
-2. Run `gh auth login`. This is per user; it also lets the role clone a private
+2. Optionally, create `~/installation/secrets.env` with mode `0600` (see
+   [`secrets.env.example`](../../secrets.env.example)) when a sibling in the
+   gate stack names `secretEnv`. Only the daemon's unit reads it, so its values
+   reach that sibling and no agent sandbox; never `readEnvFile` it in the
+   config, and keep its keys out of `sandbar.env`.
+3. Run `gh auth login`. This is per user; it also lets the role clone a private
    consumer on the next play.
-3. Run `codex login` when any role is routed to Codex. Keep the resulting
+4. Run `codex login` when any role is routed to Codex. Keep the resulting
    `~/.codex/auth.json` under this user. Never copy it between users or hosts:
    each workdir reconciles one token family and two daemons sharing a login can
    rotate each other stale.
