@@ -203,7 +203,8 @@
 //              `resolveVersionCollision` (#68) — origin's tip bumped `version`
 //              too, so it conflicts by construction. Any other conflict, a red
 //              re-gate or a second race is a hard fail; nothing has landed in
-//              any of them.
+//              any of them. A red re-gate's output goes to the gate sink
+//              under `origin-sync`, its only trace once the run halts.
 //
 //   verified — nothing reaches the source branch until the FORGE agrees. The
 //              merge result goes to a scratch integration branch, sandbar polls
@@ -1287,6 +1288,10 @@ export type MergerLog = (line: string) => void | Promise<void>;
 // Optional sink for the gate output when we *enter* the resolve loop in
 // gate-red mode. The loop will surface its own outputs separately via its
 // log; this sink preserves the existing "merger-gate-<issueId>" artefact.
+// The gate artefact key of a push race's re-gate, beside the issue ids,
+// `chunk-<root>` and `verify-round-<n>`.
+export const ORIGIN_SYNC_GATE_KEY = "origin-sync";
+
 export type MergerGateOutputSink = (
   issueId: string,
   gate: MergerGateOutput,
@@ -2809,10 +2814,22 @@ export async function runMergerWithAdapter(
     await emit(`install synced ok=${inst.ok}`);
     const g = inst.ok ? await adapter.runGate() : null;
     if (g !== null) await emit(`gate-2 synced ${formatGateFields(g)}`);
+    // Filed under its own key: the issue keys' files hold the gates of the
+    // merges this one composes, and a red here is the only evidence the halt
+    // below leaves.
+    if (g !== null && !g.ok && onGateRed) {
+      await onGateRed(ORIGIN_SYNC_GATE_KEY, {
+        stdout: g.stdout,
+        stderr: g.stderr,
+        failedStep: g.failedStep,
+        exitCode: g.exitCode,
+        containerLogs: g.containerLogs,
+      });
+    }
     if (g === null || !g.ok) {
       throw new MergerError(
         "Push to origin source branch was rejected (origin moved during the cycle), and " +
-          `the merge result re-merged onto its new tip ${g === null ? "failed npm install" : "is gate-red"}. ` +
+          `the merge result re-merged onto its new tip ${g === null ? "failed npm install" : `is gate-red (merger-gate-${ORIGIN_SYNC_GATE_KEY}.*)`}. ` +
           "Nothing landed; the next run re-merges onto the new tip.",
         nothingLanded(),
       );

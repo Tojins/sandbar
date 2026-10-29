@@ -1660,6 +1660,22 @@ describe("runMergerWithAdapter — push lifecycle", () => {
     expect(calls.closes).toEqual([]);
   });
 
+  it("push race + re-merged tree gate-red: files the re-gate's output under origin-sync", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }, gateRed()],
+      pushes: [{ kind: "race" }],
+      pulls: [true],
+    });
+    const sunk: Array<{ key: string; stdout: string; failedStep: string | null }> = [];
+    await expect(
+      runMergerWithAdapter([issue(42)], adapter, undefined, (key, gate) => {
+        sunk.push({ key, stdout: gate.stdout, failedStep: gate.failedStep });
+      }),
+    ).rejects.toThrow("merger-gate-origin-sync.*");
+    expect(sunk).toEqual([{ key: "origin-sync", stdout: "x", failedStep: "test" }]);
+  });
+
   it("push race + still-rejected after retry: throws MergerError", async () => {
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],

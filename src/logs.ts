@@ -221,7 +221,8 @@ export type LandingLogger = {
   writeMergerGate(issueId: string, gate: GateRecord): Promise<void>;
   // One resolve-loop attempt's captured stdout and stderr (#67), keyed like the
   // gate artefact beside it: an issue id for an issue branch, `chunk-<root>`
-  // for a chunk, `verify-round-<n>` for a forge-red round — so a chunk and its
+  // for a chunk, `verify-round-<n>` for a forge-red round (and, for the gate
+  // artefact alone, `origin-sync` for a push race's re-gate) — so a chunk and its
   // own root issue resolving in one landing cannot overwrite each other.
   //
   // ANSWERS WITH THE PATH IT WROTE. The abandon comment points a human at these
