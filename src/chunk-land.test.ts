@@ -312,26 +312,19 @@ describe("chunkLandDeferral (#168)", () => {
     [chunk(42, "sandbar/chunk-42-alpha", [[42, "alpha"]])],
   ).requests[0]!;
 
-  it("defers only work that targets this chunk", () => {
-    expect(chunkLandDeferral(target, [
-      { number: 41, title: "other", chunkBranch: "sandbar/chunk-41-other" },
-      { number: 43, title: "follow-up", chunkBranch: target.branch },
-    ])).toEqual({
+  it("defers only for members this pass put on the branch (#243)", () => {
+    expect(chunkLandDeferral(target, [{ number: 43, title: "follow-up" }])).toEqual({
       members: [{ number: 43, title: "follow-up" }],
       reason: "ongoing",
     });
-    expect(chunkLandDeferral(target, [
-      { number: 41, title: "other", chunkBranch: "sandbar/chunk-41-other" },
-    ])).toBeNull();
+    expect(chunkLandDeferral(target, [])).toBeNull();
   });
 
   it("gives tracker-visible rework precedence", () => {
     expect(chunkLandDeferral({
       ...target,
       rework: [{ number: 42, title: "root rework" }],
-    }, [
-      { number: 43, title: "follow-up", chunkBranch: target.branch },
-    ])).toEqual({
+    }, [{ number: 43, title: "follow-up" }])).toEqual({
       members: [{ number: 42, title: "root rework" }],
       reason: "rework",
     });

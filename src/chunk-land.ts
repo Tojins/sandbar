@@ -326,12 +326,6 @@ export type ChunkLandTarget = {
   readonly landLabels: readonly string[];
 };
 
-export type ChunkLandOngoingIssue = {
-  readonly number: number;
-  readonly title: string;
-  readonly chunkBranch: string | null;
-};
-
 export type ChunkLandDeferral = {
   readonly members: readonly ChunkMember[];
   readonly reason: "ongoing" | "rework";
@@ -340,20 +334,17 @@ export type ChunkLandDeferral = {
 // The one chunk-specific answer both scheduler discovery and the merger use.
 // Keeping it ahead of the scheduler is what lets unrelated work stop blocking
 // safe requests without turning a genuinely deferred request into one merger
-// pass (and one PR comment) per poll (#168).
+// pass (and one PR comment) per poll (#168). `grown` is what the merger put on
+// the branch this pass; work merely in flight to it defers nothing, for a
+// requested chunk is frozen and `run.ts` holds that work off it (#243).
 export function chunkLandDeferral(
   request: ChunkLandTarget,
-  ongoing: readonly ChunkLandOngoingIssue[],
+  grown: readonly ChunkMember[],
 ): ChunkLandDeferral | null {
   if (request.rework.length > 0) {
     return { members: request.rework, reason: "rework" };
   }
-  const targeting = ongoing
-    .filter((issue) => issue.chunkBranch === request.branch)
-    .map((issue) => ({ number: issue.number, title: issue.title }));
-  return targeting.length > 0
-    ? { members: targeting, reason: "ongoing" }
-    : null;
+  return grown.length > 0 ? { members: grown, reason: "ongoing" } : null;
 }
 
 // The fields of an open pull request this module reads. `headRefName` is the

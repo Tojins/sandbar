@@ -70,7 +70,11 @@
 //                              the landing even while unrelated issues run
 //                              (#168), the chunk branch is
 //                              merged in the SAME source pass, its members are
-//                              closed, and the branch is deleted.
+//                              closed, and the branch is deleted. Even issues
+//                              dispatched to it do not hold it: the label
+//                              freezes the chunk (#243), and a DONE one waits
+//                              in the pool until it lands or the label comes
+//                              off.
 //                              A chained member whose other blocker became
 //                              CLOSED waits until its origin chunk contains
 //                              origin/source (#174). The same landing path
@@ -2591,25 +2595,27 @@ export async function run(
         await refuseLandRequest(refusal, chunkRequestWrites);
       }
       const selectedLandRequests = landRequestSelection.requests;
-      const ongoingForChunkLanding = pool.ongoingIssues().map((issue) => ({
-        number: Number(issue.id),
-        title: issue.title,
-        chunkBranch: issue.chunk?.branch ?? null,
-      }));
       // A closed landing window (#244) holds every source-branch landing but a
       // `land-hotfix` one; `landing-window.ts` owns what waits and how.
       const closedUntil = landingClosedUntil(config.landingWindow, new Date());
       if (closedUntil === null) toldLandingWindow.clear();
       const landDeferrals = new Map<string, string>();
+      // Deferred requests no pass may land, not even one started for other
+      // work: the merger never sees them.
+      const heldOffSource = new Set<string>();
       for (const request of selectedLandRequests) {
-        const deferral = chunkLandDeferral(request, ongoingForChunkLanding);
+        // Nothing has grown a requested chunk: it is frozen, and its members
+        // are held off it below (#243).
+        const deferral = chunkLandDeferral(request, []);
         if (request.base !== null) {
           // Its branch carries the base's commits, which land with the base.
           landDeferrals.set(request.branch, `stacked on ${request.base} · lands once it lands`);
+          heldOffSource.add(request.branch);
         } else if (deferral !== null) {
           landDeferrals.set(request.branch, deferredLandReason(deferral.members));
         } else if (closedUntil !== null && waitsForLandingWindow(request)) {
           landDeferrals.set(request.branch, `landing window closed · lands after ${closedUntil}`);
+          heldOffSource.add(request.branch);
           if (!toldLandingWindow.has(request.pullRequest)) {
             await chunkRequestWrites.commentOnPullRequest(
               request.pullRequest,
@@ -2621,6 +2627,9 @@ export async function run(
       }
       const landRequests = selectedLandRequests.filter(
         (request) => !landDeferrals.has(request.branch),
+      );
+      const mergerLandRequests = selectedLandRequests.filter(
+        (request) => !heldOffSource.has(request.branch),
       );
       if (landRequests.length > 0) {
         const named = landRequests
@@ -2660,17 +2669,26 @@ export async function run(
           describeChunkBranchDrift(drift)
         );
 
-      // A DONE auto-lane issue is the window's other source-branch landing.
-      if (closedUntil === null) pool.releaseHeldTerminals();
-      const heldForLandingWindow = closedUntil === null ? [] : pool.holdTerminals(
+      // What may not land yet stays in the pool: a DONE auto-lane issue while
+      // the window is closed, the window's other source-branch landing, and a
+      // DONE member of a frozen chunk (#243), dispatched before the label went
+      // on, until the chunk lands or the label comes off.
+      const { frozenChunks } = frozenOptions;
+      const heldTerminals = pool.holdTerminals(
         (event) => event.status === "fulfilled" && event.value.type === "DONE" &&
-          event.issue.chunk === null,
+          (event.issue.chunk === null
+            ? closedUntil !== null
+            : frozenChunks.has(event.issue.chunk.branch)),
       );
-      for (const event of heldForLandingWindow) {
+      for (const event of heldTerminals) {
         await runRecord.emit({
           kind: "notice",
-          message: `#${event.issue.id} is done and waits for the landing window: ` +
-            `nothing lands on ${config.sourceBranch} until ${closedUntil}.`,
+          message: event.issue.chunk === null
+            ? `#${event.issue.id} is done and waits for the landing window: ` +
+              `nothing lands on ${config.sourceBranch} until ${closedUntil}.`
+            : `#${event.issue.id} is done and waits for ${event.issue.chunk.branch}: ` +
+              `its pull request carries a landing label, so nothing more goes onto ` +
+              `it until it lands or the label comes off.`,
         });
       }
 
@@ -2705,7 +2723,7 @@ export async function run(
         followUps.length > 0 || laneNotices.length > 0 ||
         reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
         landRequestSelection.refusals.length > 0 ||
-        heldForLandingWindow.length > 0 ||
+        heldTerminals.length > 0 ||
         chunkRefreshes.length > 0 ||
         schedulerAction.kind === "admit" || schedulerAction.kind === "land";
       const pollIsReportable = pollDidWork || resolution.waiting.some(
@@ -3080,13 +3098,13 @@ export async function run(
               },
               ...(verified ? { verified } : {}),
               // Scheduling sees only runnable requests, but a pass started for
-              // another reason must still let the merger observe deferred
-              // requests. That is where the PR notice about newly landed or
-              // ongoing member work is posted (#64, #168).
-              ...(selectedLandRequests.length > 0
+              // another reason still lets the merger observe the ones deferred
+              // for rework: it re-defers them and says so on their pull
+              // requests (#64, #168).
+              ...(mergerLandRequests.length > 0
                 ? {
                     chunkLanding: {
-                      requests: selectedLandRequests,
+                      requests: mergerLandRequests,
                       sourceBranch: config.sourceBranch,
                     },
                   }

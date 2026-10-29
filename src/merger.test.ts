@@ -3018,8 +3018,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     await runMergerWithAdapter([], makeAdapter({
       chunkRefs: originHas(42),
     }).adapter, undefined, undefined, {
-      ...landing(request(42)),
-      ongoingIssues: [{ ...issue(42), chunk: { root: 42, branch: "sandbar/chunk-42-c" } }],
+      ...landing({ ...request(42), rework: [{ number: 42, title: "t-42" }] }),
       observations,
     });
     await runMergerWithAdapter([], makeAdapter({
@@ -3094,30 +3093,18 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["43"]);
   });
 
-  it("defers landing while an ongoing issue targets the chunk", async () => {
-    const { adapter, calls } = makeAdapter({ chunkRefs: originHas(42) });
-    const log: string[] = [];
-    const target = request(42);
-    const summary = await runMergerWithAdapter(
-      [], adapter, (line) => log.push(line), undefined, {
-        ...landing(target),
-        ongoingIssues: [
-          { ...issue(42), chunk: { root: 42, branch: "sandbar/chunk-42-c" } },
-        ],
-      },
-    );
+  it("lands a requested chunk while an issue dispatched to it is still ongoing (#243)", async () => {
+    // A requested chunk is frozen: that issue's work is held off the branch.
+    const { adapter } = makeAdapter({
+      merges: ["ok"], gates: [{ ok: true }], chunkRefs: originHas(42),
+    });
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...landing(request(42)),
+      ongoingIssues: [{ ...issue(43), chunk: { root: 42, branch: "sandbar/chunk-42-c" } }],
+    });
 
-    expect(calls.merges).toEqual([]);
-    expect(summary.deferredChunks).toEqual([
-      { target, landedNow: [{ number: 42, title: "t-42" }] },
-    ]);
-    expect(calls.prLabelRemovals).toEqual([]);
-    expect(calls.prComments[0]?.body).toContain("#42 — t-42");
-    expect(calls.prComments[0]?.body).toContain("land or park");
-    expect(calls.prComments[0]?.body).not.toContain("description above now lists");
-    expect(log).toContain(
-      "chunk sandbar/chunk-42-c: not landed (ongoing member work: #42); `land` kept",
-    );
+    expect(summary.deferredChunks).toEqual([]);
+    expect(summary.mergedChunks.map((c) => c.target.branch)).toEqual(["sandbar/chunk-42-c"]);
   });
 
   it("defers landing while a member remains queued for rework", async () => {

@@ -170,7 +170,9 @@
 // that adds nothing new lands the chunk. At that boundary the exact fetched
 // chunk tip, not the plan-time list, determines the members it brings beyond
 // the source merge base and their close order (#175). `deferredChunks` reports
-// the wait; it is neither a landing nor a park.
+// the wait; it is neither a landing nor a park. Since #243 a requested chunk
+// is frozen and `run.ts` holds its members off it, so this is the backstop:
+// work merely in flight to the chunk defers nothing.
 //
 // The WRAP-UP runs only after the source branch has moved: close every member
 // ON THE BRANCH explicitly (the git-derived ones — a component member that was
@@ -2297,11 +2299,9 @@ export async function runMergerWithAdapter(
       try {
         const deferral = chunkLandDeferral(
           request,
-          cycle.map((issue) => ({
-            number: issueNumberOf(issue),
-            title: issue.title,
-            chunkBranch: issue.chunk?.branch ?? null,
-          })),
+          chunkLanded
+            .filter((landing) => landing.chunkBranch === request.branch)
+            .map(({ issue }) => ({ number: issueNumberOf(issue), title: issue.title })),
         );
         if (deferral !== null) {
           await deferChunk(
