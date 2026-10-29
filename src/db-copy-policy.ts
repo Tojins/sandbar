@@ -27,8 +27,9 @@
 // function of the loop's next action (`dbCopyHolderFor`), kept outside the
 // state machine because it never changes which action comes next. The
 // implementer holds one, and so does the verifier's scenario runner (#180) in
-// a round that runs scenarios; quality, gate, the white-box review alone and
-// the adjudicator never do. A copy is dropped at every change
+// a round given a written set, even one its ledger runs none of (#239), as
+// the selection is the runner's; quality, gate, the white-box review alone
+// and the adjudicator never do. A copy is dropped at every change
 // of holder and a fresh one made for the next, because the last holder's
 // experiments dirtied it. The one exception is the implementer followed by
 // the implementer (a re-prompt or a nudge round), which keeps it.
@@ -206,8 +207,8 @@ export function dbBaseComplaints(input: {
 export type DbCopyHolder = "implementer" | "scenario-runner";
 
 // Who holds the copy while `action` runs; null drops it. A verifier round
-// that runs scenarios gives one to its scenario runner (#180); without
-// scenarios it is the white-box review alone, which gets none.
+// given a written set gives one to its scenario runner (#180); without one it
+// is the white-box review alone, which gets none.
 export function dbCopyHolderFor(action: LoopAction): DbCopyHolder | null {
   switch (action.kind) {
     case "run-implementer":

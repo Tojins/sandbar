@@ -11,6 +11,7 @@ import {
   IssueBranchDeletedOnOriginError,
   IssueBranchDivergedError,
   branchCommitsSinceSeed,
+  changedPaths,
   dirtyWorktreePaths,
   ensureIssueBranch,
   fastForwardOffBranchHead,
@@ -1439,5 +1440,39 @@ describe("forkPoint (#203)", () => {
     const forked = await forkPoint(repo, "origin/main", "issue-1");
     expect(forked).toBe(seed);
     expect(forked).not.toBe(tip);
+  });
+});
+
+describe("changedPaths (#239)", () => {
+  let repo: string;
+  const git = (...args: string[]) => exec("git", args, { cwd: repo });
+  const sha = async (ref: string) => (await git("rev-parse", ref)).stdout.trim();
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), "sandbar-changedpaths-"));
+    await git("init", "-q", "-b", "main");
+    await git("config", "user.email", "t@t");
+    await git("config", "user.name", "t");
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  // A file moved out of a scenario's area touches that area, whatever the
+  // repo's own rename detection says.
+  it("lists a renamed file at its old path as well as its new one", async () => {
+    await git("config", "diff.renames", "true");
+    await mkdir(join(repo, "src", "billing"), { recursive: true });
+    await writeFile(join(repo, "src", "billing", "invoice.ts"), "export const total = 1;\n".repeat(20));
+    await git("add", "-A");
+    await git("commit", "-qm", "billing");
+    const since = await sha("HEAD");
+    await mkdir(join(repo, "src", "core"));
+    await git("mv", "src/billing/invoice.ts", "src/core/invoice.ts");
+    await git("commit", "-qm", "move");
+
+    expect([...await changedPaths(repo, since, await sha("HEAD"))].sort())
+      .toEqual(["src/billing/invoice.ts", "src/core/invoice.ts"]);
   });
 });

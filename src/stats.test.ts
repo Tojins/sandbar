@@ -157,8 +157,9 @@ describe("computeStats passes and context (#194)", () => {
       kind: "review-round", issue: 1, attempt, round: attempt, head: "h", gateOk: true,
       correctness, rejectingPass: null, gateFailures: 0, correctnessFailures: 0, durationMs: 1,
     });
-    const ruling = (pass: string, value: string) => ev({
+    const ruling = (pass: string, value: string, rulings?: readonly { unit: string; ruling: string }[]) => ev({
       kind: "adjudication", issue: 1, pass, attempt: 1, round: 1, head: "h", ruling: value,
+      ...(rulings === undefined ? {} : { rulings }),
       provider: "claude", model: "m", effort: null, durationMs: 1,
     });
     const report = computeStats(input([run("run-1", [
@@ -168,6 +169,13 @@ describe("computeStats passes and context (#194)", () => {
       round(1, "CHANGES-REQUESTED"), round(2, "APPROVED"), round(3, "SKIPPED"),
       round(4, "HARNESS-FAILED"),
       ruling("correctness", "OVERRULED"), ruling("correctness", "UPHELD"), ruling("quality", "UPHELD"),
+      // #239: one ruling per unit, by the pass the unit is.
+      ruling("correctness", "UPHELD", [
+        { unit: "white-box", ruling: "OVERRULED" },
+        { unit: "S1", ruling: "UPHELD" },
+        { unit: "S2", ruling: "OVERRULED" },
+      ]),
+      ruling("scenarios", "OVERRULED", [{ unit: "S3", ruling: "OVERRULED" }]),
     ])]));
     expect(report.passes).toEqual({
       "gate-1": { runs: 0, rejected: 0 },
@@ -178,8 +186,8 @@ describe("computeStats passes and context (#194)", () => {
     });
     expect(report.adjudication).toEqual({
       quality: { rulings: 1, overruled: 0 },
-      correctness: { rulings: 2, overruled: 1 },
-      scenarios: { rulings: 0, overruled: 0 },
+      correctness: { rulings: 3, overruled: 2 },
+      scenarios: { rulings: 3, overruled: 2 },
     });
   });
 

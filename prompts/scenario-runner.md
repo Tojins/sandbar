@@ -26,7 +26,7 @@ the database as a scenario needs.
 {{environment}}## Scenarios
 
 {{scenarios}}
-
+{{reruns}}
 ## Report
 
 End with `<scenario-runner>REPORTED</scenario-runner>` followed by a

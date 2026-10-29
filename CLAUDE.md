@@ -79,10 +79,13 @@ and the gate stack (`config.gateStack`, #24).
    (`verifier.ts`, #180; its white-box review is `reviewer-run.ts`, #41,
    patch-scoped from round 2; beside it, when the writer wrote a set, the
    scenario runner, `verifier-run.ts` with its grammar in
-   `scenario-runner-parser.ts` (#238), runs every scenario in the issue
+   `scenario-runner-parser.ts` (#238), runs the scenarios in the issue
    sandbox; each round's evidence is archived in the run's log tree and only a
-   failing scenario's restaged in `/sandbar/verifier/findings`) → adjudicator
-   on dispute of either pass (#167).
+   failing scenario's restaged in `/sandbar/verifier/findings`; later rounds
+   rerun only failed, unrun and touched scenarios, by a per-cycle ledger in
+   `verifier.ts`, #239) → adjudicator on dispute of either pass (#167),
+   unit by unit beside a scenario unit (`adjudication-parser.ts`), retiring
+   each scenario it overrules.
    Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`. Read-only
    roles that write park the issue. Beside attempt 1, the scenario writer
    (#203, `scenario-writer-run.ts`, grammar in `scenario-parser.ts`) runs once
@@ -113,8 +116,8 @@ graphroot; startup and quiescence sweep the run's copies.
 into the sandbox stack beside its target sibling (`swapDbCopyIn`/`Out`),
 then runs `onDbCopyReady` (`Sandbox.runHooks`). The inner loop aligns the
 slot before every action (`dbCopyHolderFor`): the implementer holds a copy, a
-fresh one each round, and so does the scenario runner in a verifier round that
-runs scenarios.
+fresh one each round, and so does the scenario runner in a verifier round given
+a written set.
 
 ## Invariants — where they live
 
@@ -172,8 +175,8 @@ runs scenarios.
   project group; verify 6.0k, fixer 5.4k; verifier white-box 4.1k (+0.1k
   beside a held copy); scenario runner 1.9k + its scenarios (no issue
   anchor; +2.3k sandbox-stack, +0.2k egress, +0.6k a held copy, +0.2k a
-  failed app hook);
-  adjudicator 1.1k + the report; UI check 1.6k and partition
+  failed app hook, +0.2k a rerun);
+  adjudicator 1.1k + the report (1.5k + 0.1k a unit ruled unit by unit); UI check 1.6k and partition
   check 1.5k + the issue anchor; scenario writer 2.2k + the issue anchor;
   resolve 1.2k + anchor + paths/trace; reflect
   tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser

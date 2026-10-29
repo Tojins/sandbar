@@ -47,7 +47,10 @@
 // round at a time: `pass`, `fail` and `unverified` sum them, and
 // `passes.scenarios` counts each round that selected scenarios, rejected when
 // one failed. A `scenario-runner` event that ran is an invocation row of role
-// `scenario-runner`.
+// `scenario-runner`. An adjudication that ruled unit by unit (#239) counts
+// one ruling per unit: the white-box unit's under `adjudication.correctness`,
+// each scenario's under `adjudication.scenarios`; its invocation row's role
+// stays `adjudicator:<pass>`.
 //
 // Anchors (#217) are one sample per `issue-anchor` event — every loop's
 // opening step — sized before the trace drop, after it, and as the roles
@@ -374,6 +377,16 @@ type CondenserEvent = Extract<StatsEvent, { kind: "issue-anchor" }> & {
 
 type InvocationEvent = AgentEvent | CondenserEvent | WriterEvent | RunnerEvent;
 
+// An adjudication's rulings by the pass each ruled on: one per unit when it
+// ruled unit by unit (#239), the white-box unit's under `correctness`.
+const rulingsOf = (
+  event: Extract<StatsEvent, { kind: "adjudication" }>,
+): readonly { readonly pass: AdjudicatedPass; readonly ruling: "UPHELD" | "OVERRULED" }[] =>
+  event.rulings?.map(({ unit, ruling }) => ({
+    pass: unit === "white-box" ? "correctness" : "scenarios",
+    ruling,
+  })) ?? [{ pass: event.pass, ruling: event.ruling }];
+
 const isAgentEvent = (event: StatsEvent): event is InvocationEvent =>
   event.kind === "issue-anchor" ? event.provider !== undefined
     : event.kind === "scenario-writer" ? event.durationMs !== undefined
@@ -575,8 +588,10 @@ export function computeStats(input: StatsInput): StatsReport {
           }
           break;
         case "adjudication":
-          adjudication[event.pass].rulings += 1;
-          if (event.ruling === "OVERRULED") adjudication[event.pass].overruled += 1;
+          for (const { pass, ruling } of rulingsOf(event)) {
+            adjudication[pass].rulings += 1;
+            if (ruling === "OVERRULED") adjudication[pass].overruled += 1;
+          }
           break;
       }
     }

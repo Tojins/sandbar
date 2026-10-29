@@ -307,11 +307,11 @@ describe("the verifier workspace (#238)", () => {
       await writeFile(join(workspace, "run", id, "shot.png"), id);
     }
     await archiveRun(workspace, roundDir);
-    await restageFindings(workspace, roundDir, ["S2"]);
+    await restageFindings(workspace, [{ id: "S2", roundDir }]);
     expect(await tree(workspace)).toEqual(["findings", join("findings", "S2"), join("findings", "S2", "shot.png")]);
     expect(await tree(roundDir)).toEqual(["S1", join("S1", "shot.png"), "S2", join("S2", "shot.png")]);
     // A later round's restage starts again from that round's archive.
-    await restageFindings(workspace, roundDir, []);
+    await restageFindings(workspace, []);
     expect(await tree(workspace)).toEqual(["findings"]);
   });
 

@@ -5,7 +5,7 @@
 // It is two cold, read-only agents run side by side in the issue sandbox: the
 // white-box reviewer, which is the correctness review on the `reviewer*`
 // routing, and, when the scenario writer (#203) wrote a set, the scenario
-// runner, which runs every scenario against the branch and reports each as
+// runner, which runs the round's scenarios against the branch and reports each as
 // PASS, FAIL with evidence, or UNVERIFIED with a reason. `combineVerifier`
 // folds the two results into one outcome: a write from either parks, any
 // white-box CHANGES-REQUESTED or scenario FAIL rejects, a white-box review
@@ -37,11 +37,28 @@
 // only the change since the last head an earlier round reviewed, provided that
 // head is still an ancestor of HEAD. Earlier conclusions about unchanged hunks
 // stand, and #88's history carries them.
+//
+// The scenarios a round runs come from a LEDGER (#239): what each one came to
+// when it last ran, and at which head. A round runs every scenario that
+// failed or never ran, and one that passed or was unverified only when the
+// change since its head touches its area (`scenarioTouched`); a head HEAD no
+// longer contains counts as touching everything. A failed scenario's rerun is
+// told to check the analogous sites too, beside its evidence from the round
+// that failed it, which the ledger names. Only the runner's own verdicts
+// advance the ledger: a pre-pass or harness UNVERIFIED leaves a scenario as it
+// was. A scenario an adjudicator overrules is retired and never runs again,
+// so a wrong scenario cannot fail every later round.
 
 import type { RejectingPass } from "./events.js";
 import type { ReviewerResult, ReviewScope } from "./inner-loop-machine.js";
 import type { PriorReviewRound } from "./prompt.js";
-import { type Scenario, type ScenarioNeed, type ScenarioSet, renderClauses } from "./scenario-parser.js";
+import {
+  type Scenario,
+  type ScenarioNeed,
+  type ScenarioSet,
+  renderClauses,
+  scenarioTouched,
+} from "./scenario-parser.js";
 import { stripVerdictTokens } from "./verdict-parser.js";
 
 // Where the runner's workspace is mounted in the issue sandbox: it writes
@@ -283,6 +300,79 @@ export function prepass(
     else unverified.push({ id: scenario.id, outcome: "unverified", reason });
   }
   return { run: kept, unverified };
+}
+
+// A scenario's standing in the ledger. An id the ledger does not hold has
+// never run; `head` is the one it last ran at, and a failure's `round` the
+// one whose archive holds its evidence.
+export type LedgerEntry =
+  | { readonly status: "pass" | "unverified"; readonly head: string }
+  | { readonly status: "fail"; readonly head: string; readonly round: number }
+  | { readonly status: "retired" };
+
+export type ScenarioLedger = ReadonlyMap<string, LedgerEntry>;
+
+// A failed scenario run again, and the head and round it failed at.
+export type ScenarioRerun = { readonly id: string; readonly head: string; readonly round: number };
+
+// The heads selection needs the change since: those of the scenarios that
+// passed or were unverified.
+export function ledgerHeads(ledger: ScenarioLedger): readonly string[] {
+  return [...new Set([...ledger.values()].flatMap((entry) =>
+    entry.status === "pass" || entry.status === "unverified" ? [entry.head] : []))];
+}
+
+// The round's scenarios, in the set's order. `changedSince` maps each of
+// `ledgerHeads` to the paths changed since it, or "all" for a head HEAD no
+// longer contains; a head it lacks counts as "all".
+export function selectScenarios(
+  set: ScenarioSet,
+  ledger: ScenarioLedger,
+  changedSince: ReadonlyMap<string, readonly string[] | "all">,
+): { readonly run: readonly Scenario[]; readonly reruns: readonly ScenarioRerun[] } {
+  const run: Scenario[] = [];
+  const reruns: ScenarioRerun[] = [];
+  const touched = (scenario: Scenario, head: string): boolean => {
+    const changed = changedSince.get(head) ?? "all";
+    return changed === "all" || scenarioTouched(scenario, changed);
+  };
+  for (const scenario of set.scenarios) {
+    const entry = ledger.get(scenario.id);
+    if (entry === undefined) {
+      run.push(scenario);
+    } else if (entry.status === "fail") {
+      run.push(scenario);
+      reruns.push({ id: scenario.id, head: entry.head, round: entry.round });
+    } else if (entry.status !== "retired" && touched(scenario, entry.head)) {
+      run.push(scenario);
+    }
+  }
+  return { run, reruns };
+}
+
+// The ledger after round `round` at `head`: each scenario the runner itself
+// reported PASS, FAIL or UNVERIFIED stands there, and every other one is as
+// it was.
+export function advanceLedger(
+  ledger: ScenarioLedger,
+  head: string,
+  round: number,
+  runner: RunnerResult,
+): ScenarioLedger {
+  const next = new Map(ledger);
+  for (const outcome of runnerOutcomes(runner)) {
+    if (outcome.outcome === "unverified" && outcome.reason !== "runner") continue;
+    next.set(outcome.id, outcome.outcome === "fail"
+      ? { status: "fail", head, round }
+      : { status: outcome.outcome, head });
+  }
+  return next;
+}
+
+export function retire(ledger: ScenarioLedger, ids: readonly string[]): ScenarioLedger {
+  const next = new Map(ledger);
+  for (const id of ids) next.set(id, { status: "retired" });
+  return next;
 }
 
 // What the white-box review reads this round: the whole branch, or the change

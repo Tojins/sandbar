@@ -266,6 +266,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       pass: "quality",
       head: "reviewed-head-123",
       report: "The rejected report's one blocking finding.",
+      units: null,
     });
 
     expect(prompt).toContain("commit-from-target-repo");
@@ -277,6 +278,36 @@ describe("prompt anchors name their sources (#34, #38)", () => {
     expect(prompt).toContain("branch `sandbar/issue-1-t`");
     expect(prompt).toContain("seeded from `origin/main`");
     expect(prompt).not.toContain("## Prior review rounds");
+    expect(prompt).toContain("report as a whole");
+    expect(prompt).toMatch(/<ruling>OVERRULED<\/ruling>`\n\nA missing ruling is a harness failure/);
+  });
+
+  it("asks a report with scenario units for one ruling per unit (#239)", async () => {
+    const prompt = await buildAdjudicatorPrompt({
+      subject: { kind: "issue", id: "1", title: "t" },
+      branch: "sandbar/issue-1-t",
+      issueSource: ghIssueSource(CONFIGURED),
+      repo: CONFIGURED,
+      repoDir: target,
+      anchorCacheDir: join(target, "anchor-cache"),
+      worktreePath: launchedFrom,
+      sourceBranch: "main",
+      base: sourceBranchBase("main"),
+      claudeMdPath: "CLAUDE.md",
+      pass: "correctness",
+      head: "reviewed-head-123",
+      report: "[white-box]\nnull crashes\n\n[scenario S2] totals",
+      units: ["white-box", "S2"],
+    });
+
+    expect(prompt).not.toContain("report as a whole");
+    expect(prompt).not.toContain("<ruling>UPHELD</ruling>");
+    expect(prompt).toContain("Then does not hold at this head");
+    expect(prompt).toContain(
+      "- `<ruling-white-box>UPHELD</ruling-white-box>` or `<ruling-white-box>OVERRULED</ruling-white-box>`\n" +
+        "- `<ruling-s2>UPHELD</ruling-s2>` or `<ruling-s2>OVERRULED</ruling-s2>`\n\n" +
+        "A missing ruling is a harness failure",
+    );
   });
 
   it("reads a janitor task's anchor as given and asks the tracker nothing (#205)", async () => {
@@ -297,6 +328,7 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       pass: "correctness",
       head: "reviewed-head-123",
       report: "One blocking finding.",
+      units: null,
     });
 
     expect(issueSource).not.toHaveBeenCalled();

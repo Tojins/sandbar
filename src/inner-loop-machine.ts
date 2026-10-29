@@ -95,7 +95,12 @@
 // A zero-commit COMPLETE at the head of a pending verifier rejection enters
 // one adjudication per head (#167). UPHELD keeps the original charge and makes
 // another zero-commit attempt take the ordinary round; OVERRULED finishes the
-// issue as approved.
+// issue as approved. A report with scenario units is ruled unit by unit
+// (#239), and is UPHELD when any unit is: the implementer then gets only the
+// upheld units, with the overruled ones named. Every unit OVERRULED is an
+// approval unless the white-box review produced nothing at that head; then
+// the verifier runs again at the same head, unbudgeted, since unreviewed code
+// never reads as DONE.
 //
 // A reviewer that produced NO review is not a verdict (#41); that judgment is
 // reviewer-run.ts's. `reviewer-harness-failed` consumes no review round,
@@ -116,6 +121,7 @@
 // unhandled exceptions; decideAfterTerminal answers "retry with a fresh
 // sandbox or surface?" for the runner's outer loop.
 
+import type { AdjudicationRuling } from "./adjudication-parser.js";
 import type { HeadMismatch } from "./git-ops.js";
 import type { ParseSignal } from "./promise-parser.js";
 import type { UiCheckResult } from "./ui-check-parser.js";
@@ -255,6 +261,8 @@ export type LoopState = {
   readonly upheldAdjudication: {
     readonly head: string;
     readonly reasoning: string;
+    // Whether it ruled on a scenario unit, so its reasoning may quote one.
+    readonly ruledScenarios: boolean;
   } | null;
   // The latest CHANGES-REQUESTED quality report — the lister's, or the
   // verify's restatement of what is still open. The fixer's input.
@@ -580,7 +588,11 @@ export type LoopEvent =
   | {
       readonly kind: "adjudicator-result";
       readonly head: string;
-      readonly ruling: "UPHELD" | "OVERRULED";
+      // With `rulings`, UPHELD exactly when some unit is.
+      readonly ruling: AdjudicationRuling;
+      // Each unit's ruling, keyed by unit id, for a verifier report with
+      // scenario units; null for one ruled as a whole.
+      readonly rulings: Readonly<Record<string, AdjudicationRuling>> | null;
       readonly reasoning: string;
     }
   | { readonly kind: "adjudicator-wrote"; readonly detail: string }
@@ -1459,17 +1471,19 @@ function onVerifierRejected(
 // A verifier rejection in both renderings. One repeated at a head an
 // adjudicator already UPHELD carries that ruling's reasoning, so the
 // implementer is not handed the report as if it were still disputable. The
-// public rendering withholds that reasoning beside a scenario unit, since it
-// may quote the scenario or its evidence.
+// public rendering withholds that reasoning beside a scenario unit, or when
+// the ruling was on one, since it may quote the scenario or its evidence.
 function rejectionFeedback(
   state: LoopState,
   rejection: VerifierRejection,
 ): { readonly latestReviewerFeedback: string; readonly latestReviewerPublic: string } {
-  const ruling = state.upheldAdjudication?.head === rejection.head
-    ? state.upheldAdjudication.reasoning
+  const adjudication = state.upheldAdjudication?.head === rejection.head
+    ? state.upheldAdjudication
     : null;
+  const ruling = adjudication?.reasoning ?? null;
   const upheld = (reasoning: string): string[] => ["Independent adjudicator: UPHELD", reasoning, ""];
-  const publicReasoning = rejection.units.some((unit) => unit.id !== "white-box")
+  const publicReasoning = adjudication?.ruledScenarios ||
+      rejection.units.some((unit) => unit.id !== "white-box")
     ? "(reasoning withheld beside scenario findings)"
     : ruling;
   return {
@@ -1501,15 +1515,40 @@ function onAdjudicatorResult(
       qualityRuling: event.reasoning.trim(),
     });
   }
-  // Every finding in the only rejection the head carries is false: approved.
-  if (event.ruling === "OVERRULED") return terminate(ruled, { type: "DONE" });
   const { rejection } = adjudicating;
+  if (event.ruling === "OVERRULED") {
+    // Every finding in the only rejection the head carries is false; one
+    // whose white-box review produced nothing has yet to review that head.
+    return rejection.whiteBox === "HARNESS-FAILED"
+      ? toVerifier({ ...ruled, pendingRejection: null })
+      : terminate(ruled, { type: "DONE" });
+  }
+  const { rulings } = event;
+  const units = rulings === null
+    ? rejection.units
+    : rejection.units.filter((unit) => rulings[unit.id] === "UPHELD");
+  const overruled = rejection.units.filter((unit) => !units.includes(unit));
   const upheldState: LoopState = {
     ...ruled,
     adjudicatedHeads: [...state.adjudicatedHeads, rejection.head],
-    upheldAdjudication: { head: rejection.head, reasoning: event.reasoning.trim() },
+    upheldAdjudication: {
+      head: rejection.head,
+      reasoning: event.reasoning.trim(),
+      ruledScenarios: rulings !== null,
+    },
   };
-  const feedback = rejectionFeedback(upheldState, rejection);
+  const overruledLine = overruled.length === 0
+    ? []
+    : [`The adjudicator overruled: ${overruled.map((unit) => unit.id).join(", ")}.`];
+  const { latestReviewerFeedback, latestReviewerPublic } = rejectionFeedback(upheldState, {
+    ...rejection,
+    units,
+    report: renderRejection({ units, whiteBox: rejection.whiteBox }, "text"),
+  });
+  const feedback = {
+    latestReviewerFeedback: [latestReviewerFeedback, ...overruledLine].join("\n\n"),
+    latestReviewerPublic: [latestReviewerPublic, ...overruledLine].join("\n\n"),
+  };
   return advanceAttempt(
     { ...upheldState, ...feedback },
     {
