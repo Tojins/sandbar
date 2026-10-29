@@ -48,6 +48,14 @@ describe("parseScenarioRunner (#238)", () => {
     });
   });
 
+  it("reads each line continuing an Evidence: line as another path", () => {
+    const block = "### S2: FAIL\nObserved: empty\nEvidence: S2/rows.txt\n  S2/list.png\n";
+    expect(parse(answer(block))).toMatchObject({
+      kind: "REPORTED",
+      outcomes: [{ id: "S1" }, { id: "S2", evidence: ["S2/rows.txt", "S2/list.png"] }, { id: "S3" }],
+    });
+  });
+
   it("takes the last token and the last block", () => {
     const quoted = answer("### S1: FAIL\nObserved: draft", "`<scenario-runner>REPORTED</scenario-runner>`");
     expect(parse(`${quoted}\n${answer(GOOD)}`)).toMatchObject({

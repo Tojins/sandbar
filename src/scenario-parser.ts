@@ -9,8 +9,8 @@
 // The block holds one scenario per `### S<n>: <title>` heading, ids S1..Sn in
 // order. Under it come a `needs:` line (distinct members of SCENARIO_NEEDS), an
 // `area:` line (repo-relative paths, which need not exist at the seed), then
-// the clauses: Given+, When+, Then+, with `And` extending the clause above it.
-// Blank lines are ignored; a line indented two or more spaces continues the
+// the clauses: Given+, When+, Then+, with `And` extending the clause above it;
+// a comma straight after the keyword (`And, …`) is dropped. Blank lines are ignored; a line indented two or more spaces continues the
 // clause above it. Any other line is a violation. A set holds 1 to
 // MAX_SCENARIOS scenarios: the cap protects a runner's context budget and is
 // never what sizes the set, which is the prompt's job. Every violation is
@@ -121,7 +121,8 @@ type Draft = {
   current: Clause | null;
 };
 
-// A clause line's first word, and the clause it opens or extends.
+// A clause line's first word, less a comma after it, and the clause it opens
+// or extends.
 const CLAUSE_WORDS: ReadonlyMap<string, Clause | "and"> = new Map([
   ["Given", "given"],
   ["When", "when"],
@@ -130,7 +131,7 @@ const CLAUSE_WORDS: ReadonlyMap<string, Clause | "and"> = new Map([
 ]);
 
 const HEADING = /^### (S\d+):(.*)$/;
-const WORDS = /^(\S+)(?:\s+(.*))?$/;
+const WORDS = /^(\S+?),?(?:\s+(.*))?$/;
 const FIELD_LINE = /^(needs|area):(.*)$/;
 const GLOB = /[*?[\]{}!]/;
 

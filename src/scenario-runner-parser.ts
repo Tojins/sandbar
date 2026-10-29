@@ -7,8 +7,9 @@
 // tempered `<scenario-results>` block, which holds one `### S<n>: PASS|FAIL|
 // UNVERIFIED` heading per scenario the runner was given. Under a heading come
 // `Observed:`, `Evidence:` and `Reason:` lines; a line indented two or more
-// spaces continues the line above it, blank lines are ignored, and any other
-// line is a violation. A FAIL needs `Observed` and at least one `Evidence`, and
+// spaces continues the `Observed:` or `Reason:` line above it, or under
+// `Evidence:` names another path. Blank lines are ignored, and any other line
+// is a violation. A FAIL needs `Observed` and at least one `Evidence`, and
 // every path it cites must exist; an UNVERIFIED needs `Reason`; a PASS may cite
 // evidence. An evidence path names a file under the scenario's own directory,
 // `S<n>/…`, relative to `run/`, with no `.`/`..` segment and no glob.
@@ -49,7 +50,7 @@ type Draft = {
   readonly evidence: string[];
   reason: string | null;
   // The field the next indented line continues.
-  current: { readonly field: Field; readonly index: number } | null;
+  current: Field | null;
   readonly problems: string[];
 };
 
@@ -160,7 +161,7 @@ function setField(draft: Draft, field: Field, value: string, at: string): void {
   }
   if (field === "Evidence") {
     draft.evidence.push(value);
-    draft.current = { field, index: draft.evidence.length - 1 };
+    draft.current = field;
     return;
   }
   const key = field === "Observed" ? "observed" : "reason";
@@ -169,17 +170,17 @@ function setField(draft: Draft, field: Field, value: string, at: string): void {
     return;
   }
   draft[key] = value;
-  draft.current = { field, index: 0 };
+  draft.current = field;
 }
 
 function continueField(draft: Draft, text: string, at: string): void {
   const { current } = draft;
   if (current === null) {
     draft.problems.push(`${at}: an indented continuation line with no line above it to continue.`);
-  } else if (current.field === "Evidence") {
-    draft.evidence[current.index] = `${draft.evidence[current.index]} ${text}`;
+  } else if (current === "Evidence") {
+    draft.evidence.push(text);
   } else {
-    const key = current.field === "Observed" ? "observed" : "reason";
+    const key = current === "Observed" ? "observed" : "reason";
     draft[key] = `${draft[key]} ${text}`;
   }
 }
