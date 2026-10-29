@@ -119,6 +119,16 @@ describe("parseScenarioWriter grammar", () => {
       .toContain("`And` with no Given");
   });
 
+  it.each([
+    ["Given a state", "Given, before the migration, a state", { given: ["before the migration, a state"] }],
+    ["When an action", "When, once saved, an action", { when: ["once saved, an action"] }],
+    ["Then an outcome", "Then, after a reload, an outcome", { then: ["after a reload, an outcome"] }],
+    ["Then an outcome", "Then an outcome\nAnd, on a second record, the same", { then: ["an outcome", "on a second record, the same"] }],
+  ])("accepts a comma after the keyword in place of %j",(line, replacement, clauses) => {
+    expect(parseScenarioWriter(written(scenario(1).replace(line, replacement))))
+      .toMatchObject({ kind: "WRITTEN", scenarios: [clauses] });
+  });
+
   it("joins an indented line onto the clause above it", () => {
     const block = scenario(1).replace("Then an outcome", "Then an outcome\n   spanning two lines");
     expect(parseScenarioWriter(written(block))).toMatchObject({
