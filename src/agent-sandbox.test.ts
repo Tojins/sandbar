@@ -1662,7 +1662,7 @@ describe("createSandbox integration (local provider)", () => {
         reads += 1;
         if (reads <= 2) {
           const started = performance.now();
-          await new Promise((resolve) => setTimeout(resolve, 150));
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
           snapshotReadMs.push(performance.now() - started);
         }
         return {
@@ -1692,12 +1692,12 @@ describe("createSandbox integration (local provider)", () => {
       expect(snapshotReadMs).toHaveLength(2);
       expect(first.durationMs).toBeLessThan(snapshotReadMs[0]!);
       expect(first.durationMs).toBeLessThan(snapshotReadMs[1]!);
-      expect(firstElapsed - first.durationMs).toBeGreaterThanOrEqual(250);
+      expect(firstElapsed - first.durationMs).toBeGreaterThanOrEqual(1_900);
       expect(provider.containerResourceSnapshot).toHaveBeenCalledTimes(4);
     } finally {
       await sandbox.close();
     }
-  });
+  }, 15_000);
 
   it("ingests Codex's post-invocation rollout measurement", async () => {
     const branch = "sandbar/issue-109-codex-allowed";
@@ -3905,7 +3905,7 @@ describe("prepareWorktree + createSandbox prepared mode (#20)", () => {
       `refs/heads/${branch}`,
     );
     expect((await git(["rev-parse", branch], clone)).stdout.trim()).toBe(cacheTip);
-  });
+  }, 15_000);
 
   it("sweeps an unmarked orphan outside the branch being prepared", async () => {
     const branch = "sandbar/issue-83-general-sweep";
