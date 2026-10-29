@@ -82,7 +82,7 @@ function protocolLabels(labels: LabelConfig): readonly Omit<SyncedLabel, "from">
     {
       name: WAITING_LABEL,
       description: "Held out of sandbar's queue until the label comes off",
-      color: "fbca04",
+      color: "d4c5f9",
     },
     {
       name: AUTO_LAND_LABEL,
