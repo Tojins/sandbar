@@ -21,11 +21,15 @@ import {
   type ChunkWrapupAdapter,
   LAND_HOTFIX_LABEL,
   LAND_LABEL,
+  JANITOR_RESIDUE_BANNER,
+  type JanitorLandTarget,
   type PullRequestSummary,
   refuseLandRequest,
+  selectJanitorReconciliations,
   selectLandRequests,
   selectReconciliations,
   wrapUpLandedChunk,
+  wrapUpLandedJanitor,
 } from "./chunk-land.js";
 import { NEEDS_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
 import type { ResolveAttemptSummary } from "./resolve-loop.js";
@@ -204,6 +208,29 @@ describe("selectLandRequests (#64)", () => {
       pullRequest: 9,
       landLabels: [LAND_LABEL],
     }]);
+  });
+
+  it("answers a configured janitor task's rolling branch as a janitor target, never a chunk (#205)", () => {
+    const selection = selectLandRequests(
+      [
+        pr(9, "sandbar/janitor-docs", "Idle task: docs", [LAND_LABEL, LAND_HOTFIX_LABEL]),
+        pr(10, "sandbar/janitor-unconfigured"),
+        pr(11, "sandbar/chunk-42-alpha"),
+      ],
+      [],
+      [],
+      new Set(["docs"]),
+    );
+
+    expect(selection.janitor).toEqual([{
+      task: "docs",
+      branch: "sandbar/janitor-docs",
+      title: "Idle task: docs",
+      pullRequest: 9,
+      landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL],
+    }]);
+    expect(selection.requests.map((request) => request.branch)).toEqual(["sandbar/chunk-42-alpha"]);
+    expect(selection.refusals).toEqual([]);
   });
 });
 
@@ -429,6 +456,9 @@ function makeWrapupAdapter(
       async deleteChunkBranch(b, members) {
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
         return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
+      },
+      async deleteJanitorBranch(b) {
+        record("deleteJanitorBranch", b);
       },
     },
   };
@@ -739,6 +769,77 @@ describe("wrapUpLandedChunk (#64)", () => {
       "deleted on origin, but their cached issue refs could not be removed atomically",
     );
     expect(r.residue.join("\n")).toContain("cannot lock ref");
+  });
+});
+
+describe("janitor branches on the source branch (#205)", () => {
+  const janitorTarget: JanitorLandTarget = {
+    task: "docs",
+    branch: "sandbar/janitor-docs",
+    title: "Idle task: docs",
+    pullRequest: 9,
+    landLabels: [LAND_LABEL, LAND_HOTFIX_LABEL],
+  };
+
+  it("takes every landing label off, closes the pull request and deletes the branch, writing to no issue", async () => {
+    const { adapter, calls } = makeWrapupAdapter();
+    const log: string[] = [];
+
+    const r = await wrapUpLandedJanitor(janitorTarget, adapter, (line) => { log.push(line); });
+
+    expect(r).toEqual({ target: janitorTarget, branchDeleted: true, residue: [] });
+    expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
+      `removePullRequestLabel 9:${LAND_LABEL}`,
+      `removePullRequestLabel 9:${LAND_HOTFIX_LABEL}`,
+      "closePullRequest 9",
+      "deleteJanitorBranch sandbar/janitor-docs",
+    ]);
+    expect(log).toEqual([
+      "janitor sandbar/janitor-docs: PR #9 closed",
+      "janitor sandbar/janitor-docs: deleted on origin",
+    ]);
+  });
+
+  it("still deletes the branch when the pull request writes fail, and reports them as residue", async () => {
+    const { adapter, calls } = makeWrapupAdapter({
+      removePullRequestLabel: "gh down",
+      closePullRequest: "gh down",
+    });
+
+    const r = await wrapUpLandedJanitor(janitorTarget, adapter, () => undefined);
+
+    expect(r.branchDeleted).toBe(true);
+    expect(r.residue).toHaveLength(2);
+    expect(calls.at(-1)).toEqual({ op: "deleteJanitorBranch", arg: "sandbar/janitor-docs" });
+  });
+
+  it("keeps a branch whose delete failed, so the reconciler retries it", async () => {
+    const { adapter } = makeWrapupAdapter({ deleteJanitorBranch: "stale info" });
+
+    const r = await wrapUpLandedJanitor(janitorTarget, adapter, () => undefined);
+
+    expect(r.branchDeleted).toBe(false);
+    expect(r.residue.join("\n")).toContain("stale info");
+    expect(JANITOR_RESIDUE_BANNER({ wrapups: [r], sourceBranch: "main" }))
+      .toContain("retried by the next recompute's reconciler");
+  });
+
+  it("only deletes a branch with no pull request to act on", async () => {
+    const { adapter, calls } = makeWrapupAdapter();
+
+    await wrapUpLandedJanitor({ ...janitorTarget, pullRequest: 0, landLabels: [] }, adapter, () => undefined);
+
+    expect(calls).toEqual([{ op: "deleteJanitorBranch", arg: "sandbar/janitor-docs" }]);
+  });
+
+  it("selects every landed janitor branch for reconciliation, configured or not, with its pull request", () => {
+    expect(selectJanitorReconciliations(
+      ["sandbar/chunk-42-alpha", "sandbar/janitor-docs", "sandbar/janitor-gone"],
+      [pr(9, "sandbar/janitor-docs", "Idle task: docs", [])],
+    )).toEqual([
+      { task: "docs", branch: "sandbar/janitor-docs", title: "Idle task: docs", pullRequest: 9, landLabels: [] },
+      { task: "gone", branch: "sandbar/janitor-gone", title: "", pullRequest: 0, landLabels: [] },
+    ]);
   });
 });
 

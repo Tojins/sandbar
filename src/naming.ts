@@ -484,6 +484,8 @@ export const ORIGIN_JANITOR_BRANCH_FETCH_REFSPECS: readonly string[] = [
   `+refs/heads/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*:refs/remotes/origin/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*`,
 ];
 
+export const ORIGIN_JANITOR_BRANCH_REFGLOB = `refs/remotes/origin/${BRANCH_PREFIX}${JANITOR_BRANCH_INFIX}*`;
+
 // `git for-each-ref --format=%(refname:short)` renders the remote-tracking
 // namespaces above as `origin/<branch>`. Membership consumers need the branch
 // half; keeping that conversion here leaves the shape parsers below strict to

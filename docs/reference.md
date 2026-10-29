@@ -374,6 +374,10 @@ which has a draft pull request titled `Idle task: <name>`. A run with nothing
 to change, or one that is rejected, changes nothing on GitHub. An admissible
 issue that needs the slot pre-empts a running task, and so does a `land`
 label on its pull request; while the label is there the task does not run.
+That label lands the branch like a chunk's: gate-2 and the resolve loop, the
+landing window, and the same comment when it cannot land. Once landed, sandbar
+closes the pull request and deletes the branch, and so it does for a rolling
+branch found already merged into the source branch.
 Once that pull request is merged or closed, the next run starts a fresh branch,
 and a run under way is discarded.
 When the source branch moves, a run first merges it into the rolling branch;

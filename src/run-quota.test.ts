@@ -250,6 +250,11 @@ vi.mock("./chunk-follow-up.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./chunk-follow-up.js")>(),
   realAdapter: vi.fn(() => ({})), routeChunkReviewFollowUps: vi.fn(async () => []),
 }));
+// The janitor's ledger and ref reads; a land-labelled task is never due.
+vi.mock("./janitor.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./janitor.js")>(),
+  dueJanitorTask: vi.fn(async () => null),
+}));
 vi.mock("./chunk-reconcile.js", () => ({
   fetchLandRequestPullRequests: seams.landRequestPullRequests,
   reconcileLandedChunks: seams.reconcile,
@@ -365,7 +370,7 @@ const resolution = (plan: ReturnType<typeof issue>[]) => ({
 });
 const summary = (merged: ReturnType<typeof issue>[], pushed = true) => ({
   merged, chunkLanded: [], skipped: [], pushed, unclosed: [], mergedChunks: [],
-  deferredChunks: [], skippedChunks: [], refreshedChunks: [],
+  mergedJanitors: [], deferredChunks: [], skippedChunks: [], refreshedChunks: [],
   failedChunkRefreshes: [],
 });
 const chunkWrapup = (
@@ -423,7 +428,7 @@ describe("run quota orchestration (#109)", () => {
     seams.removeChunkPullRequestLabel.mockReset();
     seams.removeChunkPullRequestLabel.mockResolvedValue(undefined);
     seams.reconcile.mockReset();
-    seams.reconcile.mockResolvedValue({ reconciled: [], closedIssues: [] });
+    seams.reconcile.mockResolvedValue({ reconciled: [], closedIssues: [], janitors: [] });
     seams.emit.mockReset();
     seams.emit.mockImplementation(async (event: Record<string, unknown>) => {
       seams.events.push(event);
@@ -630,7 +635,7 @@ describe("run quota orchestration (#109)", () => {
     }) => {
       const reconciled = { ...wrapup, durationMs: 37 };
       await options.onReconciled?.(reconciled);
-      return { reconciled: [reconciled], closedIssues: [383] };
+      return { reconciled: [reconciled], closedIssues: [383], janitors: [] };
     });
     vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
@@ -665,6 +670,7 @@ describe("run quota orchestration (#109)", () => {
     seams.reconcile.mockResolvedValueOnce({
       reconciled: [{ ...wrapup, durationMs: 1 }],
       closedIssues: [383],
+      janitors: [],
     });
     seams.merger.mockResolvedValue(summary([]));
     vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
@@ -3756,7 +3762,72 @@ describe("run quota orchestration (#109)", () => {
       expect(seams.merger).toHaveBeenCalledOnce();
       expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkLanding).toEqual({
         requests: [{ ...target, landLabels: ["land-hotfix"] }],
+        janitor: [],
         sourceBranch: "main",
+      });
+    });
+
+    describe("a janitor task's land request (#205)", () => {
+      const janitorPr = {
+        number: 77, headRefName: "sandbar/janitor-docs", title: "Idle task: docs", labels: ["land"],
+      };
+      const janitorTarget = {
+        task: "docs", branch: "sandbar/janitor-docs", title: "Idle task: docs",
+        pullRequest: 77, landLabels: ["land"],
+      };
+      const runJanitorAt = async (now: Date): Promise<void> => {
+        seams.plan.mockResolvedValue(resolution([]));
+        seams.landRequestPullRequests.mockImplementation(async () =>
+          seams.merger.mock.calls.length > 0 ? [] : [janitorPr]
+        );
+        vi.mocked(fetchOriginRefs)
+          .mockResolvedValueOnce({ sourceChanged: false, failures: [] })
+          .mockRejectedValueOnce(new Error("stop after a second poll"));
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(now);
+        vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+          throw new Error(`EXIT:${code}`);
+        }) as never);
+        try {
+          await expect(run({
+            ...config,
+            landingWindow,
+            janitor: { tasks: [{ name: "docs", prompt: "standards", runsPerDay: 1 }] },
+            maxParallelIssues: 1,
+            pollIntervalMs: 1,
+          })).rejects.toThrow("EXIT:1");
+        } finally {
+          vi.useRealTimers();
+        }
+      };
+
+      it("hands it to the merger and records its landing", async () => {
+        seams.merger.mockImplementation(async (
+          _batch: unknown, _adapter: unknown, _log: unknown, _gate: unknown,
+          options: RunMergerOptions,
+        ) => {
+          await options.observations.onOutcome({ kind: "janitor-on-source", target: janitorTarget, durationMs: 5 });
+          return { ...summary([]), mergedJanitors: [{ target: janitorTarget, branchDeleted: true, residue: [] }] };
+        });
+
+        await runJanitorAt(OPEN);
+
+        expect((seams.merger.mock.calls[0]?.[4] as RunMergerOptions).chunkLanding).toEqual({
+          requests: [],
+          janitor: [janitorTarget],
+          sourceBranch: "main",
+        });
+        expect(eventsOf("janitor-land")).toEqual([expect.objectContaining({
+          task: "docs", branch: "sandbar/janitor-docs", pullRequest: 77, outcome: "landed", durationMs: 5,
+        })]);
+      });
+
+      it("holds it while the landing window is closed", async () => {
+        await runJanitorAt(CLOSED);
+
+        expect(seams.merger).not.toHaveBeenCalled();
+        expect(seams.commentOnChunkPullRequest).toHaveBeenCalledOnce();
+        expect(seams.commentOnChunkPullRequest).toHaveBeenCalledWith(77, expect.stringContaining("landing window"));
       });
     });
 

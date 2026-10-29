@@ -172,7 +172,9 @@
 // counted by the stuck backstop — but holds one slot until it has settled:
 // admission, drains and the idle event count it. A candidate it keeps out, a
 // `land` on its own pull request, or any stop aborts it (`preempt-janitor`),
-// and its end wakes the scheduler (`janitor-finished`). With no tasks
+// and its end wakes the scheduler (`janitor-finished`). That `land` is a land
+// request like a chunk's: it waits for a closed landing window, then the
+// merger lands the branch and retires it, and the source moved. With no tasks
 // configured, none of this reads a ledger or asks the forge anything.
 // Agent and branch images are replaced as one bundle and captured by each
 // admission, so a poll cannot change the images beneath in-flight work.
@@ -289,6 +291,7 @@ import {
   runStampFromDate,
   startEventRecord,
   type EventInput,
+  type EventSubject,
   type RecomputeTrigger,
 } from "./events.js";
 import {
@@ -341,7 +344,7 @@ import {
   type OriginLockHandle,
   type OriginLockRenewal,
 } from "./origin-lock.js";
-import { type RunScope, janitorTaskFromBranch, runScope } from "./naming.js";
+import { JANITOR_BRANCH_INFIX, type RunScope, runScope } from "./naming.js";
 import { type JanitorRunDeps, dueJanitorTask, realJanitorForge, runJanitor, settleJanitorRun } from "./janitor.js";
 import {
   MergerError,
@@ -365,6 +368,9 @@ import {
   CHUNK_LAND_WINDOW_PR_COMMENT,
   CHUNK_RESIDUE_RETIRED_BANNER,
   type ChunkLandTarget,
+  JANITOR_RESIDUE_BANNER,
+  type JanitorLandTarget,
+  type JanitorWrapup,
   chunkForgeWrites,
   chunkResidue,
   describeChunkBranchDrift,
@@ -2018,6 +2024,37 @@ export async function run(
     if (landingFailure === null) throw primaryFailure;
   };
 
+  const janitorLandEvent = (
+    target: JanitorLandTarget,
+    outcome: Extract<EventInput, { kind: "janitor-land" }>["outcome"],
+    durationMs: number,
+  ): Extract<EventInput, { kind: "janitor-land" }> => ({
+    kind: "janitor-land",
+    task: target.task,
+    branch: target.branch,
+    pullRequest: target.pullRequest,
+    outcome,
+    durationMs,
+  });
+
+  // Never halts: a janitor branch kept on origin is retried by the reconciler.
+  const reportJanitorResidue = async (wrapups: readonly JanitorWrapup[]): Promise<void> => {
+    const untidy = wrapups.filter((wrapup) => wrapup.residue.length > 0);
+    if (untidy.length === 0) return;
+    await runRecord.emit({
+      kind: "complaint",
+      severity: "warning",
+      message: JANITOR_RESIDUE_BANNER({ wrapups: untidy, sourceBranch: config.sourceBranch }),
+    });
+  };
+
+  // Whom a landing's gate-2 or resolve attempt is about: an issue by number, or
+  // the idle task a `janitor-<task>` id names (#205).
+  const landingSubject = (id: string): EventSubject =>
+    id.startsWith(JANITOR_BRANCH_INFIX)
+      ? { janitor: id.slice(JANITOR_BRANCH_INFIX.length) }
+      : { issue: Number(id) };
+
   const recordLandingOutcome = async (outcome: MergerOutcome): Promise<void> => {
     switch (outcome.kind) {
       case "merged":
@@ -2102,6 +2139,15 @@ export async function run(
           });
           return;
         }
+      case "janitor-on-source":
+        await runRecord.emit(janitorLandEvent(outcome.target, "landed", outcome.durationMs));
+        return;
+      case "janitor-parked":
+        await runRecord.emit({
+          ...janitorLandEvent(outcome.target, "parked", outcome.durationMs),
+          reason: outcome.reason,
+        });
+        return;
       case "chunk-refreshed":
         failedBaseRefreshes.delete(outcome.refresh.branch);
         await runRecord.emit({
@@ -2574,7 +2620,10 @@ export async function run(
           target: chunk.target,
           durationMs: chunk.durationMs,
         }),
+        onJanitorReconciled: (janitor) =>
+          runRecord.emit(janitorLandEvent(janitor.target, "reconciled", janitor.durationMs)).then(() => undefined),
       });
+      await reportJanitorResidue(reconciliation.janitors);
       if (reconciliation.reconciled.length > 0) {
         // Same exclusion the merger's own closes get (#16): the listing
         // endpoint the planner uses lags a close by seconds, so an
@@ -2657,16 +2706,18 @@ export async function run(
           }) });
       }
 
-      // What a human has asked to land, less any chunk the reconciliation just
+      // What a human has asked to land, less any branch the reconciliation just
       // finished off: it is not merged again by the merge phase (its branch is
       // gone by then, which the merger would park on).
-      const reconciledBranches = new Set(
-        reconciliation.reconciled.map((chunk) => chunk.target.branch),
-      );
+      const reconciledBranches = new Set([
+        ...reconciliation.reconciled.map((chunk) => chunk.target.branch),
+        ...reconciliation.janitors.map((janitor) => janitor.target.branch),
+      ]);
       const landRequestSelection = selectLandRequests(
         landPullRequests.filter((pr) => !reconciledBranches.has(pr.headRefName)),
         resolution.landedChunks,
         resolution.chunkNameDrifts,
+        new Set(config.janitor?.tasks.map((task) => task.name)),
       );
       for (const refusal of landRequestSelection.refusals) {
         await runRecord.emit({
@@ -2682,6 +2733,21 @@ export async function run(
       // `land-hotfix` one; `landing-window.ts` owns what waits and how.
       const closedUntil = landingClosedUntil(config.landingWindow, new Date());
       if (closedUntil === null) toldLandingWindow.clear();
+      // Whether the closed window holds this request, telling its pull
+      // request once per closure.
+      const heldByLandingWindow = async (
+        request: ChunkLandTarget | JanitorLandTarget,
+      ): Promise<boolean> => {
+        if (closedUntil === null || !waitsForLandingWindow(request)) return false;
+        if (!toldLandingWindow.has(request.pullRequest)) {
+          await chunkRequestWrites.commentOnPullRequest(
+            request.pullRequest,
+            CHUNK_LAND_WINDOW_PR_COMMENT({ sourceBranch: config.sourceBranch, closedUntil }),
+          );
+          toldLandingWindow.add(request.pullRequest);
+        }
+        return true;
+      };
       const landDeferrals = new Map<string, string>();
       // Deferred requests no pass may land, not even one started for other
       // work: the merger never sees them.
@@ -2693,26 +2759,25 @@ export async function run(
           heldOffSource.add(request.branch);
         } else if (request.rework.length > 0) {
           landDeferrals.set(request.branch, deferredLandReason(request.rework));
-        } else if (closedUntil !== null && waitsForLandingWindow(request)) {
+        } else if (await heldByLandingWindow(request)) {
           landDeferrals.set(request.branch, `landing window closed · lands after ${closedUntil}`);
           heldOffSource.add(request.branch);
-          if (!toldLandingWindow.has(request.pullRequest)) {
-            await chunkRequestWrites.commentOnPullRequest(
-              request.pullRequest,
-              CHUNK_LAND_WINDOW_PR_COMMENT({ sourceBranch: config.sourceBranch, closedUntil }),
-            );
-            toldLandingWindow.add(request.pullRequest);
-          }
         }
       }
       const landRequests = selectedLandRequests.filter(
         (request) => !landDeferrals.has(request.branch),
       );
+      // Labelled janitor pull requests (#205) the window does not hold. A run
+      // of the task in flight is pre-empted, so none grows the branch.
+      const janitorLandRequests: JanitorLandTarget[] = [];
+      for (const request of landRequestSelection.janitor) {
+        if (!(await heldByLandingWindow(request))) janitorLandRequests.push(request);
+      }
       const mergerLandRequests = selectedLandRequests.filter(
         (request) => !heldOffSource.has(request.branch),
       );
-      if (landRequests.length > 0) {
-        const named = landRequests
+      if (landRequests.length > 0 || janitorLandRequests.length > 0) {
+        const named = [...landRequests, ...janitorLandRequests]
           .map((r) => `${r.branch} (PR #${r.pullRequest})`)
           .join(", ");
         await runRecord.emit({ kind: "reconcile", action: "land-requested", detail: named });
@@ -2751,10 +2816,7 @@ export async function run(
 
       // The idle janitor (#205): which configured tasks carry `land` on their
       // pull request, and the task due next when no run is in flight.
-      const janitorLandLabelled = new Set(landPullRequests.flatMap((pr) => {
-        const task = janitorTaskFromBranch(pr.headRefName);
-        return task === null ? [] : [task];
-      }));
+      const janitorLandLabelled = new Set(landRequestSelection.janitor.map((request) => request.task));
       const dueJanitor = config.janitor === null || janitor.run !== null
         ? null
         : await dueJanitorTask({
@@ -2805,7 +2867,7 @@ export async function run(
         hasPendingTerminals: pool.hasPendingTerminals,
         hasCandidates: pool.hasUnstarted(resolution.plan),
         hasRetries: pool.hasRetries,
-        hasLandRequests: landRequests.length > 0,
+        hasLandRequests: landRequests.length > 0 || janitorLandRequests.length > 0,
         hasChunkRefreshRequests: plannedRefreshes.length > 0,
         hasCapacity: activeSlots() < config.maxParallelIssues,
         noProgressSinceLanding: pool.noProgressSinceLanding,
@@ -2824,7 +2886,8 @@ export async function run(
       const pollDidWork =
         sourceChangedOnPoll || planDiagnosticsChanged ||
         followUps.length > 0 || laneNotices.length > 0 ||
-        reconciliation.reconciled.length > 0 || landRequests.length > 0 ||
+        reconciliation.reconciled.length > 0 || reconciliation.janitors.length > 0 ||
+        landRequests.length > 0 || janitorLandRequests.length > 0 ||
         landRequestSelection.refusals.length > 0 ||
         heldTerminals.length > 0 ||
         chunkRefreshes.length > 0 ||
@@ -3027,7 +3090,7 @@ export async function run(
       // the other.
       if (
         completedIssues.length > 0 || landRequests.length > 0 ||
-        chunkRefreshes.length > 0
+        janitorLandRequests.length > 0 || chunkRefreshes.length > 0
       ) {
         const landingImages = currentImages;
         // The merger runs in a dedicated worktree detached at
@@ -3166,7 +3229,7 @@ export async function run(
                 const usage = usageFields(record, record.rateLimit);
                 await runRecord.emit({
                   kind: "resolve-attempt",
-                  issue: Number(record.issueId),
+                  ...landingSubject(record.issueId),
                   attempt: record.attempt,
                   container: record.container,
                   end: record.end,
@@ -3202,7 +3265,7 @@ export async function run(
                   return runRecord.emit({
                     kind: "gate",
                     gate: "gate-2",
-                    issue: Number(issueId),
+                    ...landingSubject(issueId),
                     ...(planned ? { title: planned.title } : {}),
                     ok: gate.ok,
                     durationMs: gate.durationMs,
@@ -3219,10 +3282,11 @@ export async function run(
               // another reason still lets the merger observe the ones deferred
               // for rework: it re-defers them and says so on their pull
               // requests (#64, #168).
-              ...(mergerLandRequests.length > 0
+              ...(mergerLandRequests.length > 0 || janitorLandRequests.length > 0
                 ? {
                     chunkLanding: {
                       requests: mergerLandRequests,
+                      janitor: janitorLandRequests,
                       sourceBranch: config.sourceBranch,
                     },
                   }
@@ -3469,6 +3533,7 @@ export async function run(
           }) });
         haltReasons.push("chunk-wrapup-incomplete");
       }
+      await reportJanitorResidue(mergerSummary?.mergedJanitors ?? []);
 
       // Post-push close failures (issue #14): the merges are durable on origin
       // and Phase 4b above already dropped `ready-for-agent` for every merged
@@ -3509,7 +3574,8 @@ export async function run(
       // would exit stuck after six landed issues. Chunk landings are pushed
       // as they happen, independently of `pushed`, which is the source push.
       const sourceLandings = mergerSummary && mergerSummary.pushed
-        ? mergerSummary.merged.length + mergerSummary.mergedChunks.length
+        ? mergerSummary.merged.length + mergerSummary.mergedChunks.length +
+          mergerSummary.mergedJanitors.length
         : 0;
       const landedNow = sourceLandings + (mergerSummary?.chunkLanded.length ?? 0);
       pool.recordLandingOutcome(
@@ -3517,8 +3583,8 @@ export async function run(
         landedNow,
       );
       nextPlanTrigger =
-        landRequests.length > 0 || chunkRefreshes.length > 0 ||
-          landedNow > 0
+        landRequests.length > 0 || janitorLandRequests.length > 0 ||
+          chunkRefreshes.length > 0 || landedNow > 0
         ? "landing-finished"
         : "terminal-finalized";
       if (sourceLandings > 0) {

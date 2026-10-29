@@ -22,6 +22,7 @@ const summary = (over: Partial<MergerSummary> = {}): MergerSummary => ({
   pushed: false,
   unclosed: [],
   mergedChunks: [],
+  mergedJanitors: [],
   deferredChunks: [],
   skippedChunks: [],
   refreshedChunks: [],

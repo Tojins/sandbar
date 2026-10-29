@@ -43,7 +43,7 @@
 // instead (`EventSubject`), are feed lines tagged with that task and drive
 // one header row — the task and its phase, gone once its loop finishes — and
 // never reach the pool, waiting or finished tables. Its runner's
-// `janitor-start` and `janitor-run` are feed lines.
+// `janitor-start`, `janitor-run` and `janitor-land` are feed lines.
 
 import type {
   GateStepEvent,
@@ -417,6 +417,12 @@ function feedText(event: RunEvent): FeedEvent | null {
         (event.cause === undefined ? "" : ` · ${event.cause}`) +
         (event.pullRequest === undefined ? "" : ` · PR #${event.pullRequest}`);
       tone = event.outcome === "committed" ? "good" : event.outcome === "failed" ? "warn" : "dim";
+      break;
+    case "janitor-land":
+      text = `janitor ${event.task} ${event.outcome}` +
+        (event.reason === undefined ? "" : ` · ${event.reason}`) +
+        (event.pullRequest === 0 ? "" : ` · PR #${event.pullRequest}`);
+      tone = event.outcome === "parked" ? "bad" : "good";
       break;
     case "follow-up":
       text = event.detail;

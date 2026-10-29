@@ -119,7 +119,9 @@ With `config.janitor` (#205), an idle daemon runs the next due task
 under its task name, beside the pool in one slot. Only a DONE run is pushed,
 onto its rolling `sandbar/janitor-<task>` branch and draft PR;
 `preempt-janitor` aborts a run for any stop, a `land` on its PR, or work
-its slot keeps out.
+its slot keeps out. That `land` is landed by the merger like a chunk with no
+members and retired by `wrapUpLandedJanitor` (`chunk-land.ts`), as the
+reconciler retires a janitor branch already on the source (#233).
 With `config.databaseCopies`, every recompute reads the base import's outcome
 (`createDbBaseWatch`, #201) into `db-base` events and stale/failed complaints,
 and measures the database volume into the same storage latch as the
@@ -196,7 +198,7 @@ a written set.
   check 1.5k + the issue anchor; scenario writer 2.4k + the issue anchor;
   a janitor task anchor (`prompts/janitor-task.md`, in place of the issue
   anchor) 1.0k + its scope + its prompt source;
-  resolve 1.2k + anchor + paths/trace; reflect
+  resolve 1.2k + anchor (0.2k for a janitor branch) + paths/trace; reflect
   tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser
   1.3k + the thread (no anchor). The issue anchor (median 5.6k, max 41k
   measured, #197) has sandbar's traces and quoted reviewer prose dropped and,

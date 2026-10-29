@@ -174,6 +174,14 @@
 // is frozen and `run.ts` holds its members off it, so this is the backstop:
 // work merely in flight to the chunk defers nothing.
 //
+// An idle janitor task's labelled rolling branch (#205) is a land request too,
+// merged after the chunks in the same pass and parked with the same comments.
+// It has no members, so no snapshot and no deferral: `run.ts` pre-empts a run
+// of that task, so nothing grows the branch. Its resolve prompt names the task
+// in place of an issue (`resolve-janitor-anchor.md`), and its gate-2 and
+// resolve attempts are filed under `janitor-<task>`. Its wrap-up is
+// `wrapUpLandedJanitor`, which writes to no issue.
+//
 // The WRAP-UP runs only after the source branch has moved: close every member
 // ON THE BRANCH explicitly (the git-derived ones — a component member that was
 // never worked has no commits here and must not be closed; and no `Closes #N`
@@ -380,12 +388,15 @@ import {
   type ChunkLandTarget,
   type ChunkBranchRetirement,
   type ChunkWrapup,
+  type JanitorLandTarget,
+  type JanitorWrapup,
   LAND_LABEL,
   type PullRequestCloseOutcome,
   chunkLandDeferral,
   chunkForgeWrites,
   removeLandLabels,
   wrapUpLandedChunk,
+  wrapUpLandedJanitor,
 } from "./chunk-land.js";
 import { chunkMembersOnBranch, chunkPullRequestContent } from "./chunk-pr.js";
 import {
@@ -446,12 +457,14 @@ import {
   type IssueData,
 } from "./issue-anchor.js";
 import { parseBlockedBy, readChunkMemberRefs } from "./plan-resolver.js";
+import { loadTemplate, render } from "./prompts.js";
 import {
   ORIGIN_MEMBER_BRANCH_FETCH_REFSPECS,
   memberBranchName,
   issueBranchName,
   issueMergeSubject,
   issueNumberFromBranch,
+  janitorStackId,
   type RunScope,
   resolveNetworkNameFor,
   scopedResourcePrefix,
@@ -734,6 +747,9 @@ export type MergeUnit = {
   // `Merge sandbar/issue-<n>: <title>` — which is wrong for anything that is
   // not one issue's branch, so a chunk supplies its own.
   readonly mergeMessage?: string;
+  // The resolve prompt's primary anchor, for a unit no issue is behind: an
+  // idle janitor branch (#205). Absent ⇒ the issue `id` names.
+  readonly anchor?: string;
 };
 
 // What one `attemptMerge` did to the worktree, with the tracker deliberately
@@ -973,6 +989,8 @@ export type MergerAdapter = ResolveAdapter & {
     memberIssues: readonly number[],
     sourceBranch: string,
   ): Promise<ChunkBranchRetirement>;
+  // A landed janitor branch's delete (#205); see `ChunkWrapupAdapter`.
+  deleteJanitorBranch(branch: string): Promise<void>;
   commentOnPullRequest(pr: number, body: string): Promise<void>;
   // Takes `land` back off, which is what stops a request being honoured
   // again. The wrap-up drops it when a chunk lands; the merge loop drops it on
@@ -1012,6 +1030,8 @@ export type SkipReason =
 export type ChunkLandingOptions = {
   // What a human asked for: one target per open pull request carrying `land`.
   readonly requests: readonly ChunkLandTarget[];
+  // The same for configured idle janitor tasks' rolling branches (#205).
+  readonly janitor: readonly JanitorLandTarget[];
   // Named rather than derived, because this is the one thing the merge loop has
   // never had to know. The prose a member and a pull request are told has to
   // say where the work went, and `MergeTarget` only ever needed a noun phrase.
@@ -1024,27 +1044,36 @@ export type ChunkRefreshFailure = {
   readonly comment: string;
 };
 
-// One request with its destination attached — the form the merge loop carries a
-// chunk landing in, so that the two halves of `ChunkLandingOptions` never have
-// to be reunited by a defaulted local. Internal: what leaves this module is
-// `ChunkWrapup`, which names the target alone.
-type ChunkLandingUnit = {
-  readonly target: ChunkLandTarget;
-  readonly sourceBranch: string;
-};
+// What a `land` label asks the source pass to merge: a reviewed chunk (#64), or
+// an idle janitor task's rolling branch (#205), which has no members to
+// snapshot, defer on or close. Internal: what leaves this module is
+// `ChunkWrapup` or `JanitorWrapup`, which name the target alone.
+type LandUnit =
+  | { readonly kind: "chunk"; readonly target: ChunkLandTarget }
+  | { readonly kind: "janitor"; readonly target: JanitorLandTarget };
 
-// The same, once origin's copy of the chunk branch has been fetched and merged.
-// `ref` is what `fetchChunkRef` resolved — `refs/remotes/origin/<chunk>` — and
+// A land unit once origin's copy of its branch has been fetched and merged
+// onto HEAD, with its destination attached, so that the two halves of
+// `ChunkLandingOptions` never have to be reunited by a defaulted local.
+// `ref` is what `fetchChunkRef` resolved — `refs/remotes/origin/<branch>` — and
 // it is the ONLY name for those commits that resolves in the merger worktree:
 // that worktree hangs off the bare cache, whose imported `refs/heads/*` are
 // deleted on import (`repo-cache.ts`), and nothing sandbar does creates a local
 // chunk head afterwards (`preflight.ts` — the merger pushes from a detached
 // HEAD). So every prompt that names these commits has to name this, not
 // `request.branch`.
-type FetchedChunkUnit = ChunkLandingUnit & { readonly ref: string };
-type MergedChunkUnit = FetchedChunkUnit & {
+type MergedLandUnit = LandUnit & {
+  readonly sourceBranch: string;
+  readonly ref: string;
   readonly durationMs: number;
 };
+
+// The key a land unit's gate-2 and resolve attempts are filed under: a chunk
+// and its own root issue landing in one cycle must not overwrite each other.
+const landUnitKey = (unit: LandUnit): string =>
+  unit.kind === "chunk" ? `chunk-${unit.target.root}` : janitorStackId(unit.target.task);
+
+const JANITOR_RESOLVE_ANCHOR = loadTemplate("resolve-janitor-anchor");
 
 // A member whose branch is on its chunk's branch AND that branch is on origin
 // (#60). Recorded only after the push, so the label finalise applies from it
@@ -1121,6 +1150,9 @@ export type MergerSummary = {
   // orchestrator halts on it — the chunk branch is kept in that case, so the
   // next run's reconciler retries exactly the writes that failed.
   readonly mergedChunks: readonly ChunkWrapup[];
+  // Requested janitor branches landed on the source branch this cycle
+  // (#205), each with its wrap-up. Empty on a partial, like `mergedChunks`.
+  readonly mergedJanitors: readonly JanitorWrapup[];
   // Requested chunks this cycle grew before it could land them (#61 + #64).
   // The label is untouched, so these are a report and never a queue change.
   readonly deferredChunks: readonly DeferredChunkLand[];
@@ -1142,6 +1174,8 @@ export type MergerOutcome =
   | { readonly kind: "chunk-on-source"; readonly target: ChunkLandTarget; readonly durationMs: number }
   | { readonly kind: "chunk-parked"; readonly skipped: SkippedChunkLand; readonly durationMs: number }
   | { readonly kind: "chunk-deferred"; readonly deferred: DeferredChunkLand; readonly durationMs: number }
+  | { readonly kind: "janitor-on-source"; readonly target: JanitorLandTarget; readonly durationMs: number }
+  | { readonly kind: "janitor-parked"; readonly target: JanitorLandTarget; readonly reason: ChunkLandSkipReason; readonly durationMs: number }
   | { readonly kind: "chunk-refreshed"; readonly refresh: ChunkRefresh; readonly durationMs: number }
   | { readonly kind: "chunk-refresh-failed"; readonly failure: ChunkRefreshFailure; readonly durationMs: number };
 
@@ -1731,7 +1765,7 @@ export async function runMergerWithAdapter(
   // requests are going — and pulling them apart means giving the branch a
   // default for the case where there are no requests, which is an invariant
   // held by a sentinel rather than stated. Narrowed once, inside
-  // `landRequestedChunks`, which is the only thing that reads it.
+  // `landRequestedUnits`, which is the only thing that reads it.
   const chunkLanding = opts.chunkLanding;
   const cycle = opts.ongoingIssues ?? issues;
   const projectAnchor = opts.projectAnchor ?? "";
@@ -1783,6 +1817,7 @@ export async function runMergerWithAdapter(
     pushed: false,
     unclosed: [],
     mergedChunks: [],
+    mergedJanitors: [],
     skippedChunks: [...skippedChunks],
     deferredChunks: [...deferredChunks],
     refreshedChunks: [...refreshedChunks],
@@ -1965,7 +2000,7 @@ export async function runMergerWithAdapter(
 
   // ONE chunk branch: base the worktree at origin's copy of it, merge every
   // member of the group on, push, and open or update the review surface.
-  // Named for the same reason `landRequestedChunks` below is — it is one pass
+  // Named for the same reason `landRequestedUnits` below is — it is one pass
   // over one input, and what it leaves behind is exactly the `chunkLanded`
   // entries its members earned by reaching origin.
   //
@@ -2171,13 +2206,44 @@ export async function runMergerWithAdapter(
   // not there — and so, for the same reason, would naming the chunk branch:
   // only `origin/<chunk>` exists here, which is why the caller passes the ref
   // `fetchChunkRef` resolved rather than `request.branch`. See
-  // `MergedChunkUnit`.
-  const chunkMemberRefs = (unit: FetchedChunkUnit): readonly IssueRef[] =>
-    unit.target.members.map((m) => ({
+  // `MergedLandUnit`.
+  const chunkMemberRefs = (target: ChunkLandTarget, ref: string): readonly IssueRef[] =>
+    target.members.map((m) => ({
       id: String(m.number),
       title: m.title,
-      branch: unit.ref,
+      branch: ref,
     }));
+
+  // How `attemptMerge` merges a land unit from `ref`. Both are named for the
+  // BRANCH, not for an issue: `Merge sandbar/issue-<root>` would claim a whole
+  // chunk was one issue's work, and a janitor branch has no issue at all.
+  const landMergeArgs = (unit: LandUnit, ref: string): Parameters<typeof attemptMerge>[0] =>
+    unit.kind === "chunk"
+      ? {
+          unit: {
+            id: String(unit.target.root),
+            title: unit.target.title,
+            branch: ref,
+            mergeMessage: `Merge ${unit.target.branch}: ${unit.target.title}`,
+          },
+          target: SOURCE_TARGET,
+          related: chunkMemberRefs(unit.target, ref),
+          label: `chunk #${unit.target.root}`,
+          gateKey: landUnitKey(unit),
+        }
+      : {
+          unit: {
+            id: landUnitKey(unit),
+            title: unit.target.title,
+            branch: ref,
+            mergeMessage: `Merge ${unit.target.branch}: idle task ${unit.target.task}`,
+            anchor: render(JANITOR_RESOLVE_ANCHOR, { task: unit.target.task }),
+          },
+          target: SOURCE_TARGET,
+          related: [],
+          label: `janitor ${unit.target.task}`,
+          gateKey: landUnitKey(unit),
+        };
 
   // Replace the planner's membership snapshot with the one read from origin
   // at the landing boundary. Titles are display-only and may be absent for a
@@ -2215,31 +2281,35 @@ export async function runMergerWithAdapter(
     };
   };
 
-  // Take `land` back off and say why on the pull request. The chunk itself is
-  // untouched — branch, members and labels all as they were — so what this
-  // costs a human is re-applying one label once they have dealt with whatever
-  // the comment describes.
+  // Take `land` back off and say why on the pull request. The branch itself is
+  // untouched — for a chunk its members and labels too — so what this costs a
+  // human is re-applying one label once they have dealt with whatever the
+  // comment describes.
   //
   // RECORDED FIRST, before either write, on the same argument `landChunkGroup`
   // makes one phase up: the park is a decision already taken — the merge is
-  // reverted and nothing of this chunk is landing this cycle — while the two
+  // reverted and nothing of this unit is landing this cycle — while the two
   // `gh` calls below can throw and halt. A `MergerError.partial` that omitted a
   // pull request already commented on would report a reviewer as untold when
   // they had been told, which is the one thing a partial exists to get right.
-  const parkChunk = async (
-    request: ChunkLandTarget,
+  const parkLandUnit = async (
+    request: LandUnit,
     comment: string,
     reason: ChunkLandSkipReason,
     durationMs: number,
   ): Promise<void> => {
-    const skipped = { target: request, reason };
-    skippedChunks.push(skipped);
-    await opts.observations.onOutcome({ kind: "chunk-parked", skipped, durationMs });
-    if (request.pullRequest > 0) {
-      await adapter.commentOnPullRequest(request.pullRequest, comment);
-      await removeLandLabels(adapter, request);
+    if (request.kind === "chunk") {
+      const skipped = { target: request.target, reason };
+      skippedChunks.push(skipped);
+      await opts.observations.onOutcome({ kind: "chunk-parked", skipped, durationMs });
+    } else {
+      await opts.observations.onOutcome({ kind: "janitor-parked", target: request.target, reason, durationMs });
     }
-    await emit(`chunk ${request.branch}: not landed (${reason})`);
+    if (request.target.pullRequest > 0) {
+      await adapter.commentOnPullRequest(request.target.pullRequest, comment);
+      await removeLandLabels(adapter, request.target);
+    }
+    await emit(`${request.kind} ${request.target.branch}: not landed (${reason})`);
   };
 
   // Say on the pull request that the chunk grew, and leave the label where it
@@ -2275,11 +2345,12 @@ export async function runMergerWithAdapter(
     );
   };
 
-  // Every requested chunk — merged onto HEAD, parked, or deferred — returning
-  // the ones whose commits are now on the composition. Lifted out of the body
-  // because it is one self-contained pass over one input: it reads `adapter`,
-  // `attemptMerge`, `parkChunk` and `deferChunk`, and writes nothing but its
-  // own return value and the two lists those last two append to.
+  // Every requested unit — merged onto HEAD, parked, or (a chunk) deferred —
+  // returning the ones whose commits are now on the composition, chunks first.
+  // Lifted out of the body because it is one self-contained pass over one
+  // input: it reads `adapter`, `attemptMerge`, `parkLandUnit` and `deferChunk`,
+  // and writes nothing but its own return value and the lists those last two
+  // append to.
   //
   // The pairing with `sourceBranch` is where `ChunkLandingOptions` is taken
   // apart, and it happens here rather than as two locals at the top for the
@@ -2287,56 +2358,60 @@ export async function runMergerWithAdapter(
   // cycle that has no requests at all, and an empty string that only ever works
   // because nothing reads it is an invariant held by luck. Inside this function
   // a destination exists because a request does.
-  const landRequestedChunks = async (): Promise<MergedChunkUnit[]> => {
+  const landRequestedUnits = async (): Promise<MergedLandUnit[]> => {
     if (!chunkLanding) return [];
-    const onHead: MergedChunkUnit[] = [];
-    for (const request of chunkLanding.requests) {
+    const { sourceBranch } = chunkLanding;
+    const requests: readonly LandUnit[] = [
+      ...chunkLanding.requests.map((target) => ({ kind: "chunk", target }) as const),
+      ...chunkLanding.janitor.map((target) => ({ kind: "janitor", target }) as const),
+    ];
+    const onHead: MergedLandUnit[] = [];
+    for (const request of requests) {
       const requestTimer = startTimer(opts.clock);
-      const pending: ChunkLandingUnit = {
-        target: request,
-        sourceBranch: chunkLanding.sourceBranch,
-      };
+      const { branch } = request.target;
       try {
-        const deferral = chunkLandDeferral(
-          request,
-          chunkLanded
-            .filter((landing) => landing.chunkBranch === request.branch)
-            .map(({ issue }) => ({ number: issueNumberOf(issue), title: issue.title })),
-        );
-        if (deferral !== null) {
-          await deferChunk(
-            request,
-            deferral.members,
-            pending.sourceBranch,
-            deferral.reason,
-            requestTimer(),
+        if (request.kind === "chunk") {
+          const deferral = chunkLandDeferral(
+            request.target,
+            chunkLanded
+              .filter((landing) => landing.chunkBranch === branch)
+              .map(({ issue }) => ({ number: issueNumberOf(issue), title: issue.title })),
           );
-          continue;
+          if (deferral !== null) {
+            await deferChunk(
+              request.target,
+              deferral.members,
+              sourceBranch,
+              deferral.reason,
+              requestTimer(),
+            );
+            continue;
+          }
         }
-        const found = await adapter.fetchChunkRef(request.branch);
+        const found = await adapter.fetchChunkRef(branch);
         if (found.kind === "unreadable") {
-          // Origin could not be asked, so nothing is known about this chunk —
-          // and `land` is a human's request that only a fact about the chunk
+          // Origin could not be asked, so nothing is known about this branch —
+          // and `land` is a human's request that only a fact about the branch
           // may cancel. Halting keeps the label on for the next run; parking
           // here would drop it and tell a reviewer their branch was deleted on
           // the strength of a proxy hiccup. This is the same class as a push
           // race and it is handled the same way.
           throw new SandbarError(
-            `origin's copy of ${request.branch} could not be read, so there is ` +
-              `no way to tell a deleted chunk branch from an unreachable ` +
+            `origin's copy of ${branch} could not be read, so there is ` +
+              `no way to tell a deleted branch from an unreachable ` +
               `origin: ${found.detail}`,
           );
         }
         if (found.kind === "absent") {
           // Origin was reached and does not have the branch. Either the
-          // reconciler already landed this chunk and deleted it (and the label
-          // is stale), or somebody deleted the branch by hand. Merging the
-          // source branch into itself instead would be a silent no-op that
-          // closed every member of a chunk whose work is nowhere, so this
+          // reconciler already landed it and deleted it (and the label is
+          // stale), or somebody deleted the branch by hand. Merging the
+          // source branch into itself instead would be a silent no-op that,
+          // for a chunk, closed every member whose work is nowhere, so this
           // parks rather than lands.
-          await parkChunk(
+          await parkLandUnit(
             request,
-            CHUNK_BRANCH_MISSING_PR_COMMENT({ chunkBranch: request.branch }),
+            CHUNK_BRANCH_MISSING_PR_COMMENT({ chunkBranch: branch }),
             "branch-missing",
             requestTimer(),
           );
@@ -2346,44 +2421,27 @@ export async function runMergerWithAdapter(
         // that snapshot (including in the immediately preceding Phase A), so
         // close and deletion membership must be derived from the exact ref we
         // are about to merge, never from `request.members`/`closeOrder`.
-        const memberSnapshot = await adapter.fetchChunkMemberRefs(
-          found.ref,
-          pending.sourceBranch,
-        );
-        const unit: FetchedChunkUnit = {
-          ...pending,
-          target: await retargetFetchedChunk(request, memberSnapshot),
-          ref: found.ref,
-        };
-        const outcome = await attemptMerge(
-          {
-            unit: {
-              id: String(request.root),
-              title: request.title,
-              branch: unit.ref,
-              // Named for the BRANCH, not for an issue: what is being merged is
-              // a whole chunk, and `Merge sandbar/issue-<root>` would claim it
-              // was one issue's work.
-              mergeMessage: `Merge ${request.branch}: ${request.title}`,
-            },
-            target: SOURCE_TARGET,
-            related: chunkMemberRefs(unit),
-            label: `chunk #${request.root}`,
-            gateKey: `chunk-${request.root}`,
-          },
-          mergeDeps,
-        );
+        const unit: LandUnit = request.kind === "chunk"
+          ? {
+              kind: "chunk",
+              target: await retargetFetchedChunk(
+                request.target,
+                await adapter.fetchChunkMemberRefs(found.ref, sourceBranch),
+              ),
+            }
+          : request;
+        const outcome = await attemptMerge(landMergeArgs(unit, found.ref), mergeDeps);
         if (outcome.kind === "merged") {
-          onHead.push({ ...unit, durationMs: outcome.durationMs });
-          await opts.observations.onProgress?.(`chunk-${request.root}`, "push");
+          onHead.push({ ...unit, sourceBranch, ref: found.ref, durationMs: outcome.durationMs });
+          await opts.observations.onProgress?.(landUnitKey(unit), "push");
           continue;
         }
         if (outcome.kind === "stack-change") {
-          await parkChunk(
+          await parkLandUnit(
             request,
             CHUNK_LAND_STACK_CHANGE_PR_COMMENT({
-              chunkBranch: request.branch,
-              sourceBranch: pending.sourceBranch,
+              chunkBranch: branch,
+              sourceBranch,
               stackChange: outcome.stackChange,
             }),
             "stack-change",
@@ -2391,18 +2449,18 @@ export async function runMergerWithAdapter(
           );
           continue;
         }
-        await parkChunk(
+        await parkLandUnit(
           request,
           CHUNK_LAND_ABANDONED_PR_COMMENT({
-            chunkBranch: request.branch,
-            sourceBranch: pending.sourceBranch,
+            chunkBranch: branch,
+            sourceBranch,
             mode:
               outcome.kind === "install-failed"
                 ? "install-failed"
                 : outcome.mode,
             reason: outcome.kind === "install-failed" ? "" : outcome.reason,
             // The same diagnostics the auto lane's issue comment carries
-            // (#67). A reviewer reading a parked chunk needs to tell a real
+            // (#67). A reviewer reading a parked unit needs to tell a real
             // collision from a broken container exactly as an issue's author
             // does, and `install-failed` never entered the loop at all.
             attempts: outcome.kind === "install-failed" ? [] : outcome.attempts,
@@ -2413,16 +2471,16 @@ export async function runMergerWithAdapter(
           outcome.durationMs,
         );
       } catch (err) {
-        asHalt(`Chunk landing failed on ${request.branch}`)(err);
+        asHalt(`Landing ${request.kind} ${branch} failed`)(err);
       }
     }
     return onHead;
   };
 
-  // Merged onto HEAD, awaiting the landing. They become `mergedChunks` only
-  // once the source branch has actually moved — the same rule `merged` follows,
-  // and for the same reason.
-  const chunkMergesOnHead = await landRequestedChunks();
+  // Merged onto HEAD, awaiting the landing. They become `mergedChunks` and
+  // `mergedJanitors` only once the source branch has actually moved — the
+  // same rule `merged` follows, and for the same reason.
+  const landsOnHead = await landRequestedUnits();
 
   const sourceLandings: Array<{ issue: IssueRef; durationMs: number }> = [];
   for (const issue of sorted) {
@@ -2441,13 +2499,18 @@ export async function runMergerWithAdapter(
   // disagree with the writes that followed.
   const settleLanding = async (): Promise<MergerSummary> => {
     const mergedChunks: ChunkWrapup[] = [];
-    for (const { target, sourceBranch } of chunkMergesOnHead) {
-      const wrapup = await wrapUpLandedChunk(target, adapter, {
-        sourceBranch,
+    const mergedJanitors: JanitorWrapup[] = [];
+    for (const unit of landsOnHead) {
+      if (unit.kind === "janitor") {
+        mergedJanitors.push(await wrapUpLandedJanitor(unit.target, adapter, emit));
+        continue;
+      }
+      const wrapup = await wrapUpLandedChunk(unit.target, adapter, {
+        sourceBranch: unit.sourceBranch,
         provenance: "sandbar",
         log: (line) => emit(line),
       });
-      mergedChunks.push({ target, ...wrapup });
+      mergedChunks.push({ target: unit.target, ...wrapup });
     }
     return {
       merged,
@@ -2460,6 +2523,7 @@ export async function runMergerWithAdapter(
         emit,
       }),
       mergedChunks,
+      mergedJanitors,
       skippedChunks,
       deferredChunks,
       refreshedChunks: [...refreshedChunks],
@@ -2475,12 +2539,10 @@ export async function runMergerWithAdapter(
         durationMs,
       });
     }
-    for (const { target, durationMs } of chunkMergesOnHead) {
-      await opts.observations.onOutcome({
-        kind: "chunk-on-source",
-        target,
-        durationMs,
-      });
+    for (const unit of landsOnHead) {
+      await opts.observations.onOutcome(unit.kind === "chunk"
+        ? { kind: "chunk-on-source", target: unit.target, durationMs: unit.durationMs }
+        : { kind: "janitor-on-source", target: unit.target, durationMs: unit.durationMs });
     }
   };
 
@@ -2615,7 +2677,7 @@ export async function runMergerWithAdapter(
     };
   };
 
-  if (merged.length === 0 && chunkMergesOnHead.length === 0) {
+  if (merged.length === 0 && landsOnHead.length === 0) {
     // Both halves of that sentence are about the SOURCE branch, and a cycle
     // that landed chunks says so rather than reading as "nothing happened".
     await emit(
@@ -2653,7 +2715,8 @@ export async function runMergerWithAdapter(
     // anchor would be the bottom-most commit in the composition, described to
     // an agent as the top.
     const landingIssues: readonly IssueRef[] = [
-      ...chunkMergesOnHead.flatMap(chunkMemberRefs),
+      ...landsOnHead.flatMap((unit) =>
+        unit.kind === "chunk" ? chunkMemberRefs(unit.target, unit.ref) : []),
       ...merged,
     ];
 
@@ -2742,22 +2805,22 @@ export async function runMergerWithAdapter(
           haltVerified(err);
         }
       }
-      // The chunks in the same composed result (#64). Cycle-level like the
-      // issues beside them and parked the same way: `land` comes off and the
-      // pull request says the forge judged the whole composition, not this
-      // chunk. The revert above already took their merges with it.
-      for (const { target, sourceBranch, durationMs } of chunkMergesOnHead) {
+      // The land requests in the same composed result (#64). Cycle-level like
+      // the issues beside them and parked the same way: `land` comes off and
+      // the pull request says the forge judged the whole composition, not this
+      // branch. The revert above already took their merges with it.
+      for (const unit of landsOnHead) {
         try {
-          await parkChunk(
-            target,
+          await parkLandUnit(
+            unit,
             CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT({
-              chunkBranch: target.branch,
-              sourceBranch,
+              chunkBranch: unit.target.branch,
+              sourceBranch: unit.sourceBranch,
               detail: landing.detail,
               siblings: merged.map((m) => issueNumberOf(m)),
             }),
             "forge-unverified",
-            durationMs,
+            unit.durationMs,
           );
         } catch (err) {
           haltVerified(err);
@@ -2772,8 +2835,8 @@ export async function runMergerWithAdapter(
     await recordSourceLanding();
     await emit(
       `verify landed ${landing.sha} after ${landing.rounds} round(s); closing ${merged.length} issue(s)` +
-        (chunkMergesOnHead.length > 0
-          ? ` and wrapping up ${chunkMergesOnHead.length} chunk(s)`
+        (landsOnHead.length > 0
+          ? ` and wrapping up ${landsOnHead.length} land request(s)`
           : ""),
     );
     return finishWithChunkRefreshes(await settleLanding());
@@ -2847,8 +2910,8 @@ export async function runMergerWithAdapter(
   await recordSourceLanding();
   await emit(
     `push ok; closing ${merged.length} issue(s)` +
-      (chunkMergesOnHead.length > 0
-        ? ` and wrapping up ${chunkMergesOnHead.length} chunk(s)`
+      (landsOnHead.length > 0
+        ? ` and wrapping up ${landsOnHead.length} land request(s)`
         : ""),
   );
   return finishWithChunkRefreshes(await settleLanding());

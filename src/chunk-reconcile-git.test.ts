@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { findLandedChunkBranches } from "./chunk-reconcile.js";
+import { findLandedBranches } from "./chunk-reconcile.js";
 import { readChunkMembers } from "./plan-resolver.js";
 
 const exec = promisify(execFile);
@@ -31,7 +31,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-describe("findLandedChunkBranches (real git)", () => {
+describe("findLandedBranches (real git)", () => {
   let root: string;
   let origin: string;
   let cache: string;
@@ -79,8 +79,18 @@ describe("findLandedChunkBranches (real git)", () => {
   });
 
   it("returns only the chunk branch whose commits are on the source branch", async () => {
-    expect(await findLandedChunkBranches(cache, "main")).toEqual([
+    expect(await findLandedBranches(cache, "main")).toEqual([
       "sandbar/chunk-42-landed",
+    ]);
+  });
+
+  it("returns a janitor branch on the source branch beside the chunks, fetched by the reconciler (#205)", async () => {
+    await git(work, "push", "origin", "main:refs/heads/sandbar/janitor-docs");
+    await git(work, "push", "origin", "sandbar/chunk-77-open:refs/heads/sandbar/janitor-lint");
+
+    expect(await findLandedBranches(cache, "main")).toEqual([
+      "sandbar/chunk-42-landed",
+      "sandbar/janitor-docs",
     ]);
   });
 
@@ -95,7 +105,7 @@ describe("findLandedChunkBranches (real git)", () => {
       "sandbar/chunk-42-landed:refs/heads/sandbar/member-42",
     );
 
-    await findLandedChunkBranches(cache, "main");
+    await findLandedBranches(cache, "main");
 
     expect(await readChunkMembers(cache)).toEqual(
       new Map([
@@ -111,7 +121,7 @@ describe("findLandedChunkBranches (real git)", () => {
     // Not vacuous: the fetch has to SUCCEED for this to be the empty answer
     // rather than the fail-soft one below, and a wildcard refspec that matches
     // nothing is not a git error.
-    expect(await findLandedChunkBranches(cache, "main")).toEqual([]);
+    expect(await findLandedBranches(cache, "main")).toEqual([]);
   });
 
   it("says nothing has landed when the fetch itself failed, however fresh the cache looks", async () => {
@@ -123,7 +133,7 @@ describe("findLandedChunkBranches (real git)", () => {
     // comments on a pull request for a chunk somebody may have already
     // reconciled. Only the failed prune knows the cache cannot be trusted.
     await git(cache, "remote", "set-url", "origin", join(root, "gone.git"));
-    expect(await findLandedChunkBranches(cache, "main")).toEqual([]);
+    expect(await findLandedBranches(cache, "main")).toEqual([]);
     // And the stale ref really is still there, so the guard is what produced
     // the empty answer.
     expect(

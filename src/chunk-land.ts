@@ -253,6 +253,20 @@
 // the only thing that exists. Neither passes a cwd to `gh` — with `--repo`
 // given, gh never looks at a git remote (#34), so there is no directory left
 // for one of them to be wrong about.
+//
+// ---------------------------------------------------------------------------
+// Idle janitor pull requests (#205)
+// ---------------------------------------------------------------------------
+//
+// A `land` on the draft pull request of a configured janitor task's rolling
+// branch, `sandbar/janitor-<task>`, is a `JanitorLandTarget`. The merger lands
+// it in the same source pass, resolve loop and gate-2 as a chunk, with no
+// members to snapshot, defer on or close, and parks it with the same comments.
+// `wrapUpLandedJanitor` then takes the landing labels off, closes the pull
+// request and deletes the branch under a lease, so the task's next run starts
+// fresh. The reconciler does the same to any janitor branch already contained
+// in the source branch. Its residue is reported and never halts: a kept
+// branch is retried by the next recompute's reconciler.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -272,6 +286,7 @@ import { hasNonMergeCommitOutside } from "./git-ops.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
   issueNumberFromBranch,
+  janitorTaskFromBranch,
   memberBranchName,
   ORIGIN_ISSUE_BRANCH_FETCH_REFSPECS,
   ORIGIN_ISSUE_BRANCH_POLL_REFGLOBS,
@@ -326,6 +341,18 @@ export type ChunkLandTarget = {
   readonly landLabels: readonly string[];
 };
 
+// An idle janitor task's rolling branch (#205) whose pull request asks to
+// land, or that already has. No members: its landing closes no issue.
+export type JanitorLandTarget = {
+  readonly task: string;
+  readonly branch: string;
+  // The pull request's title, for the resolve prompt.
+  readonly title: string;
+  // 0 when there is none to act on, as for `ChunkLandTarget`.
+  readonly pullRequest: number;
+  readonly landLabels: readonly string[];
+};
+
 export type ChunkLandDeferral = {
   readonly members: readonly ChunkMember[];
   readonly reason: "ongoing" | "rework";
@@ -367,6 +394,7 @@ const landLabelsOf = (pr: PullRequestSummary | undefined): readonly string[] =>
 export type ChunkLandSelection = {
   readonly requests: readonly ChunkLandTarget[];
   readonly refusals: readonly ChunkLandRefusal[];
+  readonly janitor: readonly JanitorLandTarget[];
 };
 
 const byRoot = (a: ChunkLandTarget, b: ChunkLandTarget): number =>
@@ -419,6 +447,18 @@ function targetFor(
 
 const isTarget = (t: ChunkLandTarget | null): t is ChunkLandTarget => t !== null;
 
+const janitorTargetFor = (
+  task: string,
+  branch: string,
+  pr: PullRequestSummary | undefined,
+): JanitorLandTarget => ({
+  task,
+  branch,
+  title: pr?.title ?? "",
+  pullRequest: pr?.number ?? 0,
+  landLabels: landLabelsOf(pr),
+});
+
 /**
  * The chunks a human has asked to land: one per open pull request carrying
  * `land` whose head is a chunk branch.
@@ -432,19 +472,27 @@ const isTarget = (t: ChunkLandTarget | null): t is ChunkLandTarget => t !== null
  * the graph cannot name the branch: it lands and closes no issue rather than
  * leaving a label nothing reads.
  *
- * A `land` label on a pull request whose head is not a chunk branch is not
- * sandbar's business at all, and is dropped without comment.
+ * A head that is the rolling branch of a configured janitor task (#205) is a
+ * `janitor` target. A `land` label on a pull request whose head is neither is
+ * not sandbar's business at all, and is dropped without comment.
  */
 export function selectLandRequests(
   prs: readonly PullRequestSummary[],
   chunks: readonly LandedChunk[],
   drifts: readonly ChunkBranchDrift[] = [],
+  janitorTasks: ReadonlySet<string> = new Set(),
 ): ChunkLandSelection {
   const chunkByBranch = new Map(chunks.map((c) => [c.branch, c] as const));
   const driftByBranch = new Map(drifts.map((d) => [d.existing, d] as const));
   const requests: ChunkLandTarget[] = [];
   const refusals: ChunkLandRefusal[] = [];
+  const janitor: JanitorLandTarget[] = [];
   for (const pr of pullRequestsByHead(prs).values()) {
+    const task = janitorTaskFromBranch(pr.headRefName);
+    if (task !== null) {
+      if (janitorTasks.has(task)) janitor.push(janitorTargetFor(task, pr.headRefName, pr));
+      continue;
+    }
     const drift = driftByBranch.get(pr.headRefName);
     if (drift && drift.members.length > 0) {
       refusals.push({ ...drift, pullRequest: pr.number, landLabels: landLabelsOf(pr) });
@@ -460,6 +508,7 @@ export function selectLandRequests(
   return {
     requests: requests.sort(byRoot),
     refusals: refusals.sort((a, b) => a.root - b.root),
+    janitor,
   };
 }
 
@@ -490,6 +539,20 @@ export function selectReconciliations(
     .map((branch) => targetFor(branch, chunkByBranch.get(branch), prByHead.get(branch)))
     .filter(isTarget)
     .sort(byRoot);
+}
+
+// The janitor rolling branches (#205) among `landedBranches`, whatever task
+// they name: one already on the source branch is retired like a chunk with no
+// members, configured or not.
+export function selectJanitorReconciliations(
+  landedBranches: readonly string[],
+  prs: readonly PullRequestSummary[],
+): readonly JanitorLandTarget[] {
+  const prByHead = pullRequestsByHead(prs);
+  return [...new Set(landedBranches)].flatMap((branch) => {
+    const task = janitorTaskFromBranch(branch);
+    return task === null ? [] : [janitorTargetFor(task, branch, prByHead.get(branch))];
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -821,6 +884,10 @@ export type ChunkWrapupAdapter = {
     memberIssues: readonly number[],
     sourceBranch: string,
   ): Promise<ChunkBranchRetirement>;
+  // Delete a landed janitor branch (#205) on origin, leased on the tip the
+  // cache's remote-tracking ref names: the one the landing merged or the
+  // reconciler found contained, so a push since then keeps the branch.
+  deleteJanitorBranch(branch: string): Promise<void>;
 };
 
 /**
@@ -1089,6 +1156,36 @@ export function chunkForgeWrites(deps: {
         );
       }
     },
+    async deleteJanitorBranch(branch) {
+      const what = `failed to delete the landed janitor branch ${branch} on origin`;
+      let tip: string;
+      try {
+        const { stdout } = await exec(
+          "git",
+          ["rev-parse", "--verify", `refs/remotes/origin/${branch}`],
+          { cwd: deps.gitCwd },
+        );
+        tip = stdout.trim();
+      } catch (err) {
+        throw wrap(what, err);
+      }
+      await deps.beforeOriginWrite();
+      try {
+        await exec(
+          "git",
+          [
+            "push",
+            `--force-with-lease=refs/heads/${branch}:${tip}`,
+            "origin",
+            "--delete",
+            `refs/heads/${branch}`,
+          ],
+          { cwd: deps.gitCwd },
+        );
+      } catch (err) {
+        throw wrap(what, err);
+      }
+    },
   };
 }
 
@@ -1341,6 +1438,60 @@ export async function wrapUpLandedChunk(
     keptIssueBranches,
   };
 }
+
+export type JanitorWrapup = {
+  readonly target: JanitorLandTarget;
+  // True iff the branch was deleted on origin; while it is not, the
+  // reconciler finds it contained and retries.
+  readonly branchDeleted: boolean;
+  readonly residue: readonly string[];
+};
+
+/**
+ * Retire a janitor branch (#205) that is on the source branch: take the
+ * landing labels off its pull request, close it (merged counts) and delete the
+ * branch under a lease, so the task's next run starts fresh. No issue is
+ * written to. Each forge write that fails is residue and the rest still run;
+ * a failed log write propagates, as in `wrapUpLandedChunk`.
+ */
+export async function wrapUpLandedJanitor(
+  target: JanitorLandTarget,
+  adapter: Pick<ChunkWrapupAdapter, "removePullRequestLabel" | "closePullRequest" | "deleteJanitorBranch">,
+  log: (line: string) => void | Promise<void>,
+): Promise<JanitorWrapup> {
+  const residue: string[] = [];
+  if (target.pullRequest > 0) {
+    try {
+      await removeLandLabels(adapter, target);
+    } catch (err) {
+      residue.push(`the pull request #${target.pullRequest} for ${target.branch} kept its landing label: ${detail(err)}`);
+    }
+    try {
+      const outcome = await adapter.closePullRequest(target.pullRequest);
+      await log(`janitor ${target.branch}: PR #${target.pullRequest} ${outcome}`);
+    } catch (err) {
+      residue.push(`the pull request #${target.pullRequest} for ${target.branch} could not be closed: ${detail(err)}`);
+    }
+  }
+  try {
+    await adapter.deleteJanitorBranch(target.branch);
+  } catch (err) {
+    residue.push(`${target.branch} is kept on origin so the next run retries its delete: ${detail(err)}`);
+    return { target, branchDeleted: false, residue };
+  }
+  await log(`janitor ${target.branch}: deleted on origin`);
+  return { target, branchDeleted: true, residue };
+}
+
+export const JANITOR_RESIDUE_BANNER = (args: {
+  readonly wrapups: readonly JanitorWrapup[];
+  readonly sourceBranch: string;
+}): string =>
+  `Sandbar retired ${args.wrapups.length} idle task branch(es) on ` +
+  `\`${args.sourceBranch}\` with some bookkeeping left over:\n` +
+  args.wrapups.flatMap((w) => w.residue).map((r) => `  ${r}`).join("\n") +
+  "\nA branch still on origin is retried by the next recompute's reconciler; " +
+  "the rest is cosmetic.";
 
 // ---------------------------------------------------------------------------
 // Reading the residue back: three classes, and only one of them is retried

@@ -52,6 +52,9 @@ function fakeAdapter(
         record("deleteChunkBranch", `${b} [${members.join(",")}]`);
         return { deletedIssueBranches: [], keptIssueBranches: [], cache: "updated" };
       },
+      async deleteJanitorBranch(b) {
+        record("deleteJanitorBranch", b);
+      },
     },
   };
 }
@@ -110,7 +113,7 @@ describe("reconcileLandedChunks (#64)", () => {
       },
     });
 
-    expect(r).toEqual({ reconciled: [], closedIssues: [] });
+    expect(r).toEqual({ reconciled: [], closedIssues: [], janitors: [] });
     expect(calls).toEqual([]);
     expect(prQueries).toBe(0);
   });
@@ -155,6 +158,33 @@ describe("reconcileLandedChunks (#64)", () => {
       op: "deleteChunkBranch",
       arg: "sandbar/chunk-42-c [42]",
     });
+  });
+
+  it("retires a janitor branch already on the source branch and records it (#205)", async () => {
+    const { adapter, calls } = fakeAdapter();
+    const recorded: unknown[] = [];
+    const r = await reconcileLandedChunks({
+      repoDir: REPO_DIR,
+      repo: REPO,
+      sourceBranch: "main",
+      chunks: [],
+      adapter,
+      beforeOriginWrite: async () => undefined,
+      findLanded: async () => ["sandbar/janitor-docs"],
+      findPullRequests: async () => [
+        { number: 9, headRefName: "sandbar/janitor-docs", title: "Idle task: docs", labels: [LAND_LABEL] },
+      ],
+      onJanitorReconciled: (janitor) => { recorded.push(janitor.target.task); },
+    });
+
+    expect(r.reconciled).toEqual([]);
+    expect(r.janitors.map((janitor) => janitor.branchDeleted)).toEqual([true]);
+    expect(recorded).toEqual(["docs"]);
+    expect(calls).toEqual([
+      { op: "removePullRequestLabel", arg: `9:${LAND_LABEL}` },
+      { op: "closePullRequest", arg: "9" },
+      { op: "deleteJanitorBranch", arg: "sandbar/janitor-docs" },
+    ]);
   });
 
   it("deletes a landed branch the derivation knows nothing about", async () => {

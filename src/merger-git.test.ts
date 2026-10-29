@@ -411,6 +411,27 @@ describe("realAdapter chunk primitives (real bare cache + standalone clone)", ()
     expect(await originHas("refs/heads/sandbar/member-1")).toBeNull();
   });
 
+  // #205 — a landed janitor branch is deleted only at the tip the landing
+  // fetched: a push since then is not lost with it.
+  it("deletes a landed janitor branch at the tip it fetched, and keeps one origin moved since", async () => {
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/janitor-docs");
+    const a = adapter();
+    expect((await a.fetchChunkRef("sandbar/janitor-docs")).kind).toBe("present");
+    await a.deleteJanitorBranch("sandbar/janitor-docs");
+    expect(await originHas("refs/heads/sandbar/janitor-docs")).toBeNull();
+
+    await git(seed, "push", "-q", "origin", "main:refs/heads/sandbar/janitor-lint");
+    expect((await a.fetchChunkRef("sandbar/janitor-lint")).kind).toBe("present");
+    await commit(seed, "late.txt", "pushed after the landing fetched\n");
+    await git(seed, "push", "-q", "origin", "HEAD:refs/heads/sandbar/janitor-lint");
+    const late = await git(seed, "rev-parse", "HEAD");
+
+    await expect(a.deleteJanitorBranch("sandbar/janitor-lint")).rejects.toThrow(
+      "failed to delete the landed janitor branch sandbar/janitor-lint",
+    );
+    expect(await originHas("refs/heads/sandbar/janitor-lint")).toBe(late);
+  });
+
   it("reports a cache refresh failure separately after origin accepted the chunk (#175)", async () => {
     await commit(wt, "durable.txt", "member work\n");
     await git(wt, "branch", "sandbar/issue-7-member", "HEAD");
