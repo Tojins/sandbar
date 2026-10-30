@@ -351,6 +351,7 @@ import {
   type OriginLockRenewal,
 } from "./origin-lock.js";
 import { type RunScope, janitorTaskFromStackId, runScope } from "./naming.js";
+import type { ResolveAgentRun } from "./resolve-loop.js";
 import { type JanitorRunDeps, dueJanitorTask, realJanitorForge, runJanitor, settleJanitorRun } from "./janitor.js";
 import {
   MergerError,
@@ -2063,6 +2064,23 @@ export async function run(
     return { issue: Number(id.startsWith("chunk-") ? id.slice("chunk-".length) : id) };
   };
 
+  // The fields a merger agent attempt's event shares, resolve or landing pass.
+  const mergerAttemptFields = (record: ResolveAgentRun & { readonly attempt: number }) => {
+    const usage = usageFields(record, record.rateLimit);
+    return {
+      attempt: record.attempt,
+      container: record.container,
+      end: record.end,
+      exitCode: record.exitCode,
+      signal: record.signal,
+      durationMs: record.durationMs,
+      provider: config.mergerAgent,
+      model: config.mergerModelId,
+      ...(usage === undefined ? {} : { usage }),
+      ...containerResourcesOf(record),
+    };
+  };
+
   const recordLandingOutcome = async (outcome: MergerOutcome): Promise<void> => {
     switch (outcome.kind) {
       case "merged":
@@ -3232,23 +3250,32 @@ export async function run(
               // the path, which is what the abandon comment points at.
               onResolveAttempt: async (key, record) => {
                 const path = await landingLogger.writeResolveAttempt(key, record);
-                const usage = usageFields(record, record.rateLimit);
                 await runRecord.emit({
                   kind: "resolve-attempt",
                   ...landingSubject(record.issueId),
-                  attempt: record.attempt,
-                  container: record.container,
-                  end: record.end,
-                  exitCode: record.exitCode,
-                  signal: record.signal,
-                  durationMs: record.durationMs,
-                  provider: config.mergerAgent,
-                  model: config.mergerModelId,
-                  ...(usage === undefined ? {} : { usage }),
-                  ...containerResourcesOf(record),
+                  ...mergerAttemptFields(record),
                 });
                 return path;
               },
+              // #258: each landing-pass attempt beside them, recorded against
+              // the unit it ran for.
+              ...(config.landingPass === null ? {} : {
+                landingPass: {
+                  settings: config.landingPass,
+                  sourceBranch: config.sourceBranch,
+                  onAttempt: async (key, record) => {
+                    const path = await landingLogger.writeLandingPassAttempt(key, record);
+                    await runRecord.emit({
+                      kind: "landing-pass-attempt",
+                      ...landingSubject(record.unit),
+                      ...mergerAttemptFields(record),
+                      outcome: record.outcome,
+                      commits: record.commits,
+                    });
+                    return path;
+                  },
+                },
+              }),
               observations: {
                 onProgress: async (key, step) => {
                   const request = landRequests.find(

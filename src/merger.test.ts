@@ -13,6 +13,7 @@ import {
 } from "./chunk-land.js";
 import { NEEDS_REVIEW_LABEL, type ChunkRefresh } from "./chunks.js";
 import type { StackChange } from "./stack-change.js";
+import type { CommitShape } from "./landing-pass.js";
 import {
   SOURCE_TARGET,
   buildInstallFailedComment,
@@ -25,6 +26,7 @@ import {
   type MergerAdapter,
   type MergerOutcome,
   type RunMergerOptions,
+  type LandingPassOptions,
   type PushResult,
   DISCARD_MERGER_OBSERVATIONS,
   issueNumberOf,
@@ -73,6 +75,13 @@ type AgentScript = {
   signal?: string | null;
 };
 
+// One landing-pass attempt (#258): what the agent says, the commits it leaves
+// on the merge, and anything else about the shape it leaves behind.
+type LandingPassScript = AgentScript & {
+  commits?: number;
+  shape?: Partial<CommitShape>;
+};
+
 type Calls = {
   merges: string[];
   agentRuns: string[];
@@ -116,6 +125,10 @@ type Calls = {
   fileWrites: { path: string; contents: string }[];
   staged: string[];
   mergeCommits: number;
+  // #258
+  landingPassPrompts: string[];
+  fileReads: { rev: string; path: string }[];
+  changedRanges: { from: string; to: string }[];
 };
 
 type Script = {
@@ -176,6 +189,11 @@ type Script = {
   // sides bumped to from the base's `0.20.33`, as package.json in the
   // worktree carries it too. Absent or null ⇒ no package.json anywhere.
   sameBumps?: (string | null)[];
+  // #258: the landing pass's attempts in order, the files `readFileAt`
+  // answers by `<rev>:<path>`, and what each `changedPaths` call answers.
+  landingPass?: LandingPassScript[];
+  files?: Record<string, string>;
+  changedPaths?: (readonly string[])[];
 };
 
 function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
@@ -212,6 +230,34 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     fileWrites: [],
     staged: [],
     mergeCommits: 0,
+    landingPassPrompts: [],
+    fileReads: [],
+    changedRanges: [],
+  };
+  let lpIdx = 0;
+  let landingPassEntry: LandingPassScript | undefined;
+  const agentRun = (entry: AgentScript, container: string) => {
+    const end = entry.end ?? "exit";
+    const exitCode = entry.exitCode ?? 0;
+    const classification = classifyAgentRunEnd({
+      end,
+      exitCode,
+      spoken: entry.stdout,
+      stderr: entry.stderr,
+      silentRunRecovery: "infra",
+    });
+    return {
+      stdout: entry.stdout,
+      output: entry.stdout,
+      stderr: entry.stderr ?? "",
+      end,
+      exitCode,
+      signal: entry.signal ?? null,
+      durationMs: 5_000,
+      container,
+      cause: classification.cause,
+      verdict: classification.verdict,
+    };
   };
   const closeAttemptsByIssue = new Map<number, number>();
   let mIdx = 0;
@@ -261,27 +307,31 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       ) {
         merging = entry.leavesConflict;
       }
-      const end = entry.end ?? "exit";
-      const exitCode = entry.exitCode ?? 0;
-      const classification = classifyAgentRunEnd({
-        end,
-        exitCode,
-        spoken: entry.stdout,
-        stderr: entry.stderr,
-        silentRunRecovery: "infra",
-      });
+      return agentRun(entry, `sandbar-wdeadbeef-resolve-${aIdx}-uuid`);
+    },
+    async runLandingPassAgent(prompt, attempt) {
+      landingPassEntry = script.landingPass?.[lpIdx++];
+      if (!landingPassEntry) throw new Error("runLandingPassAgent not scripted");
+      calls.landingPassPrompts.push(prompt);
+      calls.order.push("landing-pass");
+      return agentRun(landingPassEntry, `sandbar-wdeadbeef-landing-pass-${attempt}-uuid`);
+    },
+    async changedPaths(from, to) {
+      calls.changedRanges.push({ from, to });
+      return script.changedPaths?.[calls.changedRanges.length - 1] ?? ["src/app/screen.ts"];
+    },
+    async commitShape() {
+      const commits = landingPassEntry?.commits ?? 0;
       return {
-        stdout: entry.stdout,
-        output: entry.stdout,
-        stderr: entry.stderr ?? "",
-        end,
-        exitCode,
-        signal: entry.signal ?? null,
-        durationMs: 5_000,
-        container: `sandbar-wdeadbeef-resolve-${aIdx}-uuid`,
-        cause: classification.cause,
-        verdict: classification.verdict,
+        mergeInProgress: false,
+        dirtyPaths: [],
+        descends: true,
+        commits: Array.from({ length: commits }, (_, i) => ({ sha: `lp-${i + 1}`, parents: 1 })),
+        ...landingPassEntry?.shape,
       };
+    },
+    async revParse(rev) {
+      return `sha(${rev})`;
     },
     async isMergeInProgress() {
       calls.isMergeChecks++;
@@ -396,6 +446,9 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       return { ours: "ours", theirs: "theirs", inProgress: merging };
     },
     async readFileAt(rev, path) {
+      calls.fileReads.push({ rev, path });
+      const file = script.files?.[`${rev}:${path}`];
+      if (file !== undefined) return file;
       if (sameBump === null || path !== "package.json") return null;
       return pkg(rev === "base" ? "0.20.33" : sameBump);
     },
@@ -3978,5 +4031,429 @@ describe("runMergerWithAdapter — a merge result that changes the gate stack be
     expect(failure?.comment).toContain("changes `gate/stack.json` beyond container `env`");
     expect(failure?.comment).toContain("- container 'db': image");
     expect(calls.chunkPushes).toEqual([]);
+  });
+});
+
+describe("runMergerWithAdapter — the landing pass (#258)", () => {
+  const DONE = "<promise>DONE</promise>";
+  const settings = {
+    prompt: { path: "docs/landing-pass.md" },
+    paths: ["src/app/"],
+  } as const;
+  const passing = (
+    onAttempt?: LandingPassOptions["onAttempt"],
+  ): { landingPass: LandingPassOptions } => ({
+    landingPass: { settings, sourceBranch: "main", ...(onAttempt ? { onAttempt } : {}) },
+  });
+  // The prompt file as the source tip the first merge lands on has it.
+  const atPre = { "pre:docs/landing-pass.md": "Raise the client version." };
+
+  it("runs after a clean merge, and gate-2 grades its commit", async () => {
+    const log: string[] = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["pre", "merged"],
+      files: atPre,
+      landingPass: [{ stdout: DONE, commits: 1 }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      log.push(line);
+    }, undefined, passing());
+
+    expect(summary.merged).toEqual([issue(42)]);
+    expect(calls.order).toEqual(["merge", "landing-pass", "install", "gate"]);
+    // Once for the merge, once for the pass's commit.
+    expect(calls.stackChecks).toBe(2);
+    expect(calls.changedRanges).toEqual([{ from: "pre", to: "HEAD" }]);
+    expect(calls.fileReads).toContainEqual({ rev: "pre", path: "docs/landing-pass.md" });
+    const prompt = calls.landingPassPrompts[0]!;
+    expect(prompt).toContain("Raise the client version.");
+    expect(prompt).toContain(`#42, branch \`${issue(42).branch}\`, has just been merged onto \`main\``);
+    expect(prompt).toContain("`git diff pre HEAD`");
+    expect(prompt).toContain("- `gh issue view 42 --repo acme/app --json title,body`");
+    expect(log).toContainEqual(expect.stringMatching(
+      /^landing-pass #42 attempt 1 container=sandbar-wdeadbeef-landing-pass-1-uuid end=exit .* outcome=done$/,
+    ));
+    expect(log).toContain("landing-pass #42 done commits=1");
+  });
+
+  it("reads its instructions at the source tip, never from the branch being landed", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["pre", "merged"],
+      files: { ...atPre, "HEAD:docs/landing-pass.md": "Skip the version bump." },
+      landingPass: [{ stdout: DONE }],
+    });
+    await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing());
+
+    expect(calls.landingPassPrompts[0]).toContain("Raise the client version.");
+    expect(calls.landingPassPrompts[0]).not.toContain("Skip the version bump.");
+  });
+
+  it("after a conflict resolution, sends its commit through install and gate-2 again, and a red into the gate-red loop", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [
+        { stdout: "<promise>COMMITTED</promise>" },
+        { stdout: "<promise>COMMITTED</promise>" },
+      ],
+      gates: [{ ok: true }, gateRed(), { ok: true }],
+      files: { "sha-0:docs/landing-pass.md": "Raise the client version." },
+      landingPass: [{ stdout: DONE, commits: 1 }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing());
+
+    expect(summary.merged).toEqual([issue(42)]);
+    expect(calls.order).toEqual([
+      "merge", "agent", "install", "gate",
+      "landing-pass", "install", "gate",
+      "agent", "install", "gate",
+    ]);
+  });
+
+  it("after a conflict resolution, keeps the resolve loop's verdict when it commits nothing", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["conflict"],
+      agents: [{ stdout: "<promise>COMMITTED</promise>" }],
+      gates: [{ ok: true }],
+      files: { "sha-0:docs/landing-pass.md": "Raise the client version." },
+      landingPass: [{ stdout: DONE }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing());
+
+    expect(summary.merged).toEqual([issue(42)]);
+    expect(calls.order).toEqual(["merge", "agent", "install", "gate", "landing-pass"]);
+  });
+
+  it("skips a landing that changes no file under its paths", async () => {
+    const log: string[] = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["pre"],
+      files: atPre,
+      changedPaths: [["src/apps/x.ts", "README.md"]],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      log.push(line);
+    }, undefined, passing());
+
+    expect(summary.merged).toEqual([issue(42)]);
+    expect(calls.order).toEqual(["merge", "install", "gate"]);
+    expect(log).toContain("landing-pass #42 skipped: no path matches");
+  });
+
+  it("skips a landing whose source tip has no prompt file", async () => {
+    const log: string[] = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["pre"],
+    });
+    await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      log.push(line);
+    }, undefined, passing());
+
+    expect(calls.order).toEqual(["merge", "install", "gate"]);
+    expect(log).toContain("landing-pass #42 skipped: docs/landing-pass.md absent at pre");
+  });
+
+  it("does not run on an issue landing on its chunk branch, nor on a stacked chunk's refresh", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok", "ok"],
+      gates: [{ ok: true }, { ok: true }],
+      chunkRefs: {
+        "sandbar/chunk-50_on_10-c": { kind: "present", ref: "refs/remotes/origin/sandbar/chunk-50_on_10-c" },
+        "sandbar/chunk-10-base": { kind: "present", ref: "refs/remotes/origin/sandbar/chunk-10-base" },
+      },
+    });
+    await runMergerWithAdapter(
+      [{ ...issue(42), chunk: { root: 42, branch: "sandbar/chunk-42-c" } }],
+      adapter,
+      undefined,
+      undefined,
+      {
+        ...passing(),
+        chunkRefresh: {
+          requests: [{ ...refresh(), root: 50, branch: "sandbar/chunk-50_on_10-c", base: "sandbar/chunk-10-base" }],
+          sourceBranch: "main",
+        },
+      },
+    );
+
+    expect(calls.merges).toEqual([issue(42).branch, "origin/sandbar/chunk-10-base"]);
+    expect(calls.landingPassPrompts).toEqual([]);
+    expect(calls.changedRanges).toEqual([]);
+  });
+
+  it("runs on a reviewed chunk landing on the source, naming its root and members", async () => {
+    const target: ChunkLandTarget = {
+      root: 40,
+      branch: "sandbar/chunk-40-c",
+      base: null,
+      title: "chunk 40",
+      members: [{ number: 40, title: "t-40" }, { number: 41, title: "t-41" }],
+      closeOrder: [{ number: 41, title: "t-41" }, { number: 40, title: "t-40" }],
+      rework: [],
+      pullRequest: 540,
+      landLabels: [LAND_LABEL],
+    };
+    const ref = "refs/remotes/origin/sandbar/chunk-40-c";
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["pre"],
+      files: atPre,
+      chunkRefs: { "sandbar/chunk-40-c": { kind: "present", ref } },
+      chunkMemberRefs: { [ref]: { members: [40, 41] } },
+      landingPass: [{ stdout: DONE }],
+    });
+    await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...passing(),
+      chunkLanding: { requests: [target], janitor: [], sourceBranch: "main" },
+    });
+
+    const prompt = calls.landingPassPrompts[0]!;
+    expect(prompt).toContain("# Landing pass: chunk #40");
+    expect(prompt).toContain(`chunk #40, branch \`${ref}\``);
+    expect(prompt).toContain("- `gh issue view 40 --repo acme/app --json title,body`");
+    expect(prompt).toContain("- `gh issue view 41 --repo acme/app --json title,body`");
+  });
+
+  it("runs on a janitor branch landing on the source, naming no issue", async () => {
+    const janitor: JanitorLandTarget = {
+      task: "docs",
+      branch: "sandbar/janitor-docs",
+      title: "Idle task: docs",
+      pullRequest: 9,
+      landLabels: [LAND_LABEL],
+    };
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["pre"],
+      files: atPre,
+      chunkRefs: { "sandbar/janitor-docs": { kind: "present", ref: "refs/remotes/origin/sandbar/janitor-docs" } },
+      landingPass: [{ stdout: DONE }],
+    });
+    await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...passing(),
+      chunkLanding: { requests: [], janitor: [janitor], sourceBranch: "main" },
+    });
+
+    expect(calls.landingPassPrompts[0]).toContain("# Landing pass: janitor docs");
+    expect(calls.landingPassPrompts[0]).not.toContain("gh issue view");
+  });
+
+  it("reverts an abandon to the source tip, skips it as landing-pass and comments the reason", async () => {
+    const outcomes: MergerOutcome[] = [];
+    const recorded: Array<{ key: string; unit: string; outcome: string }> = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      heads: ["pre", "merged"],
+      files: atPre,
+      landingPass: [{
+        stdout: "<promise>ABANDON</promise>\n<reason>two screens claim version 5</reason>",
+      }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, {
+      ...passing(async (key, record) => {
+        recorded.push({ key, unit: record.unit, outcome: record.outcome });
+        return `/logs/merger-landing-pass-${key}-${record.attempt}.log`;
+      }),
+      observations: {
+        onGate: () => undefined,
+        onOutcome: (outcome) => { outcomes.push(outcome); },
+      },
+    });
+
+    expect(summary.merged).toEqual([]);
+    expect(summary.skipped).toEqual([{ issue: issue(42), reason: "landing-pass" }]);
+    expect(calls.order).toEqual(["merge", "landing-pass", "reset", "reset"]);
+    expect(calls.resets).toEqual([{ sha: "merged" }, { sha: "pre" }]);
+    expect(recorded).toEqual([{ key: "42", unit: "42", outcome: "abandon" }]);
+    const comment = calls.comments[0]!;
+    expect(comment.n).toBe(42);
+    expect(comment.msg).toContain("the landing pass gave up after 1 attempt");
+    expect(comment.msg).toContain("Reason: two screens claim version 5");
+    expect(comment.msg).toContain("/logs/merger-landing-pass-42-1.log");
+    expect(calls.removedLabels).toEqual([{ n: 42, label: READY_FOR_AGENT_LABEL }]);
+    expect(outcomes).toEqual([{
+      kind: "skipped",
+      issue: issue(42),
+      reason: "landing-pass",
+      durationMs: expect.any(Number),
+    }]);
+  });
+
+  it("resets a commit-shape violation to the merge and re-prompts once, then abandons", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      heads: ["pre", "merged"],
+      files: atPre,
+      landingPass: [
+        { stdout: DONE, shape: { descends: false } },
+        { stdout: DONE, shape: { commits: [{ sha: "m", parents: 2 }] } },
+      ],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing());
+
+    expect(calls.resets).toEqual([{ sha: "merged" }, { sha: "merged" }, { sha: "pre" }]);
+    expect(calls.landingPassPrompts[1]).toContain(
+      "Attempt 1 was reset to `merged`: HEAD no longer descended from the merge",
+    );
+    expect(summary.skipped).toEqual([{ issue: issue(42), reason: "landing-pass" }]);
+    expect(calls.comments[0]!.msg).toContain(
+      "Reason: 2 landing-pass attempts were reset; the last because commit m has 2 parents",
+    );
+  });
+
+  it("keeps a second attempt that holds the contract", async () => {
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      gates: [{ ok: true }],
+      heads: ["pre", "merged"],
+      files: atPre,
+      landingPass: [{ stdout: "I edited it." }, { stdout: DONE, commits: 1 }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing());
+
+    expect(summary.merged).toEqual([issue(42)]);
+    expect(calls.landingPassPrompts[1]).toContain(
+      "Attempt 1 was reset to `merged`: it signalled neither DONE nor ABANDON.",
+    );
+    expect(calls.order).toEqual(["merge", "landing-pass", "reset", "landing-pass", "install", "gate"]);
+  });
+
+  it("halts on an attempt with no agent speech", async () => {
+    const { adapter } = makeAdapter({
+      merges: ["ok"],
+      heads: ["pre", "merged"],
+      files: atPre,
+      landingPass: [{ stdout: "", exitCode: 0 }],
+    });
+    const halted = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing())
+      .catch((err: unknown) => err);
+
+    expect(halted).toBeInstanceOf(MergerError);
+    expect((halted as MergerError).message).toContain(
+      "the landing pass for #42 produced no output on attempt 1/2",
+    );
+  });
+
+  it("refuses a pass commit that changes the gate stack beyond env", async () => {
+    const change: StackChange = {
+      path: "gate/stack.json",
+      differences: [{ where: "container 'db'", what: "image" }],
+    };
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      heads: ["pre", "merged"],
+      files: atPre,
+      stackChanges: [null, change],
+      landingPass: [{ stdout: DONE, commits: 1 }],
+    });
+    const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing());
+
+    expect(summary.skipped).toEqual([{ issue: issue(42), reason: "stack-change" }]);
+    expect(calls.resets).toEqual([{ sha: "pre" }]);
+    expect(calls.order).toEqual(["merge", "landing-pass", "reset"]);
+  });
+
+  describe("on a push race", () => {
+    const race = {
+      merges: ["ok"] as ("ok" | "conflict")[],
+      gates: [{ ok: true }, { ok: true }] as GateResp[],
+      pushes: [{ kind: "race" }, { kind: "ok" }] as PushResult[],
+      pulls: [true],
+      heads: ["pre", "merged", "synced"],
+      files: { ...atPre, "sha(HEAD^2):docs/landing-pass.md": "Raise the client version." },
+    };
+
+    it("runs once more over the re-merge, read at origin's new tip, when it ran this cycle", async () => {
+      const recorded: Array<{ key: string; unit: string }> = [];
+      const { adapter, calls } = makeAdapter({
+        ...race,
+        landingPass: [{ stdout: DONE }, { stdout: DONE }],
+      });
+      const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing(
+        async (key, record) => {
+          recorded.push({ key, unit: record.unit });
+          return null;
+        },
+      ));
+
+      expect(summary.pushed).toBe(true);
+      expect(calls.order.slice(calls.order.indexOf("sync"))).toEqual([
+        "sync", "landing-pass", "install", "gate",
+      ]);
+      expect(calls.changedRanges[1]).toEqual({ from: "base", to: "sha(HEAD^2)" });
+      expect(calls.fileReads).toContainEqual({ rev: "sha(HEAD^2)", path: "docs/landing-pass.md" });
+      const prompt = calls.landingPassPrompts[1]!;
+      expect(prompt).toContain("This cycle landed #42 onto `main`");
+      expect(prompt).toContain("`base..sha(HEAD^2)` is what it added");
+      expect(prompt).toContain("- `gh issue view 42 --repo acme/app --json title,body`");
+      expect(recorded).toEqual([{ key: "42", unit: "42" }, { key: "origin-sync", unit: "42" }]);
+    });
+
+    it("does not run again when every unit skipped it", async () => {
+      const { adapter, calls } = makeAdapter({
+        ...race,
+        changedPaths: [["README.md"]],
+      });
+      await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing());
+
+      expect(calls.landingPassPrompts).toEqual([]);
+      expect(calls.changedRanges).toEqual([{ from: "pre", to: "HEAD" }]);
+    });
+
+    it("skips the rerun when origin's new commits touch none of its paths", async () => {
+      const log: string[] = [];
+      const { adapter, calls } = makeAdapter({
+        ...race,
+        changedPaths: [["src/app/screen.ts"], ["README.md"]],
+        landingPass: [{ stdout: DONE }],
+      });
+      await runMergerWithAdapter([issue(42)], adapter, (line) => {
+        log.push(line);
+      }, undefined, passing());
+
+      expect(calls.landingPassPrompts).toHaveLength(1);
+      expect(log).toContain("landing-pass origin-sync skipped: no path matches");
+    });
+
+    it("defers the source pass when the rerun abandons", async () => {
+      const { adapter, calls } = makeAdapter({
+        ...race,
+        landingPass: [
+          { stdout: DONE },
+          { stdout: "<promise>ABANDON</promise><reason>the hotfix set version 6</reason>" },
+        ],
+      });
+      const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing());
+
+      expect(summary.pushed).toBe(false);
+      expect(summary.raceDeferral).toEqual({
+        reason: "the landing pass abandoned on the merge result re-merged onto " +
+          "origin's new tip: the hotfix set version 6",
+        issues: [issue(42)],
+      });
+      expect(calls.pushes).toBe(1);
+      expect(calls.closes).toEqual([]);
+    });
+  });
+
+  it("without landingPass, asks nothing new of the adapter and logs no landing-pass line", async () => {
+    const log: string[] = [];
+    const { adapter, calls } = makeAdapter({ merges: ["ok"], gates: [{ ok: true }] });
+    await runMergerWithAdapter([issue(42)], adapter, (line) => {
+      log.push(line);
+    });
+
+    expect(calls.changedRanges).toEqual([]);
+    expect(calls.landingPassPrompts).toEqual([]);
+    expect(log.filter((line) => line.startsWith("landing-pass"))).toEqual([]);
   });
 });

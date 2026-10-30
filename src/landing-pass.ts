@@ -254,9 +254,8 @@ export type LandingPassDeps = {
 };
 
 // One pass over the merge at HEAD. `promptAt` is the source tip whose
-// instructions apply and `changed` the range that must touch `paths`. A
-// `retry` or exhausted pass leaves HEAD at the merge; an abandon leaves HEAD
-// wherever the agent left it, for the caller's revert.
+// instructions apply and `changed` the range that must touch `paths`. Every
+// outcome but `done` leaves HEAD at the merge, clean.
 export async function runLandingPass(
   args: {
     readonly label: string;
@@ -318,18 +317,18 @@ export async function runLandingPass(
         logPath,
       }));
     }
-    const summary = attemptRunSummary(run, attempt, logPath);
     if (verdict.outcome === "done") {
       await deps.log(`landing-pass ${label} done commits=${verdict.commits}`);
       return { kind: "done", commits: verdict.commits };
     }
+    await adapter.resetHardSha(mergedSha);
+    const summary = attemptRunSummary(run, attempt, logPath);
     if (verdict.outcome === "abandon") {
       attempts.push({ ...summary, outcome: "abandon", problem: null });
       await deps.log(`landing-pass ${label} abandon: ${verdict.reason}`);
       return { kind: "abandon", reason: verdict.reason, attempts };
     }
     attempts.push({ ...summary, outcome: "retry", problem: verdict.problem });
-    await adapter.resetHardSha(mergedSha);
     retry = verdict.problem;
   }
   const reason =

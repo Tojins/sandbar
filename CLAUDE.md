@@ -103,7 +103,10 @@ and the gate stack (`config.gateStack`, #24).
    `chunk-land.ts` / `chunk-pr.ts` / `forge-pr.ts` (chunk branches, draft PRs,
    `land` label #64). With `config.landingWindow`, nothing lands on the
    source branch while it is closed but a `land-hotfix` chunk
-   (`landing-window.ts`, #244).
+   (`landing-window.ts`, #244). With `config.landingPass`, `landing-pass.ts`
+   (#258): after every merge onto the source branch, before gate-2, an agent
+   the consumer prompts may add commits; its instructions are read at the
+   source tip, it reruns once on a push race, and an abandon parks the unit.
 4. **Finalise** — `finalize.ts` + `finalize-inputs.ts`: branch publish, bot
    comments, label flips.
 
@@ -198,7 +201,9 @@ a written set.
   check 1.5k + the issue anchor; scenario writer 2.4k + the issue anchor;
   a janitor task anchor (`prompts/janitor-task.md`, in place of the issue
   anchor) 1.0k + its scope + its prompt source;
-  resolve 1.2k + anchor (0.2k for a janitor branch) + paths/trace; reflect
+  resolve 1.2k + anchor (0.2k for a janitor branch) + paths/trace; landing
+  pass 0.9k (1.0k on a push race) + the consumer's instructions + one line
+  per related issue (no anchor); reflect
   tagger 1.2k + the chunk, synthesizer 2.4k (no anchor); anchor condenser
   1.3k + the thread (no anchor). The issue anchor (median 5.6k, max 41k
   measured, #197) has sandbar's traces and quoted reviewer prose dropped and,

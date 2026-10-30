@@ -41,14 +41,18 @@
 // `attempt-<n>-standalone-steps-list.log` beside the listers and
 // `attempt-<n>-standalone-steps-verify-<k>.log` beside a verify, a banner per
 // step above its output.
+// A landing-pass attempt (#258) is filed beside the resolve attempts as
+// `merger-landing-pass-<key>-<n>.log`, with the same header.
 
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-// Resolve types stay type-only — resolve-loop.ts loads prompt templates from
-// disk at import, and the log tree must not depend on those existing. The
-// resource formatter is the sole runtime helper and has no template inputs.
-import type { ResolveAttemptRecord } from "./resolve-loop.js";
+// Resolve and landing-pass types stay type-only — both modules load prompt
+// templates from disk at import, and the log tree must not depend on those
+// existing. The resource formatter is the sole runtime helper and has no
+// template inputs.
+import type { ResolveAgentRun, ResolveAttemptRecord } from "./resolve-loop.js";
+import type { LandingPassAttemptRecord } from "./landing-pass.js";
 import type { AgentInvocationRecord } from "./agent-sandbox.js";
 import type { IssueJson } from "./issue-anchor.js";
 import type { ScenarioSet } from "./scenario-parser.js";
@@ -232,7 +236,35 @@ export type LandingLogger = {
     key: string,
     record: ResolveAttemptRecord,
   ): Promise<string>;
+  // One landing-pass attempt (#258), the same way: `merger-landing-pass-<key>-<n>.log`,
+  // keyed by the unit's gate key or `origin-sync`.
+  writeLandingPassAttempt(
+    key: string,
+    record: LandingPassAttemptRecord,
+  ): Promise<string>;
 };
+
+// A merger agent attempt's file. A header before the streams, because the
+// streams are what a container that died at startup does NOT have: on the
+// failure this file exists for, everything below the header is empty and the
+// header is the whole artefact.
+function agentAttemptLog(title: string, record: ResolveAgentRun): string {
+  const resources = formatContainerResources(record);
+  const header = [
+    title,
+    `container:  ${record.container}`,
+    `ended:      ${record.end}` +
+      (record.detail ? ` (${record.detail})` : ""),
+    `exit code:  ${record.exitCode ?? "-"}`,
+    `signal:     ${record.signal ?? "-"}`,
+    `duration:   ${record.durationMs}ms`,
+    ...(resources ? [`resources:  ${resources}`] : []),
+    `stdout:     ${record.stdout.length} bytes`,
+    `stderr:     ${record.stderr.length} bytes`,
+    "",
+  ].join("\n");
+  return `${header}\n--- stdout ---\n${record.stdout}\n--- stderr ---\n${record.stderr}\n`;
+}
 
 export type TranscriptTree = {
   readonly runDir: string;
@@ -398,27 +430,24 @@ function makeLandingLogger(runDir: string, n: number): LandingLogger {
     async writeResolveAttempt(key, record) {
       await ensureLandingDir();
       const path = join(landingDir, `resolve-${key}-attempt-${record.attempt}.log`);
-      // A header before the streams, because the streams are what a container
-      // that died at startup does NOT have: on the failure this file exists for,
-      // everything below the header is empty and the header is the whole
-      // artefact.
-      const resources = formatContainerResources(record);
-      const header = [
-        `resolve attempt ${record.attempt} for #${record.issueId} (mode=${record.mode})`,
-        `container:  ${record.container}`,
-        `ended:      ${record.end}` +
-          (record.detail ? ` (${record.detail})` : ""),
-        `exit code:  ${record.exitCode ?? "-"}`,
-        `signal:     ${record.signal ?? "-"}`,
-        `duration:   ${record.durationMs}ms`,
-        ...(resources ? [`resources:  ${resources}`] : []),
-        `stdout:     ${record.stdout.length} bytes`,
-        `stderr:     ${record.stderr.length} bytes`,
-        "",
-      ].join("\n");
       await writeFile(
         path,
-        `${header}\n--- stdout ---\n${record.stdout}\n--- stderr ---\n${record.stderr}\n`,
+        agentAttemptLog(
+          `resolve attempt ${record.attempt} for #${record.issueId} (mode=${record.mode})`,
+          record,
+        ),
+      );
+      return path;
+    },
+    async writeLandingPassAttempt(key, record) {
+      await ensureLandingDir();
+      const path = join(landingDir, `merger-landing-pass-${key}-${record.attempt}.log`);
+      await writeFile(
+        path,
+        agentAttemptLog(
+          `landing-pass attempt ${record.attempt} (outcome=${record.outcome} commits=${record.commits})`,
+          record,
+        ),
       );
       return path;
     },

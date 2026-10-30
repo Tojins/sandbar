@@ -295,6 +295,10 @@ import {
   ORIGIN_ISSUE_BRANCH_POLL_REF_PREFIX,
   rootIssueFromChunkBranch,
 } from "./naming.js";
+import {
+  type LandingPassAttemptSummary,
+  formatLandingPassAttempts,
+} from "./landing-pass.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 import {
   type ResolveAttemptSummary,
@@ -723,6 +727,24 @@ export const CHUNK_LAND_ABANDONED_PR_COMMENT = (args: {
       ? `<details><summary>Resolve diagnostics</summary>\n\n${diagnostics}\n\n</details>\n\n`
       : "") +
     `Action: fix \`${args.chunkBranch}\`; re-apply \`${LAND_LABEL}\`.`;
+};
+
+// The landing pass (#258) gave up on the land unit's merge, so it was
+// reverted and the unit is parked like one whose merge the resolve loop could
+// not save.
+export const CHUNK_LAND_LANDING_PASS_PR_COMMENT = (args: {
+  readonly sourceBranch: string;
+  readonly reason: string;
+  readonly attempts: readonly LandingPassAttemptSummary[];
+}): string => {
+  const n = args.attempts.length;
+  return `${BOT_COMMENT_PREFIX} merge into \`${args.sourceBranch}\` stopped: the ` +
+    `landing pass gave up after ${n} attempt${n === 1 ? "" : "s"}, and the merge was reverted.\n\n` +
+    `Reason: ${args.reason}\n\n` +
+    `<details><summary>Landing-pass diagnostics</summary>\n\n` +
+    `${formatLandingPassAttempts(args.attempts)}\n\n</details>\n\n` +
+    `Action: settle what the reason names, on \`${args.sourceBranch}\` or in the ` +
+    `landing instructions; re-apply \`${LAND_LABEL}\`.`;
 };
 
 // The chunk's merge result changes the gate stack beyond container env (#186),

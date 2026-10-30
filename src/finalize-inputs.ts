@@ -60,6 +60,7 @@ export function finalizeKindForSkip(
   | "merge-conflict"
   | "forge-unverified"
   | "landing-push-refused"
+  | "landing-pass-abandoned"
   | "merge-gate-red" {
   switch (reason) {
     case "conflict":
@@ -68,6 +69,8 @@ export function finalizeKindForSkip(
       return "forge-unverified";
     case "push-refused":
       return "landing-push-refused";
+    case "landing-pass":
+      return "landing-pass-abandoned";
     case "gate-red":
     case "install-failed":
     case "stack-change":

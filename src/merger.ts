@@ -30,17 +30,29 @@
 //
 //   preMergeSha = HEAD                   — for safe revert on abandon
 //   git merge --no-ff <branch>
+//     version collision / identical bump settled mechanically (#68, #235)
 //     conflict   → runResolveLoop({conflict, ...}, cycleIssues)
 //                  abandon  → merge --abort OR reset --hard preMergeSha + skip
-//                  resolved → stack check, then merged.push (loop already gated)
-//     clean      → stack check
-//                  → npm install
-//                    fail  → reset --hard preMergeSha + skip (unchanged)
-//                  → runGate
-//                    green → merged.push
-//                    red   → runResolveLoop({gate-red, ...}, cycleIssues)
-//                            abandon  → reset --hard preMergeSha + skip
-//                            resolved → stack check, then merged.push
+//     clean or resolved:
+//       stack check
+//       landing pass (#258, source branch only, landing-pass.ts)
+//         abandon → reset --hard preMergeSha + skip `landing-pass`
+//         committed → stack check again
+//         resolved and nothing committed → merged.push (loop already gated)
+//       → npm install
+//         fail  → reset --hard preMergeSha + skip (unchanged)
+//       → runGate
+//         green → merged.push
+//         red   → runResolveLoop({gate-red, ...}, cycleIssues)
+//                 abandon  → reset --hard preMergeSha + skip
+//                 resolved → stack check, then merged.push
+//
+// A landing pass that commits after a conflict resolution sends the result
+// through install and gate-2 again, since the resolve loop's verdict is about
+// a tree that no longer lands (D1, #27). It does not rerun after a gate-red
+// resolve loop. On a push race it runs once more over the re-merge, when it
+// ran for some unit this cycle and origin's new commits touch its paths; an
+// abandon or a stack change there defers the source pass like a red re-gate.
 //
 // Gate-2 runs on the stack in effect for the merge result at HEAD (#186,
 // stack-source.ts): the source tip's, with the result's container `env` laid
@@ -69,7 +81,9 @@
 // worktree, same per-issue `merge --no-ff`, same resolve loop with the same
 // sibling issue list, same gate-2 on the composition, same `preMergeSha`
 // revert on abandon. The only differences are what the worktree is detached
-// at, where the result is pushed, and what the issue is told afterwards.
+// at, where the result is pushed, and what the issue is told afterwards, and
+// that the landing pass (#258) runs only on the source branch: the chunk's own
+// landing runs it once over the chunk's whole diff, and a chunk refresh never.
 //
 // CHUNKS ARE LANDED FIRST, and the worktree is put back at the sha it entered
 // on before the source-branch pass. Order matters for one reason: the
@@ -286,8 +300,9 @@
 //
 // This file owns the two ENDS of that: the invocation, and the prose.
 //
-// `runResolveAgent` runs the configured provider in a NAMED, run-scoped
-// container, as container uid 1000 with the daemon's host uid mapped onto it
+// `runResolveAgent` (and `runLandingPassAgent`, the same invocation named
+// for the landing pass, #258) runs the configured provider in a NAMED,
+// run-scoped container, as container uid 1000 with the daemon's host uid mapped onto it
 // (`--userns=keep-id:uid=1000,gid=1000`, the sandbox's own spelling) so the
 // worktree and the shared Codex credential stay readable whatever uid the
 // installation's Linux user has (#149). The same provider object owns its argv and line parser; credential
@@ -402,6 +417,7 @@ import {
   CHUNK_LAND_DEFERRED_PR_COMMENT,
   CHUNK_LAND_FORGE_UNVERIFIED_PR_COMMENT,
   CHUNK_LAND_ABANDONED_PR_COMMENT,
+  CHUNK_LAND_LANDING_PASS_PR_COMMENT,
   CHUNK_LAND_STACK_CHANGE_PR_COMMENT,
   type ChunkLandTarget,
   type ChunkBranchRetirement,
@@ -438,7 +454,13 @@ import { classifyAgentRunEnd } from "./agent-run-end.js";
 import { EGRESS_AGENT_ENV, type OwnerEgress } from "./egress.js";
 import { SandbarError, hasExitCode, isErrno, isExitCode } from "./errors.js";
 import { type PullRequestRef, ensurePullRequest } from "./forge-pr.js";
-import { dirtyWorktreePaths, fetchOriginChunkBranch, readFileAtRef } from "./git-ops.js";
+import {
+  changedPaths,
+  dirtyWorktreePaths,
+  fetchOriginChunkBranch,
+  isAncestor,
+  readFileAtRef,
+} from "./git-ops.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import {
   type Clock,
@@ -474,6 +496,15 @@ import {
   ghIssueSource,
   type IssueData,
 } from "./issue-anchor.js";
+import {
+  type LandingPassAdapter,
+  type LandingPassAttemptRecord,
+  type LandingPassAttemptSummary,
+  type LandingPassOpening,
+  type LandingPassOutcome,
+  formatLandingPassAttempts,
+  runLandingPass,
+} from "./landing-pass.js";
 import { parseBlockedBy, readChunkMemberRefs } from "./plan-resolver.js";
 import { loadTemplate, render } from "./prompts.js";
 import {
@@ -507,7 +538,11 @@ import {
   formatResolveAttempts,
   runResolveLoop,
 } from "./resolve-loop.js";
-import type { PromptExtension, SandboxGateAttachments } from "./config.js";
+import type {
+  LandingPassSettings,
+  PromptExtension,
+  SandboxGateAttachments,
+} from "./config.js";
 import { type StackChange, renderLandingStackChange } from "./stack-change.js";
 import {
   type Clock as TimingClock,
@@ -604,6 +639,25 @@ export function buildStackChangeComment(args: {
     "Action: land the stack change on the source branch by hand, or remove " +
     `it from \`${args.branch}\`; drop \`${args.handoffLabel}\` and re-apply ` +
     `\`${READY_FOR_AGENT_LABEL}\`.`
+  );
+}
+
+// #258: the landing pass gave up on a merge onto the source branch, the only
+// target it runs on, so the merge was reverted.
+export function buildLandingPassAbandonComment(args: {
+  readonly reason: string;
+  readonly attempts: readonly LandingPassAttemptSummary[];
+  readonly handoffLabel: string;
+}): string {
+  const n = args.attempts.length;
+  return (
+    `**Sandbar:** merge into ${SOURCE_TARGET_PHRASE} stopped: the landing pass ` +
+    `gave up after ${n} attempt${n === 1 ? "" : "s"}, and the merge was reverted.\n\n` +
+    `Reason: ${args.reason}\n\n` +
+    `<details><summary>Landing-pass diagnostics</summary>\n\n` +
+    `${formatLandingPassAttempts(args.attempts)}\n\n</details>\n\n` +
+    "Action: settle what the reason names, on the source branch or in the landing " +
+    `instructions; drop \`${args.handoffLabel}\` and re-apply \`${READY_FOR_AGENT_LABEL}\`.`
   );
 }
 
@@ -800,6 +854,12 @@ type MergeAttempt = (
     })
   // The merge result changes the gate stack beyond env (#186).
   | { readonly kind: "stack-change"; readonly stackChange: StackChange }
+  // The landing pass (#258) abandoned, or spent its attempts.
+  | {
+      readonly kind: "landing-pass";
+      readonly reason: string;
+      readonly attempts: readonly LandingPassAttemptSummary[];
+    }
 ) & { readonly durationMs: number };
 
 // Why a refresh stopped, and the evidence under it.
@@ -814,6 +874,11 @@ function chunkRefreshStop(
       };
     case "stack-change":
       return { stopped: renderLandingStackChange(outcome.stackChange), details: "" };
+    case "landing-pass":
+      return {
+        stopped: `the landing pass gave up: ${outcome.reason}`,
+        details: formatLandingPassAttempts(outcome.attempts),
+      };
     case "abandon":
       return {
         stopped: outcome.mode === "conflict"
@@ -886,7 +951,7 @@ type ChunkPushResult =
 
 // Adapter shape. Split into the merger's own primitives and the resolve-loop
 // primitives (which the merger forwards). The real adapter implements both.
-export type MergerAdapter = ResolveAdapter & {
+export type MergerAdapter = ResolveAdapter & LandingPassAdapter & {
   // Structured tracker fields for orchestration decisions. Resolve prompts use
   // `getIssueBody` instead because they intentionally include comments.
   getIssueData(issueId: string): Promise<IssueData>;
@@ -940,6 +1005,8 @@ export type MergerAdapter = ResolveAdapter & {
   // `path` as committed at `rev`, or null when `rev` has no such file.
   readFileAt(rev: string, path: string): Promise<string | null>;
   mergeBaseOf(a: string, b: string): Promise<string>;
+  // `rev` as a commit sha: a push race names origin's new tip by it (#258).
+  revParse(rev: string): Promise<string>;
   // `git commit --amend --no-edit`: folds what is staged into the merge
   // commit, keeping its parents, subject and co-author trailer.
   amendHead(): Promise<void>;
@@ -1039,7 +1106,9 @@ export type SkipReason =
   | "silent-noop"
   // The merge result changes the gate stack file beyond container env (#186),
   // so it was reverted: a landing never changes the gate it is graded by.
-  | "stack-change";
+  | "stack-change"
+  // The landing pass (#258) abandoned on the merge, so it was reverted.
+  | "landing-pass";
 
 // Wired here rather than in `chunk-land.ts` because the merge phase is what
 // consumes it: `chunkLanding` present ⇒ this cycle may land reviewed chunks on
@@ -1091,6 +1160,16 @@ type MergedLandUnit = LandUnit & {
 const landUnitKey = (unit: LandUnit): string =>
   unit.kind === "chunk" ? `chunk-${unit.target.root}` : janitorStackId(unit.target.task);
 
+// How a land unit is named in the merger log and the landing pass's prompt.
+const landUnitLabel = (unit: LandUnit): string =>
+  unit.kind === "chunk" ? `chunk #${unit.target.root}` : `janitor ${unit.target.task}`;
+
+// The issues a land unit brings (#258): a chunk's root and members.
+const landUnitIssues = (unit: LandUnit): readonly number[] =>
+  unit.kind === "chunk"
+    ? [...new Set([unit.target.root, ...unit.target.members.map((m) => m.number)])]
+    : [];
+
 const JANITOR_RESOLVE_ANCHOR = loadTemplate("resolve-janitor-anchor");
 
 // A member whose branch is on its chunk's branch AND that branch is on origin
@@ -1126,7 +1205,8 @@ export type ChunkLandSkipReason =
   | "gate-red"
   | "install-failed"
   | "forge-unverified"
-  | "stack-change";
+  | "stack-change"
+  | "landing-pass";
 
 export type SkippedChunkLand = {
   readonly target: ChunkLandTarget;
@@ -1378,6 +1458,21 @@ export type MergerResolveAttemptSink = (
   record: ResolveAttemptRecord,
 ) => Promise<string | null>;
 
+// One landing-pass attempt (#258), filed under `key` (the unit's gate key,
+// or `origin-sync` for a push race's pass) and recorded against `unit`, the
+// gate key of the unit it is about.
+export type MergerLandingPassAttemptSink = (
+  key: string,
+  record: LandingPassAttemptRecord & { readonly unit: string },
+) => Promise<string | null>;
+
+export type LandingPassOptions = {
+  readonly settings: LandingPassSettings;
+  // The source branch, as the prompt names it.
+  readonly sourceBranch: string;
+  readonly onAttempt?: MergerLandingPassAttemptSink;
+};
+
 export type RunMergerOptions = {
   // Configured human-handoff label named in the resolve-loop action line.
   readonly handoffLabel: string;
@@ -1414,6 +1509,9 @@ export type RunMergerOptions = {
   // Per-resolve-attempt output capture (#67). Absent ⇒ nothing is written and
   // every comment says so outright instead of naming a file that is not there.
   readonly onResolveAttempt?: MergerResolveAttemptSink;
+  // The landing pass after every merge onto the source branch (#258). Absent
+  // ⇒ none, and nothing else about the merge phase differs.
+  readonly landingPass?: LandingPassOptions;
   // Explicit observation adapter. Run-owned calls supply the event record;
   // standalone merger tests opt into DISCARD_MERGER_OBSERVATIONS. Neither
   // gate nor durable outcome reporting can disappear independently.
@@ -1462,6 +1560,18 @@ type MergeAttemptDeps = {
   // would force every one of them to be loosened to a prefix match. Defaulted
   // by `startTimer` when absent.
   readonly clock?: TimingClock | undefined;
+  // The landing pass over a unit just merged onto the source branch (#258).
+  // Absent without `config.landingPass`.
+  readonly landingPass?: (unit: LandingPassUnit) => Promise<LandingPassOutcome>;
+};
+
+// The unit a landing pass runs for, as `attemptMerge` knows it.
+type LandingPassUnit = {
+  readonly label: string;
+  readonly gateKey: string;
+  readonly branch: string;
+  readonly issues: readonly number[];
+  readonly preMergeSha: string;
 };
 
 // The version collision, resolved before the agent is asked anything (#68).
@@ -1623,6 +1733,9 @@ async function attemptMerge(
     // `chunk-<root>` for a chunk, so a chunk and its own root issue landing in
     // one cycle cannot overwrite each other's trace.
     readonly gateKey: string;
+    // The issues the unit brings, for the landing pass's prompt (#258): the
+    // issue itself, a chunk's root and members, none for a janitor branch.
+    readonly issues: readonly number[];
   },
   deps: MergeAttemptDeps,
 ): Promise<MergeAttempt> {
@@ -1705,11 +1818,38 @@ async function attemptMerge(
         durationMs: unitTimer(),
       };
     }
-    return (await stackChangeRefusal()) ?? merged(" (via resolve-loop)");
   }
 
   const refused = await stackChangeRefusal();
   if (refused !== null) return refused;
+
+  // The landing pass (#258), on the source branch only: a chunk's own landing
+  // runs it once over the chunk's whole diff. Its commits are stack-checked
+  // and gated like any other; without one, a resolve loop's verdict stands.
+  const pass = target.kind === "source" && deps.landingPass
+    ? await deps.landingPass({
+        label,
+        gateKey: args.gateKey,
+        branch: unit.branch,
+        issues: args.issues,
+        preMergeSha,
+      })
+    : null;
+  if (pass?.kind === "abandon") {
+    await adapter.resetHardSha(preMergeSha);
+    return {
+      kind: "landing-pass",
+      reason: pass.reason,
+      attempts: pass.attempts,
+      durationMs: unitTimer(),
+    };
+  }
+  if (pass?.kind === "done" && pass.commits > 0) {
+    const refusedPass = await stackChangeRefusal();
+    if (refusedPass !== null) return refusedPass;
+  } else if (conflicted) {
+    return merged(" (via resolve-loop)");
+  }
 
   // `npm install` runs on every clean merge and on every resolve attempt, and
   // whether that is seconds or a minute decides #77 §3.F43/F45. Reported on the
@@ -1929,6 +2069,45 @@ export async function runMergerWithAdapter(
     return (record) => sink(key, record);
   };
 
+  // Whether the landing pass ran for some unit this cycle, skips aside: a push
+  // race reruns it only then (#258).
+  let landingPassRan = false;
+  const landingPass = opts.landingPass;
+  const runPass = landingPass === undefined ? null : async (
+    key: string,
+    unit: string,
+    args: {
+      readonly label: string;
+      readonly promptAt: string;
+      readonly changed: { readonly from: string; readonly to: string };
+      readonly opening: LandingPassOpening;
+      readonly issues: readonly number[];
+    },
+  ): Promise<LandingPassOutcome> => {
+    const sink = landingPass.onAttempt;
+    const outcome = await runLandingPass(
+      {
+        label: args.label,
+        promptAt: args.promptAt,
+        changed: args.changed,
+        prompt: {
+          opening: args.opening,
+          target: landingPass.sourceBranch,
+          issues: args.issues,
+          repoSlug: opts.repoSlug,
+        },
+      },
+      adapter,
+      {
+        settings: landingPass.settings,
+        log: emit,
+        ...(sink ? { onAttempt: (record) => sink(key, { ...record, unit }) } : {}),
+      },
+    );
+    if (outcome.kind !== "skipped") landingPassRan = true;
+    return outcome;
+  };
+
   // Everything module-scope `attemptMerge` needs of this cycle, bound once.
   const mergeDeps: MergeAttemptDeps = {
     adapter,
@@ -1942,6 +2121,20 @@ export async function runMergerWithAdapter(
     onGate: opts.observations.onGate,
     resolveSinkFor,
     clock: opts.clock,
+    ...(runPass === null ? {} : {
+      landingPass: (unit: LandingPassUnit) => runPass(unit.gateKey, unit.gateKey, {
+        label: unit.label,
+        promptAt: unit.preMergeSha,
+        changed: { from: unit.preMergeSha, to: "HEAD" },
+        opening: {
+          kind: "unit",
+          label: unit.label,
+          branch: unit.branch,
+          preMergeSha: unit.preMergeSha,
+        },
+        issues: unit.issues,
+      }),
+    }),
   };
 
   // One DONE issue branch. A number means its commits are on HEAD and carries
@@ -1960,6 +2153,7 @@ export async function runMergerWithAdapter(
           related: cycle.filter((c) => c.id !== issue.id),
           label: `#${n}`,
           gateKey: issue.id,
+          issues: [n],
         },
         mergeDeps,
       );
@@ -1996,6 +2190,17 @@ export async function runMergerWithAdapter(
             handoffLabel: opts.handoffLabel,
           }),
           "",
+        );
+      }
+      if (outcome.kind === "landing-pass") {
+        return await park(
+          "landing-pass",
+          buildLandingPassAbandonComment({
+            reason: outcome.reason,
+            attempts: outcome.attempts,
+            handoffLabel: opts.handoffLabel,
+          }),
+          ` landing-pass-abandon: ${outcome.reason}`,
         );
       }
       if (outcome.silent) {
@@ -2271,8 +2476,9 @@ export async function runMergerWithAdapter(
           },
           target: SOURCE_TARGET,
           related: chunkMemberRefs(unit.target, ref),
-          label: `chunk #${unit.target.root}`,
+          label: landUnitLabel(unit),
           gateKey: landUnitKey(unit),
+          issues: landUnitIssues(unit),
         }
       : {
           unit: {
@@ -2284,8 +2490,9 @@ export async function runMergerWithAdapter(
           },
           target: SOURCE_TARGET,
           related: [],
-          label: `janitor ${unit.target.task}`,
+          label: landUnitLabel(unit),
           gateKey: landUnitKey(unit),
+          issues: [],
         };
 
   // Replace the planner's membership snapshot with the one read from origin
@@ -2492,6 +2699,19 @@ export async function runMergerWithAdapter(
           );
           continue;
         }
+        if (outcome.kind === "landing-pass") {
+          await parkLandUnit(
+            request,
+            CHUNK_LAND_LANDING_PASS_PR_COMMENT({
+              sourceBranch,
+              reason: outcome.reason,
+              attempts: outcome.attempts,
+            }),
+            "landing-pass",
+            outcome.durationMs,
+          );
+          continue;
+        }
         await parkLandUnit(
           request,
           CHUNK_LAND_ABANDONED_PR_COMMENT({
@@ -2649,6 +2869,7 @@ export async function runMergerWithAdapter(
           related: dependents,
           label: `chunk refresh #${refresh.root}`,
           gateKey: `chunk-refresh-${refresh.root}`,
+          issues: [],
         },
         mergeDeps,
       );
@@ -2890,6 +3111,46 @@ export async function runMergerWithAdapter(
     return finishWithChunkRefreshes(await settleLanding());
   }
 
+  // The landing pass once more over the merge result re-merged onto origin's
+  // new tip (#258), when it ran for a unit this cycle: origin's new commits
+  // (a human hotfix, typically) may change what the landing owes. Its
+  // instructions are read at that tip. Null when the push may go on.
+  const syncLandingPass = async (unit: string): Promise<FollowedPush | null> => {
+    if (runPass === null || !landingPassRan) return null;
+    const newTip = await adapter.revParse("HEAD^2");
+    const oldTip = await adapter.mergeBaseOf("HEAD^1", newTip);
+    const pass = await runPass(ORIGIN_SYNC_GATE_KEY, unit, {
+      label: ORIGIN_SYNC_GATE_KEY,
+      promptAt: newTip,
+      changed: { from: oldTip, to: newTip },
+      opening: {
+        kind: "sync",
+        labels: [
+          ...landsOnHead.map(landUnitLabel),
+          ...merged.map((issue) => `#${issueNumberOf(issue)}`),
+        ],
+        oldTip,
+        newTip,
+      },
+      issues: [...landsOnHead.flatMap(landUnitIssues), ...merged.map(issueNumberOf)],
+    });
+    if (pass.kind === "abandon") {
+      return {
+        kind: "deferred",
+        reason: "the landing pass abandoned on the merge result re-merged onto " +
+          `origin's new tip: ${pass.reason}`,
+      };
+    }
+    if (pass.kind === "done" && pass.commits > 0 && (await adapter.stackChange()) !== null) {
+      return {
+        kind: "deferred",
+        reason: "the landing pass's commits on the merge result re-merged onto it " +
+          "change the gate stack beyond env",
+      };
+    }
+    return null;
+  };
+
   // A push race (#253): origin moved under the push, so the merge result
   // follows its new tip once — re-merged, re-installed, re-gated, re-pushed.
   // Whatever stops it is a deferral of the source pass, not a halt.
@@ -2921,6 +3182,14 @@ export async function runMergerWithAdapter(
     }
     // Or it bumped to the very value the cycle carries, and merged cleanly.
     await settleIdenticalBump(adapter, emit, "origin");
+    const lastLand = landsOnHead.at(-1);
+    const lastUnit = merged.at(-1)?.id ??
+      (lastLand ? landUnitKey(lastLand) : null);
+    if (lastUnit === null) {
+      throw new Error("push race with no merged issue or land unit on HEAD");
+    }
+    const passStop = await syncLandingPass(lastUnit);
+    if (passStop !== null) return passStop;
     // The tree about to land is no longer the one gate-2 passed: the verdict
     // has to be about the commit that is pushed (D1, #27).
     const inst = await adapter.npmInstall();
@@ -2933,12 +3202,6 @@ export async function runMergerWithAdapter(
     }
     const g = await adapter.runGate();
     await emit(`gate-2 synced ${formatGateFields(g)}`);
-    const lastLand = landsOnHead.at(-1);
-    const lastUnit = merged.at(-1)?.id ??
-      (lastLand ? landUnitKey(lastLand) : null);
-    if (lastUnit === null) {
-      throw new Error("push race with no merged issue or land unit on HEAD");
-    }
     await opts.observations.onGate(lastUnit, g, "origin");
     if (!g.ok) {
       // Filed under its own key: the issue keys' files hold the gates of the
@@ -3468,6 +3731,19 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       .map((l) => l.trim())
       .filter(Boolean);
   };
+  const isMergeInProgress = async (): Promise<boolean> => {
+    // NOT `<cwd>/.git/MERGE_HEAD`. Since #10 the merger always runs in a
+    // repository. `--git-path` remains the canonical way to resolve it
+    // correctly in a worktree and in a plain checkout alike.
+    const { stdout } = await exec(
+      "git",
+      ["rev-parse", "--git-path", "MERGE_HEAD"],
+      { cwd },
+    );
+    const p = stdout.trim();
+    if (!p) return false;
+    return existsSync(isAbsolute(p) ? p : join(cwd, p));
+  };
   // ORIGIN's copy of a chunk branch, for the #64 landing — and the one place
   // in this file that asks the question WITHOUT `fetchOriginChunkBranch`
   // (git-ops.ts), which `chunkBase` above and #61's seeding share.
@@ -3559,6 +3835,169 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
 
     return { members };
   };
+  // One merger agent invocation in a fresh container named for its role: the
+  // resolve agent's (#67), or the landing pass's (#258).
+  const runAgent = async (
+    role: "resolve" | "landing-pass",
+    prompt: string,
+    attempt: number,
+  ): Promise<ResolveAgentRun> => {
+    // Runs the routed provider inside a podman container off the SANDBOX
+    // image, augmented with this run's routed providers (#75).
+    // Bind-mounts the merger worktree at /workspace so
+    // the agent's edits and commits are live on host. `cwd` is a git worktree
+    // (detached at origin/<sourceBranch>) with a real `.git` directory, all
+    // covered by the workspace mount; the host cache is never mounted.
+    //
+    // Captures stdout for the promise-token parser AND stderr, the exit
+    // status, the duration and the container's name (#67). Before, stderr was
+    // piped and never read: the process that told us why it could not start
+    // wrote its reason into a pipe nobody had attached a listener to.
+    //
+    // NAMED, and scoped like everything else this run creates (#28), so the
+    // existing prefix sweep reaps a leftover and the failure message has
+    // something an operator can pass to `podman logs`. The uuid is what keeps
+    // two cycles resolving the same issue from colliding on the name; the
+    // attempt number is in it so the name is greppable against the log line.
+    const container = `${scopedResourcePrefix(deps.scope)}${role}-${attempt}-${randomUUID()}`;
+    const command = agentProvider.buildPrintCommand({
+      prompt,
+      dangerouslySkipPermissions: true,
+    });
+    // The attempt's own network and its only way out (#202), up before the
+    // container and stopped after it is removed, with the other cleanup.
+    const network = resolveNetworkNameFor(deps.scope, attempt);
+    const proxy = deps.egress === undefined
+      ? null
+      : await deps.egress.start({
+          owner: `resolve-${attempt}`,
+          networkName: network,
+          createNetwork: true,
+        });
+    const runInvocation = buildResolveRunArgv({
+      container,
+      cwd,
+      gateAttachments: await deps.gateAttachments(),
+      ...(deps.mergerAgent === "codex" && deps.codexAuthMount !== undefined
+        ? { codexAuthMount: deps.codexAuthMount }
+        : {}),
+      image: deps.sandboxImage,
+      credentials: resolveAgentCredentials(deps.mergerAgent, deps.env),
+      botName: deps.botName,
+      botEmail: deps.botEmail,
+      ...(proxy === null ? {} : { egress: { network, dnsArgs: proxy.dnsArgs } }),
+    });
+    let containerStarted = false;
+    let removePromise: Promise<void> | undefined;
+    let disposeContainer: (() => void) | undefined;
+    const removeContainer = (): Promise<void> => {
+      removePromise ??= podman(
+        CONTAINER_RM_ARGS(container),
+        CONTROL_TIMEOUT_MS,
+      ).then((removed) => {
+        if (!boundedRuntimeOk(removed)) {
+          throw new SandbarError(
+            `merger: failed to remove resolve container '${container}': ` +
+              (removed.timedOut ? "podman rm timed out" : removed.errorMessage),
+          );
+        }
+      });
+      return removePromise;
+    };
+    const processResult = await Promise.resolve().then(async () => {
+      const started = await withRuntimeEnv(runInvocation, (argv) =>
+        captureResolveProcess(RUNTIME, argv, "", {
+          container,
+          timeoutMs: CONTROL_TIMEOUT_MS,
+        }),
+      );
+      if (started.exitCode !== 0 || started.end !== "exit") {
+        return { ...started, end: "spawn-error" as const };
+      }
+      containerStarted = true;
+      disposeContainer = registerResolveCleanup(removeContainer);
+      return captureResolveProcess(
+        RUNTIME,
+        buildResolveExecArgv(container, command.command),
+        command.stdin ?? "",
+        { container, timeoutMs: RESOLVE_AGENT_TIMEOUT_MS },
+      );
+    }).then(
+      (run) => ({ run }) as const,
+      (failure: unknown) => ({ failure }) as const,
+    );
+
+    const reaped = containerStarted
+      ? await Promise.allSettled([
+          podman(buildResolveReapArgv(container), CONTROL_TIMEOUT_MS),
+        ])
+      : [];
+    const reapResult = reaped[0];
+    const reapingFailure = reapResult?.status === "rejected"
+      ? reapResult.reason
+      : reapResult !== undefined && !boundedRuntimeOk(reapResult.value)
+        ? new SandbarError(
+            `merger: failed to stop processes in resolve container '${container}': ` +
+              (reapResult.value.timedOut
+                ? "resolve process reaping timed out"
+                : reapResult.value.errorMessage),
+          )
+        : undefined;
+
+    const measured = await Promise.allSettled([
+      readContainerResources(container, systemContainerResourceDeps(podman)),
+    ]);
+    const removal = await Promise.allSettled([
+      removeContainer(),
+    ]);
+    disposeContainer?.();
+    const [proxyStopped] = await Promise.allSettled([proxy?.stop()]);
+    const proxyFailure = proxyStopped?.status === "rejected"
+      ? proxyStopped.reason
+      : undefined;
+    const removed = removal[0];
+    const removalFailure = removed?.status === "rejected"
+      ? removed.reason
+      : undefined;
+    const measurement = measured[0];
+    const measurementFailure = measurement?.status === "rejected"
+      ? measurement.reason
+      : undefined;
+    const cleanupFailures = [
+      reapingFailure === undefined
+        ? undefined
+        : {
+            message: `Resolve container '${container}' process reaping also failed`,
+            cause: reapingFailure,
+          },
+      measurementFailure === undefined
+        ? undefined
+        : {
+            message: `Resolve container '${container}' resource measurement also failed`,
+            cause: measurementFailure,
+          },
+      removalFailure === undefined
+        ? undefined
+        : {
+            message: `Resolve container '${container}' cleanup also failed`,
+            cause: removalFailure,
+          },
+      proxyFailure === undefined
+        ? undefined
+        : {
+            message: `Resolve container '${container}' egress proxy teardown also failed`,
+            cause: proxyFailure,
+          },
+    ].filter((failure): failure is { readonly message: string; readonly cause: unknown } =>
+      failure !== undefined,
+    );
+    for (const failure of cleanupFailures) {
+      await reportCleanupNotice("cleanup-failure", failure.message, failure.cause);
+    }
+    if ("failure" in processResult) throw processResult.failure;
+    const resources = measurement?.status === "fulfilled" ? measurement.value : {};
+    return parseCapturedAgentRun({ ...processResult.run, ...resources }, agentProvider);
+  };
   return {
     worktreeFileExists(path) {
       return existsSync(resolve(cwd, path));
@@ -3612,177 +4051,29 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         return { ok: false };
       }
     },
-    async runResolveAgent(prompt, attempt) {
-      // Runs the routed provider inside a podman container off the SANDBOX
-      // image, augmented with this run's routed providers (#75).
-      // Bind-mounts the merger worktree at /workspace so
-      // the agent's edits and commits are live on host. `cwd` is a git worktree
-      // (detached at origin/<sourceBranch>) with a real `.git` directory, all
-      // covered by the workspace mount; the host cache is never mounted.
-      //
-      // Captures stdout for the promise-token parser AND stderr, the exit
-      // status, the duration and the container's name (#67). Before, stderr was
-      // piped and never read: the process that told us why it could not start
-      // wrote its reason into a pipe nobody had attached a listener to.
-      //
-      // NAMED, and scoped like everything else this run creates (#28), so the
-      // existing prefix sweep reaps a leftover and the failure message has
-      // something an operator can pass to `podman logs`. The uuid is what keeps
-      // two cycles resolving the same issue from colliding on the name; the
-      // attempt number is in it so the name is greppable against the log line.
-      const container = `${scopedResourcePrefix(deps.scope)}resolve-${attempt}-${randomUUID()}`;
-      const command = agentProvider.buildPrintCommand({
-        prompt,
-        dangerouslySkipPermissions: true,
-      });
-      // The attempt's own network and its only way out (#202), up before the
-      // container and stopped after it is removed, with the other cleanup.
-      const network = resolveNetworkNameFor(deps.scope, attempt);
-      const proxy = deps.egress === undefined
-        ? null
-        : await deps.egress.start({
-            owner: `resolve-${attempt}`,
-            networkName: network,
-            createNetwork: true,
-          });
-      const runInvocation = buildResolveRunArgv({
-        container,
-        cwd,
-        gateAttachments: await deps.gateAttachments(),
-        ...(deps.mergerAgent === "codex" && deps.codexAuthMount !== undefined
-          ? { codexAuthMount: deps.codexAuthMount }
-          : {}),
-        image: deps.sandboxImage,
-        credentials: resolveAgentCredentials(deps.mergerAgent, deps.env),
-        botName: deps.botName,
-        botEmail: deps.botEmail,
-        ...(proxy === null ? {} : { egress: { network, dnsArgs: proxy.dnsArgs } }),
-      });
-      let containerStarted = false;
-      let removePromise: Promise<void> | undefined;
-      let disposeContainer: (() => void) | undefined;
-      const removeContainer = (): Promise<void> => {
-        removePromise ??= podman(
-          CONTAINER_RM_ARGS(container),
-          CONTROL_TIMEOUT_MS,
-        ).then((removed) => {
-          if (!boundedRuntimeOk(removed)) {
-            throw new SandbarError(
-              `merger: failed to remove resolve container '${container}': ` +
-                (removed.timedOut ? "podman rm timed out" : removed.errorMessage),
-            );
-          }
-        });
-        return removePromise;
-      };
-      const processResult = await Promise.resolve().then(async () => {
-        const started = await withRuntimeEnv(runInvocation, (argv) =>
-          captureResolveProcess(RUNTIME, argv, "", {
-            container,
-            timeoutMs: CONTROL_TIMEOUT_MS,
-          }),
-        );
-        if (started.exitCode !== 0 || started.end !== "exit") {
-          return { ...started, end: "spawn-error" as const };
-        }
-        containerStarted = true;
-        disposeContainer = registerResolveCleanup(removeContainer);
-        return captureResolveProcess(
-          RUNTIME,
-          buildResolveExecArgv(container, command.command),
-          command.stdin ?? "",
-          { container, timeoutMs: RESOLVE_AGENT_TIMEOUT_MS },
-        );
-      }).then(
-        (run) => ({ run }) as const,
-        (failure: unknown) => ({ failure }) as const,
-      );
-
-      const reaped = containerStarted
-        ? await Promise.allSettled([
-            podman(buildResolveReapArgv(container), CONTROL_TIMEOUT_MS),
-          ])
-        : [];
-      const reapResult = reaped[0];
-      const reapingFailure = reapResult?.status === "rejected"
-        ? reapResult.reason
-        : reapResult !== undefined && !boundedRuntimeOk(reapResult.value)
-          ? new SandbarError(
-              `merger: failed to stop processes in resolve container '${container}': ` +
-                (reapResult.value.timedOut
-                  ? "resolve process reaping timed out"
-                  : reapResult.value.errorMessage),
-            )
-          : undefined;
-
-      const measured = await Promise.allSettled([
-        readContainerResources(container, systemContainerResourceDeps(podman)),
+    runResolveAgent: (prompt, attempt) => runAgent("resolve", prompt, attempt),
+    runLandingPassAgent: (prompt, attempt) => runAgent("landing-pass", prompt, attempt),
+    isMergeInProgress,
+    unmergedPaths,
+    changedPaths: (from, to) => changedPaths(cwd, from, to),
+    async commitShape(mergedSha) {
+      const [mergeInProgress, dirtyPaths, descends] = await Promise.all([
+        isMergeInProgress(),
+        dirtyWorktreePaths(cwd),
+        isAncestor(cwd, mergedSha, "HEAD"),
       ]);
-      const removal = await Promise.allSettled([
-        removeContainer(),
-      ]);
-      disposeContainer?.();
-      const [proxyStopped] = await Promise.allSettled([proxy?.stop()]);
-      const proxyFailure = proxyStopped?.status === "rejected"
-        ? proxyStopped.reason
-        : undefined;
-      const removed = removal[0];
-      const removalFailure = removed?.status === "rejected"
-        ? removed.reason
-        : undefined;
-      const measurement = measured[0];
-      const measurementFailure = measurement?.status === "rejected"
-        ? measurement.reason
-        : undefined;
-      const cleanupFailures = [
-        reapingFailure === undefined
-          ? undefined
-          : {
-              message: `Resolve container '${container}' process reaping also failed`,
-              cause: reapingFailure,
-            },
-        measurementFailure === undefined
-          ? undefined
-          : {
-              message: `Resolve container '${container}' resource measurement also failed`,
-              cause: measurementFailure,
-            },
-        removalFailure === undefined
-          ? undefined
-          : {
-              message: `Resolve container '${container}' cleanup also failed`,
-              cause: removalFailure,
-            },
-        proxyFailure === undefined
-          ? undefined
-          : {
-              message: `Resolve container '${container}' egress proxy teardown also failed`,
-              cause: proxyFailure,
-            },
-      ].filter((failure): failure is { readonly message: string; readonly cause: unknown } =>
-        failure !== undefined,
-      );
-      for (const failure of cleanupFailures) {
-        await reportCleanupNotice("cleanup-failure", failure.message, failure.cause);
-      }
-      if ("failure" in processResult) throw processResult.failure;
-      const resources = measurement?.status === "fulfilled" ? measurement.value : {};
-      return parseCapturedAgentRun({ ...processResult.run, ...resources }, agentProvider);
-    },
-    async isMergeInProgress() {
-      // NOT `<cwd>/.git/MERGE_HEAD`. Since #10 the merger always runs in a
-      // repository. `--git-path` remains the canonical way to resolve it
-      // correctly in a worktree and in a plain checkout alike.
+      if (!descends) return { mergeInProgress, dirtyPaths, descends, commits: [] };
       const { stdout } = await exec(
         "git",
-        ["rev-parse", "--git-path", "MERGE_HEAD"],
+        ["rev-list", "--reverse", "--parents", `${mergedSha}..HEAD`],
         { cwd },
       );
-      const p = stdout.trim();
-      if (!p) return false;
-      return existsSync(isAbsolute(p) ? p : join(cwd, p));
+      const commits = stdout.split("\n").filter(Boolean).map((line) => {
+        const [sha = "", ...parents] = line.split(" ");
+        return { sha, parents: parents.length };
+      });
+      return { mergeInProgress, dirtyPaths, descends, commits };
     },
-    unmergedPaths,
     async readWorktreeFile(path) {
       try {
         return await readFile(join(cwd, path), "utf8");
@@ -3838,6 +4129,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     async mergeBaseOf(a, b) {
       return (await exec("git", ["merge-base", a, b], { cwd })).stdout.trim();
+    },
+    async revParse(rev) {
+      return (await exec("git", ["rev-parse", "--verify", `${rev}^{commit}`], { cwd })).stdout.trim();
     },
     async amendHead() {
       await exec("git", ["commit", "--amend", "--no-edit", "--no-verify"], {
