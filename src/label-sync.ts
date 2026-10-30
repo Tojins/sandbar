@@ -83,13 +83,13 @@ function protocolLabels(labels: LabelConfig): readonly SyncedLabel[] {
     {
       name: HUMAN_SPEC_LABEL,
       description: "A human finishes the spec before an agent can take it",
-      color: "fbca04",
+      color: "1d76db",
       from: "ready-for-human",
     },
     {
       name: HUMAN_LATER_LABEL,
       description: "Not a priority now; a human decides when it moves on",
-      color: "fef2c0",
+      color: "d4c5f9",
       from: "waiting",
     },
     {
