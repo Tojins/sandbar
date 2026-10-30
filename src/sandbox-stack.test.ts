@@ -21,7 +21,7 @@ import { resolveDatabaseCopies, resolveGateStack } from "./config.js";
 import { setCleanupReporter } from "./cleanup.js";
 import type { ContainerTeardown } from "./container-resources.js";
 import { withDbCopy } from "./db-copy-policy.js";
-import { ContainerBringupError } from "./gate-stack.js";
+import { ContainerBringupError, containerRunArgs } from "./gate-stack.js";
 import { runScope } from "./naming.js";
 import {
   SANDBOX_LOG_MOUNT,
@@ -264,6 +264,7 @@ describe("startSandboxStack (#44 D3)", () => {
   // #256: the gate copy is built from `env` alone (gate-stack.test.ts).
   it("lays sandboxEnv over env for a sibling and for a database copy of it", async () => {
     const envs: Record<string, string>[] = [];
+    const argvs: string[][] = [];
     const r = recorder();
     const sandboxed = resolveGateStack({
       containers: [
@@ -273,7 +274,7 @@ describe("startSandboxStack (#44 D3)", () => {
           lifecycle: "issue",
           inSandbox: true,
           env: { TZ: "UTC", MODE: "mock" },
-          sandboxEnv: { MODE: "record" },
+          sandboxEnv: { MODE: "record", PROXY_URL: "http://127.0.0.1:8090" },
         },
         { name: "app", image: "app", mountWorktree: "/app" },
       ],
@@ -291,7 +292,19 @@ describe("startSandboxStack (#44 D3)", () => {
       {
         ...r.deps,
         bringUp: async (containers, ctx) => {
-          envs.push(...containers.map((c) => c.env));
+          for (const c of containers) {
+            // What the real bringUp hands withRuntimeEnv (#154).
+            const { argv, env } = containerRunArgs({
+              containerName: ctx.nameOf(c),
+              attach: ctx.attach,
+              container: c,
+              worktreePath: ctx.worktreePath,
+              hideWorktreeGit: ctx.hideWorktreeGit,
+              readOnlyWorktree: false,
+            });
+            envs.push(env);
+            argvs.push(argv);
+          }
           await r.deps.bringUp(containers, ctx);
         },
       },
@@ -306,7 +319,13 @@ describe("startSandboxStack (#44 D3)", () => {
       container: withDbCopy(sandboxed.containers[0]!, "/srv/installations/app/copies/c1", cfg),
       label: "c1",
     });
-    expect(envs).toEqual([{ TZ: "UTC", MODE: "record" }, { TZ: "UTC", MODE: "record" }]);
+    const env = { TZ: "UTC", MODE: "record", PROXY_URL: "http://127.0.0.1:8090", CI: "true" };
+    expect(envs).toEqual([env, env]);
+    for (const argv of argvs) {
+      expect(argv).not.toContain("-e");
+      expect(argv.some((a) => a.startsWith("--env"))).toBe(false);
+      expect(argv.join(" ")).not.toMatch(/record|8090|PROXY_URL/);
+    }
   });
 
   it.each([["unset", {}], ["empty", { ADFINITY_TOKEN: "" }]])(
