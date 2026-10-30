@@ -71,16 +71,19 @@ export function mergeBase(repo, base) {
   return git(repo, ["merge-base", "HEAD", base]).trim();
 }
 
-// `path` at `rev` parsed as a JSON object (or array).
-export function readJsonAt(repo, rev, path) {
-  const text = git(repo, ["show", `${rev}:${path}`]);
-  let json;
+// `text` parsed as JSON, or a `StructureError` naming `what`.
+export function parseJson(text, what) {
   try {
-    json = JSON.parse(text);
+    return JSON.parse(text);
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err;
-    throw new StructureError(`${path} at ${rev} is not JSON: ${err.message}`);
+    throw new StructureError(`${what} is not JSON: ${err.message}`);
   }
+}
+
+// `path` at `rev` parsed as a JSON object (or array).
+export function readJsonAt(repo, rev, path) {
+  const json = parseJson(git(repo, ["show", `${rev}:${path}`]), `${path} at ${rev}`);
   if (typeof json !== "object" || json === null) throw new StructureError(`${path} at ${rev} is not a JSON object`);
   return json;
 }

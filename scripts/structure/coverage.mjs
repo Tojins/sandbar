@@ -14,7 +14,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
-import { StructureError, withFsError } from "./core.mjs";
+import { StructureError, parseJson, withFsError } from "./core.mjs";
 
 export const UNIT_COVERAGE = "coverage/unit/coverage-final.json";
 export const PODMAN_COVERAGE = "coverage/podman/coverage-final.json";
@@ -54,13 +54,7 @@ export function readCoverage(dir, relativePath, required) {
     return null;
   }
   const text = withFsError(`${relativePath} cannot be read`, () => readFileSync(path, "utf8"));
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch (err) {
-    if (!(err instanceof SyntaxError)) throw err;
-    throw new StructureError(`${relativePath} is not JSON: ${err.message}`);
-  }
+  const json = parseJson(text, relativePath);
   if (!isCoverage(json)) throw new StructureError(`${relativePath} is not istanbul coverage`);
   return statementHits(json, dir);
 }
