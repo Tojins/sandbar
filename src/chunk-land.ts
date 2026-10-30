@@ -295,6 +295,10 @@ import {
   ORIGIN_ISSUE_BRANCH_POLL_REF_PREFIX,
   rootIssueFromChunkBranch,
 } from "./naming.js";
+import {
+  type LandingPassAttemptSummary,
+  formatLandingPassAttempts,
+} from "./landing-pass.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 import {
   type ResolveAttemptSummary,
@@ -690,6 +694,22 @@ export const JANITOR_LANDED_PR_COMMENT = (args: {
     landedPullRequestTail(args.sourceBranch),
   ].join("\n");
 
+// The layout of the comment on a land unit whose merge stopped and was
+// reverted: headline, reason, a diagnostics block, the action.
+const landStoppedComment = (args: {
+  readonly headline: string;
+  readonly reason: string;
+  readonly diagnosticsTitle: string;
+  readonly diagnostics: string;
+  readonly action: string;
+}): string =>
+  `${BOT_COMMENT_PREFIX} ${args.headline}.\n\n` +
+  (args.reason ? `${args.reason}\n\n` : "") +
+  (args.diagnostics
+    ? `<details><summary>${args.diagnosticsTitle}</summary>\n\n${args.diagnostics}\n\n</details>\n\n`
+    : "") +
+  `Action: ${args.action}; re-apply \`${LAND_LABEL}\`.`;
+
 export const CHUNK_LAND_ABANDONED_PR_COMMENT = (args: {
   readonly chunkBranch: string;
   readonly sourceBranch: string;
@@ -717,12 +737,33 @@ export const CHUNK_LAND_ABANDONED_PR_COMMENT = (args: {
     paths,
     args.attempts.length === 0 ? "" : formatResolveAttempts(args.attempts),
   ].filter((part) => part.length > 0).join("\n\n");
-  return `${BOT_COMMENT_PREFIX} ${what}.\n\n` +
-    (args.reason ? `Agent's reason: ${args.reason}\n\n` : "") +
-    (diagnostics
-      ? `<details><summary>Resolve diagnostics</summary>\n\n${diagnostics}\n\n</details>\n\n`
-      : "") +
-    `Action: fix \`${args.chunkBranch}\`; re-apply \`${LAND_LABEL}\`.`;
+  return landStoppedComment({
+    headline: what,
+    reason: args.reason ? `Agent's reason: ${args.reason}` : "",
+    diagnosticsTitle: "Resolve diagnostics",
+    diagnostics,
+    action: `fix \`${args.chunkBranch}\``,
+  });
+};
+
+// The landing pass (#258) gave up on the land unit's merge, so it was
+// reverted and the unit is parked like one whose merge the resolve loop could
+// not save.
+export const CHUNK_LAND_LANDING_PASS_PR_COMMENT = (args: {
+  readonly sourceBranch: string;
+  readonly reason: string;
+  readonly attempts: readonly LandingPassAttemptSummary[];
+}): string => {
+  const n = args.attempts.length;
+  return landStoppedComment({
+    headline: `merge into \`${args.sourceBranch}\` stopped: the landing pass gave up ` +
+      `after ${n} attempt${n === 1 ? "" : "s"}, and the merge was reverted`,
+    reason: `Reason: ${args.reason}`,
+    diagnosticsTitle: "Landing-pass diagnostics",
+    diagnostics: formatLandingPassAttempts(args.attempts),
+    action: `settle what the reason names, on \`${args.sourceBranch}\` or in the ` +
+      `landing instructions`,
+  });
 };
 
 // The chunk's merge result changes the gate stack beyond container env (#186),

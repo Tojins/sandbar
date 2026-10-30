@@ -588,6 +588,11 @@ type FinalizeKindInput =
   // it contains the same refused content and would turn a per-branch park back
   // into a run-wide halt.
   | { readonly kind: "landing-push-refused"; readonly issue: IssueRef }
+  // #258 — the landing pass gave up on the merge, which was reverted. The
+  // merger already posted its reason and dropped the queue label. A retry by
+  // the implementer cannot fix landing instructions, so it is a handoff with
+  // merge-gate-red's shape.
+  | { readonly kind: "landing-pass-abandoned"; readonly issue: IssueRef }
   | {
       // #174 — the issue never entered execution, so there is no issue branch
       // to publish or reclaim. The merger supplies the refresh diagnostics;
@@ -803,6 +808,7 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "merge-gate-red",
   "forge-unverified",
   "landing-push-refused",
+  "landing-pass-abandoned",
   "chunk-refresh-failed",
   "needs-info",
   "needs-ui-prototype",
@@ -1180,7 +1186,8 @@ export async function finalizeOne(
       return { kind: "pushed" };
     }
     case "merge-gate-red":
-    case "forge-unverified": {
+    case "forge-unverified":
+    case "landing-pass-abandoned": {
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
       const refused = await pushBranchOrPark(input, adapter, labels, {

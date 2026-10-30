@@ -783,6 +783,23 @@ describe("finalizeOne", () => {
     ]);
   });
 
+  it("landing-pass-abandoned: pushes the branch + parks it as a handoff (#258)", async () => {
+    const { adapter, calls } = makeAdapter();
+    const i = issue(45);
+    const action = await finalizeOne(
+      { kind: "landing-pass-abandoned", issue: i },
+      adapter,
+      LABELS,
+    );
+
+    expect(action).toEqual({ kind: "pushed" });
+    expect(calls.pushes).toEqual([i.branch]);
+    expect(calls.comments).toEqual([]);
+    expect(calls.labelEdits).toEqual([
+      { n: 45, remove: [], add: [HANDOFF] },
+    ]);
+  });
+
   it("forge-unverified on an already-CLOSED issue: no push, no label flip (#16)", async () => {
     const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
     const action = await finalizeOne(

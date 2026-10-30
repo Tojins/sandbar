@@ -184,14 +184,7 @@ export function resolvePromptExtensions(
         `config.promptExtensions has unknown role ${JSON.stringify(role)}; expected ${PROMPT_ROLES.join(", ")}.`,
       );
     }
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new SandbarError(`config.promptExtensions.${role} must be { text } or { path }.`);
-    }
-    const fields = Object.keys(value);
-    const kind = fields.length === 1 ? fields[0] : undefined;
-    if ((kind !== "text" && kind !== "path") || typeof (value as Record<string, unknown>)[kind] !== "string") {
-      throw new SandbarError(`config.promptExtensions.${role} must be exactly { text: string } or { path: string }.`);
-    }
+    checkPromptExtension(`config.promptExtensions.${role}`, value);
   }
   // The other roles' paths are probed in a worktree; this one is read out of
   // the source tip's commit (standards-groups.ts).
@@ -201,6 +194,20 @@ export function resolvePromptExtensions(
     ...configured,
     reviewerQuality: { path: repoRelativePath("config.promptExtensions.reviewerQuality.path", quality.path) },
   };
+}
+
+function checkPromptExtension(
+  label: string,
+  value: unknown,
+): asserts value is PromptExtension {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new SandbarError(`${label} must be { text } or { path }.`);
+  }
+  const fields = Object.keys(value);
+  const kind = fields.length === 1 ? fields[0] : undefined;
+  if ((kind !== "text" && kind !== "path") || typeof (value as Record<string, unknown>)[kind] !== "string") {
+    throw new SandbarError(`${label} must be exactly { text: string } or { path: string }.`);
+  }
 }
 
 export const DEFAULT_LABELS: LabelConfig = {
@@ -945,6 +952,31 @@ export type JanitorConfig = {
 
 export type JanitorTask = Required<JanitorTaskConfig>;
 
+// The landing pass (#258, `landing-pass.ts`): a consumer-prompted agent that
+// runs after every merge onto the source branch, before gate-2, and may add
+// commits on top of it. It runs with the merger's agent, model, effort, image
+// and credentials.
+//
+// `prompt` is `{ text }` or `{ path }`, checked like a `promptExtensions`
+// entry. A path is a standards-like file and follows `gateStack.path`'s rule
+// (#186): repository-relative without `..`, normalized here, and read at the
+// source tip the unit lands on, never from the branch being landed. A tip that
+// lacks the file skips the pass for that unit; a directory there is an error.
+//
+// `paths` are repository-relative path prefixes: one ending in `/` matches
+// everything under it, any other one exactly that file. The pass runs for a
+// unit only when its landing changes a matching file. Absent, it runs on
+// every source landing.
+export type LandingPassConfig = {
+  readonly prompt: PromptExtension;
+  readonly paths?: readonly string[];
+};
+
+export type LandingPassSettings = {
+  readonly prompt: PromptExtension;
+  readonly paths: readonly string[] | null;
+};
+
 // A container `assertDatabaseCopiesTarget` accepted.
 export type DbCopyTarget = ResolvedStackContainer & { readonly readiness: Readiness };
 
@@ -1316,6 +1348,11 @@ export type RunConfig = {
   // Idle janitor tasks (#205). Default: unset or no tasks, the janitor is off.
   readonly janitor?: JanitorConfig;
 
+  // An agent the consumer prompts after every merge onto the source branch
+  // (#258), e.g. `{ prompt: { path: "docs/landing-pass.md" }, paths:
+  // ["src/app/"] }`. See `LandingPassConfig`. Default: unset, no pass.
+  readonly landingPass?: LandingPassConfig;
+
   // Which landing lane an issue takes when it carries no `auto-land` label
   // (#57, §1 of #54): "auto" — the gate is the last word, what sandbar has
   // always done — or "review", where a human looks before the work lands.
@@ -1386,8 +1423,9 @@ export type RunConfig = {
 // merely `Required<>`d because resolution changes their TYPE, not just their
 // presence: `labels` widens from Partial to the fully-populated vocabulary,
 // `gateStack` and `mergeMode` become their resolved-and-validated forms,
-// `deployWatch`, `landingWindow`, `databaseCopies` and `janitor` are null
-// when they are off, and `egress` is `open` without an allowlist.
+// `deployWatch`, `landingWindow`, `databaseCopies`, `janitor` and
+// `landingPass` are null when they are off, and `egress` is `open` without an
+// allowlist.
 export type ResolvedConfig = Required<
   Omit<
     RunConfig,
@@ -1398,6 +1436,7 @@ export type ResolvedConfig = Required<
     | "landingWindow"
     | "databaseCopies"
     | "janitor"
+    | "landingPass"
     | "requiresSandbar"
     | "implementerEffort"
     | "uiCheckEffort"
@@ -1441,6 +1480,7 @@ export type ResolvedConfig = Required<
   readonly egress: ResolvedEgress;
   readonly databaseCopies: DatabaseCopiesSettings | null;
   readonly janitor: { readonly tasks: readonly JanitorTask[] } | null;
+  readonly landingPass: LandingPassSettings | null;
 };
 
 export const DEFAULT_CWD = (): string => process.cwd();
@@ -1816,6 +1856,29 @@ export function resolveJanitor(
     };
   });
   return tasks.length === 0 ? null : { tasks };
+}
+
+export function resolveLandingPass(
+  landingPass: LandingPassConfig | undefined,
+): LandingPassSettings | null {
+  if (landingPass === undefined) return null;
+  if (!isRecord(landingPass)) {
+    throw new SandbarError("config.landingPass must be { prompt, paths? }.");
+  }
+  const { prompt, paths } = landingPass;
+  checkPromptExtension("config.landingPass.prompt", prompt);
+  if (paths !== undefined && (!Array.isArray(paths) || paths.length === 0)) {
+    throw new SandbarError(
+      "config.landingPass.paths must be a non-empty list of repository-relative " +
+        "path prefixes, or absent to run on every source landing.",
+    );
+  }
+  return {
+    prompt: "path" in prompt
+      ? { path: repoRelativePath("config.landingPass.prompt.path", prompt.path) }
+      : prompt,
+    paths: paths?.map((path, i) => repoRelativePath(`config.landingPass.paths[${i}]`, path)) ?? null,
+  };
 }
 
 function resolveJanitorPrompt(field: string, prompt: unknown): JanitorTaskPrompt {
@@ -3776,6 +3839,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     })),
     databaseCopies,
     janitor: resolveJanitor(config.janitor),
+    landingPass: resolveLandingPass(config.landingPass),
     defaultLane: requireLane(config.defaultLane),
   };
 }

@@ -358,6 +358,11 @@ function feedText(event: RunEvent): FeedEvent | null {
       text = `resolve attempt ${event.attempt} · ${event.end}`;
       tone = event.oomKilled === true ? "bad" : "";
       break;
+    case "landing-pass-attempt":
+      text = `landing pass attempt ${event.attempt} · ${event.outcome}` +
+        (event.commits === 0 ? "" : ` · ${event.commits} commit${event.commits === 1 ? "" : "s"}`);
+      tone = event.outcome === "done" ? "" : event.outcome === "retry" ? "warn" : "bad";
+      break;
     case "container":
       text = `${event.stack} container ${event.name} stopped`;
       tone = event.oomKilled === true ? "bad" : "dim";

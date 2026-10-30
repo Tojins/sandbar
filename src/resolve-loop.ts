@@ -238,11 +238,11 @@ export type ResolveAttemptVerdict =
   | "abandon"
   | "silent-noop";
 
-// One attempt as the abandon comment reports it: how the invocation ended, and
-// what the loop then made of it. Deliberately holds SIZES and not the output
-// itself — the output is on disk, and a comment that inlined four agent
-// transcripts would be unreadable and would hit GitHub's body limit.
-export type ResolveAttemptSummary = ContainerResources & {
+// How one merger agent invocation ran, as an abandon comment reports it.
+// Deliberately holds SIZES and not the output itself — the output is on disk,
+// and a comment that inlined four agent transcripts would be unreadable and
+// would hit GitHub's body limit. Shared with the landing pass (#258).
+export type AttemptRunSummary = ContainerResources & {
   readonly attempt: number;
   readonly end: ResolveAgentEnd;
   readonly exitCode: number | null;
@@ -251,9 +251,32 @@ export type ResolveAttemptSummary = ContainerResources & {
   readonly container: string;
   readonly stdoutBytes: number;
   readonly stderrBytes: number;
-  readonly verdict: ResolveAttemptVerdict;
   // Where this attempt's stdout/stderr were written, when a sink took them.
   readonly logPath: string | null;
+};
+
+export function attemptRunSummary(
+  run: ResolveAgentRun,
+  attempt: number,
+  logPath: string | null,
+): AttemptRunSummary {
+  return {
+    attempt,
+    end: run.end,
+    exitCode: run.exitCode,
+    signal: run.signal,
+    durationMs: run.durationMs,
+    ...containerResourcesOf(run),
+    container: run.container,
+    stdoutBytes: run.stdout.length,
+    stderrBytes: run.stderr.length,
+    logPath,
+  };
+}
+
+// One resolve attempt, and what the loop then made of it.
+export type ResolveAttemptSummary = AttemptRunSummary & {
+  readonly verdict: ResolveAttemptVerdict;
 };
 
 export type ResolveAdapter = {
@@ -436,32 +459,14 @@ export async function runResolveLoop(
         (logPath ? ` log=${logPath}` : ""),
     );
 
-    if (run.verdict === "quota") {
-      if (!run.rateLimit) throw new Error("quota run missing rate-limit measurement");
-      throw new AgentQuotaError("claude", run.rateLimit);
-    }
-    if (run.verdict === "credential") {
-      throw new AgentCredentialError(run.detail ?? "credential refresh failed");
-    }
+    throwProviderClosure(run);
 
     // One journal entry per attempt, filed once the loop knows what it made of
     // the tree. A closure over this attempt's run so that every `continue` and
     // every `return` below files exactly one, and none of them has to restate
     // the eight fields that came out of the invocation.
     const record = (verdict: ResolveAttemptVerdict): void => {
-      attempts.push({
-        attempt,
-        end: run.end,
-        exitCode: run.exitCode,
-        signal: run.signal,
-        durationMs: run.durationMs,
-        ...containerResourcesOf(run),
-        container: run.container,
-        stdoutBytes: run.stdout.length,
-        stderrBytes: run.stderr.length,
-        verdict,
-        logPath,
-      });
+      attempts.push({ ...attemptRunSummary(run, attempt, logPath), verdict });
     };
 
     // Nothing ran. Not an answer, and not this loop's to absorb — see the
@@ -475,9 +480,14 @@ export async function runResolveLoop(
       // left the tree untouched — there is no honest verdict to file. Nothing
       // reads the journal on this path anyway: the throw is the report, and
       // the file the sink just wrote is the evidence behind it.
-      throw new SandbarError(
-        buildInfraFailureMessage(issue, attempt, run, logPath),
-      );
+      throw new SandbarError(buildInfraFailureMessage({
+        agent: `the resolve agent for #${issue.id}`,
+        budget: "resolve attempt",
+        attempt,
+        maxAttempts: RESOLVE_MAX_ATTEMPTS,
+        run,
+        logPath,
+      }));
     }
 
     const signal = parseResolveSignal(run.output);
@@ -638,28 +648,46 @@ export function isInfraFailure(run: ResolveAgentRun): boolean {
   return run.verdict === "infra";
 }
 
+// A provider's quota or credential closure ends the merge phase as a typed
+// error, spending no further attempt.
+export function throwProviderClosure(run: ResolveAgentRun): void {
+  if (run.verdict === "quota") {
+    if (!run.rateLimit) throw new Error("quota run missing rate-limit measurement");
+    throw new AgentQuotaError("claude", run.rateLimit);
+  }
+  if (run.verdict === "credential") {
+    throw new AgentCredentialError(run.detail ?? "credential refresh failed");
+  }
+}
+
 // How much of stderr rides along in the halt message. The whole of it is on
 // disk; what belongs in a message an operator reads in a terminal is the tail,
 // which is where a container's own complaint ("image not known", "cannot
 // connect to podman socket") lands.
 const INFRA_STDERR_TAIL = 600;
 
-export function buildInfraFailureMessage(
-  issue: IssueRef,
-  attempt: number,
-  run: ResolveAgentRun,
-  logPath: string | null,
-): string {
-  const remaining = RESOLVE_MAX_ATTEMPTS - attempt;
+// Shared with the landing pass (#258), whose silent attempt halts the same way.
+export function buildInfraFailureMessage(args: {
+  // Who produced nothing: `the resolve agent for #12`.
+  readonly agent: string;
+  // What the budget counts: `resolve attempt`.
+  readonly budget: string;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly run: ResolveAgentRun;
+  readonly logPath: string | null;
+}): string {
+  const { run, logPath } = args;
+  const remaining = args.maxAttempts - args.attempt;
   const tail = run.stderr.trim().slice(-INFRA_STDERR_TAIL);
   return (
-    `merger: the resolve agent for #${issue.id} produced no output on attempt ` +
-    `${attempt}/${RESOLVE_MAX_ATTEMPTS}. Container \`${run.container}\` ` +
+    `merger: ${args.agent} produced no output on attempt ` +
+    `${args.attempt}/${args.maxAttempts}. Container \`${run.container}\` ` +
     `${describeEndForHumans(run)}` +
     (run.detail ? ` (${run.detail})` : "") +
     ". A silent provider or container failure is infrastructure, not an agent " +
     "declining to answer, so the merge phase halts here " +
-    `rather than spending the remaining ${remaining} resolve attempt` +
+    `rather than spending the remaining ${remaining} ${args.budget}` +
     `${remaining === 1 ? "" : "s"} on it. ` +
     (logPath
       ? `Its stdout and stderr are at ${logPath}.`
@@ -677,6 +705,14 @@ export function formatResolveAttempts(
   if (attempts.length === 0) {
     return "No resolve attempt was recorded.";
   }
+  return formatAttemptJournal(attempts, (a) => VERDICT_PROSE[a.verdict]);
+}
+
+// One line per attempt, ending in what the caller's loop made of it.
+export function formatAttemptJournal<A extends AttemptRunSummary>(
+  attempts: readonly A[],
+  conclusion: (attempt: A) => string,
+): string {
   return attempts
     .map((a) => {
       const where = a.logPath ? ` Output: \`${a.logPath}\`.` : "";
@@ -684,7 +720,7 @@ export function formatResolveAttempts(
       return (
         `- **Attempt ${a.attempt}** — the agent ${describeEndForHumans(a)}, ` +
         `writing ${bytes(a.stdoutBytes)} of stdout and ${bytes(a.stderrBytes)} ` +
-        `of stderr; ${VERDICT_PROSE[a.verdict]}.` +
+        `of stderr; ${conclusion(a)}.` +
         ` Container \`${a.container}\`.` +
         (resources ? ` ${resources}.` : "") +
         where

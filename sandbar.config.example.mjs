@@ -198,6 +198,13 @@ export default {
   //   tasks: [{ name: "tidy-tests", prompt: "standards", runsPerDay: 4, paths: ["src"] }],
   // },
 
+  // An agent that runs after every merge onto the source branch, before
+  // gate-2, and may commit edits only a landing can know, such as a version
+  // that depends on what landed before. The prompt ({ text } or { path }, read
+  // at the source tip) says what to do; with `paths`, it runs only for a
+  // landing that changes a file under one of those prefixes.
+  // landingPass: { prompt: { path: "docs/landing-pass.md" }, paths: ["src/app/"] },
+
   // `auto` lets the gate decide. `review` lands connected review-gated issues
   // on a draft chunk pull request. An issue's `auto-land` label overrides the
   // default, unless review-gating reaches it through `## Blocked by`; inherited

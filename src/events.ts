@@ -166,6 +166,13 @@
 // file. Only a failed run was a finding; none was a verdict. A new kind, so
 // no bump.
 //
+// `landing-pass-attempt` (#258, `landing-pass.ts`) is one attempt of the
+// landing pass after a merge onto the source branch, with a resolve
+// attempt's fields, its `outcome` and the `commits` it kept on top of the
+// merge. `retry` was reset and re-prompted; `halt` produced no agent speech
+// or hit a provider closure, and halted the merge phase. A push race's pass
+// is attributed to the source pass's last merged unit. A new kind, so no bump.
+//
 // A reader accepts exactly EVENT_SCHEMA_VERSION. There is deliberately no
 // migration layer for the retired orchestrator.log/plans.jsonl pair or for an
 // older event schema: old driver runs are unreadable by this UI, visibly and
@@ -184,6 +191,8 @@ import type { FinalizeAction, FinalizeInput } from "./finalize.js";
 import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
 import type { QualityOutcome, Verdict } from "./inner-loop-machine.js";
 import type { JanitorOutcome } from "./janitor-plan.js";
+import type { LandingPassAttemptOutcome } from "./landing-pass.js";
+import type { ResolveAgentEnd } from "./resolve-loop.js";
 import type { RestartDueReason } from "./scheduler.js";
 import type { StackClassification } from "./stack-change.js";
 import type { StandaloneStepOutcome } from "./standalone-steps.js";
@@ -549,6 +558,7 @@ export type EventInput =
   | (EventSubject & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "adjudication"; readonly pass: "quality" | "correctness" | "scenarios"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly rulings?: readonly UnitRuling[]; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields })
+  | (EventSubject & ContainerResources & { readonly kind: "landing-pass-attempt"; readonly attempt: number; readonly container: string; readonly end: ResolveAgentEnd; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields; readonly outcome: LandingPassAttemptOutcome; readonly commits: number })
   | (EgressSubject & EgressRefusal & { readonly kind: "egress-refused" })
   | (EgressSubject & EgressSummaryEvent & { readonly kind: "egress" })
   | (ContainerResources & { readonly kind: "container"; readonly stack: "gate" | "sandbox"; readonly name: string; readonly container: string; readonly lifecycle: "issue" | "attempt"; readonly durationMs: number } & Partial<EventSubject>)

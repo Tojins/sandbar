@@ -289,4 +289,23 @@ describe("raw transcript tree", () => {
       "signal:     -\nduration:   12ms\nstdout:     0 bytes\nstderr:     0 bytes",
     );
   });
+
+  it("files a landing-pass attempt beside them under its key (#258)", async () => {
+    const tree = await makeRun();
+    const landing = tree.landing(3);
+    const path = await landing.writeLandingPassAttempt("origin-sync", {
+      attempt: 2, outcome: "done", commits: 1,
+      stdout: "bumped", stderr: "", output: "bumped", end: "exit",
+      exitCode: 0, signal: null, durationMs: 900, cause: "clean", verdict: "answer",
+      container: "sandbar-wdeadbeef-landing-pass-2-uuid", toolCalls: 0,
+    });
+    expect(path).toBe(join(landing.dir, "merger-landing-pass-origin-sync-2.log"));
+    expect(await readFile(path, "utf8")).toBe(
+      "landing-pass attempt 2 (outcome=done commits=1)\n" +
+      "container:  sandbar-wdeadbeef-landing-pass-2-uuid\nended:      exit\n" +
+      "exit code:  0\nsignal:     -\nduration:   900ms\n" +
+      "stdout:     6 bytes\nstderr:     0 bytes\n\n" +
+      "--- stdout ---\nbumped\n--- stderr ---\n\n",
+    );
+  });
 });

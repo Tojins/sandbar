@@ -273,6 +273,7 @@ describe("finalizeKindForSkip", () => {
     expect(finalizeKindForSkip("stack-change")).toBe("merge-gate-red");
     expect(finalizeKindForSkip("forge-unverified")).toBe("forge-unverified");
     expect(finalizeKindForSkip("push-refused")).toBe("landing-push-refused");
+    expect(finalizeKindForSkip("landing-pass")).toBe("landing-pass-abandoned");
   });
 
   it("throws rather than guessing on an unknown reason", () => {

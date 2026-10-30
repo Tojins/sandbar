@@ -40,8 +40,9 @@ export default {
   // 0.60.9 is the first release that reads `egress` (#202); an older driver
   // would drop it in silence. It also reads `databaseCopies` (#201) and
   // `gateStack: { path }` from the source tip (#186), which both use below.
-  // 0.63.6 is the first release that reads `landingWindow` (#244).
-  requiresSandbar: "0.63.6",
+  // 0.63.6 is the first release that reads `landingWindow` (#244), 0.68.2
+  // the first that reads `landingPass` (#258).
+  requiresSandbar: "0.68.2",
   botName: "sandbar",
   botEmail: "sandbar@sda.be",
   uiPort: 7331,
@@ -156,6 +157,11 @@ export default {
   // Landing on main deploys to prod, and nobody watches prod over the
   // weekend: `land` waits for Monday morning, `land-hotfix` lands anyway.
   landingWindow: { timeZone: "Europe/Brussels", closedFrom: "Fri 02:00", closedUntil: "Mon 08:00" },
+
+  // The client version a screen change requires is only known once the
+  // landing before it is on main (Tojins/sandbar#258). Until outdoor carries
+  // docs/landing-pass.md, every landing logs the pass as skipped.
+  landingPass: { prompt: { path: "docs/landing-pass.md" }, paths: ["src/app/"] },
 
   // Merging main deploys to prod, so nothing lands unreviewed unless the issue
   // opts in with the `auto-land` label. The repo carries the `auto-land`,
