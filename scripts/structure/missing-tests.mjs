@@ -164,7 +164,7 @@ export async function checkMissingTests(repo, baseRef, options) {
     deleting.length === 0 ? { findings: [], caught: 0 } : runDeletions(repo.dir, deleting),
   ]);
   findings.push(...probe.findings, ...deletion.findings);
-  withFsError(`${WORK_DIR} cannot be removed`, () => rmSync(join(repo.dir, WORK_DIR), { recursive: true, force: true }));
+  rmSync(join(repo.dir, WORK_DIR), { recursive: true, force: true });
 
   return {
     findings,
