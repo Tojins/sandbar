@@ -6,6 +6,9 @@
 //
 //   version  the branch moves `version` above its base (version.mjs), the
 //            `version` step, which settles `commit-ritual`
+//   tests    every added production line is covered and pinned by a test
+//            (tests.mjs), the `tests-structure` step, which settles
+//            `missing-tests`
 //
 //   node scripts/structure/run.mjs [check…] [--base <ref>] [--git-dir <dir>]
 //
@@ -21,9 +24,10 @@
 import { parseArgs } from "node:util";
 
 import { StructureError } from "./core.mjs";
+import { checkTests } from "./tests.mjs";
 import { checkVersion } from "./version.mjs";
 
-const CHECKS = { version: checkVersion };
+const CHECKS = { version: checkVersion, tests: checkTests };
 
 const USAGE = `usage: run.mjs [${Object.keys(CHECKS).join("|")}]… [--base <ref>] [--git-dir <dir>]`;
 
@@ -51,13 +55,13 @@ function parse(argv) {
 }
 
 // Each named check's lines, and the exit code for all of them.
-function runChecks(names, repo, base) {
+async function runChecks(names, repo, base) {
   const lines = [];
   let exitCode = 0;
   for (const name of names) {
     let result;
     try {
-      result = CHECKS[name](repo, base);
+      result = await CHECKS[name](repo, base);
     } catch (err) {
       if (!(err instanceof StructureError)) throw err;
       lines.push(`${name}: ${err.message}`);
@@ -79,7 +83,7 @@ if ("error" in args) {
   console.log(`${args.error}; ${USAGE}`);
   process.exitCode = 2;
 } else {
-  const { lines, exitCode } = runChecks(args.names, args.repo, args.base);
+  const { lines, exitCode } = await runChecks(args.names, args.repo, args.base);
   console.log(lines.join("\n"));
   process.exitCode = exitCode;
 }

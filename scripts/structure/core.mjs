@@ -16,7 +16,8 @@
 // that fails, the base included, throws `StructureError`: `run.mjs` reports it
 // in one line and exits 2, a red and never a skip.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 
 // The check could not be answered. Its message is the one line `run.mjs`
 // prints.
@@ -99,4 +100,14 @@ export function parseAddedLines(diff) {
     lines.set(path, into);
   }
   return lines;
+}
+
+// `argv` run in `cwd` with its output in `log`; resolves to its exit code.
+export function runLogged(argv, cwd, log) {
+  const fd = openSync(log, "w");
+  return new Promise((resolve, reject) => {
+    const child = spawn(argv[0], argv.slice(1), { cwd, stdio: ["ignore", fd, fd] });
+    child.on("error", reject);
+    child.on("close", (code, signal) => resolve(code ?? `signal ${signal}`));
+  }).finally(() => closeSync(fd));
 }

@@ -8,3 +8,7 @@ dist/
 
 # Browser-MCP session logs, written into the checkout by an editor integration.
 .playwright-mcp/
+
+# The test steps' coverage and the structural checks' work (scripts/structure).
+coverage/
+.stryker-tmp/

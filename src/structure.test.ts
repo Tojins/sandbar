@@ -1,62 +1,15 @@
 // Sandbar's structural checks (#183, #235): the pure layer as tables, and every
 // check proved able to go red by running `run.mjs` over a fixture branch built
 // in a real repository.
-import { spawnSync } from "node:child_process";
-import { cp, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { addedLines, parseAddedLines } from "../scripts/structure/core.mjs";
 import { parseVersion, versionFindings } from "../scripts/structure/version.mjs";
+import { git, run, useFixtures } from "./structure.test-util.js";
 
-const RUN = fileURLToPath(new URL("../scripts/structure/run.mjs", import.meta.url));
-const FIXTURES = fileURLToPath(new URL("../scripts/structure/fixtures/", import.meta.url));
-
-const temporaryDirectories = new Set<string>();
-afterEach(async () => {
-  await Promise.all(
-    [...temporaryDirectories].map((path) => rm(path, { recursive: true, force: true })),
-  );
-  temporaryDirectories.clear();
-});
-
-const tempDir = async (): Promise<string> => {
-  const dir = await mkdtemp(join(tmpdir(), "sandbar-structure-"));
-  temporaryDirectories.add(dir);
-  return dir;
-};
-
-const git = (dir: string, ...args: string[]): string => {
-  const result = spawnSync("git", [
-    "-C", dir, "-c", "user.name=T", "-c", "user.email=t@e", "-c", "commit.gpgsign=false",
-    "-c", "init.defaultBranch=main", ...args,
-  ], { encoding: "utf8" });
-  if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
-  return result.stdout.trim();
-};
-
-// A repository whose `origin/main` is the fixture's `base/` tree and whose
-// HEAD, on `topic`, adds its `head/` tree on top.
-const fixtureRepo = async (fixture: string): Promise<string> => {
-  const dir = await tempDir();
-  await cp(join(FIXTURES, fixture, "base"), dir, { recursive: true });
-  git(dir, "init", "-q");
-  git(dir, "add", "-A");
-  git(dir, "commit", "-q", "-m", "base");
-  git(dir, "update-ref", "refs/remotes/origin/main", "HEAD");
-  git(dir, "checkout", "-q", "-b", "topic");
-  await cp(join(FIXTURES, fixture, "head"), dir, { recursive: true });
-  git(dir, "add", "-A");
-  git(dir, "commit", "-q", "-m", "head");
-  return dir;
-};
-
-const run = (cwd: string, ...args: string[]) => {
-  const result = spawnSync(process.execPath, [RUN, ...args], { cwd, encoding: "utf8" });
-  return { status: result.status, lines: result.stdout.trimEnd().split("\n"), stderr: result.stderr };
-};
+const { tempDir, fixtureRepo } = useFixtures();
 
 describe("parseAddedLines", () => {
   it.each([
@@ -217,9 +170,9 @@ describe("version check", () => {
     git(dir, "update-ref", "refs/remotes/origin/main", "HEAD");
     // The landing shape: origin/main merged with the branch, on top of it.
     git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-    expect(run(dir, "--base", "origin/main").status).toBe(0);
+    expect(run(dir, "version", "--base", "origin/main").status).toBe(0);
     git(dir, "update-ref", "refs/remotes/origin/main", "HEAD");
-    expect(run(dir, "--base", "origin/main")).toMatchObject({
+    expect(run(dir, "version", "--base", "origin/main")).toMatchObject({
       status: 1,
       lines: ["package.json: version 1.2.4 is not above origin/main's 1.2.4"],
     });
@@ -229,7 +182,7 @@ describe("version check", () => {
   it("reads the repository through --git-dir from a directory that is none", async () => {
     const dir = await fixtureRepo("version-unbumped");
     const elsewhere = await tempDir();
-    expect(run(elsewhere, "--git-dir", join(dir, ".git"))).toMatchObject({
+    expect(run(elsewhere, "version", "--git-dir", join(dir, ".git"))).toMatchObject({
       status: 1,
       lines: ["package.json: version 1.2.3 is not above origin/main's 1.2.3"],
     });
@@ -244,24 +197,24 @@ describe("version check", () => {
     },
     {
       name: "a package.json that is not JSON",
-      args: [],
+      args: ["version"],
       broken: true,
       line: /^version: package\.json at HEAD is not JSON: /,
     },
     {
       name: "an unknown option",
       args: ["version", "--bogus"],
-      line: /--bogus.*; usage: run\.mjs \[version\]… \[--base <ref>\] \[--git-dir <dir>\]$/,
+      line: /--bogus.*; usage: run\.mjs \[version\|tests\]… \[--base <ref>\] \[--git-dir <dir>\]$/,
     },
     {
       name: "an option missing its value",
       args: ["--base"],
-      line: /--base.*; usage: run\.mjs \[version\]…/,
+      line: /--base.*; usage: run\.mjs \[version\|tests\]…/,
     },
     {
       name: "an unknown check",
       args: ["nope"],
-      line: /^unknown check 'nope'; usage: run\.mjs \[version\]… \[--base <ref>\] \[--git-dir <dir>\]$/,
+      line: /^unknown check 'nope'; usage: run\.mjs \[version\|tests\]… \[--base <ref>\] \[--git-dir <dir>\]$/,
     },
   ])("$name is a one-line exit 2", async ({ args, broken, line }) => {
     const dir = await fixtureRepo("version-bumped");

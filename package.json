@@ -1,6 +1,6 @@
 {
   "name": "sandbar",
-  "version": "0.66.7",
+  "version": "0.66.8",
   "description": "Self-hosted issue-tracker-driven coding agent orchestrator.",
   "type": "module",
   "main": "dist/index.js",
@@ -43,8 +43,12 @@
     "proper-lockfile": "^4.1.2"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "^10.1.1",
+    "@stryker-mutator/instrumenter": "^10.1.1",
+    "@stryker-mutator/vitest-runner": "^10.1.1",
     "@types/node": "^22.0.0",
     "@types/proper-lockfile": "^4.1.4",
+    "@vitest/coverage-v8": "~4.1.7",
     "typescript": "^5.7.0",
     "vitest": "^4.1.5",
     "yaml": "^2.9.0"
