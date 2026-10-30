@@ -20,8 +20,8 @@ const { default: config } = await import(
 const stack = resolveGateStack(config.gateStack);
 
 describe("sandbar's gate runs the structural checks", () => {
-  it("runs the version check after check, settling commit-ritual", () => {
-    expect(stack.steps.map((step) => step.name).slice(0, 2)).toEqual(["check", "version"]);
+  it("runs the version check after the build, settling commit-ritual", () => {
+    expect(stack.steps.map((step) => step.name).slice(0, 2)).toEqual(["build", "version"]);
     const version = stack.steps.find((step) => step.name === "version");
     expect(version).toMatchObject({
       command: [
@@ -46,12 +46,23 @@ describe("sandbar's gate runs the structural checks", () => {
   });
 
   it.each([
-    ["test", ["npm", "test", "--", "--exclude", "**/*-podman.test.ts"], UNIT_COVERAGE],
-    ["podman-test", ["npm", "test", "--", "podman.test.ts"], PODMAN_COVERAGE],
+    ["test", ["npx", "vitest", "run", "--exclude", "**/*-podman.test.ts"], UNIT_COVERAGE],
+    ["podman-test", ["npx", "vitest", "run", "podman.test.ts"], PODMAN_COVERAGE],
   ])("the %s step runs its suite writing the %s the missing-tests check reads", (name, suite, file) => {
     const command = stack.steps.find((step) => step.name === name)?.command ?? [];
     expect(command.slice(0, suite.length)).toEqual(suite);
     expect(command.slice(-2)).toEqual(["--coverage.enabled", `--coverage.reportsDirectory=${dirname(file)}`]);
+  });
+
+  it("builds once, then runs both suites side by side before the missing-tests check", () => {
+    expect(stack.steps.find((step) => step.name === "build")?.command).toEqual(["npm", "run", "build"]);
+    expect(stack.steps.map((step) => [step.name, step.parallel])).toEqual([
+      ["build", false],
+      ["version", false],
+      ["test", false],
+      ["podman-test", true],
+      ["tests-structure", false],
+    ]);
   });
 
   it("mounts the clone's .git read-only where the structural steps read it", () => {

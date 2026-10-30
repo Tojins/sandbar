@@ -7,6 +7,9 @@
 // the invoking user, and the entrypoint's subuid-owned datadir is its to
 // remove and measure, as it is the user's under `podman unshare`. The roots
 // are under the host-shared tmpdir, which both clients see at the same path.
+//
+// Each test imports into roots of its own, whose scope names its containers,
+// so the tests run concurrently: one of them waits out a 90s import timeout.
 
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -110,14 +113,14 @@ describe.runIf(available)("sandbar db-base against real podman", () => {
     return { root, dump, layout, run };
   };
 
-  it("removes a killed job's leftover container before importing", async ({ expect }) => {
+  it.concurrent("removes a killed job's leftover container before importing", async ({ expect }) => {
     const { root, dump, run } = await fresh();
     await writeFile(dump, gzipSync(ROWS));
     await exec(RUNTIME, ["create", "--name", dbImportContainerName(runScope(root)), IMAGE, "true"]);
     await expect(run()).resolves.toBe("imported");
   }, 600_000);
 
-  it("keeps current unchanged for a truncated gzip and for an import past its timeout", async ({ expect }) => {
+  it.concurrent("keeps current unchanged for a truncated gzip and for an import past its timeout", async ({ expect }) => {
     const truncated = await fresh();
     // Without its trailer: every row arrives, then zlib reports the end.
     const whole = gzipSync(ROWS);
@@ -134,7 +137,7 @@ describe.runIf(available)("sandbar db-base against real podman", () => {
     expect(await readdir(slow.root)).not.toContain("current");
   }, 600_000);
 
-  it("names a server that will not start not-ready, and an image that will not run container-failed", async ({ expect }) => {
+  it.concurrent("names a server that will not start not-ready, and an image that will not run container-failed", async ({ expect }) => {
     // The server runs, but its healthcheck never passes inside the timeout.
     const broken = await fresh({ importTimeoutMs: 5_000 });
     await writeFile(broken.dump, gzipSync(ROWS));
@@ -148,7 +151,7 @@ describe.runIf(available)("sandbar db-base against real podman", () => {
     expect(await readImportStatus(missing.layout)).toMatchObject({ detail: "container-failed" });
   }, 600_000);
 
-  it("imports a dump as current, and keeps it current through a failing one", async ({ expect }) => {
+  it.concurrent("imports a dump as current, and keeps it current through a failing one", async ({ expect }) => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "sandbar-db-base-podman-")));
     roots.push(root);
     const drop = join(root, "drop");

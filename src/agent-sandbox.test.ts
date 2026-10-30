@@ -1851,13 +1851,14 @@ describe("createSandbox integration (local provider)", () => {
         prompt: "go",
         completionSignal: [],
         idleTimeoutSeconds: 2,
+        controlTimeoutMs: 1_000,
       });
       expect(run.stdout).toBe("done");
       expect(run.rateLimit).toBeUndefined();
     } finally {
       await sandbox.close();
     }
-  }, 25_000);
+  }, 15_000);
 
   it.each(["missing", "malformed"] as const)(
     "preserves Codex's existing failure classification when its rollout is %s",
@@ -3277,18 +3278,19 @@ describe("createSandbox integration (local provider)", () => {
             completionSignal: ["<promise>COMPLETE</promise>"],
             completionTimeoutSeconds: 0.2,
             idleTimeoutSeconds: 30,
+            controlTimeoutMs: 500,
             onInvocationEnd: async (record) => {
               records.push(record);
             },
           }).then(() => null, (e: unknown) => e);
           expect(err).toBeInstanceOf(AgentError);
           expect(records[0]?.detail).toContain(
-            "reaping the agent's process group failed: timed out after 10000ms",
+            "reaping the agent's process group failed: timed out after 500ms",
           );
         } finally {
           await sandbox.close();
         }
-      }, 30_000);
+      }, 15_000);
     });
 
     it("leaves a clean exit's end as `exit`, even after a successful result", async () => {

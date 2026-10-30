@@ -39,6 +39,7 @@ import {
   pollUntilReady,
   pollUntilHealthy,
   READY_POLL_INTERVAL_MS,
+  stepBatches,
   stepExecArgs,
 } from "./gate-stack.js";
 import { SandbarError } from "./errors.js";
@@ -569,6 +570,21 @@ describe("stepExecArgs", () => {
       argv: ["exec", "sandbar-42-app", "npm", "test"],
       env: { CI: "true" },
     });
+  });
+});
+
+describe("stepBatches", () => {
+  const step = (name: string, parallel = false) =>
+    ({ name, in: "runner", command: ["true"], timeoutMs: 1, settles: [], standalone: false, parallel });
+
+  it("opens a batch at each ordinary step and adds the parallel steps behind it", () => {
+    const steps = [step("check"), step("build"), step("test", true), step("podman", true), step("after")];
+    expect(stepBatches(steps).map((batch) => batch.map((s) => s.name)))
+      .toEqual([["check"], ["build", "test", "podman"], ["after"]]);
+  });
+
+  it("opens a batch for a parallel step with no step before it", () => {
+    expect(stepBatches([step("lone", true)]).map((batch) => batch.map((s) => s.name))).toEqual([["lone"]]);
   });
 });
 
