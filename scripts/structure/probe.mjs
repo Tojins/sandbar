@@ -12,8 +12,9 @@
 // of module-scope code reruns every test the module reaches.
 //
 // `Survived` is a finding. `NoCoverage` is not: coverage owns an unexecuted
-// line, and a podman-only line is not probed. A dry run Stryker cannot
-// complete (a red test, a crash) throws `StructureError`.
+// line, and a podman-only line is not probed. A changed file Stryker cannot
+// parse, or a dry run it cannot complete (a red test, a crash), throws
+// `StructureError`.
 //
 // `plannedMutants` asks Stryker's own instrumenter which mutants a run over
 // the same ranges will test, so the check can cap the run before paying for
@@ -67,17 +68,25 @@ const quiet = Object.fromEntries(
 // `content`): `{ path, line, column }` each, 1-based like Stryker's report,
 // in line order. A mutant a `Stryker disable` hint switched off is not one.
 export async function plannedMutants(path, content, runs) {
-  const { mutants } = await new Instrumenter(quiet).instrument(
-    [{
-      name: path,
-      content,
-      mutate: runs.map(([first, last]) => ({
-        start: { line: first - 1, column: 0 },
-        end: { line: last - 1, column: Number.MAX_SAFE_INTEGER },
-      })),
-    }],
-    { plugins: null, ignorers: [], excludedMutations: EXCLUDED_MUTATORS },
-  );
+  let mutants;
+  try {
+    ({ mutants } = await new Instrumenter(quiet).instrument(
+      [{
+        name: path,
+        content,
+        mutate: runs.map(([first, last]) => ({
+          start: { line: first - 1, column: 0 },
+          end: { line: last - 1, column: Number.MAX_SAFE_INTEGER },
+        })),
+      }],
+      { plugins: null, ignorers: [], excludedMutations: EXCLUDED_MUTATORS },
+    ));
+  } catch (err) {
+    if (err.code !== "BABEL_PARSE_ERROR") throw err;
+    // `<absolute path>: <reason> (<line>:<column>)`, then a code frame.
+    const reason = err.message.split("\n")[0].replace(/^.*?: /, "");
+    throw new StructureError(`probe: ${path} does not parse: ${reason}`);
+  }
   // An excluded mutator's mutants, like a hint's, come back `Ignored`.
   const tested = mutants.filter((mutant) => mutant.status === undefined);
   const unknown = tested.find((mutant) => !PROBED_MUTATORS.includes(mutant.mutatorName));

@@ -14,7 +14,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
-import { StructureError } from "./core.mjs";
+import { StructureError, withFsError } from "./core.mjs";
 
 export const UNIT_COVERAGE = "coverage/unit/coverage-final.json";
 export const PODMAN_COVERAGE = "coverage/podman/coverage-final.json";
@@ -53,14 +53,13 @@ export function readCoverage(dir, relativePath, required) {
     if (required) throw new StructureError(`${relativePath} is missing: the test step wrote no coverage`);
     return null;
   }
+  const text = withFsError(`${relativePath} cannot be read`, () => readFileSync(path, "utf8"));
   let json;
   try {
-    json = JSON.parse(readFileSync(path, "utf8"));
+    json = JSON.parse(text);
   } catch (err) {
-    if (err instanceof SyntaxError) throw new StructureError(`${relativePath} is not JSON: ${err.message}`);
-    // A system error from the read: a directory, no permission.
-    if (typeof err.code === "string") throw new StructureError(`${relativePath} cannot be read: ${err.message}`);
-    throw err;
+    if (!(err instanceof SyntaxError)) throw err;
+    throw new StructureError(`${relativePath} is not JSON: ${err.message}`);
   }
   if (!isCoverage(json)) throw new StructureError(`${relativePath} is not istanbul coverage`);
   return statementHits(json, dir);

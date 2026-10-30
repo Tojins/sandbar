@@ -15,7 +15,8 @@
 // The base is `merge-base(HEAD, <base>)`, so a branch is measured against
 // where it left the source, not where the source has since moved. A git call
 // that fails, the base included, throws `StructureError`: `run.mjs` reports it
-// in one line and exits 2, a red and never a skip.
+// in one line and exits 2, a red and never a skip. So does a file a check
+// cannot read or write (`withFsError`).
 
 import { execFileSync, spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
@@ -25,6 +26,17 @@ import { closeSync, openSync } from "node:fs";
 export class StructureError extends Error {
   constructor(message) {
     super(message.replace(/\s*\n\s*/g, " "));
+  }
+}
+
+// `fn()`, with a system error it throws (no such file, a directory, no
+// permission) as the `StructureError` `<what>: <its message>`.
+export function withFsError(what, fn) {
+  try {
+    return fn();
+  } catch (err) {
+    if (typeof err.syscall !== "string") throw err;
+    throw new StructureError(`${what}: ${err.message}`);
   }
 }
 

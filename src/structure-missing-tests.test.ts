@@ -4,7 +4,7 @@
 // twin, after a real coverage run.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -475,6 +475,20 @@ describe("run.mjs missing-tests", () => {
     return { dir, result: run(dir, "missing-tests", "--base", "origin/main", "--podman-coverage") };
   };
 
+  const writeCoverage = async (dir: string, content: string) => {
+    await mkdir(join(dir, "coverage/unit"), { recursive: true });
+    await writeFile(join(dir, UNIT_COVERAGE), content);
+  };
+
+  const expectCannotAnswer = (result: ReturnType<typeof run>, line: RegExp) => {
+    expect(result).toMatchObject({ status: 2, stderr: "" });
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]).toMatch(line);
+  };
+
+  // Root reads and writes past a file's mode, as the gate's runner does.
+  const asRoot = process.getuid?.() === 0;
+
   it("goes red on an uncovered line, a survivor, a green deletion and a bare hint", { timeout: SLOW }, async () => {
     const { dir, result } = await gateRun("missing-tests-red");
     expect(result).toEqual({
@@ -514,12 +528,11 @@ describe("run.mjs missing-tests", () => {
     ["an error page", "<html>\n<body>502</body>\n</html>\n"],
   ])("cannot answer over coverage that is %s, in one line", async (_name, content) => {
     const dir = await fixtureRepo("missing-tests-red");
-    await mkdir(join(dir, "coverage/unit"), { recursive: true });
-    await writeFile(join(dir, UNIT_COVERAGE), content);
-    const result = run(dir, "missing-tests", "--base", "origin/main");
-    expect(result).toMatchObject({ status: 2, stderr: "" });
-    expect(result.lines).toHaveLength(1);
-    expect(result.lines[0]).toMatch(/^missing-tests: coverage\/unit\/coverage-final\.json is not JSON: /);
+    await writeCoverage(dir, content);
+    expectCannotAnswer(
+      run(dir, "missing-tests", "--base", "origin/main"),
+      /^missing-tests: coverage\/unit\/coverage-final\.json is not JSON: /,
+    );
   });
 
   it.each([
@@ -530,10 +543,73 @@ describe("run.mjs missing-tests", () => {
     await mkdir(join(dir, "coverage/unit"), { recursive: true });
     await make(join(dir, UNIT_COVERAGE));
     const result = run(dir, "missing-tests", "--base", "origin/main");
-    expect(result).toMatchObject({ status: 2, stderr: "" });
-    expect(result.lines).toHaveLength(1);
-    expect(result.lines[0]).toMatch(/^missing-tests: coverage\/unit\/coverage-final\.json/);
+    expectCannotAnswer(result, /^missing-tests: coverage\/unit\/coverage-final\.json/);
     expect(result.lines[0]).toMatch(reason);
+  });
+
+  // A file the check cannot read or write is exit 2, never a crash's exit 1,
+  // which reads as a finding.
+  it.each([
+    ["lacks", (path: string) => rm(path), "ENOENT: no such file or directory, open"],
+    ["holds a directory for", async (path: string) => {
+      await rm(path);
+      await mkdir(path);
+    }, "EISDIR: illegal operation on a directory, read"],
+  ])("cannot answer when the worktree %s an added file, in one line", async (_name, make, reason) => {
+    const dir = await fixtureRepo("missing-tests-red");
+    await make(join(dir, "src/calc.ts"));
+    expectCannotAnswer(
+      run(dir, "missing-tests", "--base", "origin/main"),
+      new RegExp(`^missing-tests: src/calc\\.ts cannot be read: ${reason}`),
+    );
+  });
+
+  it.skipIf(asRoot)("cannot answer over an added file it may not read, in one line", async () => {
+    const dir = await fixtureRepo("missing-tests-red");
+    await chmod(join(dir, "src/calc.ts"), 0);
+    expectCannotAnswer(
+      run(dir, "missing-tests", "--base", "origin/main"),
+      /^missing-tests: src\/calc\.ts cannot be read: EACCES: /,
+    );
+  });
+
+  it("cannot answer with --git-dir from a directory that is not the worktree, in one line", async () => {
+    const dir = await fixtureRepo("missing-tests-red");
+    const elsewhere = await tempDir();
+    expect(run(elsewhere, "missing-tests", "--base", "origin/main", "--git-dir", join(dir, ".git"))).toEqual({
+      status: 2,
+      lines: [
+        `missing-tests: deploy/app.yml cannot be read: ENOENT: no such file or directory, open '${elsewhere}/deploy/app.yml'`,
+      ],
+      stderr: "",
+    });
+  });
+
+  it("cannot answer over a production file that does not parse, in one line", async () => {
+    const dir = await fixtureRepo("missing-tests-red");
+    await writeFile(join(dir, "src/broken.ts"), "export const = 1;\n");
+    git(dir, "add", "src/broken.ts");
+    git(dir, "commit", "-q", "-m", "broken");
+    await writeCoverage(dir, "{}");
+    expect(run(dir, "missing-tests", "--base", "origin/main")).toEqual({
+      status: 2,
+      lines: ["missing-tests: probe: src/broken.ts does not parse: Unexpected token (1:13)"],
+      stderr: "",
+    });
+  });
+
+  it.skipIf(asRoot)("cannot answer when it cannot clear .stryker-tmp, in one line", async () => {
+    const dir = await fixtureRepo("missing-tests-red");
+    await writeCoverage(dir, "{}");
+    await mkdir(join(dir, ".stryker-tmp"));
+    await chmod(dir, 0o555);
+    let result: ReturnType<typeof run>;
+    try {
+      result = run(dir, "missing-tests", "--base", "origin/main");
+    } finally {
+      await chmod(dir, 0o755);
+    }
+    expectCannotAnswer(result, /^missing-tests: \.stryker-tmp cannot be cleared: EACCES\b/);
   });
 
   it("skips the landing shape in one line, with no coverage to read", async () => {

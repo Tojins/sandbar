@@ -30,12 +30,14 @@
 // runs.
 //
 // It reads the worktree, which in the gate is the clean HEAD it judges (D1),
-// and writes only under the gitignored `.stryker-tmp/`, cleared first.
+// and writes only under the gitignored `.stryker-tmp/`, cleared first. The
+// worktree is the working directory, `--git-dir` or not: a judged file it
+// lacks or cannot read, or a `.stryker-tmp/` it cannot clear, is exit 2.
 
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import { addedLines, git, LOG_DIR, mergeBase, WORK_DIR } from "./core.mjs";
+import { addedLines, git, LOG_DIR, mergeBase, withFsError, WORK_DIR } from "./core.mjs";
 import { coverageFindings, PODMAN_COVERAGE } from "./coverage.mjs";
 import { deletableLines, deletionEntry, runDeletions } from "./deletion.mjs";
 import { lineRuns, plannedMutants, runProbe } from "./probe.mjs";
@@ -119,7 +121,7 @@ export async function checkMissingTests(repo, baseRef, options) {
   const contents = new Map(
     [...added.keys()]
       .filter(isJudged)
-      .map((path) => [path, readFileSync(join(repo.dir, path), "utf8")]),
+      .map((path) => [path, withFsError(`${path} cannot be read`, () => readFileSync(join(repo.dir, path), "utf8"))]),
   );
   const production = new Map([...added].filter(([path]) => isProduction(path)));
 
@@ -151,8 +153,10 @@ export async function checkMissingTests(repo, baseRef, options) {
   }
   const deleting = deletions.filter((unit) => running.has(unit));
 
-  rmSync(join(repo.dir, WORK_DIR), { recursive: true, force: true });
-  mkdirSync(join(repo.dir, LOG_DIR), { recursive: true });
+  withFsError(`${WORK_DIR} cannot be cleared`, () => {
+    rmSync(join(repo.dir, WORK_DIR), { recursive: true, force: true });
+    mkdirSync(join(repo.dir, LOG_DIR), { recursive: true });
+  });
   const [probe, deletion] = await Promise.all([
     mutate.size === 0 ? { findings: [], killed: 0, statics: 0 } : runProbe(repo.dir, mutate, contents),
     deleting.length === 0 ? { findings: [], caught: 0 } : runDeletions(repo.dir, deleting),
