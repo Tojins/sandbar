@@ -30,6 +30,10 @@ produce; otherwise describe the outcome without it ("the record is paid") or
 drop the clause. Describe data by its properties, not by production ids or
 personal data.
 
+Gate-1 runs the project's own test suites and checks on the branch before any
+scenario does. A Then that one of them passes (the suite, the type check, a
+lint, a version bump) restates that verdict: leave it out.
+
 Scale the set to the issue: 2–4 scenarios for a narrow fix, 5–10 for a typical
 feature, at most 15. Fewer sharp scenarios beat many overlapping ones. If
 nothing the issue changes can be observed from outside (docs, a pure refactor,
