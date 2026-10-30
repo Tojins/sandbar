@@ -1471,16 +1471,17 @@ describe("committed installation data and configs", () => {
 
   // The `.mjs` is type-checked by nothing and imports what only the box has,
   // so its `egress` literal is evaluated alone and resolved as the daemon would.
-  it("ships outdoor's egress allowlist in report mode, resolvable as written (#224)", () => {
+  it("ships outdoor's egress allowlist in enforce mode, resolvable as written (#224, #225)", () => {
     const block = outdoorConfig.match(/^ {2}egress: (\{\n[\s\S]*?\n {2}\}),$/m)?.[1];
     expect(block).toBeDefined();
     const egress = resolveEgress(new Function(`return (${block});`)(), ["claude"]);
     if (egress.kind !== "allowlist") throw new Error("outdoor's egress resolved open");
-    expect(egress.policy.mode).toBe("report");
+    expect(egress.policy.mode).toBe("enforce");
     expect(egress.policy.entries.map((entry) => entry.host)).toEqual(
       expect.arrayContaining([
         "registry.npmjs.org",
         "repo.packagist.org",
+        "registry.bower.io",
         "api.mews-demo.com",
         "directory.peppol.eu",
         "ec.europa.eu",

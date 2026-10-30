@@ -66,21 +66,21 @@ export default {
   },
 
   // Every sandbox, sibling, gate and resolve container sits behind its own
-  // egress proxy (#202). Report mode refuses nothing: each host enforce would
-  // refuse lands in the run record as an `egress-refused` event, and those
-  // complete this list before it switches to "enforce". GitHub and the model
-  // APIs are sandbar's defaults. npm and packagist serve sandbox-prepare.sh's
-  // installs; the rest are the integrations the app reaches for real from a
-  // sandbox, as outdoor's source names them: Mews demo (configDev.php), the
-  // Peppol directory (peppolDirectory.php), VIES and the other GET-only
-  // registries (vatRegisters.php; HMRC at dev's sandbox host), and adfinity
+  // egress proxy (#202), and it refuses every host not listed here: the list
+  // was completed from 1.5 days of report-mode `egress-refused` events (#225).
+  // GitHub and the model APIs are sandbar's defaults. npm, packagist and
+  // bower's registry serve the dependency installs; the rest are the
+  // integrations the app reaches for real from a sandbox, as outdoor's source
+  // names them: Mews demo (configDev.php), the Peppol directory
+  // (peppolDirectory.php), VIES and the other GET-only registries (vatRegisters.php; HMRC at dev's sandbox host), and adfinity
   // live for the recording proxy sibling (Tojins/outdoor#785), whose tenant
   // host is a secret, hence the suffix.
   egress: {
-    mode: "report",
+    mode: "enforce",
     allow: [
       "npm",
       "packagist",
+      "registry.bower.io",
       "api.mews-demo.com",
       "directory.peppol.eu",
       "ec.europa.eu",
