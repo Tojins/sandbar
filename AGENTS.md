@@ -29,6 +29,9 @@ move for.
 
 ## Run the structural checks before promising
 
+Every production line a branch adds needs a test that runs it and fails
+without it: the gate's `missing-tests` check reds an added line no test
+covers, a mutant of it no test kills, or a deleted line no test misses.
 Before promising, run `npm run structure` after a test run that writes the
 coverage it reads; gate-1 runs the same checks:
 
