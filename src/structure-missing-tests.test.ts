@@ -13,7 +13,7 @@ import { StructureError } from "../scripts/structure/core.mjs";
 import {
   coverageFindings, lineCoverage, PODMAN_COVERAGE, statementHits, UNIT_COVERAGE, uncoveredFindings,
 } from "../scripts/structure/coverage.mjs";
-import { deletableLines, deletionEntry, runDeletions } from "../scripts/structure/deletion.mjs";
+import { copyWorktree, deletableLines, deletionEntry, runDeletions } from "../scripts/structure/deletion.mjs";
 import {
   lineRuns, plannedMutants, probeResult, runProbe, strykerConfig,
 } from "../scripts/structure/probe.mjs";
@@ -409,6 +409,20 @@ describe("probe", () => {
     await expect(runProbe(dir, new Map([["src/a.ts", [[1, 1]]]]), contents))
       .rejects.toThrow(/^probe: Stryker exited 1: .*initial test run.* \(\.stryker-tmp\/log\/stryker\.log\)$/);
   });
+
+  // A Stryker that exits 0 is a stub here: what it leaves of the report.
+  it.each([
+    ["no report is a one-line error", "", /^probe: \.stryker-tmp\/report\.json cannot be read: ENOENT: /],
+    ["a report that is not JSON is a one-line error", "require(\"node:fs\").writeFileSync(\".stryker-tmp/report.json\", \"<html>\\n502\\n\");\n",
+      /^probe: \.stryker-tmp\/report\.json is not JSON: /],
+  ])("a Stryker run that answers with %s", async (_name, stub, error) => {
+    const dir = await tempDir();
+    await mkdir(join(dir, "node_modules/@stryker-mutator/core/bin"), { recursive: true });
+    await writeFile(join(dir, "node_modules/@stryker-mutator/core/bin/stryker.js"), stub);
+    await mkdir(join(dir, ".stryker-tmp/log"), { recursive: true });
+    await expect(runProbe(dir, new Map([["src/a.ts", [[1, 1]]]]), new Map([["src/a.ts", "export const a = 1;\n"]])))
+      .rejects.toThrow(error);
+  });
 });
 
 describe("deletion", () => {
@@ -418,8 +432,45 @@ describe("deletion", () => {
       "deploy/app.yml": "name: app\n",
       "src/deploy-app.test.ts": "import { expect, it } from \"vitest\";\nit(\"is red\", () => expect(1).toBe(2));\n",
     });
-    await expect(runDeletions(dir, [{ path: "deploy/app.yml", line: 1 }]))
+    copyWorktree(dir);
+    await expect(runDeletions(dir, [{ path: "deploy/app.yml", line: 1 }], new Map([["deploy/app.yml", "name: app\n"]])))
       .rejects.toThrow("deletion: src/deploy-*.test.ts fail with no line deleted (.stryker-tmp/log/deletion-baseline-1.log)");
+  });
+
+  it.skipIf(process.getuid?.() === 0)("a worktree it cannot copy is a one-line error", async () => {
+    const dir = await tree({ "locked.txt": "secret\n" });
+    await chmod(join(dir, "locked.txt"), 0);
+    expect(() => copyWorktree(dir)).toThrow(new StructureError(
+      `deletion: the worktree cannot be copied: EACCES: permission denied, copyfile '${dir}/locked.txt' -> '${dir}/.stryker-tmp/deletion/locked.txt'`,
+    ));
+  });
+
+  // A symlink's copy points into the worktree, and a read-only file's copy
+  // is read-only: a deletion replaces the copy's file, never writes through
+  // it. The symlink's target is read-only too, so a write through it fails.
+  it.each([
+    ["is read-only", (path: string) => chmod(path, 0o444)],
+    ["is a symlink", async (path: string) => {
+      await writeFile(join(path, "../real.yml"), "name: app\nport: 1\n", { mode: 0o444 });
+      await rm(path);
+      await symlink("real.yml", path);
+    }],
+  ])("deletes the lines of a mapped file that %s, leaving the worktree's", { timeout: SLOW }, async (_name, make) => {
+    const dir = await tree({
+      "vitest.config.ts": "export default { test: { include: [\"src/**/*.test.ts\"] } };\n",
+      "deploy/app.yml": "name: app\nport: 1\n",
+      "src/deploy-app.test.ts": "import { readFileSync } from \"node:fs\";\nimport { expect, it } from \"vitest\";\n" +
+        "it(\"names the app\", () => expect(readFileSync(\"deploy/app.yml\", \"utf8\")).toMatch(/^name: app$/m));\n",
+    });
+    await make(join(dir, "deploy/app.yml"));
+    const content = await readFile(join(dir, "deploy/app.yml"), "utf8");
+    copyWorktree(dir);
+    const units = [{ path: "deploy/app.yml", line: 1 }, { path: "deploy/app.yml", line: 2 }];
+    await expect(runDeletions(dir, units, new Map([["deploy/app.yml", content]]))).resolves.toEqual({
+      findings: ["deploy/app.yml:2  deleted, src/deploy-*.test.ts stayed green"],
+      caught: 1,
+    });
+    expect(await readFile(join(dir, "deploy/app.yml"), "utf8")).toBe(content);
   });
 });
 
@@ -612,6 +663,18 @@ describe("run.mjs missing-tests", () => {
       await chmod(dir, 0o755);
     }
     expectCannotAnswer(result, /^missing-tests: \.stryker-tmp cannot be cleared: EACCES\b/);
+  });
+
+  it.skipIf(asRoot)("cannot answer over a worktree it cannot copy for the line deletions, in one line", async () => {
+    const dir = await fixtureRepo("missing-tests-red");
+    await writeCoverage(dir, "{}");
+    await writeFile(join(dir, "locked.txt"), "secret\n");
+    await chmod(join(dir, "locked.txt"), 0);
+    expectCannotAnswer(
+      run(dir, "missing-tests", "--base", "origin/main"),
+      /^missing-tests: deletion: the worktree cannot be copied: EACCES: permission denied, copyfile '.*\/locked\.txt' /,
+    );
+    expect(existsSync(join(dir, ".stryker-tmp"))).toBe(false);
   });
 
   it("skips the landing shape in one line, with no coverage to read", async () => {

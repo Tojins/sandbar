@@ -13,8 +13,8 @@
 //
 // `Survived` is a finding. `NoCoverage` is not: coverage owns an unexecuted
 // line, and a podman-only line is not probed. A changed file Stryker cannot
-// parse, or a dry run it cannot complete (a red test, a crash), throws
-// `StructureError`.
+// parse, a dry run it cannot complete (a red test, a crash), or a report it
+// did not write as JSON, throws `StructureError`.
 //
 // `plannedMutants` asks Stryker's own instrumenter which mutants a run over
 // the same ranges will test, so the check can cap the run before paying for
@@ -25,7 +25,7 @@ import { join } from "node:path";
 
 import { Instrumenter } from "@stryker-mutator/instrumenter";
 
-import { LOG_DIR, runLogged, StructureError, WORK_DIR } from "./core.mjs";
+import { LOG_DIR, parseJson, runLogged, StructureError, withFsError, WORK_DIR } from "./core.mjs";
 
 // Every mutator Stryker 10 has. A mutant of any other means an upgrade added
 // one: `plannedMutants` refuses it until it is sorted in here.
@@ -167,5 +167,6 @@ export async function runProbe(dir, mutate, contents) {
     const reason = error === undefined ? "" : `: ${error.replace(/^.*ERROR \S+ /, "")}`;
     throw new StructureError(`probe: Stryker exited ${code}${reason} (${LOG_DIR}/stryker.log)`);
   }
-  return probeResult(JSON.parse(readFileSync(join(dir, REPORT), "utf8")), contents);
+  const report = withFsError(`probe: ${REPORT} cannot be read`, () => readFileSync(join(dir, REPORT), "utf8"));
+  return probeResult(parseJson(report, `probe: ${REPORT}`), contents);
 }

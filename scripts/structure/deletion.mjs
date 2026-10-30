@@ -6,15 +6,17 @@
 // deleting it can change nothing.
 //
 // The copy is one tree under `.stryker-tmp/deletion/` (gitignored, D1),
-// sharing the worktree's `node_modules`; each probe writes its one file and
-// restores it. The mapped tests first run on the untouched copy, and a red
-// there throws `StructureError`: no deletion could be judged against it.
-// vitest's output goes to `.stryker-tmp/log/`.
+// sharing the worktree's `node_modules`, made before any tool runs; a
+// worktree it cannot copy (a file it may not read) throws `StructureError`.
+// Each probe replaces its one file and restores it. The mapped tests first
+// run on the untouched copy, and a red there throws `StructureError`: no
+// deletion could be judged against it. vitest's output goes to
+// `.stryker-tmp/log/`.
 
-import { cpSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { LOG_DIR, runLogged, StructureError, WORK_DIR } from "./core.mjs";
+import { LOG_DIR, runLogged, StructureError, withFsError, WORK_DIR } from "./core.mjs";
 
 // The first entry whose `paths` matches a file maps it; `tests` are vitest
 // filters, `label` names them in a finding.
@@ -41,21 +43,36 @@ export function deletableLines(content, lines) {
 
 const NOT_COPIED = new Set([".git", "node_modules", WORK_DIR, "coverage", ".sandbar"]);
 
-// Each of `units` (`{ path, line }`, mapped paths only) deleted in turn in a
-// copy of `dir`, whose `LOG_DIR` exists. Resolves to the green deletions'
-// findings and how many went red.
-export async function runDeletions(dir, units) {
-  const copy = join(dir, WORK_DIR, "deletion");
-  rmSync(copy, { recursive: true, force: true });
-  for (const name of readdirSync(dir).filter((entry) => !NOT_COPIED.has(entry))) {
-    cpSync(join(dir, name), join(copy, name), { recursive: true });
-  }
-  symlinkSync(join(dir, "node_modules"), join(copy, "node_modules"));
+const COPY = `${WORK_DIR}/deletion`;
+
+// `dir` copied for `runDeletions`, into its `WORK_DIR`.
+export function copyWorktree(dir) {
+  const copy = join(dir, COPY);
+  withFsError("deletion: the worktree cannot be copied", () => {
+    for (const name of readdirSync(dir).filter((entry) => !NOT_COPIED.has(entry))) {
+      cpSync(join(dir, name), join(copy, name), { recursive: true });
+    }
+    symlinkSync(join(dir, "node_modules"), join(copy, "node_modules"));
+  });
+}
+
+// Each of `units` (`{ path, line }`, mapped paths only) deleted in turn in
+// the copy of `dir` (`copyWorktree`), whose `LOG_DIR` exists; `contents`
+// maps each path to its text. Resolves to the green deletions' findings and
+// how many went red.
+export async function runDeletions(dir, units, contents) {
+  const copy = join(dir, COPY);
   const vitest = (entry, log) => runLogged(
     [process.execPath, join(copy, "node_modules", "vitest", "vitest.mjs"), "run", ...entry.tests],
     copy,
     join(dir, LOG_DIR, log),
   );
+  // The copy's file is replaced, never written: a symlink's copy points into
+  // the worktree, and a read-only file's copy is read-only.
+  const replace = (path, text) => {
+    rmSync(join(copy, path));
+    writeFileSync(join(copy, path), text);
+  };
   try {
     for (const entry of new Set(units.map((unit) => deletionEntry(unit.path)))) {
       const log = `deletion-baseline-${DELETION_MAP.indexOf(entry)}.log`;
@@ -67,10 +84,9 @@ export async function runDeletions(dir, units) {
     let caught = 0;
     for (const [i, { path, line }] of units.entries()) {
       const entry = deletionEntry(path);
-      const file = join(copy, path);
-      const content = readFileSync(file, "utf8");
+      const content = contents.get(path);
       const lines = content.split("\n");
-      writeFileSync(file, [...lines.slice(0, line - 1), ...lines.slice(line)].join("\n"));
+      replace(path, [...lines.slice(0, line - 1), ...lines.slice(line)].join("\n"));
       try {
         if (await vitest(entry, `deletion-${i}.log`) === 0) {
           findings.push(`${path}:${line}  deleted, ${entry.label} stayed green`);
@@ -78,7 +94,7 @@ export async function runDeletions(dir, units) {
           caught++;
         }
       } finally {
-        writeFileSync(file, content);
+        replace(path, content);
       }
     }
     return { findings, caught };

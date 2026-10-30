@@ -31,8 +31,9 @@
 //
 // It reads the worktree, which in the gate is the clean HEAD it judges (D1),
 // and writes only under the gitignored `.stryker-tmp/`, cleared first and
-// removed once the tools answer; a tool that cannot leaves it for the log its
-// line names. The worktree is the working directory, `--git-dir` or not: a
+// removed once the tools answer, or when the line deletions' copy fails
+// before they run; a tool that cannot answer leaves it for the log its line
+// names. The worktree is the working directory, `--git-dir` or not: a
 // judged file it lacks or cannot read, or a `.stryker-tmp/` it cannot clear,
 // is exit 2.
 
@@ -41,7 +42,7 @@ import { join } from "node:path";
 
 import { addedLines, git, LOG_DIR, mergeBase, withFsError, WORK_DIR } from "./core.mjs";
 import { coverageFindings, PODMAN_COVERAGE } from "./coverage.mjs";
-import { deletableLines, deletionEntry, runDeletions } from "./deletion.mjs";
+import { copyWorktree, deletableLines, deletionEntry, runDeletions } from "./deletion.mjs";
 import { lineRuns, plannedMutants, runProbe } from "./probe.mjs";
 
 export const CAP = 200;
@@ -159,9 +160,18 @@ export async function checkMissingTests(repo, baseRef, options) {
     rmSync(join(repo.dir, WORK_DIR), { recursive: true, force: true });
     mkdirSync(join(repo.dir, LOG_DIR), { recursive: true });
   });
+  if (deleting.length > 0) {
+    try {
+      copyWorktree(repo.dir);
+    } catch (err) {
+      // No tool has run, so there is no log to keep.
+      rmSync(join(repo.dir, WORK_DIR), { recursive: true, force: true });
+      throw err;
+    }
+  }
   const [probe, deletion] = await Promise.all([
     mutate.size === 0 ? { findings: [], killed: 0, statics: 0 } : runProbe(repo.dir, mutate, contents),
-    deleting.length === 0 ? { findings: [], caught: 0 } : runDeletions(repo.dir, deleting),
+    deleting.length === 0 ? { findings: [], caught: 0 } : runDeletions(repo.dir, deleting, contents),
   ]);
   findings.push(...probe.findings, ...deletion.findings);
   rmSync(join(repo.dir, WORK_DIR), { recursive: true, force: true });
