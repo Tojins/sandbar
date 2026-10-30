@@ -27,15 +27,21 @@ a mid-change HEAD. The command also updates the two matching entries in
 internal change, minor for anything a host repo's config or expectations have to
 move for.
 
-## Run the structural checks before promising
+## Run the tests your change reaches, not the suite
+
+Gate-1 runs the whole suite, unit and podman, and the structural checks on
+every attempt, so a whole `npm test` of your own repeats it at ten minutes a
+run. Run the test files your change reaches: `npx vitest run
+src/<file>.test.ts`, or `npx vitest related --run <changed src files>` for every
+test that imports them.
 
 Every production line a branch adds needs a test that runs it and fails
 without it: the gate's `missing-tests` check reds an added line no test
 covers, a mutant of it no test kills, or a deleted line no test misses.
-Before promising, run `npm run structure` after a test run that writes the
-coverage it reads; gate-1 runs the same checks:
+Before promising, run `npm run structure` over coverage from those same
+related tests:
 
 ```sh
-npm test -- --coverage.enabled --coverage.reportsDirectory=coverage/unit
+npx vitest related --run --coverage.enabled --coverage.reportsDirectory=coverage/unit <changed src files>
 npm run structure
 ```

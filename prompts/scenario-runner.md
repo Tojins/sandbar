@@ -15,7 +15,9 @@ For each scenario, set up its Given, perform its When, and check its Then
 exactly as written. Use the cheapest means that shows it: a Playwright script
 against the app, an HTTP request to its API, SQL on the database, a request
 through the allowed outbound hosts, or a repository command. You may write to
-the database as a scenario needs.
+the database as a scenario needs. Gate-1 already ran the project's test
+suites on this branch: run a test only when a scenario names it, never a
+whole suite.
 
 - FAIL only when you saw a Then not hold. Save what shows it under
   `S<n>/` and cite it.

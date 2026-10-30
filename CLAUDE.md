@@ -199,11 +199,11 @@ a written set.
   project group; verify 6.0k (+0.1k when the report held only gate-step
   findings), fixer 5.4k (its report +0.2k and the output's tail per red
   standalone step, #247); verifier white-box 4.1k (+0.1k
-  beside a held copy); scenario runner 1.9k + its scenarios (no issue
+  beside a held copy); scenario runner 2.1k + its scenarios (no issue
   anchor; +2.3k sandbox-stack, +0.2k egress, +0.6k a held copy, +0.2k a
   failed app hook, +0.2k a rerun);
   adjudicator 1.1k + the report (1.5k + 0.1k a unit ruled unit by unit); UI check 1.6k and partition
-  check 1.5k + the issue anchor; scenario writer 2.4k + the issue anchor;
+  check 1.5k + the issue anchor; scenario writer 2.6k + the issue anchor;
   a janitor task anchor (`prompts/janitor-task.md`, in place of the issue
   anchor) 1.0k + its scope + its prompt source;
   resolve 1.2k + anchor (0.2k for a janitor branch) + paths/trace; landing
