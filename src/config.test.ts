@@ -2200,4 +2200,59 @@ describe("resolveConfig — landingPass (#258)", () => {
     expect(() => resolveConfig({ ...minimal, landingPass: landingPass as never })).toThrow(message);
     expect(() => resolveConfig({ ...minimal, landingPass: landingPass as never })).toThrow(SandbarError);
   });
+
+  const pass = { prompt: { text: "Bump the client version." } };
+
+  it("runs its own role: sonnet on the merger's CLI and effort by default", () => {
+    expect(resolveConfig({ ...minimal, landingPass: pass })).toMatchObject({
+      mergerModelId: "opus",
+      landingPassAgent: "claude",
+      landingPassModelId: "sonnet",
+      landingPassEffort: "medium",
+    });
+    expect(resolveConfig({ ...minimal, mergerEffort: "high", landingPass: pass }))
+      .toMatchObject({ landingPassEffort: "high" });
+    // On claude it never inherits the merger's model.
+    expect(resolveConfig({ ...minimal, mergerModelId: "opus", landingPass: pass }))
+      .toMatchObject({ landingPassModelId: "sonnet" });
+    expect(resolveConfig({
+      ...minimal,
+      landingPass: pass,
+      landingPassModelId: "opus",
+      landingPassEffort: "low",
+    })).toMatchObject({ landingPassModelId: "opus", landingPassEffort: "low" });
+  });
+
+  it("follows a merger routed off claude, model and effort, but not once split", () => {
+    const codexMerger = {
+      ...minimal,
+      mergerAgent: "codex",
+      mergerModelId: "gpt-5.6-sol",
+      mergerEffort: "xhigh",
+      landingPass: pass,
+    } as const;
+    expect(resolveConfig(codexMerger)).toMatchObject({
+      landingPassAgent: "codex",
+      landingPassModelId: "gpt-5.6-sol",
+      landingPassEffort: "xhigh",
+    });
+    expect(resolveConfig({ ...codexMerger, landingPassAgent: "codex" })).toMatchObject({
+      landingPassModelId: "gpt-5.6-sol",
+      landingPassEffort: "xhigh",
+    });
+    expect(resolveConfig({ ...codexMerger, landingPassAgent: "claude" })).toMatchObject({
+      landingPassAgent: "claude",
+      landingPassModelId: "sonnet",
+      landingPassEffort: "medium",
+    });
+  });
+
+  it("refuses a landing pass moved half-way off claude, unless the pass is off", () => {
+    expect(() => resolveConfig({ ...minimal, landingPass: pass, landingPassAgent: "codex" }))
+      .toThrow(/config\.landingPassAgent is "codex"[\s\S]*config\.landingPassModelId/);
+    expect(resolveConfig({ ...minimal, landingPassAgent: "codex" }).landingPassAgent)
+      .toBe("codex");
+    expect(() => resolveConfig({ ...minimal, landingPassEffort: "" }))
+      .toThrow(/config\.landingPassEffort/);
+  });
 });

@@ -3929,6 +3929,9 @@ describe("run quota orchestration (#109)", () => {
           expect(event).toEqual(expect.objectContaining({ janitor: "docs" }));
           expect(event).not.toHaveProperty("issue");
         }
+        expect(eventsOf("resolve-attempt")).toEqual([
+          expect.objectContaining({ provider: "claude", model: "opus" }),
+        ]);
       });
 
       describe("landing-pass attempts (#258)", () => {
@@ -3949,6 +3952,7 @@ describe("run quota orchestration (#109)", () => {
 
           expect(eventsOf("landing-pass-attempt")).toEqual([expect.objectContaining({
             janitor: "docs", attempt: 1, outcome: "done", commits: 2,
+            provider: "claude", model: "sonnet",
           })]);
         });
 

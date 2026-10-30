@@ -5,8 +5,8 @@
 // The config splits the MODEL per call (`implementerModelId`, `uiCheckModelId`,
 // correctness `reviewerModelId`, `reviewerQualityModelId`,
 // `adjudicatorModelId`, `condenserModelId`, `scenarioWriterModelId`,
-// `scenarioRunnerModelId` and
-// `mergerModelId`); this is the vendor knob beside
+// `scenarioRunnerModelId`,
+// `mergerModelId` and `landingPassModelId`); this is the vendor knob beside
 // it, and `*Effort` (#130) is
 // the third per-call knob:
 // the reasoning effort, passed through `buildAgentProvider` for the provider
@@ -28,7 +28,9 @@
 // The scenario writer (#203) names `scenarioWriterAgent`, defaulting to
 // claude on its own, and is absent when `scenarioWriter` is off. So is the
 // scenario runner (#180), `scenarioRunnerAgent`, which runs only the writer's
-// scenarios and follows the reviewer as the adjudicator does.
+// scenarios and follows the reviewer as the adjudicator does. The landing
+// pass (#258), `landingPassAgent`, follows the merger and is absent while
+// `landingPass` is unset.
 // The pressure that wants the vendor
 // knob is the implementer's: a review round is one bounded sequential chain,
 // while an implementer attempt is a long multi-tool session, with several of
@@ -400,6 +402,8 @@ export function requiredAgentProviders(roles: {
   readonly reviewerQualityAgent: AgentProviderName;
   readonly adjudicatorAgent: AgentProviderName;
   readonly mergerAgent: AgentProviderName;
+  readonly landingPass: object | null;
+  readonly landingPassAgent: AgentProviderName;
 }): readonly AgentProviderName[] {
   const named = new Set<AgentProviderName>([
     roles.implementerAgent,
@@ -411,6 +415,7 @@ export function requiredAgentProviders(roles: {
     ...(roles.scenarioWriter ? [roles.scenarioWriterAgent, roles.scenarioRunnerAgent] : []),
     roles.mergerAgent,
   ]);
+  if (roles.landingPass !== null) named.add(roles.landingPassAgent);
   // Ordered by the canonical list, not by insertion: the set feeds a refusal
   // message, and a message whose lines reorder with the config reads as two
   // different failures.
@@ -447,6 +452,7 @@ export function assertRoleModelIdNamed(
     | "scenarioWriter"
     | "scenarioRunner"
     | "merger"
+    | "landingPass"
     | "reflectTagger"
     | "reflectSynthesizer",
   provider: AgentProviderName,

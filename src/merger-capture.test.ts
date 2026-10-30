@@ -682,6 +682,70 @@ describe("resolve provider invocation (#74)", () => {
     }
   });
 
+  // #258: the landing pass runs the same invocation under its own routing.
+  it("runs the landing pass on its own provider, model and credential", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandbar-landing-pass-route-"));
+    const argvLog = join(root, "podman-argv.json");
+    const originalPath = process.env["PATH"];
+    await writePodmanShim({
+      path: join(root, "podman"),
+      logPath: argvLog,
+      respond: [
+        'if (args[0] === "run") process.stdout.write("container-id\\n");',
+        'if (args[0] === "inspect") process.stdout.write("\\nfalse\\n");',
+        'if (args[0] === "stats") process.stdout.write("2048 / 4096\\n");',
+      ],
+    });
+    process.env["PATH"] = `${root}:${originalPath ?? ""}`;
+    const codexAuthMount = {
+      hostPath: join(root, "codex-auth.json"),
+      sandboxPath: "/var/lib/codex/auth.json",
+    };
+    try {
+      const adapter = realAdapter({
+        cwd: root,
+        cacheDir: join(root, "repo.git"),
+        scope: runScope(root),
+        repo: { owner: "acme", name: "app" },
+        sourceBranch: "main",
+        botName: "sandbar-bot",
+        botEmail: "bot@example.test",
+        coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+        mergerAgent: "codex",
+        mergerModelId: "gpt-5.6-sol",
+        landingPassAgent: "claude",
+        landingPassModelId: "sonnet",
+        landingPassEffort: "medium",
+        sandboxImage: "sandbox-image",
+        env: (key) => ({ CODEX_AUTH_JSON: "secret-json", ANTHROPIC_API_KEY: "sk-test" })[key],
+        codexAuthMount,
+        beforeOriginWrite: async () => undefined,
+        runStackGate: async () => { throw new Error("not called"); },
+        gateAttachments: async () => NO_GATE_ATTACHMENTS,
+      });
+
+      await adapter.runLandingPassAgent("bump the version", 1);
+      await adapter.runResolveAgent("resolve this", 1);
+      const calls = await readPodmanCalls(argvLog);
+      const [passRun, resolveRun] = calls.filter((call) => call.args[0] === "run");
+      const [passExec, resolveExec] = calls
+        .filter((call) => call.args[0] === "exec" && call.args[1] === "-i")
+        .map((call) => call.args.at(-1));
+      expect(passRun!.args.join(" ")).toContain("landing-pass-1-");
+      expect(passRun!.args.join(" ")).not.toContain(codexAuthMount.hostPath);
+      expect(passRun!.containerEnv["ANTHROPIC_API_KEY"]).toBe("sk-test");
+      expect(passExec).toMatch(/^claude .*--model 'sonnet' --effort medium/);
+      expect(resolveRun!.args).toContain(
+        `${codexAuthMount.hostPath}:${codexAuthMount.sandboxPath}:z`,
+      );
+      expect(resolveExec).toMatch(/^codex exec .*--model 'gpt-5.6-sol'/);
+    } finally {
+      if (originalPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = originalPath;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["exit", 0, null],
     ["exit", 7, null],
