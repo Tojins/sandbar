@@ -77,7 +77,10 @@ export default {
       {
         name: "test",
         in: "runner",
-        command: ["npm", "test", "--", "--exclude", "**/*-podman.test.ts"],
+        command: [
+          "npm", "test", "--", "--exclude", "**/*-podman.test.ts",
+          "--coverage.enabled", "--coverage.reportsDirectory=coverage/unit",
+        ],
         timeoutMs: 900_000,
       },
       {
@@ -89,8 +92,19 @@ export default {
           "--exclude", "src/sandbox-stack-podman.test.ts",
           "--exclude", "src/container-resources-podman.test.ts",
           "--maxWorkers", "8",
+          "--coverage.enabled", "--coverage.reportsDirectory=coverage/podman",
         ],
         timeoutMs: 1_800_000,
+      },
+      {
+        name: "tests-structure",
+        in: "runner",
+        command: [
+          "node", "scripts/structure/run.mjs", "missing-tests",
+          "--base", "origin/main", "--git-dir", gitDir, "--podman-coverage",
+        ],
+        timeoutMs: 1_500_000,
+        settles: ["missing-tests"],
       },
     ],
   },
