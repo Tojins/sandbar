@@ -267,6 +267,7 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
 
   it("measures the on-demand net diff separately from the rendered prompt", async () => {
     expect(await branchIsAheadOfSeed(worktree, "origin/main")).toBe(false);
+    expect(await measureNetDiff(worktree, "origin/main", "main")).toEqual({ chars: 0, largestFiles: [] });
     await commitOnBranch();
 
     const diff = (await git(worktree, "diff", "origin/main...HEAD")).stdout;
@@ -569,6 +570,17 @@ describe("the measured net diff leaves out what the branch merged from the sourc
     await commitIn(memberWt, { "chunk.txt": "rewritten\n" }, "more-own-work");
 
     expect((await measure()).chars).toBe((await git(memberWt, "diff", `${seed}...HEAD`)).stdout.length);
+  });
+
+  // Only a conflict yields a tree; any other `merge-tree` failure is git's.
+  it("propagates a merge-tree failure that is not a conflict", async () => {
+    await git(checkout, "checkout", "-q", "--orphan", "unrelated");
+    await commitIn(checkout, { "a.txt": "another history\n" }, "unrelated-root");
+    await git(checkout, "push", "-q", "origin", "unrelated");
+    await git(repoDir, "fetch", "-q", "origin");
+    await git(memberWt, "merge", "-q", "--no-edit", "--allow-unrelated-histories", "-X", "ours", "origin/unrelated");
+
+    await expect(measureNetDiff(memberWt, seed, "unrelated")).rejects.toThrow(/refusing to merge unrelated histories/);
   });
 
   it("measures against the conflicted tree when the seed and main conflict", async () => {
