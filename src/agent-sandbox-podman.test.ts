@@ -454,7 +454,10 @@ describe.runIf(snapshotAvailable)("a seed snapshot sandbox against real podman (
         join(context, "Containerfile"),
         `FROM ${GIT_BASE}\nRUN apk add --no-cache git && adduser -D -u 1000 -h /home/agent agent\n`,
       );
-      await exec(RUNTIME, ["build", "-q", "-t", imageName, context]);
+      // Without Buildah's layer cache: its lookup reads every image in the
+      // shared store, and one another test removes mid-scan fails this build
+      // with `layer not known` (ensure-images-podman.test.ts).
+      await exec(RUNTIME, ["build", "-q", "--layers=false", "-t", imageName, context]);
     } finally {
       await rm(context, { recursive: true, force: true });
     }
