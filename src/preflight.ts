@@ -107,9 +107,10 @@
 // take a reflink copy (`dbVolumeRefusals`, #201): without reflink every copy
 // would fail, and `--reflink=auto` would silently fill the volume instead.
 //
-// With `config.janitor` (#205), git must be 2.38 or newer, for the
-// `merge-tree --write-tree` that refreshes a rolling branch. Whether or not
-// it is on, every local `sandbar/janitor-*` branch is deleted with its clone:
+// Git must be 2.38 or newer, for `merge-tree --write-tree`: the context
+// budget measures every issue branch against a merged tree (#263), and the
+// janitor refreshes a rolling branch with it (#205). Every local
+// `sandbar/janitor-*` branch is deleted with its clone:
 // origin owns the rolling branches, and a local one is only a dead run's
 // scratch.
 //
@@ -342,8 +343,6 @@ export type PreflightConfig = {
   readonly deployWatch: DeployWatchSettings | null;
   // `config.databaseCopies`; null when copies are off.
   readonly databaseCopies: DatabaseCopiesSettings | null;
-  // Whether `config.janitor` is on (#205): it needs `git merge-tree --write-tree`.
-  readonly janitor: boolean;
   readonly onEvent: (event: EventInput) => Promise<void> | void;
 };
 
@@ -1234,13 +1233,13 @@ export async function deleteJanitorScratch(
   return branches;
 }
 
-// The janitor refreshes its rolling branch with `git merge-tree --write-tree`
-// (#205), which git 2.38 introduced. `git --version`'s answer, judged.
+// `git merge-tree --write-tree` (#205, #263) arrived in git 2.38.
+// `git --version`'s answer, judged.
 export function mergeTreeRefusals(versionOutput: string): readonly string[] {
   const m = versionOutput.match(/git version (\d+)\.(\d+)/);
   if (m !== null && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 38))) return [];
   return [
-    `config.janitor needs git 2.38 or newer for \`merge-tree --write-tree\`; this host has ` +
+    `sandbar needs git 2.38 or newer for \`merge-tree --write-tree\`; this host has ` +
       `${versionOutput.trim() || "an unidentified git"}.`,
   ];
 }
@@ -1888,7 +1887,7 @@ export async function runPreflightAfterReachability(
     ...synced.refusals,
     ...deployWatchFailures,
     ...(cfg.databaseCopies === null ? [] : await dbVolumeRefusals(cfg.databaseCopies)),
-    ...(cfg.janitor ? mergeTreeRefusals((await exec("git", ["--version"])).stdout) : []),
+    ...mergeTreeRefusals((await exec("git", ["--version"])).stdout),
   ];
   if (failures.length > 0) throw new PreflightError(failures);
 

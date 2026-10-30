@@ -12,7 +12,7 @@ const seams = vi.hoisted(() => ({
   })),
   branchCommitsSinceSeed: vi.fn(async () => [] as { sha: string }[]),
   branchIsAheadOfSeed: vi.fn(async () => false),
-  measureNetDiffChars: vi.fn(async () => 0),
+  measureNetDiff: vi.fn(async (): Promise<NetDiff> => ({ chars: 0, largestFiles: [] })),
   preserveWorktree: vi.fn(),
   deferWorktreeReclaim: vi.fn(),
   partialUsage: new WeakMap<object, {
@@ -102,7 +102,7 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   buildQualityFixPrompt: vi.fn(async () => "quality fix"),
   buildCorrectnessPrompt: vi.fn(async () => "correctness review"),
   branchIsAheadOfSeed: seams.branchIsAheadOfSeed,
-  measureNetDiffChars: seams.measureNetDiffChars,
+  measureNetDiff: seams.measureNetDiff,
 }));
 
 import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
@@ -115,6 +115,7 @@ import {
 import { createAgentInvocationSequencer } from "./logs.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
 import type { PlannedIssue } from "./plan-resolver.js";
+import type { NetDiff } from "./prompt.js";
 import { sandboxContainers } from "./sandbox-stack.js";
 
 const issue = (id: string): PlannedIssue => ({
@@ -223,7 +224,7 @@ describe("runInnerLoop run-scoped quota closure (#109)", () => {
     });
     seams.branchIsAheadOfSeed.mockReset().mockResolvedValue(false);
     seams.branchCommitsSinceSeed.mockReset().mockResolvedValue([]);
-    seams.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    seams.measureNetDiff.mockReset().mockResolvedValue({ chars: 0, largestFiles: [] });
     seams.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     seams.preserveWorktree.mockReset();
     seams.deferWorktreeReclaim.mockReset();

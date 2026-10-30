@@ -31,7 +31,7 @@ import {
   buildQualityFixPrompt,
   buildQualityReviewPrompt,
   contextChars,
-  measureNetDiffChars,
+  measureNetDiff,
   readGit,
 } from "./prompt.js";
 import { loadTemplate } from "./prompts.js";
@@ -271,8 +271,24 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
 
     const diff = (await git(worktree, "diff", "origin/main...HEAD")).stdout;
     expect(await branchIsAheadOfSeed(worktree, "origin/main")).toBe(true);
-    expect(await measureNetDiffChars(worktree, "origin/main")).toBe(diff.length);
+    expect((await measureNetDiff(worktree, "origin/main", "main")).chars).toBe(diff.length);
     expect(contextChars("prompt", diff.length)).toBe(6 + diff.length);
+  });
+
+  it("names the three largest files of the measured diff, largest first", async () => {
+    for (const [path, size] of [["small.txt", 100], ["large.txt", 300], ["mid.txt", 200], ["tiny.txt", 50]] as const) {
+      await writeFile(join(worktree, path), `${"x".repeat(size)}\n`);
+    }
+    await git(worktree, "add", "-A");
+    await git(worktree, "commit", "-qm", "four-files");
+
+    const sizeOf = async (path: string) =>
+      (await git(worktree, "diff", "origin/main...HEAD", "--", path)).stdout.length;
+    expect((await measureNetDiff(worktree, "origin/main", "main")).largestFiles).toEqual([
+      { path: "large.txt", chars: await sizeOf("large.txt") },
+      { path: "mid.txt", chars: await sizeOf("mid.txt") },
+      { path: "small.txt", chars: await sizeOf("small.txt") },
+    ]);
   });
 
   // #187: a later lister reads what changed since the last approved quality
@@ -480,5 +496,89 @@ describe("a chunk member's slots are measured from the chunk tip (#61)", () => {
     expect(prompt).toContain(CHUNK_SUBJECT);
     expect(prompt).toContain("chunk.txt");
     expect(prompt).not.toContain(CHUNK_LINE);
+  });
+});
+
+// #263 — the context budget counts the branch's own work, never what it merged
+// from the source branch. The seed is a chunk tip that trails main, the shape
+// Tojins/outdoor#827 parked on: main moves past the seed, the issue branch
+// merges main, and `seed...HEAD` then charges main's change to the issue.
+describe("the measured net diff leaves out what the branch merged from the source branch (#263)", () => {
+  const CHUNK = { root: 6, branch: "sandbar/chunk-6-widget" };
+  const MEMBER_BRANCH = "sandbar/issue-8-member";
+  // A single-line generated asset, as outdoor's `emoji.json` was.
+  const EMOJI = `[${'"x",'.repeat(99_000)}"y"]`;
+
+  let memberWt: string;
+  let seed: string;
+  let ownDiff: string;
+
+  const commitIn = async (dir: string, files: Record<string, string>, subject: string) => {
+    for (const [path, body] of Object.entries(files)) await writeFile(join(dir, path), body);
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-qm", subject);
+  };
+
+  const advanceMain = async (files: Record<string, string>) => {
+    await commitIn(checkout, files, "main-moves-past-the-seed");
+    await git(checkout, "push", "-q", "origin", "main");
+    await git(repoDir, "fetch", "-q", "origin");
+  };
+
+  const measure = () => measureNetDiff(memberWt, seed, "main");
+
+  beforeEach(async () => {
+    await commitIn(checkout, { "emoji.json": EMOJI }, "emoji-on-main");
+    await git(checkout, "push", "-q", "origin", "main");
+    await commitIn(checkout, { "chunk.txt": "earlier member\n" }, "earlier-member");
+    await git(checkout, "push", "-q", "origin", `HEAD:refs/heads/${CHUNK.branch}`);
+    await git(checkout, "reset", "-q", "--hard", "origin/main");
+    await git(repoDir, "fetch", "-q", "origin");
+
+    seed = (await ensureIssueBranch(repoDir, MEMBER_BRANCH, "main", CHUNK)).ref;
+    memberWt = join(root, "member-wt");
+    await git(repoDir, "worktree", "add", "-q", memberWt, MEMBER_BRANCH);
+    await git(memberWt, "config", "user.email", "t@t");
+    await git(memberWt, "config", "user.name", "t");
+    await commitIn(memberWt, { "own.txt": "own work line\n".repeat(750) }, "own-work");
+    ownDiff = (await git(memberWt, "diff", "HEAD^", "HEAD")).stdout;
+  });
+
+  it("measures 10k of own work, not a 1 MB file merged from main", async () => {
+    await advanceMain({ "big.txt": `${"b".repeat(1_000_000)}\n` });
+    await git(memberWt, "merge", "-q", "--no-edit", "origin/main");
+
+    expect(ownDiff.length).toBeGreaterThan(10_000);
+    expect((await measure()).chars).toBe(ownDiff.length);
+  });
+
+  it("measures only own work after merging main's edit to a large single-line file", async () => {
+    await advanceMain({ "emoji.json": EMOJI.replace('"y"', '"z"') });
+    await git(memberWt, "merge", "-q", "--no-edit", "origin/main");
+
+    // The premise: the old measure charged the issue for main's one-line edit.
+    expect((await git(memberWt, "diff", `${seed}...HEAD`)).stdout.length).toBeGreaterThan(2 * EMOJI.length);
+    expect(await measure()).toEqual({
+      chars: ownDiff.length,
+      largestFiles: [{ path: "own.txt", chars: ownDiff.length }],
+    });
+  });
+
+  it("measures a branch that never merged main exactly as seed...HEAD", async () => {
+    await advanceMain({ "big.txt": "unmerged\n" });
+    await commitIn(memberWt, { "chunk.txt": "rewritten\n" }, "more-own-work");
+
+    expect((await measure()).chars).toBe((await git(memberWt, "diff", `${seed}...HEAD`)).stdout.length);
+  });
+
+  it("measures against the conflicted tree when the seed and main conflict", async () => {
+    await commitIn(checkout, { "chunk.txt": "main's version\n" }, "main-edits-chunk-file");
+    await advanceMain({ "big.txt": `${"b".repeat(100_000)}\n` });
+    await expect(git(memberWt, "merge", "-q", "--no-edit", "origin/main")).rejects.toThrow();
+    await commitIn(memberWt, { "chunk.txt": "resolved\n" }, "merge-main");
+
+    const measured = await measure();
+    expect(measured.largestFiles.map((file) => file.path)).toEqual(["own.txt", "chunk.txt"]);
+    expect(measured.chars).toBeLessThan(ownDiff.length + 1_000);
   });
 });

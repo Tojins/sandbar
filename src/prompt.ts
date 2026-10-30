@@ -622,15 +622,56 @@ export function buildCondenserPrompt(issueId: string, issue: IssueJson): string 
 // rendered into a prompt. The transport ceiling merely ensures a pathological
 // branch still returns an over-budget measurement instead of allocating
 // without bound.
-export async function measureNetDiffChars(
+//
+// The patch is HEAD against the merge of the seed with what the branch has
+// merged from the source branch (#263), so a branch that merged
+// `origin/<sourceBranch>` past a trailing chunk seed is not charged for the
+// source branch's own changes. A branch that never merged it measures against
+// its seed's tree, as `seed...HEAD` would. A conflicted merge is measured
+// against the tree `merge-tree` writes anyway, markers and all: the branch
+// already resolved those files, so the overcount is bounded, and falling back
+// to `seed...HEAD` would be the overcount this exists to remove.
+export type NetDiff = {
+  readonly chars: number;
+  // The three largest files of the patch, largest first, so a park can say
+  // what it measured.
+  readonly largestFiles: readonly { readonly path: string; readonly chars: number }[];
+};
+
+export async function measureNetDiff(
   worktreePath: string,
   baseRef: string,
-): Promise<number> {
-  return (await readGit(
-    ["diff", `${baseRef}...HEAD`],
-    worktreePath,
-    `the net diff size anchored at ${baseRef}`,
-  )).length;
+  sourceBranch: string,
+): Promise<NetDiff> {
+  const what = `the net diff size anchored at ${baseRef}`;
+  const mergeBase = async (ref: string) =>
+    (await readGit(["merge-base", ref, "HEAD"], worktreePath, what)).trim();
+  const [seed, merged] = await Promise.all([
+    mergeBase(baseRef),
+    mergeBase(`origin/${sourceBranch}`),
+  ]);
+  const tree = await mergedTree(worktreePath, seed, merged);
+  const diff = await readGit(["diff", tree, "HEAD"], worktreePath, what);
+  const files = diff.split(/^(?=diff --git )/m).filter((file) => file !== "").map((file) => {
+    const header = file.slice(0, file.indexOf("\n"));
+    return { path: header.slice(header.lastIndexOf(" b/") + 3), chars: file.length };
+  });
+  return {
+    chars: diff.length,
+    largestFiles: files.sort((a, b) => b.chars - a.chars).slice(0, 3),
+  };
+}
+
+// `merge-tree` exits 1 on a conflict and still writes the tree, its id on the
+// first line.
+async function mergedTree(worktreePath: string, left: string, right: string): Promise<string> {
+  try {
+    return (await exec("git", ["merge-tree", "--write-tree", left, right], { cwd: worktreePath }))
+      .stdout.split("\n")[0]!;
+  } catch (err) {
+    if (!isExitCode(err, 1)) throw err;
+    return String((err as { stdout?: unknown }).stdout).split("\n")[0]!;
+  }
 }
 
 export const contextChars = (prompt: string, netDiffChars: number): number =>

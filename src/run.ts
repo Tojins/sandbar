@@ -924,7 +924,6 @@ export async function run(
     agentProviders,
     deployWatch: config.deployWatch,
     databaseCopies: config.databaseCopies,
-    janitor: config.janitor !== null,
   };
   const stopBeforeOriginLock = async (
     err: PreflightError | SandbarError,

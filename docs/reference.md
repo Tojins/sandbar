@@ -23,6 +23,8 @@ echo -e "sandbar.config.mjs\nsandbar.env\n.sandbar/" >> .gitignore
 npx sandbar
 ```
 
+The host needs git 2.38 or newer.
+
 `npx sandbar` imports `./sandbar.config.mjs`; `--config <path>` names another
 file. Sandbar never searches parent directories. `cwd` defaults to the
 directory of the config file, not the one you launched from.
@@ -262,7 +264,8 @@ then two read-only agents classify the issue:
   it parks for a human.
 
 `maxContextChars` is checked again before each review, against the prompt plus
-the branch's diff.
+the branch's diff, not counting what the branch merged from the source branch.
+A park it causes names the three largest files it counted.
 
 ### Scenario writer
 
@@ -403,8 +406,7 @@ and a run under way is discarded.
 When the source branch moves, a run first merges it into the rolling branch;
 on a conflict the task waits, with one comment on its pull request, until
 either branch moves. Which files were visited is kept in
-`.sandbar/janitor/<name>.json`; deleting it costs only repeat visits. With
-tasks configured, git must be 2.38 or newer.
+`.sandbar/janitor/<name>.json`; deleting it costs only repeat visits.
 
 ## Images
 
