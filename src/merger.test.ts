@@ -4247,6 +4247,75 @@ describe("runMergerWithAdapter — the landing pass (#258)", () => {
     expect(calls.landingPassPrompts[0]).not.toContain("gh issue view");
   });
 
+  const ABANDON = "<promise>ABANDON</promise><reason>two screens claim version 5</reason>";
+
+  it("parks a chunk whose pass abandons on its pull request, reverted and unlanded", async () => {
+    const target: ChunkLandTarget = {
+      root: 40,
+      branch: "sandbar/chunk-40-c",
+      base: null,
+      title: "chunk 40",
+      members: [{ number: 40, title: "t-40" }, { number: 41, title: "t-41" }],
+      closeOrder: [{ number: 41, title: "t-41" }, { number: 40, title: "t-40" }],
+      rework: [],
+      pullRequest: 540,
+      landLabels: [LAND_LABEL],
+    };
+    const ref = "refs/remotes/origin/sandbar/chunk-40-c";
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      heads: ["pre", "merged"],
+      files: atPre,
+      chunkRefs: { "sandbar/chunk-40-c": { kind: "present", ref } },
+      chunkMemberRefs: { [ref]: { members: [40, 41] } },
+      landingPass: [{ stdout: ABANDON }],
+    });
+    const summary = await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...passing(),
+      chunkLanding: { requests: [target], janitor: [], sourceBranch: "main" },
+    });
+
+    expect(summary.skippedChunks).toEqual([{ target, reason: "landing-pass" }]);
+    expect(calls.resets).toEqual([{ sha: "merged" }, { sha: "pre" }]);
+    expect(calls.prComments).toEqual([{
+      pr: 540,
+      body: expect.stringContaining("the landing pass gave up after 1 attempt"),
+    }]);
+    expect(calls.prComments[0]?.body).toContain("Reason: two screens claim version 5");
+    expect(calls.prLabelRemovals).toEqual([{ pr: 540, label: LAND_LABEL }]);
+    expect(calls.pushes).toBe(0);
+  });
+
+  it("parks a janitor branch whose pass abandons as rejected for the landing pass", async () => {
+    const janitor: JanitorLandTarget = {
+      task: "docs",
+      branch: "sandbar/janitor-docs",
+      title: "Idle task: docs",
+      pullRequest: 9,
+      landLabels: [LAND_LABEL],
+    };
+    const outcomes: MergerOutcome[] = [];
+    const { adapter, calls } = makeAdapter({
+      merges: ["ok"],
+      heads: ["pre", "merged"],
+      files: atPre,
+      chunkRefs: { "sandbar/janitor-docs": { kind: "present", ref: "refs/remotes/origin/sandbar/janitor-docs" } },
+      landingPass: [{ stdout: ABANDON }],
+    });
+    await runMergerWithAdapter([], adapter, undefined, undefined, {
+      ...passing(),
+      chunkLanding: { requests: [], janitor: [janitor], sourceBranch: "main" },
+      observations: { onOutcome: (outcome) => { outcomes.push(outcome); }, onGate: () => undefined },
+    });
+
+    expect(outcomes).toEqual([
+      { kind: "janitor-parked", target: janitor, reason: "landing-pass", durationMs: expect.any(Number) },
+    ]);
+    expect(calls.resets).toEqual([{ sha: "merged" }, { sha: "pre" }]);
+    expect(calls.prLabelRemovals).toEqual([{ pr: 9, label: LAND_LABEL }]);
+    expect(calls.pushes).toBe(0);
+  });
+
   it("reverts an abandon to the source tip, skips it as landing-pass and comments the reason", async () => {
     const outcomes: MergerOutcome[] = [];
     const recorded: Array<{ key: string; unit: string; outcome: string }> = [];
@@ -4442,6 +4511,25 @@ describe("runMergerWithAdapter — the landing pass (#258)", () => {
       });
       expect(calls.pushes).toBe(1);
       expect(calls.closes).toEqual([]);
+    });
+
+    it("defers the source pass when the rerun's commit changes the gate stack beyond env", async () => {
+      const change: StackChange = {
+        path: "gate/stack.json",
+        differences: [{ where: "container 'db'", what: "image" }],
+      };
+      const { adapter, calls } = makeAdapter({
+        ...race,
+        // The merge's check, then the re-merge's pass commit.
+        stackChanges: [null, change],
+        landingPass: [{ stdout: DONE }, { stdout: DONE, commits: 1 }],
+      });
+      const summary = await runMergerWithAdapter([issue(42)], adapter, undefined, undefined, passing());
+
+      expect(summary.pushed).toBe(false);
+      expect(summary.raceDeferral?.reason).toContain("change the gate stack beyond env");
+      expect(calls.installs).toBe(1);
+      expect(calls.gates).toBe(1);
     });
   });
 

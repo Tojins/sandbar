@@ -15,6 +15,7 @@ import {
   chunkLandDeferral,
   chunkResidue,
   CHUNK_LAND_ABANDONED_PR_COMMENT,
+  CHUNK_LAND_LANDING_PASS_PR_COMMENT,
   CHUNK_LAND_DEFERRED_PR_COMMENT,
   CHUNK_MEMBER_CLOSED_COMMENT,
   CHUNK_LAND_WINDOW_PR_COMMENT,
@@ -970,6 +971,23 @@ describe("the prose (#64)", () => {
     expect(body).toContain("2 resolve attempts");
     expect(body).toContain("two branches rewrote the same file");
     expect(body).toContain(`re-apply \`${LAND_LABEL}\``);
+    expect(body.endsWith(`re-apply \`${LAND_LABEL}\`.`)).toBe(true);
+  });
+
+  it("ends a landing-pass comment with the reason, its attempts and the action that restores land", () => {
+    const body = CHUNK_LAND_LANDING_PASS_PR_COMMENT({
+      sourceBranch: "main",
+      reason: "two screens claim version 5",
+      attempts: [{
+        attempt: 1, outcome: "abandon", end: "exit", exitCode: 0, signal: null,
+        durationMs: 900, container: "c1", stdoutBytes: 10, stderrBytes: 0,
+        logPath: "/logs/merger-landing-pass-chunk-42-1.log",
+      }],
+    });
+    expect(body).toContain("merge into `main` stopped: the landing pass gave up after 1 attempt,");
+    expect(body).toContain("/logs/merger-landing-pass-chunk-42-1.log");
+    expect(body).toContain("Reason: two screens claim version 5");
+    expect(body).toContain("<summary>Landing-pass diagnostics</summary>");
     expect(body.endsWith(`re-apply \`${LAND_LABEL}\`.`)).toBe(true);
   });
 

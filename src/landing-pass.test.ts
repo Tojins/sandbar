@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 
+import { AgentCredentialError, AgentQuotaError } from "./agent-sandbox.js";
+import type { ResolveAgentRun } from "./resolve-loop.js";
+
 import {
   LANDING_PASS_MAX_ATTEMPTS,
   type CommitShape,
+  type LandingPassAdapter,
   type LandingPassPromptInputs,
   buildLandingPassPrompt,
   commitShapeProblem,
   landingTouchesPaths,
   parseLandingPassSignal,
+  runLandingPass,
 } from "./landing-pass.js";
 
 describe("landingTouchesPaths", () => {
@@ -168,5 +173,98 @@ describe("buildLandingPassPrompt", () => {
       retry: null,
     });
     expect(empty.length).toBeLessThanOrEqual(1_200);
+  });
+});
+
+describe("runLandingPass attempts", () => {
+  const run = (over: Partial<ResolveAgentRun>): ResolveAgentRun => ({
+    stdout: "",
+    stderr: "",
+    output: "",
+    end: "exit",
+    exitCode: 0,
+    signal: null,
+    durationMs: 1_000,
+    container: "c",
+    cause: { kind: "exit" },
+    verdict: "answer",
+    toolCalls: 0,
+    ...over,
+  }) as ResolveAgentRun;
+
+  const setup = (runs: ResolveAgentRun[]) => {
+    const prompts: string[] = [];
+    const resets: string[] = [];
+    const adapter: LandingPassAdapter = {
+      async runLandingPassAgent(prompt) {
+        prompts.push(prompt);
+        const next = runs.shift();
+        if (!next) throw new Error("no attempt scripted");
+        return next;
+      },
+      async changedPaths() {
+        return ["src/app/x.ts"];
+      },
+      async readFileAt() {
+        return "instructions";
+      },
+      async commitShape() {
+        return { mergeInProgress: false, dirtyPaths: [], descends: true, commits: [] };
+      },
+      async getHeadSha() {
+        return "merged";
+      },
+      async resetHardSha(sha) {
+        resets.push(sha);
+      },
+    };
+    const go = () =>
+      runLandingPass(
+        {
+          label: "#12",
+          promptAt: "pre",
+          changed: { from: "pre", to: "HEAD" },
+          prompt: {
+            opening: { kind: "unit", label: "#12", branch: "b", preMergeSha: "pre" },
+            target: "main",
+            issues: [12],
+            repoSlug: "acme/app",
+          },
+        },
+        adapter,
+        { settings: { prompt: { text: "t" }, paths: null }, log: async () => {} },
+      );
+    return { go, prompts, resets };
+  };
+
+  it("spends an attempt killed at the timeout without a signal, and runs the next", async () => {
+    const { go, prompts, resets } = setup([
+      run({ end: "timeout", exitCode: null, output: "still looking" }),
+      run({ output: "<promise>DONE</promise>" }),
+    ]);
+
+    expect(await go()).toEqual({ kind: "done", commits: 0 });
+    expect(resets).toEqual(["merged"]);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("10-minute timeout");
+  });
+
+  it("propagates a closed quota and spends no second attempt", async () => {
+    const { go, prompts } = setup([
+      run({
+        verdict: "quota",
+        rateLimit: { window: "five_hour" } as ResolveAgentRun["rateLimit"],
+      }),
+    ]);
+
+    await expect(go()).rejects.toBeInstanceOf(AgentQuotaError);
+    expect(prompts).toHaveLength(1);
+  });
+
+  it("propagates a refused credential and spends no second attempt", async () => {
+    const { go, prompts } = setup([run({ verdict: "credential", detail: "expired" })]);
+
+    await expect(go()).rejects.toBeInstanceOf(AgentCredentialError);
+    expect(prompts).toHaveLength(1);
   });
 });

@@ -192,6 +192,7 @@ import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
 import type { QualityOutcome, Verdict } from "./inner-loop-machine.js";
 import type { JanitorOutcome } from "./janitor-plan.js";
 import type { LandingPassAttemptOutcome } from "./landing-pass.js";
+import type { ResolveAgentEnd } from "./resolve-loop.js";
 import type { RestartDueReason } from "./scheduler.js";
 import type { StackClassification } from "./stack-change.js";
 import type { StandaloneStepOutcome } from "./standalone-steps.js";
@@ -557,7 +558,7 @@ export type EventInput =
   | (EventSubject & ContainerResources & { readonly kind: "review-pass"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly result: "completed" | "failed" | "input-too-large" | "quota" | "credential"; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "adjudication"; readonly pass: "quality" | "correctness" | "scenarios"; readonly attempt: number; readonly round: number; readonly head: string; readonly ruling: "UPHELD" | "OVERRULED"; readonly rulings?: readonly UnitRuling[]; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & ContainerResources & { readonly kind: "resolve-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields })
-  | (EventSubject & ContainerResources & { readonly kind: "landing-pass-attempt"; readonly attempt: number; readonly container: string; readonly end: "exit" | "timeout" | "signal" | "spawn-error"; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields; readonly outcome: LandingPassAttemptOutcome; readonly commits: number })
+  | (EventSubject & ContainerResources & { readonly kind: "landing-pass-attempt"; readonly attempt: number; readonly container: string; readonly end: ResolveAgentEnd; readonly exitCode: number | null; readonly signal: string | null; readonly durationMs: number; readonly provider?: string; readonly model?: string; readonly usage?: UsageFields; readonly outcome: LandingPassAttemptOutcome; readonly commits: number })
   | (EgressSubject & EgressRefusal & { readonly kind: "egress-refused" })
   | (EgressSubject & EgressSummaryEvent & { readonly kind: "egress" })
   | (ContainerResources & { readonly kind: "container"; readonly stack: "gate" | "sandbox"; readonly name: string; readonly container: string; readonly lifecycle: "issue" | "attempt"; readonly durationMs: number } & Partial<EventSubject>)

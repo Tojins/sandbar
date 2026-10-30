@@ -1844,11 +1844,11 @@ async function attemptMerge(
       durationMs: unitTimer(),
     };
   }
-  if (pass?.kind === "done" && pass.commits > 0) {
+  const passCommitted = pass?.kind === "done" && pass.commits > 0;
+  if (conflicted && !passCommitted) return merged(" (via resolve-loop)");
+  if (passCommitted) {
     const refusedPass = await stackChangeRefusal();
     if (refusedPass !== null) return refusedPass;
-  } else if (conflicted) {
-    return merged(" (via resolve-loop)");
   }
 
   // `npm install` runs on every clean merge and on every resolve attempt, and
@@ -2075,7 +2075,6 @@ export async function runMergerWithAdapter(
   const landingPass = opts.landingPass;
   const runPass = landingPass === undefined ? null : async (
     key: string,
-    unit: string,
     args: {
       readonly label: string;
       readonly promptAt: string;
@@ -2083,6 +2082,7 @@ export async function runMergerWithAdapter(
       readonly opening: LandingPassOpening;
       readonly issues: readonly number[];
     },
+    unit: string = key,
   ): Promise<LandingPassOutcome> => {
     const sink = landingPass.onAttempt;
     const outcome = await runLandingPass(
@@ -2122,7 +2122,7 @@ export async function runMergerWithAdapter(
     resolveSinkFor,
     clock: opts.clock,
     ...(runPass === null ? {} : {
-      landingPass: (unit: LandingPassUnit) => runPass(unit.gateKey, unit.gateKey, {
+      landingPass: (unit: LandingPassUnit) => runPass(unit.gateKey, {
         label: unit.label,
         promptAt: unit.preMergeSha,
         changed: { from: unit.preMergeSha, to: "HEAD" },
@@ -3119,7 +3119,7 @@ export async function runMergerWithAdapter(
     if (runPass === null || !landingPassRan) return null;
     const newTip = await adapter.revParse("HEAD^2");
     const oldTip = await adapter.mergeBaseOf("HEAD^1", newTip);
-    const pass = await runPass(ORIGIN_SYNC_GATE_KEY, unit, {
+    const pass = await runPass(ORIGIN_SYNC_GATE_KEY, {
       label: ORIGIN_SYNC_GATE_KEY,
       promptAt: newTip,
       changed: { from: oldTip, to: newTip },
@@ -3133,7 +3133,7 @@ export async function runMergerWithAdapter(
         newTip,
       },
       issues: [...landsOnHead.flatMap(landUnitIssues), ...merged.map(issueNumberOf)],
-    });
+    }, unit);
     if (pass.kind === "abandon") {
       return {
         kind: "deferred",
