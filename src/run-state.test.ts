@@ -17,9 +17,9 @@ const reduceRunEvents = (
 describe("run event reducer", () => {
   it("renders excluded label actors in the waiting list", () => {
     expect(waitingReasonText({ kind: "label-actor", actor: "mallory" }))
-      .toBe("excluded: ready-for-agent applied by @mallory");
+      .toBe("excluded: 2-agent-build applied by @mallory");
     expect(waitingReasonText({ kind: "label-actor", actor: null }))
-      .toBe("excluded: ready-for-agent label actor unknown");
+      .toBe("excluded: 2-agent-build label actor unknown");
   });
 
   it("names why a review-gated issue is held", () => {

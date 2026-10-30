@@ -68,7 +68,7 @@ defaults.
 | Field | Meaning |
 | --- | --- |
 | `ghOwner`, `ghRepo` | The GitHub repository. Must match `origin`. |
-| `developers` | Logins whose `ready-for-agent` label is honored (plus the token's own login), or `"anyone"`. |
+| `developers` | Logins whose `2-agent-build` label is honored (plus the token's own login), or `"anyone"`. |
 | `sandboxImage` | Image the implementer and resolve agents run in. |
 | `botName`, `botEmail` | Commit author. |
 | `sandboxHooks` | Per-sandbox setup commands, e.g. `onWorktreeReady: npm ci`. |
@@ -98,7 +98,7 @@ defaults.
 | `maxQualityRounds` | `3` | See [Budgets](#budgets). |
 | `maxGateRounds` | `4` | See [Budgets](#budgets). |
 | `maxReviewRounds` | `4` | See [Budgets](#budgets). |
-| `labels` | `{ handoff: "needs-human" }` | Rename the handoff label every park applies. The old `needsInfo`/`agentStuck` keys are refused. |
+| `labels` | `{ handoff: "2-human-unstick" }` | Rename the handoff label every park applies. The old `needsInfo`/`agentStuck` keys are refused. |
 | `copyToWorktree` | `[]` | Host-only files copied into each issue worktree. |
 | `claudeMdPath`, `contextMdPath`, `adrDir` | `CLAUDE.md`, `CONTEXT.md`, `docs/adr` | Anchor docs. |
 | `promptExtensions` | `{}` | Per-role `{ text }` or `{ path }` additions. `reviewerQuality` is a [standards file](#coding-standards). |
@@ -106,8 +106,28 @@ defaults.
 | `requiresSandbar` | none | Oldest driver version this config needs. |
 | `janitor` | off | `{ tasks: [...] }`: idle tasks run when no issue is admissible. See [Idle janitor](#idle-janitor). |
 
-`ready-for-agent`, `auto-land` and `land` are fixed label names. `land` and the
-handoff label must exist in the repo; sandbar never creates either.
+The workflow labels are named `<stage>-<who acts next>-<what they do>`, so the
+label list sorts in workflow order and each label says whose move it is:
+
+| Label | Next step |
+|---|---|
+| `1-human-spec` | A human finishes the spec. |
+| `1-human-later` | Not a priority now; a human decides when it moves on. |
+| `2-agent-build` | Sandbar's queue: an agent builds it when it has a slot. |
+| `2-agent-later` | For an agent, once a human moves it to `2-agent-build`. |
+| `2-human-unstick` | Sandbar stopped (the handoff label); its comment says what to do. |
+| `3-human-review` | A human reviews the chunk's pull request. |
+
+`auto-land`, `land` and `land-hotfix` are commands rather than stages. An issue
+an agent is working keeps `2-agent-build`: work in progress is sandbar's state,
+not a label. Either `-later` label also keeps an issue that still carries
+`2-agent-build` out of the queue.
+
+These names are fixed except the handoff label. Every label sandbar applies
+must exist in the repo; the run never creates one. `sandbar labels sync`
+creates them, and renames the names they had before (`ready-for-human`,
+`waiting`, `ready-for-agent`, `agent-queued`, `needs-human`, `needs-review`),
+keeping them on their issues.
 
 ### Credentials and role routing
 
@@ -236,7 +256,7 @@ then two read-only agents classify the issue:
   condenser fails, the roles read the whole thread.
 
 - **Partition check** (`partitionCheck`): if the issue won't fit
-  `maxContextChars`, it parks as `NEEDS-PARTITION` under `needs-human` and asks
+  `maxContextChars`, it parks as `NEEDS-PARTITION` under `2-human-unstick` and asks
   for a `## Blocked by` chain.
 - **UI check** (`uiPrototypeCheck`): if the issue needs a UI prototype first,
   it parks for a human.
@@ -476,14 +496,14 @@ A branch never changes its own gate, except for container `env` (and
 that branch's gate-1 (and to its sandbox from the next one) and to the gate
 on its merge result when it lands. Any other change — mounts, images, flags,
 containers added or removed, steps — is not applied: gate-1 runs once on the
-source branch's stack, and the issue parks under `needs-human` with a comment
+source branch's stack, and the issue parks under `2-human-unstick` with a comment
 listing what differs and how that gate went. Land the stack change on the
 source branch by hand, then re-queue the issue. A missing or invalid file on
 the branch counts as such a change.
 
 Landing applies the same rule to each merge result, including a merge-resolve
 agent's edits and a reviewed chunk. A result that changes the file beyond
-`env` is reverted: an issue parks under `needs-human`, a chunk's pull request
+`env` is reverted: an issue parks under `2-human-unstick`, a chunk's pull request
 loses `land`, and either gets a comment listing what differs.
 
 ### Containers

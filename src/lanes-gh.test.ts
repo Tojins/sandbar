@@ -146,7 +146,7 @@ describe("postLaneOverrideNotices", () => {
   });
 
   it("says nothing on an issue already carrying the marker", async () => {
-    // A review-gated issue keeps `ready-for-agent` and is a candidate again
+    // A review-gated issue keeps `2-agent-build` and is a candidate again
     // every cycle of every run, so this is the difference between one comment
     // and one per cycle forever.
     process.env["SANDBAR_TEST_COMMENTS"] = JSON.stringify({

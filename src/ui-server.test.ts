@@ -53,7 +53,7 @@ const PARKED_WHY =
   " .sandbar/worktrees/sandbar-issue-249-long-reason with its branch published" +
   " and an off-branch HEAD pinned in the cache, and the gate-1 trace from the" +
   " attempt before it is filed beside that attempt log; push a fix on the" +
-  " branch and re-apply ready-for-agent to resume, or delete the branch on" +
+  " branch and re-apply 2-agent-build to resume, or delete the branch on" +
   " origin to abandon what the attempt accumulated there · this run";
 
 describe("run UI server", () => {

@@ -798,7 +798,7 @@ export function createBranchImages(opts: BranchImagesOptions): BranchImages {
         // ENOSPC) would be a dead end rather than a bad verdict: the
         // fingerprint stays put as long as the agent does not touch the
         // lockfile again, so every remaining attempt re-throws the SAME stale
-        // error, no build is ever retried, and the issue lands on `needs-human`
+        // error, no build is ever retried, and the issue lands on `2-human-unstick`
         // with a trace telling its author their dependencies do not install.
         // The merger's gate-2 on a merge result with the same lockfile bytes
         // would inherit it too. Evicting costs a repeated failing build per red

@@ -342,7 +342,7 @@ describe("markers and renderers", () => {
     ]) {
       expect(text).toContain(part);
     }
-    expect(text).not.toContain("ready-for-agent");
+    expect(text).not.toContain("2-agent-build");
   });
 
   it("stays under the body bound with a huge log or a huge landing list", () => {
@@ -430,7 +430,7 @@ describe("realDeployWatchAdapter argv", () => {
     expect(calls().some((c) => c.args.includes(`${sha("a4")}..refs/remotes/origin/main`))).toBe(true);
   });
 
-  it("creates the bug with both labels and never ready-for-agent, behind the write barrier", async () => {
+  it("creates the bug with both labels and never 2-agent-build, behind the write barrier", async () => {
     const { adapter, log } = fake(answers);
     expect(await adapter.createIssue("t", "b")).toBe(93);
     await adapter.comment(7, "c");
@@ -439,7 +439,7 @@ describe("realDeployWatchAdapter argv", () => {
       {
         file: "gh",
         args: ["issue", "create", "--repo", "o/r", "--title", "t", "--body", "b",
-          "--label", "ready-for-human", "--label", "deploy-red"],
+          "--label", "1-human-spec", "--label", "deploy-red"],
         timeout: 60_000,
       },
       "lease",

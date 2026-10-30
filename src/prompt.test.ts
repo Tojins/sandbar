@@ -265,8 +265,8 @@ describe("UI-prototype prompt contracts (#126)", () => {
       NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
         42,
         "impact",
-        "needs-human",
-        "ready-for-agent",
+        "2-human-unstick",
+        "2-agent-build",
         null,
         null,
         { kind: "removed" },

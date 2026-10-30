@@ -467,7 +467,7 @@ export async function runResolveLoop(
     // Nothing ran. Not an answer, and not this loop's to absorb — see the
     // header. Thrown rather than returned as an abandon, because an abandon is
     // a statement about the CODE ("this conflict cannot be resolved") that
-    // parks the issue under `needs-human` and takes it off the queue; what
+    // parks the issue under `2-human-unstick` and takes it off the queue; what
     // happened here is a statement about the host.
     if (isInfraFailure(run)) {
       // Deliberately NOT recorded in the journal. A journal entry states what

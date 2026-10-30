@@ -40,7 +40,7 @@ function issue(
     number,
     title: opts.title ?? `Issue ${number}`,
     body,
-    labels: ["ready-for-agent", ...(opts.labels ?? [])],
+    labels: ["2-agent-build", ...(opts.labels ?? [])],
   };
 }
 
@@ -162,7 +162,7 @@ describe("parseBlockedBy", () => {
   });
 });
 
-describe("ready-for-agent actor admission (#136)", () => {
+describe("2-agent-build actor admission (#136)", () => {
   const policy = {
     developers: ["Alice", "release-bot[bot]"],
     viewerLogin: "sandbar-bot",
@@ -172,8 +172,8 @@ describe("ready-for-agent actor admission (#136)", () => {
     "admits a configured or token actor case-insensitively: %s",
     (actor) => {
       const result = resolvePlan(
-        [issue(10, "", { labels: ["ready-for-agent"] })],
-        facts({ 10: { labels: ["ready-for-agent"], actor } }),
+        [issue(10, "", { labels: ["2-agent-build"] })],
+        facts({ 10: { labels: ["2-agent-build"], actor } }),
         new Set(),
         3,
         "auto",
@@ -192,8 +192,8 @@ describe("ready-for-agent actor admission (#136)", () => {
     { name: "an event whose actor has no login", actor: null, reported: null },
   ])("excludes and reports $name", ({ actor, reported }) => {
     const result = resolvePlan(
-      [issue(10, "", { labels: ["ready-for-agent"] })],
-      facts({ 10: { labels: ["ready-for-agent"], actor } }),
+      [issue(10, "", { labels: ["2-agent-build"] })],
+      facts({ 10: { labels: ["2-agent-build"], actor } }),
       new Set(),
       3,
       "auto",
@@ -241,16 +241,16 @@ describe("ready-for-agent actor admission (#136)", () => {
 
   it("keeps anyone mode's existing behavior without timeline evidence", () => {
     const result = resolvePlan(
-      [issue(10, "", { labels: ["ready-for-agent"] })],
-      facts({ 10: { labels: ["ready-for-agent"], actor: "mallory" } }),
+      [issue(10, "", { labels: ["2-agent-build"] })],
+      facts({ 10: { labels: ["2-agent-build"], actor: "mallory" } }),
     );
     expect(result.plan.map((candidate) => candidate.id)).toEqual(["10"]);
   });
 
   it("trusts a same-cycle extra candidate re-queued by sandbar", () => {
     const result = resolvePlan(
-      [issue(10, "", { labels: ["ready-for-agent"] })],
-      facts({ 10: { labels: ["ready-for-agent"] } }),
+      [issue(10, "", { labels: ["2-agent-build"] })],
+      facts({ 10: { labels: ["2-agent-build"] } }),
       new Set(),
       3,
       "auto",
@@ -264,8 +264,8 @@ describe("ready-for-agent actor admission (#136)", () => {
 
   it("does not treat an outsider's chunk relabelling as a rework request", () => {
     const result = resolvePlan(
-      [issue(47, "", { title: "Root", labels: ["ready-for-agent"] })],
-      facts({ 47: { labels: ["ready-for-agent"], actor: "mallory" } }),
+      [issue(47, "", { title: "Root", labels: ["2-agent-build"] })],
+      facts({ 47: { labels: ["2-agent-build"], actor: "mallory" } }),
       new Set(),
       3,
       "review",
@@ -284,7 +284,7 @@ describe("ready-for-agent actor admission (#136)", () => {
 
 describe("resolvePlan", () => {
   it("reports every ready issue not admitted with its scheduler reason", () => {
-    const ready = { labels: ["ready-for-agent"] };
+    const ready = { labels: ["2-agent-build"] };
     const resolution = resolvePlan(
       [
         issue(1, "", ready),
@@ -337,9 +337,9 @@ describe("resolvePlan", () => {
     expect(plan).toEqual([]);
   });
 
-  it("excludes `waiting`-labelled issues even when otherwise unblocked", () => {
+  it.each(["1-human-later", "2-agent-later"])("excludes `%s`-labelled issues even when otherwise unblocked", (later) => {
     const plan = planOf(
-      [issue(10, "## Blocked by\nNone\n", { labels: ["waiting"] })],
+      [issue(10, "## Blocked by\nNone\n", { labels: [later] })],
       new Map(),
     );
     expect(plan).toEqual([]);
@@ -347,7 +347,7 @@ describe("resolvePlan", () => {
 
   it("drops a listed candidate when authoritative facts say it is no longer ready", () => {
     const plan = planOf(
-      [issue(10, "", { labels: ["ready-for-agent"] })],
+      [issue(10, "", { labels: ["2-agent-build"] })],
       facts({ 10: { labels: [] } }),
     );
 
@@ -356,17 +356,17 @@ describe("resolvePlan", () => {
 
   it("keeps the listed ready reading when the authoritative batch misses it", () => {
     const plan = planOf(
-      [issue(10, "", { labels: ["ready-for-agent"] })],
+      [issue(10, "", { labels: ["2-agent-build"] })],
       new Map(),
     );
 
     expect(plan.map((p) => p.id)).toEqual(["10"]);
   });
 
-  it("unions authoritative `waiting` with the listing", () => {
+  it("unions authoritative `2-agent-later` with the listing", () => {
     const plan = planOf(
-      [issue(10, "", { labels: ["ready-for-agent"] })],
-      facts({ 10: { labels: ["ready-for-agent", "waiting"] } }),
+      [issue(10, "", { labels: ["2-agent-build"] })],
+      facts({ 10: { labels: ["2-agent-build", "2-agent-later"] } }),
     );
 
     expect(plan).toEqual([]);
@@ -435,7 +435,7 @@ describe("resolvePlan", () => {
       [issue(10, ""), issue(11, "")],
       facts({
         10: { state: "CLOSED" },
-        11: { labels: ["ready-for-agent"] },
+        11: { labels: ["2-agent-build"] },
       }),
     );
     expect(plan.map((p) => p.id)).toEqual(["11"]);
@@ -455,7 +455,7 @@ describe("resolvePlan", () => {
         issue(10, "## Blocked by\nNone\n"),
         issue(11, "## Blocked by\n- #5\n- #6\n"),
         issue(12, "## Blocked by\n- #7\n"),
-        issue(13, "", { labels: ["waiting"] }),
+        issue(13, "", { labels: ["1-human-later"] }),
         issue(2, ""),
       ],
       states({ 5: "CLOSED", 6: "CLOSED", 7: "OPEN" }),
@@ -607,7 +607,7 @@ describe("resolvePlan lanes (#57)", () => {
         issue(12, ""),
         issue(13, "## Blocked by\n- #12\n", { labels: ["auto-land"] }),
       ],
-      facts({ 12: { labels: ["ready-for-agent"] } }),
+      facts({ 12: { labels: ["2-agent-build"] } }),
       new Set(),
       3,
       "review",
@@ -643,9 +643,9 @@ describe("resolvePlan lanes (#57)", () => {
       .map((entry) => entry.issue)).toEqual([30]);
   });
 
-  it("does not count a `waiting` issue as held", () => {
+  it("does not count a `-later` issue as held", () => {
     const r = resolvePlan(
-      [issue(10, "", { labels: ["waiting"] })],
+      [issue(10, "", { labels: ["2-agent-later"] })],
       new Map(),
       new Set(),
       3,
@@ -732,7 +732,7 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
     // a satisfied #11 would be planned beside it, as the case above shows.
     const r = resolvePlan(
       [issue(10, ""), issue(11, "## Blocked by\n- #10\n")],
-      facts({ 10: { labels: ["ready-for-agent"] } }),
+      facts({ 10: { labels: ["2-agent-build"] } }),
       new Set(),
       3,
       "review",
@@ -808,8 +808,8 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
       ],
       facts({
         10: {},
-        11: { labels: ["ready-for-agent"] },
-        12: { labels: ["ready-for-agent"] },
+        11: { labels: ["2-agent-build"] },
+        12: { labels: ["2-agent-build"] },
       }),
       new Set(),
       3,
@@ -975,8 +975,8 @@ describe("resolvePlan chunk-branch blockers (#59, #93)", () => {
 
   it("does not let a display label de-queue an auto-lane candidate", () => {
     const r = resolvePlan(
-      [issue(10, "", { labels: ["needs-review"] }), issue(11, "")],
-      facts({ 10: { labels: ["ready-for-agent"] } }),
+      [issue(10, "", { labels: ["3-human-review"] }), issue(11, "")],
+      facts({ 10: { labels: ["2-agent-build"] } }),
       new Set(),
       3,
       "auto",
@@ -1120,7 +1120,7 @@ describe("resolvePlan git membership safety (#93)", () => {
   it("re-plans a member only when the authoritative batch says it is ready", () => {
     const result = resolvePlan(
       [issue(47, "", { title: "Root" })],
-      facts({ 47: { labels: ["ready-for-agent"] } }),
+      facts({ 47: { labels: ["2-agent-build"] } }),
       new Set(),
       3,
       "review",
@@ -1134,7 +1134,7 @@ describe("resolvePlan git membership safety (#93)", () => {
   it("retains authoritative rework even when scheduler exclusion prevents a restart", () => {
     const result = resolvePlan(
       [issue(47, "", { title: "Root" })],
-      facts({ 47: { labels: ["ready-for-agent"] } }),
+      facts({ 47: { labels: ["2-agent-build"] } }),
       new Set([47]), 3, "review", membersOn(47, "Root", 47),
     );
 
@@ -1154,7 +1154,7 @@ describe("resolvePlan git membership safety (#93)", () => {
       facts({
         245: {},
         399: { state: "CLOSED" },
-        400: { labels: ["ready-for-agent"] },
+        400: { labels: ["2-agent-build"] },
       }),
       new Set(),
       3,
@@ -1173,19 +1173,19 @@ describe("resolvePlan git membership safety (#93)", () => {
     {
       name: "closed",
       candidate: issue(47, "", { title: "Root" }),
-      issueFacts: facts({ 47: { state: "CLOSED", labels: ["ready-for-agent"] } }),
+      issueFacts: facts({ 47: { state: "CLOSED", labels: ["2-agent-build"] } }),
       excluded: new Set<number>(),
     },
     {
       name: "waiting",
-      candidate: issue(47, "", { title: "Root", labels: ["waiting"] }),
-      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
+      candidate: issue(47, "", { title: "Root", labels: ["1-human-later"] }),
+      issueFacts: facts({ 47: { labels: ["2-agent-build"] } }),
       excluded: new Set<number>(),
     },
     {
       name: "blocked",
       candidate: issue(47, "## Blocked by\n- #99\n", { title: "Root" }),
-      issueFacts: facts({ 47: { labels: ["ready-for-agent"] } }),
+      issueFacts: facts({ 47: { labels: ["2-agent-build"] } }),
       excluded: new Set<number>(),
     },
   ])("does not defer landing for a $name member the planner will not work", ({
@@ -1201,10 +1201,10 @@ describe("resolvePlan git membership safety (#93)", () => {
     expect(result.landedChunks[0]?.rework).toEqual([]);
   });
 
-  it("ignores needs-review when git does not name the member", () => {
-    const candidate = issue(47, "", { labels: ["ready-for-agent", "needs-review"] });
+  it("ignores 3-human-review when git does not name the member", () => {
+    const candidate = issue(47, "", { labels: ["2-agent-build", "3-human-review"] });
     const result = resolvePlan(
-      [candidate], facts({ 47: { labels: ["ready-for-agent"] } }),
+      [candidate], facts({ 47: { labels: ["2-agent-build"] } }),
       new Set(), 3, "review", new Map(),
     );
     expect(result.plan.map((p) => p.id)).toEqual(["47"]);
@@ -1220,7 +1220,7 @@ describe("resolvePlan git membership safety (#93)", () => {
     ];
     const result = resolvePlan(
       candidates,
-      facts({ 47: {}, 48: { labels: ["ready-for-agent"] } }),
+      facts({ 47: {}, 48: { labels: ["2-agent-build"] } }),
       new Set(),
       3,
       "review",
@@ -1253,7 +1253,7 @@ describe("resolvePlan git membership safety (#93)", () => {
     ];
     const result = resolvePlan(
       candidates,
-      facts({ 47: {}, 48: { labels: ["ready-for-agent"] }, 99: {} }),
+      facts({ 47: {}, 48: { labels: ["2-agent-build"] }, 99: {} }),
       new Set(),
       3,
       "review",
@@ -1314,7 +1314,7 @@ describe("resolvePlan git membership safety (#93)", () => {
   it("seeds new work onto the sole origin branch even before it has member refs", () => {
     const result = resolvePlan(
       [issue(47, "", { title: "New title" })],
-      facts({ 47: { labels: ["ready-for-agent"] } }),
+      facts({ 47: { labels: ["2-agent-build"] } }),
       new Set(),
       3,
       "review",
@@ -1383,8 +1383,8 @@ describe("resolvePlan git membership safety (#93)", () => {
         issue(48, "## Blocked by\n- #47\n", { title: "Child" }),
       ],
       facts({
-        47: { labels: ["ready-for-agent"] },
-        48: { labels: ["ready-for-agent"] },
+        47: { labels: ["2-agent-build"] },
+        48: { labels: ["2-agent-build"] },
       }),
       new Set(),
       3,
@@ -1422,9 +1422,9 @@ describe("resolvePlan git membership safety (#93)", () => {
         issue(48, "## Blocked by\n- #47\n", { title: "Child" }),
       ],
       facts({
-        40: { labels: ["ready-for-agent"] },
+        40: { labels: ["2-agent-build"] },
         47: {},
-        48: { labels: ["ready-for-agent"] },
+        48: { labels: ["2-agent-build"] },
       }),
       new Set(),
       3,
@@ -1773,7 +1773,7 @@ describe("resolvePlan frozen and stacked chunks (#243)", () => {
   it("holds rework of a frozen chunk's member, which keeps its landing waiting", () => {
     const r = resolveWith(
       chain,
-      facts({ 10: {}, 11: { labels: ["ready-for-agent"] } }),
+      facts({ 10: {}, 11: { labels: ["2-agent-build"] } }),
       { chunkMembers: new Map([[F, new Set([10, 11])]]), frozenChunks: new Set([F]) },
     );
     expect(r.plan).toEqual([]);

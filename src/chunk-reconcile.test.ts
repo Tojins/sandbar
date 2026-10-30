@@ -12,7 +12,7 @@ import {
   type ChunkWrapupAdapter,
   type PullRequestSummary,
 } from "./chunk-land.js";
-import { NEEDS_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
+import { HUMAN_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
 import { reconcileLandedChunks } from "./chunk-reconcile.js";
 
 type Recorded = { readonly op: string; readonly arg: string };
@@ -121,7 +121,7 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(prQueries).toBe(0);
   });
 
-  it("closes the members, drops needs-review and every landing label, closes the PR and deletes the branch", async () => {
+  it("closes the members, drops 3-human-review and every landing label, closes the PR and deletes the branch", async () => {
     const { adapter, calls } = fakeAdapter();
     const r = await run(
       ["sandbar/chunk-42-c"],
@@ -139,9 +139,9 @@ describe("reconcileLandedChunks (#64)", () => {
     expect(r.reconciled[0]?.residue).toEqual([]);
     expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
       "closeIssue 42",
-      `removeLabel 42:${NEEDS_REVIEW_LABEL}`,
+      `removeLabel 42:${HUMAN_REVIEW_LABEL}`,
       "closeIssue 43",
-      `removeLabel 43:${NEEDS_REVIEW_LABEL}`,
+      `removeLabel 43:${HUMAN_REVIEW_LABEL}`,
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       `removePullRequestLabel 9:${LAND_HOTFIX_LABEL}`,

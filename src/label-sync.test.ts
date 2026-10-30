@@ -14,32 +14,39 @@ import {
   syncLabels,
 } from "./label-sync.js";
 
-const PROTOCOL = ["ready-for-agent", "waiting", "auto-land", "needs-review", "land", "needs-human"];
-const handoff = { handoff: "needs-human" };
-const host = { name: "ready-for-human", description: "A human picks this up", color: "d93f0b" };
+const PROTOCOL = [
+  "1-human-spec", "1-human-later", "2-agent-build", "2-agent-later", "2-human-unstick",
+  "3-human-review", "auto-land", "land",
+];
+const RENAMED_FROM = [
+  "ready-for-human", "waiting", "ready-for-agent", "agent-queued", "needs-human", "needs-review", null, null,
+];
+const handoff = { handoff: "2-human-unstick" };
+const host = { name: "design", description: "Needs a design pass", color: "d93f0b" };
 
 describe("declaredLabels", () => {
   it("declares every protocol label with a description and colour, then the host's", () => {
     const declared = declaredLabels(handoff, [host]);
-    expect(declared.map((l) => l.name)).toEqual([...PROTOCOL, "ready-for-human"]);
+    expect(declared.map((l) => l.name)).toEqual([...PROTOCOL, "design"]);
+    expect(declared.map((l) => l.from)).toEqual([...RENAMED_FROM, null]);
     for (const label of declared) {
       expect(label.description).not.toBe("");
       expect(label.color).toMatch(/^[0-9a-f]{6}$/);
-      expect(label.from).toBeNull();
     }
   });
 
-  it("follows the configured handoff label", () => {
-    expect(declaredLabels({ handoff: "blocked" }, []).map((l) => l.name)).toContain("blocked");
+  it("follows the configured handoff label, which keeps its own name rather than renaming needs-human", () => {
+    const blocked = declaredLabels({ handoff: "blocked" }, []).find((l) => l.name === "blocked");
+    expect(blocked?.from).toBeNull();
   });
 
   it("lets config override a protocol label's description and declare its rename", () => {
     const declared = declaredLabels(handoff, [
-      { name: "Needs-Human", description: "Ours to look at", from: "needs-info" },
+      { name: "2-Human-Unstick", description: "Ours to look at", from: "needs-info" },
     ]);
-    const canonical = declaredLabels(handoff, []).find((l) => l.name === "needs-human")!;
-    expect(declared.find((l) => l.name === "needs-human")).toEqual({
-      name: "needs-human",
+    const canonical = declaredLabels(handoff, []).find((l) => l.name === "2-human-unstick")!;
+    expect(declared.find((l) => l.name === "2-human-unstick")).toEqual({
+      name: "2-human-unstick",
       description: "Ours to look at",
       color: canonical.color,
       from: "needs-info",
@@ -48,9 +55,10 @@ describe("declaredLabels", () => {
   });
 
   it.each([
-    [[{ name: "agent-queued", color: "ededed" }], /`agent-queued` is not a sandbar protocol label/],
-    [[{ name: "agent-queued", description: "Queued" }], /needs both a description and a color/],
-    [[host, { ...host, name: "Ready-For-Human" }], /declares `Ready-For-Human` twice/],
+    [[{ name: "triage", color: "ededed" }], /`triage` is not a sandbar protocol label/],
+    [[{ name: "triage", description: "Triage" }], /needs both a description and a color/],
+    [[host, { ...host, name: "Design" }], /declares `Design` twice/],
+    [[{ ...host, from: "waiting" }], /names `waiting` both as a label and as a rename's `from`/],
     [[{ ...host, from: "land" }], /names `land` both as a label and as a rename's `from`/],
     [[{ ...host, from: "x" }, { ...host, name: "y", from: "X" }], /names `X`/],
   ])("refuses %o", (declarations, message) => {
@@ -216,9 +224,9 @@ describe("syncLabels against a repository", () => {
     seed({ labels: [{ id: 1, name: "land", description: "x", color: "000000" }], issues: [] });
     const first = await sync([host]);
     expect(first.steps.map((s) => [s.kind, s.label.name])).toEqual(
-      [...PROTOCOL, "ready-for-human"].map((n) => [n === "land" ? "update" : "create", n]),
+      [...PROTOCOL, "design"].map((n) => [n === "land" ? "update" : "create", n]),
     );
-    expect(read().labels.map((l) => l.name).sort()).toEqual([...PROTOCOL, "ready-for-human"].sort());
+    expect(read().labels.map((l) => l.name).sort()).toEqual([...PROTOCOL, "design"].sort());
 
     seed({ ...read() });
     expect(renderLabelSync(await sync([host]))).toEqual(["labels: nothing to change"]);
@@ -229,10 +237,24 @@ describe("syncLabels against a repository", () => {
     seed({ labels: [], issues: [] });
     await sync([host]);
     seed({ ...read() });
-    const plan = await sync([{ ...host, description: "Triaged for a human" }]);
-    expect(renderLabelSync(plan)).toEqual(["updated ready-for-human (description)"]);
+    const plan = await sync([{ ...host, description: "Needs a second design pass" }]);
+    expect(renderLabelSync(plan)).toEqual(["updated design (description)"]);
     expect(writes()).toEqual([labelSyncCommand(plan.steps[0]!, "o/r")]);
-    expect(read().labels.find((l) => l.name === "ready-for-human")?.description).toBe("Triaged for a human");
+    expect(read().labels.find((l) => l.name === "design")?.description).toBe("Needs a second design pass");
+  });
+
+  it("moves a repo on the old label names to the stage names, and its issues keep them", async () => {
+    const old = RENAMED_FROM.filter((name) => name !== null);
+    seed({
+      labels: old.map((name, i) => ({ id: i + 1, name, description: "old", color: "000000" })),
+      issues: [{ number: 5, labelIds: old.map((_, i) => i + 1) }],
+    });
+    const plan = await sync([]);
+    expect(plan.steps.filter((s) => s.kind === "rename").map((s) => s.kind === "rename" && [s.from, s.label.name]))
+      .toEqual(PROTOCOL.flatMap((name, i) => RENAMED_FROM[i] === null ? [] : [[RENAMED_FROM[i], name]]));
+    const after = read();
+    expect(after.labels.map((l) => l.name).sort()).toEqual([...PROTOCOL].sort());
+    expect(after.issues).toEqual([{ number: 5, labelIds: old.map((_, i) => i + 1) }]);
   });
 
   it("a declared rename moves the label and the issues keep it", async () => {
@@ -240,15 +262,15 @@ describe("syncLabels against a repository", () => {
       labels: [{ id: 7, name: "needs-info", description: "old", color: "000000" }],
       issues: [{ number: 12, labelIds: [7] }],
     });
-    const plan = await sync([{ name: "needs-human", from: "needs-info" }]);
-    expect(renderLabelSync(plan)).toContain("renamed needs-info -> needs-human");
+    const plan = await sync([{ name: "2-human-unstick", from: "needs-info" }]);
+    expect(renderLabelSync(plan)).toContain("renamed needs-info -> 2-human-unstick");
     const after = read();
-    expect(after.labels.find((l) => l.id === 7)?.name).toBe("needs-human");
+    expect(after.labels.find((l) => l.id === 7)?.name).toBe("2-human-unstick");
     expect(after.labels.some((l) => l.name === "needs-info")).toBe(false);
     expect(after.issues).toEqual([{ number: 12, labelIds: [7] }]);
 
     seed({ ...after });
-    expect(renderLabelSync(await sync([{ name: "needs-human", from: "needs-info" }]))).toEqual([
+    expect(renderLabelSync(await sync([{ name: "2-human-unstick", from: "needs-info" }]))).toEqual([
       "labels: nothing to change",
     ]);
   });

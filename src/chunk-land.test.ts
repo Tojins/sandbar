@@ -32,7 +32,7 @@ import {
   wrapUpLandedChunk,
   wrapUpLandedJanitor,
 } from "./chunk-land.js";
-import { NEEDS_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
+import { HUMAN_REVIEW_LABEL, type LandedChunk } from "./chunks.js";
 import type { ResolveAttemptSummary } from "./resolve-loop.js";
 
 // One entry of the resolve loop's journal (#67), as the abandoned-chunk comment
@@ -484,7 +484,7 @@ const target = {
 };
 
 describe("wrapUpLandedChunk (#64)", () => {
-  it("closes every member in dependency order, drops needs-review, closes the PR, deletes the branch", async () => {
+  it("closes every member in dependency order, drops 3-human-review, closes the PR, deletes the branch", async () => {
     const { adapter, calls } = makeWrapupAdapter();
     const r = await wrapUpLandedChunk(target, adapter, {
       sourceBranch: "main",
@@ -497,9 +497,9 @@ describe("wrapUpLandedChunk (#64)", () => {
     expect(r.branchDeleted).toBe(true);
     expect(calls.map((c) => `${c.op} ${c.arg}`)).toEqual([
       "closeIssue 43",
-      `removeLabel 43:${NEEDS_REVIEW_LABEL}`,
+      `removeLabel 43:${HUMAN_REVIEW_LABEL}`,
       "closeIssue 42",
-      `removeLabel 42:${NEEDS_REVIEW_LABEL}`,
+      `removeLabel 42:${HUMAN_REVIEW_LABEL}`,
       "commentOnPullRequest 9",
       `removePullRequestLabel 9:${LAND_LABEL}`,
       "closePullRequest 9",
@@ -860,7 +860,7 @@ describe("the prose (#64)", () => {
     expect(body).toContain(LAND_LABEL);
     expect(body).toContain("sandbar/chunk-42-alpha");
     expect(body).toContain("#43");
-    expect(body).toContain(NEEDS_REVIEW_LABEL);
+    expect(body).toContain(HUMAN_REVIEW_LABEL);
   });
 
   it("does not claim sandbar landed a chunk a human merged", () => {

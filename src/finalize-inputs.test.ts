@@ -411,7 +411,7 @@ describe("mergeFinalizeInputs", () => {
   // Ordering, and it is a safety property rather than cosmetics: the
   // `chunk-landed` arm is the only one here that can throw, `finalizeAll` is
   // fail-fast, and a handoff that never runs leaves an issue on no queue at all
-  // (the merger already took `ready-for-agent` off it). A chunk landing that
+  // (the merger already took `2-agent-build` off it). A chunk landing that
   // never runs is retried next cycle. So it goes last.
   it("emits chunk landings after every skip, because its arm is the one that throws", () => {
     const { inputs } = mergeFinalizeInputs(

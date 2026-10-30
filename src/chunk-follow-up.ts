@@ -1,6 +1,6 @@
 // A changes-requested review on a chunk PR routes back to the landed member it
 // concerns (#95, replacing #63's follow-up-issue design; rationale in #92).
-// Sandbar comments on that existing issue and adds `ready-for-agent`; #94's
+// Sandbar comments on that existing issue and adds `2-agent-build`; #94's
 // ordinary rework path resumes it from the chunk tip and lands it back on the
 // same branch. No new tracker surface is created.
 //
@@ -33,7 +33,7 @@ import { promisify } from "node:util";
 
 import type { ChunkMember, LandedChunk } from "./chunks.js";
 import { SandbarError } from "./errors.js";
-import { BOT_COMMENT_PREFIX, READY_FOR_AGENT_LABEL } from "./finalize.js";
+import { BOT_COMMENT_PREFIX, AGENT_BUILD_LABEL } from "./finalize.js";
 import { memberBranchName } from "./naming.js";
 import type { OriginWriteBarrier } from "./origin-lock.js";
 import type { IssueSummary } from "./plan-resolver.js";
@@ -484,7 +484,7 @@ export function realAdapter(args: {
       await args.beforeOriginWrite();
       await exec("gh", [
         "issue", "edit", String(issueNumber), "--repo", slug,
-        "--add-label", READY_FOR_AGENT_LABEL,
+        "--add-label", AGENT_BUILD_LABEL,
       ]);
       const { stdout } = await exec("gh", [
         "issue", "view", String(issueNumber), "--repo", slug,

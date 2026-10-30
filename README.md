@@ -6,7 +6,7 @@ review the result.
 
 ## The GitHub workflow
 
-![You run /grill-me and to-tickets to file ready-for-agent issues; sandbar picks unblocked issues, builds them and merges them to a chunk branch with a draft PR; you test it with /human-review, then approve with the land label or request changes](docs/github-workflow.svg)
+![You run /grill-me and to-tickets to file 2-agent-build issues; sandbar picks unblocked issues, builds them and merges them to a chunk branch with a draft PR; you test it with /human-review, then approve with the land label or request changes](docs/github-workflow.svg)
 
 `/grill-me`, `to-tickets` and `/human-review` are Claude Code skills in the
 consumer repo.

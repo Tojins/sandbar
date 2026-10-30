@@ -52,7 +52,7 @@ describe("computeLanes", () => {
   });
 
   it("ignores unrelated labels", () => {
-    expect(laneOf([node(1, [], ["ready-for-agent", "waiting"])], "auto")).toEqual({
+    expect(laneOf([node(1, [], ["2-agent-build", "2-agent-later"])], "auto")).toEqual({
       1: "auto",
     });
   });

@@ -3,7 +3,7 @@
 // Raised when sandbar's OWN machinery malfunctions — a required git / issue-
 // tracker side-effect that sandbar cannot complete, or a config error. This is
 // categorically different from a coding-task outcome (a red gate, a
-// CHANGES-REQUESTED review, `needs-human`) — those are normal results the loop
+// CHANGES-REQUESTED review, `2-human-unstick`) — those are normal results the loop
 // handles and continues past.
 //
 // The contract is "fail loud, do not gracefully continue" (#8): by the time

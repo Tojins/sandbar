@@ -49,7 +49,7 @@ export type IssueOutcome = {
  *
  * Exhaustive on purpose (the `never` assignment). A ternary chain with a
  * catch-all silently gave every future skip reason `merge-gate-red`, which
- * pushes the branch and applies `needs-human` — plausible for some reasons and
+ * pushes the branch and applies `2-human-unstick` — plausible for some reasons and
  * wrong for others, with nothing to catch the difference. `silent-noop` is
  * handled by mergeFinalizeInputs itself (it needs the per-issue retry count)
  * and never reaches here.
@@ -84,7 +84,7 @@ export function finalizeKindForSkip(
  *
  * Exhaustive over Terminal: a new terminal type that nobody maps here would
  * silently skip finalise — no comment, no label flip — and the issue would keep
- * `ready-for-agent` and be re-picked forever. The `never` assignment makes that
+ * `2-agent-build` and be re-picked forever. The `never` assignment makes that
  * a compile error instead. DONE is the one deliberate no-op: the merger decides
  * what a DONE branch earns, and mergeFinalizeInputs carries it.
  */

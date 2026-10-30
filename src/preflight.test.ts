@@ -539,7 +539,7 @@ describe("checkInvariants", () => {
 // `podman run` at bringup, and a gate container is `attempt`-lifecycle, so #24
 // D5 charges that to the BRANCH: a gate red about a statfs source no agent can
 // see or fix, repeated until the quality budget parks the issue as
-// `needs-human` with an "environment" trace. Host state belongs in preflight,
+// `2-human-unstick` with an "environment" trace. Host state belongs in preflight,
 // beside `missingImages`, which is the identical class.
 describe("checkInvariants — gate-stack mount sources exist (#51)", () => {
   // The path AND the container, because a stack with several containers
@@ -654,7 +654,7 @@ describe("classifySandbarBranches", () => {
       ...over,
     });
 
-  it("resumable: an open `ready-for-agent` issue's branch", () => {
+  it("resumable: an open `2-agent-build` issue's branch", () => {
     const r = classify(["sandbar/issue-5-a"], { openReadyIssues: new Set([5]) });
     expect(r).toEqual({
       unmerged: [], discarded: [], resumable: ["sandbar/issue-5-a"], parked: [], closed: [],
@@ -662,7 +662,7 @@ describe("classifySandbarBranches", () => {
   });
 
   it("parked: an open issue that is not queued keeps its branch and is not refused", () => {
-    // `queued`, `needs-human` — preflight does not read the
+    // `queued`, `2-human-unstick` — preflight does not read the
     // label, only that the issue is still open.
     const r = classify(["sandbar/issue-76-held", "sandbar/issue-93-stuck"], {
       openIssues: new Set([76, 93]),
@@ -751,7 +751,7 @@ describe("deployWatchRefusals (#198)", () => {
         return { stdout: "name: deploy\n", stderr: "" };
       }
       if (opts.labels === null) throw exitError("HTTP 403");
-      const labels = opts.labels ?? ["ready-for-human", "deploy-red", "bug"];
+      const labels = opts.labels ?? ["1-human-spec", "deploy-red", "bug"];
       return { stdout: JSON.stringify(labels.map((name) => ({ name }))), stderr: "" };
     };
     return { exec, calls };
@@ -785,8 +785,8 @@ describe("deployWatchRefusals (#198)", () => {
   });
 
   it.each([
-    [["deploy-red"], /`ready-for-human`/],
-    [["ready-for-human"], /`deploy-red`/],
+    [["deploy-red"], /`1-human-spec`/],
+    [["1-human-spec"], /`deploy-red`/],
   ])("refuses a missing label (%j listed)", async (labels, missing) => {
     const [refusal, ...rest] = await refusals(fakeGh({ labels }).exec);
     expect(rest).toEqual([]);
