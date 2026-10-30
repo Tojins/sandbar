@@ -2064,8 +2064,12 @@ export async function run(
     return { issue: Number(id.startsWith("chunk-") ? id.slice("chunk-".length) : id) };
   };
 
-  // The fields a merger agent attempt's event shares, resolve or landing pass.
-  const mergerAttemptFields = (record: ResolveAgentRun & { readonly attempt: number }) => {
+  // The fields a merger agent attempt's event shares, resolve or landing pass,
+  // each under its own routing.
+  const mergerAttemptFields = (
+    record: ResolveAgentRun & { readonly attempt: number },
+    route = { provider: config.mergerAgent, model: config.mergerModelId },
+  ) => {
     const usage = usageFields(record, record.rateLimit);
     return {
       attempt: record.attempt,
@@ -2074,8 +2078,7 @@ export async function run(
       exitCode: record.exitCode,
       signal: record.signal,
       durationMs: record.durationMs,
-      provider: config.mergerAgent,
-      model: config.mergerModelId,
+      ...route,
       ...(usage === undefined ? {} : { usage }),
       ...containerResourcesOf(record),
     };
@@ -3174,6 +3177,9 @@ export async function run(
             mergerAgent: config.mergerAgent,
             mergerModelId: config.mergerModelId,
             mergerEffort: config.mergerEffort,
+            landingPassAgent: config.landingPassAgent,
+            landingPassModelId: config.landingPassModelId,
+            landingPassEffort: config.landingPassEffort,
             sandboxImage: landingImages.agentImages.declaredTag,
             env,
             ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
@@ -3268,7 +3274,10 @@ export async function run(
                     await runRecord.emit({
                       kind: "landing-pass-attempt",
                       ...landingSubject(record.unit),
-                      ...mergerAttemptFields(record),
+                      ...mergerAttemptFields(record, {
+                        provider: config.landingPassAgent,
+                        model: config.landingPassModelId,
+                      }),
                       outcome: record.outcome,
                       commits: record.commits,
                     });

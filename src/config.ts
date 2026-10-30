@@ -1142,6 +1142,13 @@ export type RunConfig = {
   // `promptExtensions.scenarioRunner` is probed in the issue worktree.
   readonly scenarioRunnerModelId?: string;
   readonly mergerModelId?: string;
+  // The landing pass (#258), when `landingPass` is set: the merger's
+  // invocation under its own routing. It follows the merger's CLI, and takes
+  // the merger's effort only while it also runs that CLI. On claude its model
+  // is "sonnet" rather than the merger's: the consumer's instructions name a
+  // scoped edit, and the contract check resets whatever breaks it. On another
+  // vendor it takes the merger's model only while it shares that vendor.
+  readonly landingPassModelId?: string;
   // `npm run reflect`'s two steps (#182, #208), never run by the daemon: the
   // tagger labels findings against a closed vocabulary ("sonnet"), the
   // synthesizer turns recurring clusters into proposals ("opus").
@@ -1170,6 +1177,7 @@ export type RunConfig = {
   readonly scenarioWriterAgent?: AgentProviderName;
   readonly scenarioRunnerAgent?: AgentProviderName;
   readonly mergerAgent?: AgentProviderName;
+  readonly landingPassAgent?: AgentProviderName;
   readonly reflectTaggerAgent?: AgentProviderName;
   readonly reflectSynthesizerAgent?: AgentProviderName;
 
@@ -1180,7 +1188,8 @@ export type RunConfig = {
   // codex models, `ultra` on one), and a wrong value is refused by the CLI on
   // the first invocation, loudly. A claude-routed role that leaves it unset
   // gets the driver default beside its default model — implementer, UI
-  // checker and reviewer `high`, reviewer-quality and merger `medium`, the
+  // checker and reviewer `high`, reviewer-quality and merger `medium` (the
+  // landing pass the merger's while it runs the merger's CLI), the
   // adjudicator the reviewer's, the scenario runner the reviewer's while it
   // runs the reviewer's CLI, the reflect tagger `medium` and its
   // synthesizer `high`; the condenser (#217) and the scenario writer (#203)
@@ -1199,6 +1208,7 @@ export type RunConfig = {
   readonly scenarioWriterEffort?: string;
   readonly scenarioRunnerEffort?: string;
   readonly mergerEffort?: string;
+  readonly landingPassEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
 
@@ -1447,6 +1457,7 @@ export type ResolvedConfig = Required<
     | "scenarioWriterEffort"
     | "scenarioRunnerEffort"
     | "mergerEffort"
+    | "landingPassEffort"
     | "reflectTaggerEffort"
     | "reflectSynthesizerEffort"
     | "maxConcurrentGates"
@@ -1467,6 +1478,7 @@ export type ResolvedConfig = Required<
   readonly scenarioWriterEffort?: string;
   readonly scenarioRunnerEffort?: string;
   readonly mergerEffort?: string;
+  readonly landingPassEffort?: string;
   readonly reflectTaggerEffort?: string;
   readonly reflectSynthesizerEffort?: string;
   // Optional after resolution because absence is the unlimited default.
@@ -1499,6 +1511,7 @@ export const DEFAULT_REFLECT_SYNTHESIZER_MODEL_ID = "opus";
 export const DEFAULT_UI_CHECK_MODEL_ID = "sonnet";
 export const DEFAULT_CONDENSER_MODEL_ID = "sonnet";
 export const DEFAULT_SCENARIO_RUNNER_MODEL_ID = "sonnet";
+export const DEFAULT_LANDING_PASS_MODEL_ID = "sonnet";
 export const DEFAULT_CONDENSE_ABOVE_CHARS = 20_000;
 export const DEFAULT_SCENARIO_WRITER = true;
 export const DEFAULT_SCENARIO_WRITER_MODEL_ID = "opus";
@@ -3607,6 +3620,22 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     config.scenarioWriterAgent,
   );
   const mergerAgent = parseAgentProviderName("mergerAgent", config.mergerAgent);
+  // The landing pass (#258) follows the merger's CLI, on the scenario
+  // runner's rule: a Sonnet-class model on claude, the merger's elsewhere
+  // only from the same vendor.
+  const landingPass = resolveLandingPass(config.landingPass);
+  const landingPassAgent = parseAgentProviderName(
+    "landingPassAgent",
+    config.landingPassAgent ?? mergerAgent,
+  );
+  const passFollowsMerger = landingPassAgent === mergerAgent;
+  const landingPassModelId = config.landingPassModelId ?? (
+    landingPassAgent === "claude"
+      ? DEFAULT_LANDING_PASS_MODEL_ID
+      : passFollowsMerger
+        ? config.mergerModelId
+        : undefined
+  );
   assertRoleModelIdNamed("implementer", implementerAgent, config.implementerModelId);
   if (uiPrototypeCheck) {
     assertRoleModelIdNamed(
@@ -3661,6 +3690,11 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     );
   }
   assertRoleModelIdNamed("merger", mergerAgent, config.mergerModelId);
+  if (landingPass !== null) {
+    // Inherited, the agent brings the merger model the merger's own assertion
+    // has already required; only a split agent can arrive unnamed.
+    assertRoleModelIdNamed("landingPass", landingPassAgent, landingPassModelId);
+  }
   const reflectTaggerAgent = parseAgentProviderName(
     "reflectTaggerAgent",
     config.reflectTaggerAgent,
@@ -3687,6 +3721,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     "scenarioWriterEffort",
     "scenarioRunnerEffort",
     "mergerEffort",
+    "landingPassEffort",
     "reflectTaggerEffort",
     "reflectSynthesizerEffort",
   ] as const) {
@@ -3730,6 +3765,8 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     // Only a disabled writer leaves it unnamed off claude; nothing runs it then.
     scenarioRunnerModelId: scenarioRunnerModelId ?? DEFAULT_SCENARIO_RUNNER_MODEL_ID,
     mergerModelId: config.mergerModelId ?? DEFAULT_MERGER_MODEL_ID,
+    // Only an unset pass leaves it unnamed off claude; nothing runs it then.
+    landingPassModelId: landingPassModelId ?? DEFAULT_LANDING_PASS_MODEL_ID,
     reflectTaggerModelId: config.reflectTaggerModelId ?? DEFAULT_REFLECT_TAGGER_MODEL_ID,
     reflectSynthesizerModelId:
       config.reflectSynthesizerModelId ?? DEFAULT_REFLECT_SYNTHESIZER_MODEL_ID,
@@ -3742,6 +3779,7 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
     scenarioWriterAgent,
     scenarioRunnerAgent,
     mergerAgent,
+    landingPassAgent,
     reflectTaggerAgent,
     reflectSynthesizerAgent,
     implementerEffort:
@@ -3764,6 +3802,10 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       claudeEffort(scenarioRunnerAgent, DEFAULT_REVIEWER_EFFORT),
     mergerEffort:
       config.mergerEffort ?? claudeEffort(mergerAgent, DEFAULT_MERGER_EFFORT),
+    landingPassEffort:
+      config.landingPassEffort ??
+      (passFollowsMerger ? config.mergerEffort : undefined) ??
+      claudeEffort(landingPassAgent, DEFAULT_MERGER_EFFORT),
     reflectTaggerEffort:
       config.reflectTaggerEffort ??
       claudeEffort(reflectTaggerAgent, DEFAULT_REFLECT_TAGGER_EFFORT),
@@ -3836,10 +3878,12 @@ export function resolveConfig(config: RunConfig): ResolvedConfig {
       reviewerQualityAgent,
       adjudicatorAgent,
       mergerAgent,
+      landingPass,
+      landingPassAgent,
     })),
     databaseCopies,
     janitor: resolveJanitor(config.janitor),
-    landingPass: resolveLandingPass(config.landingPass),
+    landingPass,
     defaultLane: requireLane(config.defaultLane),
   };
 }

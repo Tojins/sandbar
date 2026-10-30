@@ -301,7 +301,8 @@
 // This file owns the two ENDS of that: the invocation, and the prose.
 //
 // `runResolveAgent` (and `runLandingPassAgent`, the same invocation named
-// for the landing pass, #258) runs the configured provider in a NAMED,
+// for the landing pass, #258, under its own `landingPass*` routing) runs the
+// configured provider in a NAMED,
 // run-scoped container, as container uid 1000 with the daemon's host uid mapped onto it
 // (`--userns=keep-id:uid=1000,gid=1000`, the sandbox's own spelling) so the
 // worktree and the shared Codex credential stay readable whatever uid the
@@ -3346,6 +3347,10 @@ export type RealAdapterDeps = {
   // Reasoning effort for the resolve invocation (#130); absent is the CLI's
   // default.
   readonly mergerEffort?: string | undefined;
+  // The landing pass's own routing (#258), the same invocation's otherwise.
+  readonly landingPassAgent: AgentProviderName;
+  readonly landingPassModelId: string;
+  readonly landingPassEffort?: string | undefined;
   // The image the resolve agent runs in — augmented with exactly the providers
   // routed by this run, unlike any gate-stack image (#24 D7, #75).
   readonly sandboxImage: string;
@@ -3704,9 +3709,20 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
   const registerResolveCleanup = deps.registerResolveCleanup ?? registerDisposable;
   // No resume semantics: every resolve attempt is a fresh container whose
   // prompt carries the complete state.
-  const agentProvider = buildAgentProvider(deps.mergerAgent, deps.mergerModelId, {
-    effort: deps.mergerEffort,
-  });
+  const routes = {
+    resolve: {
+      agent: deps.mergerAgent,
+      provider: buildAgentProvider(deps.mergerAgent, deps.mergerModelId, {
+        effort: deps.mergerEffort,
+      }),
+    },
+    "landing-pass": {
+      agent: deps.landingPassAgent,
+      provider: buildAgentProvider(deps.landingPassAgent, deps.landingPassModelId, {
+        effort: deps.landingPassEffort,
+      }),
+    },
+  } as const;
   // The merger worktree is always detached, so every push it makes is HEAD to
   // a named ref on origin. `classifyPushError` is shared with finalise: Git's
   // bracketed status, rather than the unqualified word "rejected", decides
@@ -3864,6 +3880,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     // two cycles resolving the same issue from colliding on the name; the
     // attempt number is in it so the name is greppable against the log line.
     const container = `${scopedResourcePrefix(deps.scope)}${role}-${attempt}-${randomUUID()}`;
+    const { agent, provider: agentProvider } = routes[role];
     const command = agentProvider.buildPrintCommand({
       prompt,
       dangerouslySkipPermissions: true,
@@ -3883,11 +3900,9 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       container,
       cwd,
       gateAttachments: await deps.gateAttachments(),
-      ...(deps.mergerAgent === "codex" && deps.codexAuthMount !== undefined
-        ? { codexAuthMount: deps.codexAuthMount }
-        : {}),
+      codexAuthMount: agent === "codex" ? deps.codexAuthMount : undefined,
       image: deps.sandboxImage,
-      credentials: resolveAgentCredentials(deps.mergerAgent, deps.env),
+      credentials: resolveAgentCredentials(agent, deps.env),
       botName: deps.botName,
       botEmail: deps.botEmail,
       ...(proxy === null ? {} : { egress: { network, dnsArgs: proxy.dnsArgs } }),

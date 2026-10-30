@@ -42,7 +42,8 @@
 // This file is the pure layer (path matcher, signal parser, commit-shape
 // check, prompt builder) and the attempt loop over `LandingPassAdapter`. The
 // container is the merger adapter's, the resolve agent's invocation under
-// another name.
+// another name and its own routing: `landingPassAgent`, `landingPassModelId`
+// and `landingPassEffort`, following the merger's CLI, "sonnet" on claude.
 
 import { formatRateLimitFields } from "./agent-run-end.js";
 import { formatUsageFields } from "./agent-usage.js";

@@ -223,6 +223,27 @@ describe("requiredAgentProviders", () => {
     expect(requiredAgentProviders({ ...roles, scenarioWriter: false })).toEqual(["claude"]);
   });
 
+  it("adds the landing pass's provider only while the pass is set (#258)", () => {
+    const roles = {
+      uiPrototypeCheck: true,
+      condenseAboveChars: null,
+      condenserAgent: "claude",
+      implementerAgent: "claude",
+      uiCheckAgent: "claude",
+      reviewerAgent: "claude",
+      reviewerQualityAgent: "claude",
+      adjudicatorAgent: "claude",
+      mergerAgent: "claude",
+      scenarioWriter: false,
+      scenarioWriterAgent: "claude",
+      scenarioRunnerAgent: "claude",
+      landingPassAgent: "codex",
+    } as const;
+    expect(requiredAgentProviders({ ...roles, landingPass: { paths: null } }))
+      .toEqual(["claude", "codex"]);
+    expect(requiredAgentProviders({ ...roles, landingPass: null })).toEqual(["claude"]);
+  });
+
   it("is just claude for the default routing", () => {
     expect(
       requiredAgentProviders({

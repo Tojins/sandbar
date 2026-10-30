@@ -592,7 +592,7 @@ export function checkInvariants(s: RepoState): readonly Invariant[] {
     const why =
       `A role is routed to ${provider} by \`implementerAgent\`, \`uiCheckAgent\`, ` +
       "`reviewerAgent`, `reviewerQualityAgent`, `adjudicatorAgent`, `condenserAgent`, " +
-      "or `mergerAgent`.";
+      "`mergerAgent` or `landingPassAgent`.";
     out.push({
       ok: false,
       message:
