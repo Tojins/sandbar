@@ -2130,3 +2130,46 @@ describe("resolveConfig — janitor (#205)", () => {
     expect(() => resolveConfig({ ...minimal, janitor: janitor as never })).toThrow(SandbarError);
   });
 });
+
+describe("resolveConfig — landingPass (#258)", () => {
+  it("is off without the key", () => {
+    expect(resolveConfig(minimal).landingPass).toBeNull();
+  });
+
+  it("keeps a text prompt and runs on every landing without paths", () => {
+    expect(resolveConfig({
+      ...minimal,
+      landingPass: { prompt: { text: "Bump the client version." } },
+    }).landingPass).toEqual({ prompt: { text: "Bump the client version." }, paths: null });
+  });
+
+  it("normalizes a prompt path and the path prefixes, keeping a directory's slash", () => {
+    expect(resolveConfig({
+      ...minimal,
+      landingPass: {
+        prompt: { path: "./docs//landing-pass.md" },
+        paths: ["./src/app/", "services.php"],
+      },
+    }).landingPass).toEqual({
+      prompt: { path: "docs/landing-pass.md" },
+      paths: ["src/app/", "services.php"],
+    });
+  });
+
+  it.each([
+    ["a non-object", "docs/landing-pass.md", /config\.landingPass must be/],
+    ["no prompt", { paths: ["src/"] }, /config\.landingPass\.prompt must be/],
+    ["a prompt naming both forms", { prompt: { text: "a", path: "b.md" } }, /landingPass\.prompt must be exactly/],
+    ["a prompt that is no string", { prompt: { path: 3 } }, /landingPass\.prompt must be exactly/],
+    ["an absolute prompt path", { prompt: { path: "/docs/x.md" } }, /landingPass\.prompt\.path/],
+    ["a prompt path with '..'", { prompt: { path: "../x.md" } }, /landingPass\.prompt\.path/],
+    ["paths that are no list", { prompt: { text: "a" }, paths: "src/" }, /landingPass\.paths must be/],
+    ["empty paths", { prompt: { text: "a" }, paths: [] }, /landingPass\.paths must be/],
+    ["an empty path", { prompt: { text: "a" }, paths: [""] }, /landingPass\.paths\[0\]/],
+    ["a path that is no string", { prompt: { text: "a" }, paths: [3] }, /landingPass\.paths\[0\]/],
+    ["a path with '..'", { prompt: { text: "a" }, paths: ["src/", "src/../.."] }, /landingPass\.paths\[1\]/],
+  ])("refuses %s", (_, landingPass, message) => {
+    expect(() => resolveConfig({ ...minimal, landingPass: landingPass as never })).toThrow(message);
+    expect(() => resolveConfig({ ...minimal, landingPass: landingPass as never })).toThrow(SandbarError);
+  });
+});
