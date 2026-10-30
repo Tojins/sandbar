@@ -3860,8 +3860,10 @@ describe("runInnerLoop context terminals (#158)", () => {
 
   describe("behind an egress allowlist (#202)", () => {
     const calls: string[] = [];
+    const connect = { secret: "s3cret", env: { HTTPS_PROXY: "http://sandbar:s3cret@10.0.0.2:3128" } };
     const proxy = (name: string, stop: () => Promise<void> = async () => undefined) => ({
       dnsArgs: ["--dns", "10.0.0.2"],
+      connect,
       assertAlive: vi.fn(async () => undefined),
       checkpoint: vi.fn(async () => []),
       stop: vi.fn(async () => {
@@ -3899,6 +3901,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         owner: `sbx-${issue.id}`,
         networkName: network,
         createNetwork: true,
+        authenticated: true,
       });
       expect(innerLoopMocks.podmanOptions).toEqual([
         expect.objectContaining({
@@ -3911,6 +3914,46 @@ describe("runInnerLoop context terminals (#158)", () => {
         expect.objectContaining({ egress: gateOwner }),
       );
       expect(calls).toEqual(["stop stack", "close sandbox", "stop proxy"]);
+    });
+
+    it("hands the sandbox proxy's connect to the sandbox stack", async () => {
+      wire();
+      const { sandbox, opts } = harness(async (options) =>
+        /^(reviewer|quality-list)-/.test(options.name ?? "") ? approvedReview : completeRun,
+        { egress } as never,
+      );
+      innerLoopMocks.createSandbox.mockImplementation(async (options: {
+        beforeSandboxReady?: (name: string) => Promise<void>;
+      }) => {
+        await options.beforeSandboxReady?.("anchor");
+        return sandbox;
+      });
+      innerLoopMocks.startSandboxStack.mockReset().mockResolvedValue(null);
+      const sidecar = resolveGateStack({
+        containers: [
+          { name: "side", image: "localhost/side", inSandbox: true },
+          { name: "runner", image: "localhost/runner", mountWorktree: "/w", hold: true },
+        ],
+        steps: [{ name: "s", in: "runner", command: ["true"] }],
+      });
+      const stackOpts = {
+        ...opts,
+        stackSource: {
+          path: null,
+          current: async () => ({ stack: sidecar }),
+          forHead: async () => ({
+            stack: sidecar,
+            attachments: { env: {}, mounts: [] },
+            classification: { kind: "same" },
+            tipBlob: null,
+          }),
+        },
+      } as unknown as Parameters<typeof runInnerLoop>[1];
+
+      await expect(runInnerLoop(issue, stackOpts)).resolves.toMatchObject({ type: "DONE" });
+      expect(innerLoopMocks.startSandboxStack).toHaveBeenCalledWith(
+        expect.objectContaining({ egressConnect: connect }),
+      );
     });
 
     it("stops every sandbox proxy it started when a later setup step fails", async () => {

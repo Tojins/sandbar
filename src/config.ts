@@ -16,7 +16,9 @@ import {
   type EgressPolicy,
   GITHUB_HOSTS,
   PRESETS,
+  PROXY_CONNECT_PORT,
   type ResolvedEgressEntry,
+  SECRET_PROXY_ENV_KEYS,
   normalizeHost,
 } from "./egress-policy.js";
 import { SandbarError } from "./errors.js";
@@ -292,6 +294,11 @@ function resolveLabelSync(value: unknown): readonly LabelDeclaration[] {
 // sandbox receives. Like the step-env collision, that is checked wherever a
 // stack meets config.env: at load for an inline stack, and each time a stack
 // file is resolved, so preflight's opening of the stack refuses the run.
+// Nor may it be a proxy variable (`SECRET_PROXY_ENV_KEYS`, #257): with
+// `egress.secretAllow` the sandbox stack sets those on every `secretEnv`
+// container to route it through the proxy's authenticated listener, which
+// alone reaches `secretAllow` hosts; `allow` may not then name that
+// listener's port.
 // An `inSandbox` container may also name `sandboxEnv` (#256): literal env for
 // its sandbox copy only, laid over its `env` there (sandbox-stack.ts). No
 // gate-side reader looks at it, `gateStackOf` and `sandboxGateAttachmentsOf`
@@ -851,13 +858,18 @@ export type EgressConfig = {
   // have refused, to discover an installation's list from its run record.
   readonly mode?: EgressMode;
   readonly allow: readonly EgressAllowEntry[];
+  // Hosts only a sandbox's `secretEnv` siblings reach, through the proxy's
+  // authenticated `CONNECT` (#257); refused to everything else, a name `allow`
+  // also matches included. Same entries as `allow`. Default: none.
+  readonly secretAllow?: readonly EgressAllowEntry[];
 };
 
 // The resolved allowlist (`resolveEgress`). `open` is the sandbox without a
 // proxy, every argv as it was before #202. The policy's `entries` are the
 // defaults (GitHub and the hosts of every provider the run invokes) and the
-// consumer's own, deduplicated and sorted; `digest` hashes the policy, for
-// the standalone gate's reuse token.
+// consumer's own, its `secretEntries` the consumer's `secretAllow`, each
+// deduplicated and sorted; `digest` hashes the policy, for the standalone
+// gate's reuse token.
 export type ResolvedEgress =
   | { readonly kind: "open" }
   | {
@@ -1911,8 +1923,12 @@ function egressPort(field: string, raw: unknown): number {
   return raw as number;
 }
 
-function resolveEgressEntry(entry: unknown, i: number): ResolvedEgressEntry[] {
-  const field = `config.egress.allow[${i}]`;
+function resolveEgressEntry(
+  list: "allow" | "secretAllow",
+  entry: unknown,
+  i: number,
+): ResolvedEgressEntry[] {
+  const field = `config.egress.${list}[${i}]`;
   const entryOf = (
     host: string,
     ports: readonly number[] = DEFAULT_EGRESS_PORTS,
@@ -1955,9 +1971,13 @@ export function resolveEgress(
   providers: readonly AgentProviderName[],
 ): ResolvedEgress {
   if (egress === undefined) return { kind: "open" };
-  if (!isRecord(egress) || !Array.isArray(egress.allow)) {
-    throw new SandbarError("config.egress must be { mode?, allow: [...] }.");
+  if (
+    !isRecord(egress) || !Array.isArray(egress.allow) ||
+    !(egress.secretAllow === undefined || Array.isArray(egress.secretAllow))
+  ) {
+    throw new SandbarError("config.egress must be { mode?, allow: [...], secretAllow?: [...] }.");
   }
+  const { secretAllow = [] } = egress;
   const mode = egress.mode ?? "enforce";
   if (mode !== "enforce" && mode !== "report") {
     throw new SandbarError(
@@ -1968,15 +1988,26 @@ export function resolveEgress(
     ...GITHUB_HOSTS,
     ...providers.flatMap((provider) => PROVIDER_EGRESS_HOSTS[provider]),
   ].map((host): ResolvedEgressEntry => ({ host, ports: DEFAULT_EGRESS_PORTS, private: false }));
-  const byKey = new Map(
-    [...defaults, ...egress.allow.flatMap(resolveEgressEntry)]
-      .map((entry) => [JSON.stringify(entry), entry] as const),
+  const allowed = egress.allow.flatMap((entry, i) => resolveEgressEntry("allow", entry, i));
+  const secretEntries = canonicalEntries(
+    secretAllow.flatMap((entry, i) => resolveEgressEntry("secretAllow", entry, i)),
   );
-  const entries = [...byKey.entries()]
+  const onConnectPort = allowed.findIndex((entry) => entry.ports.includes(PROXY_CONNECT_PORT));
+  if (secretEntries.length > 0 && onConnectPort !== -1) {
+    throw new SandbarError(
+      `config.egress.allow names ${allowed[onConnectPort]!.host}:${PROXY_CONNECT_PORT}, the ` +
+        "port the proxy's authenticated listener takes while secretAllow is set.",
+    );
+  }
+  const policy = { mode, entries: canonicalEntries([...defaults, ...allowed]), secretEntries };
+  return { kind: "allowlist", policy, digest: canonicalSha256(policy) };
+}
+
+function canonicalEntries(entries: readonly ResolvedEgressEntry[]): ResolvedEgressEntry[] {
+  const byKey = new Map(entries.map((entry) => [JSON.stringify(entry), entry] as const));
+  return [...byKey.entries()]
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .map(([, entry]) => entry);
-  const policy = { mode, entries };
-  return { kind: "allowlist", policy, digest: canonicalSha256(policy) };
 }
 
 // Prod data with open egress is never silent (#202): the startup warning when
@@ -2660,6 +2691,11 @@ function checkReadiness(
 // container that mounts it runs code the agent wrote, holding the secret).
 // `mounts` with an absolute `hostPath` stay allowed — a host path is the
 // installation's, not the branch's.
+// The proxy variables are what the sandbox stack sets on every `secretEnv`
+// sibling to route it through the egress proxy's authenticated listener
+// (#257), so no secret may take their place.
+const RESERVED_SECRET_ENV_KEYS: ReadonlySet<string> = new Set(["CI", ...SECRET_PROXY_ENV_KEYS]);
+
 function checkSecretEnv(
   c: StackContainer,
   inGate: boolean,
@@ -2703,7 +2739,7 @@ function checkSecretEnv(
     const literal = Object.hasOwn(c.env ?? {}, key)
       ? "env"
       : Object.hasOwn(c.sandboxEnv ?? {}, key) ? "sandboxEnv" : null;
-    if (literal !== null || key === "CI") {
+    if (literal !== null || RESERVED_SECRET_ENV_KEYS.has(key)) {
       throw new SandbarError(
         `${label}: container '${c.name}' has secretEnv key '${key}', which ` +
           `${literal === null ? "is reserved" : `it also sets in '${literal}'`}. A key ` +

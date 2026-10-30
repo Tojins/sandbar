@@ -23,7 +23,18 @@
 // those, is reachable only through an entry that says `private: true`;
 // otherwise a hostname would turn the proxy into a door to host services and
 // to other containers on podman's bridge.
+//
+// Two lists (#257). `entries` is what every process on the owner's network
+// reaches through the transparent path. `secretEntries` (`egress.secretAllow`)
+// is reachable only through an authenticated `CONNECT` to the proxy's
+// `PROXY_CONNECT_PORT`, whose credential is the owner's secret: the
+// transparent path treats a name a secret entry matches as unlisted, whatever
+// `entries` says, and the authenticated path reaches nothing but secret
+// entries. Only an owner whose policy file carries a secret listens for
+// `CONNECT` at all; `secretProxyEnv` is how a `secretEnv` sibling is pointed
+// at it.
 
+import { timingSafeEqual } from "node:crypto";
 import { BlockList, isIP } from "node:net";
 
 export type EgressMode = "enforce" | "report";
@@ -37,7 +48,12 @@ export type ResolvedEgressEntry = {
 export type EgressPolicy = {
   readonly mode: EgressMode;
   readonly entries: readonly ResolvedEgressEntry[];
+  readonly secretEntries: readonly ResolvedEgressEntry[];
 };
+
+// What one owner's proxy reads: the run's policy and that owner's secret, null
+// for an owner without the authenticated listener.
+export type ProxyPolicy = EgressPolicy & { readonly secret: string | null };
 
 // Registries are opt-in by name (Decision 6): only a consumer's hooks run them
 // inside a sandbox.
@@ -67,12 +83,11 @@ function hostMatches(pattern: string, host: string): boolean {
 // or private ones too.
 export type EgressReach = "refuse" | "public" | "private";
 
-export function decide(
+function reach(
   entries: readonly ResolvedEgressEntry[],
-  host: string,
+  name: string,
   port: number,
 ): EgressReach {
-  const name = normalizeHost(host);
   const matching = entries.filter((entry) =>
     entry.ports.includes(port) && hostMatches(entry.host, name)
   );
@@ -80,12 +95,67 @@ export function decide(
   return matching.some((entry) => entry.private) ? "private" : "public";
 }
 
-export function decideDns(
-  entries: readonly ResolvedEgressEntry[],
-  name: string,
-): boolean {
+const namedBy = (entries: readonly ResolvedEgressEntry[], name: string): boolean =>
+  entries.some((entry) => hostMatches(entry.host, name));
+
+// The transparent path, by SNI or `Host`.
+export function decide(policy: EgressPolicy, host: string, port: number): EgressReach {
+  const name = normalizeHost(host);
+  return namedBy(policy.secretEntries, name) ? "refuse" : reach(policy.entries, name, port);
+}
+
+export function decideDns(policy: EgressPolicy, name: string): boolean {
   const normalized = normalizeHost(name);
-  return entries.some((entry) => hostMatches(entry.host, normalized));
+  return !namedBy(policy.secretEntries, normalized) && namedBy(policy.entries, normalized);
+}
+
+// ---------------------------------------------------------------------------
+// The authenticated path
+// ---------------------------------------------------------------------------
+
+// Squid's port, a proxy's customary one. config.ts keeps it off `allow` while
+// `secretAllow` is set, since the proxy would listen on it twice.
+export const PROXY_CONNECT_PORT = 3128;
+
+const PROXY_USER = "sandbar";
+
+// The env that sends a client's https through the authenticated listener and
+// keeps the sandbox's loopback off it.
+export const SECRET_PROXY_ENV_KEYS = ["HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"] as const;
+
+export function secretProxyEnv(
+  secret: string,
+  proxyIp: string,
+): Readonly<Record<(typeof SECRET_PROXY_ENV_KEYS)[number], string>> {
+  const url = `http://${PROXY_USER}:${secret}@${proxyIp}:${PROXY_CONNECT_PORT}`;
+  const local = "127.0.0.1,localhost";
+  return { HTTPS_PROXY: url, https_proxy: url, NO_PROXY: local, no_proxy: local };
+}
+
+// The `Proxy-Authorization` a client derives from `secretProxyEnv`'s URL.
+export function proxyAuthorization(secret: string): string {
+  return `Basic ${Buffer.from(`${PROXY_USER}:${secret}`).toString("base64")}`;
+}
+
+export type ConnectRequest = {
+  readonly host: string;
+  readonly port: number;
+  // The `Proxy-Authorization` header's value, null without one.
+  readonly authorization: string | null;
+};
+
+// The same in report mode as in enforce: nothing on this path is discovery.
+export function decideConnect(
+  policy: ProxyPolicy,
+  request: ConnectRequest,
+): "unauthorized" | EgressReach {
+  if (policy.secret === null || request.authorization === null) return "unauthorized";
+  const expected = Buffer.from(proxyAuthorization(policy.secret));
+  const given = Buffer.from(request.authorization);
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
+    return "unauthorized";
+  }
+  return reach(policy.secretEntries, normalizeHost(request.host), request.port);
 }
 
 const PRIVATE_RANGES = new BlockList();
@@ -131,32 +201,40 @@ const fail = (what: string): never => {
 const isPort = (value: unknown): value is number =>
   Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 65535;
 
+function parseEntries(field: string, entries: unknown): ResolvedEgressEntry[] {
+  if (!Array.isArray(entries)) return fail(`${field} is not an array`);
+  return entries.map((entry: unknown): ResolvedEgressEntry => {
+    const e = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+    if (typeof e.host !== "string" || e.host === "") return fail(`bad entry ${JSON.stringify(entry)}`);
+    if (!Array.isArray(e.ports) || e.ports.length === 0 || !e.ports.every(isPort)) {
+      return fail(`bad ports in ${JSON.stringify(entry)}`);
+    }
+    if (typeof e.private !== "boolean") return fail(`bad private in ${JSON.stringify(entry)}`);
+    return { host: e.host, ports: e.ports, private: e.private };
+  });
+}
+
 // The proxy's one input. Sandbar writes it, but it crosses a process and a
 // container boundary, so the proxy checks the shape before serving on it.
-export function parseEgressPolicy(json: string): EgressPolicy {
+export function parseProxyPolicy(json: string): ProxyPolicy {
   const value: unknown = JSON.parse(json);
   if (typeof value !== "object" || value === null) return fail("not an object");
-  const { mode, entries } = value as Record<string, unknown>;
+  const { mode, entries, secretEntries, secret } = value as Record<string, unknown>;
   if (mode !== "enforce" && mode !== "report") return fail(`bad mode ${String(mode)}`);
-  if (!Array.isArray(entries)) return fail("entries is not an array");
+  if (secret !== null && (typeof secret !== "string" || secret === "")) return fail("bad secret");
   return {
     mode,
-    entries: entries.map((entry: unknown): ResolvedEgressEntry => {
-      const e = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
-      if (typeof e.host !== "string" || e.host === "") return fail(`bad entry ${JSON.stringify(entry)}`);
-      if (!Array.isArray(e.ports) || e.ports.length === 0 || !e.ports.every(isPort)) {
-        return fail(`bad ports in ${JSON.stringify(entry)}`);
-      }
-      if (typeof e.private !== "boolean") return fail(`bad private in ${JSON.stringify(entry)}`);
-      return { host: e.host, ports: e.ports, private: e.private };
-    }),
+    entries: parseEntries("entries", entries),
+    secretEntries: parseEntries("secretEntries", secretEntries),
+    secret,
   };
 }
 
 // How the proxy came to its decision: a DNS query, the TLS SNI, the HTTP
-// `Host`, first bytes that name no destination, or an allowed name whose
-// addresses are all private.
-export type EgressVia = "dns" | "tls" | "http" | "opaque" | "private";
+// `Host`, first bytes that name no destination, an allowed name whose
+// addresses are all private, or an authenticated `CONNECT` however it was
+// decided.
+export type EgressVia = "dns" | "tls" | "http" | "opaque" | "private" | "connect";
 
 export type EgressDecisionLine = {
   readonly t: "allow" | "refuse" | "would-refuse" | "upstream-error";
@@ -172,7 +250,7 @@ export type EgressLogLine = { readonly t: "ready" } | EgressDecisionLine;
 const LINE_KINDS: ReadonlySet<string> = new Set([
   "ready", "allow", "refuse", "would-refuse", "upstream-error",
 ]);
-const VIAS: ReadonlySet<string> = new Set(["dns", "tls", "http", "opaque", "private"]);
+const VIAS: ReadonlySet<string> = new Set(["dns", "tls", "http", "opaque", "private", "connect"]);
 
 // Every line is the proxy's own output, so one that does not parse is a defect
 // in the proxy rather than something to skip.
@@ -202,7 +280,9 @@ export type EgressRefusal = {
 export type EgressCounts = Readonly<Record<string, number>>;
 
 export type EgressTally = {
-  // Destinations whose refusal has already been reported.
+  // Destinations whose refusal has already been reported, a `CONNECT`'s apart
+  // from a transparent one's, so a refused authenticated attempt is sighted
+  // even after the same destination was refused directly.
   readonly seen: ReadonlySet<string>;
   readonly allowed: EgressCounts;
   readonly refused: EgressCounts;
@@ -254,8 +334,9 @@ export function foldEgressLog(
     else {
       refused = bump(refused, key);
       refusedHere.add(key);
-      if (!seen.has(key)) {
-        seen.add(key);
+      const sighting = entry.via === "connect" ? `connect ${key}` : key;
+      if (!seen.has(sighting)) {
+        seen.add(sighting);
         firstRefusals.push({
           host: entry.host,
           port: entry.port,

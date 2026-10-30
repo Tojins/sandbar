@@ -21,10 +21,13 @@
 // Behind an egress allowlist (#202, `config.egress`) the sandbox entry first
 // starts the sandbox's own proxy on its own internal network, which the agent
 // container then joins with the proxy as its only DNS and Claude Code's
-// nonessential traffic off; its siblings inherit both. The gate stack gets
-// its own proxy (gate-stack.ts). Every agent invocation ends at a checkpoint
-// (`withEgressCheckpoints`) that records the proxy's first-sighted refusals;
-// a failed one whose proxy died raises `EgressProxyDiedError` instead, which
+// nonessential traffic off; its siblings inherit both, and with
+// `egress.secretAllow` only its proxy gets the authenticated listener, whose
+// env the `secretEnv` siblings get (#257). The gate stack gets its own proxy
+// (gate-stack.ts). Every agent invocation ends at a checkpoint
+// (`withEgressCheckpoints`) that records the proxy's first-sighted refusals
+// and masks the proxy's secret in what the agent printed; a failed one whose
+// proxy died raises `EgressProxyDiedError` instead, which
 // even the reviewer's failure classification passes through, so a dead proxy
 // is a HARD-ERROR rather than a role's failure. The proxy stops after the
 // sandbox closes and records its `egress` summary. The implementer is told
@@ -427,6 +430,7 @@ import {
   settleWithoutRunner,
 } from "./verifier-run.js";
 import { startTimer } from "./timing.js";
+import { maskSecrets } from "./token-scan.js";
 import {
   containerResourcesOf,
   mergeContainerResources,
@@ -1428,6 +1432,7 @@ async function runSandboxCycle(
             owner: `sbx-${issue.id}`,
             networkName: egressNetwork,
             createNetwork: true,
+            authenticated: true,
           });
         }
         // The sandbox's own image is a function of the branch too (#46), and
@@ -1524,6 +1529,7 @@ async function runSandboxCycle(
                     worktreePath,
                     anchorContainerName: containerName,
                     logDir: sandboxLogDir,
+                    egressConnect: holder.egress?.connect ?? null,
                     onNotice: (message) => opts.onEvent({
                       kind: "complaint", severity: "warning", message,
                     }),
@@ -1883,8 +1889,12 @@ async function runSandboxCycle(
 // (#202): the refusals its proxy first sighted are recorded, and a failed
 // invocation whose proxy is dead raises that death instead — infrastructure,
 // so HARD-ERROR and a fresh sandbox, where the agent's error would have
-// charged the role with a network that no longer exists.
+// charged the role with a network that no longer exists. The proxy's secret
+// (#257) is masked in what the invocation returns or throws: the agent is
+// never handed it, so output carrying it is output that must not reach a
+// record or a later prompt.
 export function withEgressCheckpoints(sandbox: Sandbox, egress: OwnerProxy): Sandbox {
+  const secrets = egress.connect === null ? [] : [egress.connect.secret];
   return {
     ...sandbox,
     run: async (o) => {
@@ -1894,10 +1904,11 @@ export function withEgressCheckpoints(sandbox: Sandbox, egress: OwnerProxy): San
       } catch (err) {
         await egress.assertAlive();
         await egress.checkpoint();
+        if (err instanceof Error) err.message = maskSecrets(err.message, secrets);
         throw err;
       }
       await egress.checkpoint();
-      return result;
+      return { ...result, stdout: maskSecrets(result.stdout, secrets) };
     },
   };
 }

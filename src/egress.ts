@@ -19,6 +19,18 @@
 // bytes it then sends are spliced through unchanged, so the client verifies
 // the real certificate.
 //
+// THE ONE `HTTPS_PROXY` (#257), a deliberate exception to Decision 2. A host
+// a sandbox sibling must reach live is reachable by everything in its netns,
+// the agent included, so `egress.secretAllow` hosts are refused on the
+// transparent path and reachable only through the proxy's authenticated
+// `CONNECT` listener. An `authenticated` owner (the sandbox's; never a gate's
+// or a resolve's) with a `secretAllow` list gets a random secret at start,
+// held in memory and in its policy file, which is 0600, mounted into the
+// proxy only and removed at stop. `EgressConnect` hands it on: the env that
+// sandbox-stack.ts gives each `secretEnv` sibling and nothing else, and the
+// literal the inner loop masks in agent output. A client that ignores the
+// variable fails closed, refused and recorded.
+//
 // ONE PROXY PER OWNER (Decision 3), never shared: the gate's fresh-stack retry
 // runs `network rm -f`, which takes every container on the network with it,
 // and a proxy bridging two internal networks would be one hop between
@@ -61,8 +73,8 @@
 // dead one is an `EgressProxyDiedError`, so a caller that classifies an
 // agent's failure can tell the host's apart.
 
-import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { isIPv4 } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
@@ -80,12 +92,14 @@ import {
   type EgressPolicy,
   type EgressRefusal,
   EMPTY_EGRESS_TALLY,
+  type ProxyPolicy,
   egressDnsArgs,
   egressProxyRunArgs,
   foldEgressLog,
   internalNetworkCreateArgs,
   parseEgressLogLine,
   proxyIpInspectArgs,
+  secretProxyEnv,
 } from "./egress-policy.js";
 import {
   type ImageRecorder,
@@ -204,11 +218,20 @@ export type EgressDrain = {
   readonly refused: readonly string[];
 };
 
+// An authenticated owner's way through the `CONNECT` listener (#257): its
+// secret, and the env that carries it to a `secretEnv` sibling.
+export type EgressConnect = {
+  readonly secret: string;
+  readonly env: Readonly<Record<string, string>>;
+};
+
 export type EgressHandle = {
   // The proxy's address on the owner's network.
   readonly ip: string;
   // `--dns`/`--dns-search` for the owner's `run` or `pod create`.
   readonly dnsArgs: readonly string[];
+  // Null unless the owner is authenticated and `secretAllow` names a host.
+  readonly connect: EgressConnect | null;
   readonly drain: () => Promise<EgressDrain>;
   // Throws when podman says the proxy is stopped or gone. An unanswered
   // inspect is no evidence either way and passes.
@@ -255,12 +278,16 @@ export type EgressOwner = {
   // The address to take on that network: a reused gate pod's resolv.conf
   // already names its proxy's (gate-stack.ts).
   readonly ip?: string | undefined;
+  // Whether the proxy gets the authenticated listener: the sandbox's, whose
+  // `secretEnv` siblings it serves, and never a gate's or a resolve's.
+  readonly authenticated: boolean;
 };
 
 // An owner's proxy as the owner uses it: what it checks and when it stops,
 // its records going to the report it was started with.
 export type OwnerProxy = {
   readonly dnsArgs: readonly string[];
+  readonly connect: EgressConnect | null;
   readonly assertAlive: () => Promise<void>;
   // Records the refusals first sighted since the previous checkpoint, and
   // answers every destination refused since then.
@@ -282,6 +309,7 @@ export function ownerEgress(context: EgressContext, report: EgressReport): Owner
       const handle = await startEgress({ ...context, ...owner });
       return {
         dnsArgs: handle.dnsArgs,
+        connect: handle.connect,
         assertAlive: handle.assertAlive,
         checkpoint: async () => {
           const { firstRefusals, refused } = await handle.drain();
@@ -324,6 +352,9 @@ export async function startEgress(
   const name = egressProxyNameFor(opts.scope, opts.owner);
   const logPath = join(opts.logDir, `${opts.owner}.jsonl`);
   const policyPath = join(opts.logDir, `${opts.owner}.policy.json`);
+  const secret = opts.authenticated && opts.policy.secretEntries.length > 0
+    ? randomBytes(32).toString("hex")
+    : null;
   let offset = 0;
   let tally = EMPTY_EGRESS_TALLY;
 
@@ -388,6 +419,7 @@ export async function startEgress(
     };
     await remove(CONTAINER_RM_ARGS(name));
     if (opts.createNetwork) await remove(["network", "rm", "-f", opts.networkName]);
+    await rm(policyPath, { force: true });
     if (failures.length > 0) {
       throw new Error(
         `egress proxy ${name}: teardown failed, leaking podman resources:\n` +
@@ -450,8 +482,9 @@ export async function startEgress(
 
   try {
     await mkdir(opts.logDir, { recursive: true });
+    const policy: ProxyPolicy = { ...opts.policy, secret };
     await Promise.all([
-      writeFile(policyPath, JSON.stringify(opts.policy)),
+      writeFile(policyPath, JSON.stringify(policy), { mode: 0o600 }),
       writeFile(logPath, ""),
     ]);
     // A namesake can only be a crashed predecessor's, and is never reused.
@@ -485,7 +518,14 @@ export async function startEgress(
     if (!isIPv4(ip)) {
       throw new Error(`egress proxy ${name}: podman reported address '${ip}' on ${opts.networkName}`);
     }
-    return { ip, dnsArgs: egressDnsArgs(ip), drain, assertAlive, stop };
+    return {
+      ip,
+      dnsArgs: egressDnsArgs(ip),
+      connect: secret === null ? null : { secret, env: secretProxyEnv(secret, ip) },
+      drain,
+      assertAlive,
+      stop,
+    };
   } catch (err) {
     await abandon();
     throw err;

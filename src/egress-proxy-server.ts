@@ -8,10 +8,10 @@
 // DNS on UDP and TCP 53. An A query for an allowed name is answered with the
 // proxy's own address on the asker's subnet, TTL 5; AAAA, HTTPS, SVCB and every
 // other type for an allowed name get NODATA, so a client has no IPv6 and no
-// ECH to try. Any other name gets NXDOMAIN and a log line. Malformed packets
-// are dropped unanswered.
+// ECH to try. Any other name, a `secretAllow` one included, gets NXDOMAIN and
+// a log line. Malformed packets are dropped unanswered.
 //
-// TCP on the union of the entries' ports. The first bytes name the
+// TCP on the union of the `allow` entries' ports. The first bytes name the
 // destination: the SNI of a TLS ClientHello, or the `Host` of an HTTP request.
 // Anything else (no SNI, a ClientHello split across records, a protocol where
 // the server speaks first and the client waits) is refused as `opaque`. An
@@ -24,6 +24,14 @@
 // mode a refusal is logged as `would-refuse` and the connection or answer goes
 // ahead, except for `opaque`, which names nowhere to forward to.
 //
+// The authenticated listener (#257), only when the policy file carries the
+// owner's secret: HTTP `CONNECT host:port` on `PROXY_CONNECT_PORT`. A request
+// whose `Proxy-Authorization` is not the secret gets a 407, and one for a host
+// no `secretAllow` entry matches a 403; an allowed one is resolved, checked
+// against the private ranges like any other, answered 200 and spliced. Every
+// decision is logged with via `connect` and enforced in both modes; a request
+// that does not parse as a `CONNECT` is refused as `opaque`.
+//
 // One JSON line per decision goes to the bind-mounted log; `{"t":"ready"}` is
 // written once every listener is bound, and is what `startEgress` waits for.
 
@@ -35,15 +43,19 @@ import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
+  type ConnectRequest,
   type EgressDecisionLine,
-  type EgressPolicy,
+  type EgressReach,
+  PROXY_CONNECT_PORT,
   PROXY_LOG_PATH,
   PROXY_POLICY_PATH,
+  type ProxyPolicy,
   decide,
+  decideConnect,
   decideDns,
   isPrivateAddress,
   normalizeHost,
-  parseEgressPolicy,
+  parseProxyPolicy,
 } from "./egress-policy.js";
 
 // ---------------------------------------------------------------------------
@@ -164,8 +176,8 @@ export type Peek =
   | { readonly kind: "route"; readonly via: "tls" | "http"; readonly host: string }
   | { readonly kind: "opaque" };
 
-const MORE: Peek = { kind: "more" };
-const OPAQUE: Peek = { kind: "opaque" };
+const MORE = { kind: "more" } as const;
+const OPAQUE = { kind: "opaque" } as const;
 
 // A TLS record carries at most 2^14 bytes of plaintext; a ClientHello is never
 // encrypted, so a longer first record is not one.
@@ -244,6 +256,30 @@ export function peekDestination(buf: Buffer): Peek {
   return buf[0] === TLS_HANDSHAKE ? peekTlsSni(buf) : peekHttpHost(buf);
 }
 
+export type ConnectPeek =
+  | { readonly kind: "more" }
+  | { readonly kind: "route"; readonly request: ConnectRequest; readonly rest: Buffer }
+  | { readonly kind: "opaque" };
+
+// A `CONNECT host:port` request's head, and whatever the client sent past it.
+export function peekConnect(buf: Buffer): ConnectPeek {
+  const headerEnd = buf.indexOf("\r\n\r\n");
+  if (headerEnd === -1) return buf.length < HTTP_MAX_HEADER_BYTES ? MORE : OPAQUE;
+  const [requestLine = "", ...headers] = buf.toString("latin1", 0, headerEnd).split("\r\n");
+  const target = /^CONNECT (\S+) HTTP\/1\.[01]$/.exec(requestLine)?.[1] ?? "";
+  const authority = /^(\[[^\]]*\]|[^:[\]]+):(\d{1,5})$/.exec(target);
+  const port = Number(authority?.[2]);
+  if (authority === null || port < 1 || port > 65_535) return OPAQUE;
+  const authorization = headers
+    .map((line) => /^proxy-authorization:[ \t]*(.*?)[ \t]*$/i.exec(line)?.[1])
+    .find((value) => value !== undefined) ?? null;
+  return {
+    kind: "route",
+    request: { host: authority[1]!, port, authorization },
+    rest: buf.subarray(headerEnd + 4),
+  };
+}
+
 // The proxy's own IPv4 address on the subnet a DNS query came from: the only
 // address of its own that the asker can reach.
 export function addressFacing(
@@ -273,7 +309,7 @@ const PEEK_TIMEOUT_MS = 10_000;
 const PEEK_MAX_BYTES = 5 + TLS_MAX_RECORD_BYTES;
 
 async function serve(): Promise<void> {
-  const policy: EgressPolicy = parseEgressPolicy(readFileSync(PROXY_POLICY_PATH, "utf8"));
+  const policy: ProxyPolicy = parseProxyPolicy(readFileSync(PROXY_POLICY_PATH, "utf8"));
   const enforce = policy.mode === "enforce";
   const refusal = enforce ? "refuse" : "would-refuse";
   const logFd = openSync(PROXY_LOG_PATH, "a");
@@ -285,7 +321,7 @@ async function serve(): Promise<void> {
     const query = parseDnsQuery(packet);
     if (query === null) return null;
     const name = dnsQueryName(query);
-    if (!decideDns(policy.entries, name)) {
+    if (!decideDns(policy, name)) {
       record({ t: refusal, via: "dns", host: name, port: null });
       if (enforce) return dnsResponse(query, { kind: "nxdomain" });
     }
@@ -321,35 +357,40 @@ async function serve(): Promise<void> {
     });
   });
 
-  const refuse = (socket: Socket, via: "tls" | "http", host: string): void => {
-    if (via === "tls") {
-      socket.destroy();
-      return;
-    }
-    const body = `sandbar egress: ${host} is not on the allowlist\n`;
+  // An HTTP answer that ends the connection.
+  const respond = (socket: Socket, status: string, body: string, headers = ""): void => {
     // Resumed so the client's FIN is read and the half-open socket closes.
     socket.resume();
     socket.end(
-      "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n" +
+      `HTTP/1.1 ${status}\r\nContent-Type: text/plain\r\n${headers}` +
         `Content-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
     );
   };
 
-  const forward = async (
-    socket: Socket,
-    peeked: Buffer,
-    via: "tls" | "http",
-    host: string,
-    port: number,
-  ): Promise<void> => {
-    const reach = decide(policy.entries, host, port);
-    // Set once this connection has been logged as refused, so a report-mode
-    // forward is one `would-refuse` and not also an `allow`.
-    let refused = reach === "refuse";
-    if (refused) {
-      record({ t: refusal, via, host, port });
-      if (enforce) return refuse(socket, via, host);
+  const refuse = (socket: Socket, via: "tls" | "http" | "connect", host: string): void => {
+    if (via === "tls") {
+      socket.destroy();
+      return;
     }
+    respond(socket, "403 Forbidden", `sandbar egress: ${host} is not on the allowlist\n`);
+  };
+
+  // Resolves `host`, keeps to public addresses unless `reach` allows private
+  // ones, connects, and splices both ways once `open` has handed the upstream
+  // what it is owed. `refused` is a report-mode connection already logged as
+  // `would-refuse`, which is then not also an `allow`; `enforcing` decides
+  // whether a private-only resolution is refused or let through.
+  const splice = async (socket: Socket, s: {
+    readonly via: "tls" | "http" | "connect";
+    readonly host: string;
+    readonly port: number;
+    readonly publicOnly: boolean;
+    readonly enforcing: boolean;
+    readonly refused: boolean;
+    readonly open: (upstream: Socket) => void;
+  }): Promise<void> => {
+    const { via, host, port, enforcing } = s;
+    let refused = s.refused;
     // Every way a lookup can fail (no such name, a timeout, a SERVFAIL) is the
     // upstream's, and is recorded as such rather than thrown.
     const resolved = await lookup(host, { all: true, order: "ipv4first" }).then(
@@ -363,13 +404,18 @@ async function serve(): Promise<void> {
       socket.destroy();
       return;
     }
-    let candidates = reach === "public"
+    let candidates = s.publicOnly
       ? resolved.filter((a) => !isPrivateAddress(a.address))
       : resolved;
     if (candidates.length === 0) {
       refused = true;
-      record({ t: refusal, via: "private", host, port });
-      if (enforce) return refuse(socket, via, host);
+      record({
+        t: enforcing ? "refuse" : "would-refuse",
+        via: via === "connect" ? via : "private",
+        host,
+        port,
+      });
+      if (enforcing) return refuse(socket, via, host);
       candidates = resolved;
     }
     let connected = false;
@@ -377,7 +423,7 @@ async function serve(): Promise<void> {
     upstream.on("connect", () => {
       connected = true;
       if (!refused) record({ t: "allow", via, host, port });
-      upstream.write(peeked);
+      s.open(upstream);
       socket.pipe(upstream);
       upstream.pipe(socket);
     });
@@ -389,7 +435,63 @@ async function serve(): Promise<void> {
     socket.on("error", () => upstream.destroy());
   };
 
-  const route = (socket: Socket, port: number): void => {
+  const forward = async (
+    socket: Socket,
+    peeked: Buffer,
+    via: "tls" | "http",
+    host: string,
+    port: number,
+  ): Promise<void> => {
+    const reach = decide(policy, host, port);
+    if (reach === "refuse") {
+      record({ t: refusal, via, host, port });
+      if (enforce) return refuse(socket, via, host);
+    }
+    await splice(socket, {
+      via, host, port,
+      publicOnly: reach === "public",
+      enforcing: enforce,
+      refused: reach === "refuse",
+      open: (upstream) => upstream.write(peeked),
+    });
+  };
+
+  const tunnel = async (socket: Socket, request: ConnectRequest, rest: Buffer): Promise<void> => {
+    const { host, port } = request;
+    const reach = decideConnect(policy, request);
+    if (reach === "unauthorized") {
+      record({ t: "refuse", via: "connect", host, port });
+      return respond(
+        socket,
+        "407 Proxy Authentication Required",
+        "sandbar egress: proxy credential missing or wrong\n",
+        'Proxy-Authenticate: Basic realm="sandbar"\r\n',
+      );
+    }
+    if (reach === "refuse") {
+      record({ t: "refuse", via: "connect", host, port });
+      return refuse(socket, "connect", host);
+    }
+    await splice(socket, {
+      via: "connect", host, port,
+      publicOnly: reach === "public",
+      enforcing: true,
+      refused: false,
+      open: (upstream) => {
+        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        upstream.write(rest);
+      },
+    });
+  };
+
+  // Reads a connection's first bytes until `peek` says what they ask for:
+  // more, nothing routable (`opaque`), or a request for `serve`.
+  const route = <P extends { readonly kind: "more" | "opaque" | "route" }>(
+    socket: Socket,
+    port: number,
+    peek: (peeked: Buffer) => P,
+    serve: (peeked: Buffer, routed: Extract<P, { readonly kind: "route" }>) => Promise<void>,
+  ): void => {
     let peeked = Buffer.alloc(0);
     let decided = false;
     const settle = (): boolean => {
@@ -407,11 +509,11 @@ async function serve(): Promise<void> {
     };
     const onData = (chunk: Buffer): void => {
       peeked = Buffer.concat([peeked, chunk]);
-      const peek = peekDestination(peeked);
-      if (peek.kind === "more" && peeked.length < PEEK_MAX_BYTES) return;
-      if (peek.kind !== "route") return opaque();
+      const next = peek(peeked);
+      if (next.kind === "more" && peeked.length < PEEK_MAX_BYTES) return;
+      if (next.kind !== "route") return opaque();
       settle();
-      void forward(socket, peeked, peek.via, peek.host, port);
+      void serve(peeked, next as Extract<P, { readonly kind: "route" }>);
     };
     const timer = setTimeout(opaque, PEEK_TIMEOUT_MS);
     socket.on("data", onData);
@@ -435,8 +537,15 @@ async function serve(): Promise<void> {
     }),
     listen(dnsTcp, 53),
     ...ports.map((port) =>
-      listen(createServer({ allowHalfOpen: true }, (socket) => route(socket, port)), port)
+      listen(createServer({ allowHalfOpen: true }, (socket) =>
+        route(socket, port, peekDestination, (peeked, peek) =>
+          forward(socket, peeked, peek.via, peek.host, port))), port)
     ),
+    ...(policy.secret === null ? [] : [
+      listen(createServer({ allowHalfOpen: true }, (socket) =>
+        route(socket, PROXY_CONNECT_PORT, peekConnect, (_peeked, peek) =>
+          tunnel(socket, peek.request, peek.rest))), PROXY_CONNECT_PORT),
+    ]),
   ]);
   record({ t: "ready" });
 }

@@ -85,7 +85,7 @@ defaults.
 | `images` | sandbox image from `./Containerfile` | See [Images](#images). |
 | `defaultLane` | `auto` | `auto` lands after the gate; `review` lands on a chunk branch with a draft PR. |
 | `mergeMode` | `{ kind: "direct" }` | `{ kind: "verified", requiredChecks: [...] }` also waits for forge CI. |
-| `egress` | open | `{ mode?, allow: [...] }`: sandboxes, gates and resolve containers reach only GitHub, the model APIs in use and the listed hosts (presets `npm`, `packagist`; `host`, `*.suffix`, `host:port`, or `{ host, ports, private }`). Each refused host is an `egress-refused` event. `mode: "report"` refuses nothing and records what it would refuse. |
+| `egress` | open | `{ mode?, allow: [...], secretAllow?: [...] }`: sandboxes, gates and resolve containers reach only GitHub, the model APIs in use and the `allow` hosts (presets `npm`, `packagist`; `host`, `*.suffix`, `host:port`, or `{ host, ports, private }`). `secretAllow` takes the same entries, reachable only by a sandbox's `secretEnv` containers (see [below](#ingate-false-and-secretenv)). Each refused host is an `egress-refused` event. `mode: "report"` refuses nothing and records what it would refuse. |
 | `maxParallelIssues` | `3` | Issues worked at once. |
 | `maxConcurrentGates` | unlimited | Gate runs at once. |
 | `pollIntervalMs` | `60000` | Idle poll interval. |
@@ -604,6 +604,23 @@ the names:
   read, so it must not print the secret.
 - A branch's own `env` or `sandboxEnv` change to such a container is treated
   as a stack change, not an env-only one.
+
+A live host such a container needs belongs in `egress.secretAllow`, not
+`allow`: an `allow` host is reachable by everything beside the agent, the
+agent included. A `secretAllow` host gets no DNS answer and is refused on a
+direct connection; it is reachable only through the egress proxy's
+authenticated `CONNECT`, and only a `secretEnv` container gets the credential:
+
+- Each one gets `HTTPS_PROXY`/`https_proxy` set to
+  `http://sandbar:<secret>@<proxy>:3128` and `NO_PROXY`/`no_proxy` set to
+  `127.0.0.1,localhost`, so these four cannot be `secretEnv` keys, and `allow`
+  cannot name port 3128 while `secretAllow` is set.
+- The secret is random per sandbox, and its client must honour
+  `HTTPS_PROXY`. One that ignores it is refused, and the refusal is recorded.
+- A refused `CONNECT` (wrong credential, or a host not on `secretAllow`) is
+  an `egress-refused` event with via `connect`, in report mode too.
+- Gates and resolve containers never get it, so `secretAllow` hosts are
+  refused for them.
 
 ## `sandbar gate`
 

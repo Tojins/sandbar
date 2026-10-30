@@ -152,7 +152,10 @@ a written set.
   proxy program), `egress.ts` (its image, one proxy per network owner, the
   `egress-refused`/`egress` records). Every sandbox (siblings included),
   gate stack and resolve attempt then sits on its own `--internal` network
-  behind its own proxy; without it nothing changes.
+  behind its own proxy; without it nothing changes. A `secretAllow` host
+  (#257) is refused on that path and reached only by a sandbox's `secretEnv`
+  siblings, through its proxy's authenticated `CONNECT` with a per-sandbox
+  secret (`EgressConnect`); the agent holds no NET_RAW/NET_ADMIN.
 - **Origin owns issue and chunk branches** (`git-ops.ts`, `chunks.ts`).
 - **Locks**: per-workdir `lock.ts` (#32), repo-wide origin lease
   `origin-lock.ts` (#139), host wake lock `keepawake.ts` (#117).
