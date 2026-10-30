@@ -72,9 +72,10 @@ export default {
   // bower's registry serve the dependency installs; the rest are the
   // integrations the app reaches for real from a sandbox, as outdoor's source
   // names them: Mews demo (configDev.php), the Peppol directory
-  // (peppolDirectory.php), VIES and the other GET-only registries (vatRegisters.php; HMRC at dev's sandbox host), and adfinity
-  // live for the recording proxy sibling (Tojins/outdoor#785), whose tenant
-  // host is a secret, hence the suffix.
+  // (peppolDirectory.php), VIES and the other GET-only registries
+  // (vatRegisters.php; HMRC at dev's sandbox host), and adfinity live for the
+  // recording proxy sibling (Tojins/outdoor#785), whose tenant host is a
+  // secret, hence the suffix.
   egress: {
     mode: "enforce",
     allow: [
