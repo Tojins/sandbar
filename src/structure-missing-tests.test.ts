@@ -293,6 +293,30 @@ describe("coverage", () => {
     expect(() => coverageFindings(dir, new Map(), false)).toThrow(`${UNIT_COVERAGE} is not JSON: `);
   });
 
+  it("a coverage file that cannot be read is an error", async () => {
+    const dir = await tempDir();
+    await mkdir(join(dir, UNIT_COVERAGE), { recursive: true });
+    expect(() => coverageFindings(dir, new Map(), false))
+      .toThrow(new StructureError(`${UNIT_COVERAGE} cannot be read: EISDIR: illegal operation on a directory, read`));
+  });
+
+  it.each([
+    ["null", null],
+    ["a string", "s"],
+    ["an array of files", [coverageFile("/w/src/a.ts", [[1, 1]])]],
+    ["a file that is a number", { a: 1 }],
+    ["a file whose path is not a string", { a: { ...coverageFile("/w/src/a.ts", [[1, 1]]), path: 7 } }],
+    ["a file without a statement map", { a: { path: "x", s: {} } }],
+    ["a file without hits", { a: { path: "x", statementMap: {} } }],
+    ["a statement without a start line", { a: { path: "x", statementMap: { 0: {} }, s: { 0: 1 } } }],
+    ["a statement without a hit count", { a: { path: "x", statementMap: { 0: { start: { line: 1 } } }, s: {} } }],
+  ])("a coverage file holding %s is an error", async (_name, json) => {
+    const dir = await tempDir();
+    await write(dir, UNIT_COVERAGE, json as Record<string, unknown>);
+    expect(() => coverageFindings(dir, new Map(), false))
+      .toThrow(new StructureError(`${UNIT_COVERAGE} is not istanbul coverage`));
+  });
+
   it("a changed file coverage never measured is a finding: it measured another tree", async () => {
     const dir = await tempDir();
     await write(dir, UNIT_COVERAGE, {});
@@ -496,6 +520,20 @@ describe("run.mjs missing-tests", () => {
     expect(result).toMatchObject({ status: 2, stderr: "" });
     expect(result.lines).toHaveLength(1);
     expect(result.lines[0]).toMatch(/^missing-tests: coverage\/unit\/coverage-final\.json is not JSON: /);
+  });
+
+  it.each([
+    ["a directory", (path: string) => mkdir(path, { recursive: true }), / cannot be read: EISDIR: /],
+    ["null", (path: string) => writeFile(path, "null"), / is not istanbul coverage$/],
+  ])("cannot answer over a coverage file that is %s, in one line", async (_name, make, reason) => {
+    const dir = await fixtureRepo("missing-tests-red");
+    await mkdir(join(dir, "coverage/unit"), { recursive: true });
+    await make(join(dir, UNIT_COVERAGE));
+    const result = run(dir, "missing-tests", "--base", "origin/main");
+    expect(result).toMatchObject({ status: 2, stderr: "" });
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]).toMatch(/^missing-tests: coverage\/unit\/coverage-final\.json/);
+    expect(result.lines[0]).toMatch(reason);
   });
 
   it("skips the landing shape in one line, with no coverage to read", async () => {

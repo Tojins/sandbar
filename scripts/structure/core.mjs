@@ -59,15 +59,18 @@ export function mergeBase(repo, base) {
   return git(repo, ["merge-base", "HEAD", base]).trim();
 }
 
-// `path` parsed as JSON at `rev`.
+// `path` at `rev` parsed as a JSON object (or array).
 export function readJsonAt(repo, rev, path) {
   const text = git(repo, ["show", `${rev}:${path}`]);
+  let json;
   try {
-    return JSON.parse(text);
+    json = JSON.parse(text);
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err;
     throw new StructureError(`${path} at ${rev} is not JSON: ${err.message}`);
   }
+  if (typeof json !== "object" || json === null) throw new StructureError(`${path} at ${rev} is not a JSON object`);
+  return json;
 }
 
 // The lines `mb..HEAD` adds, per path in HEAD: added lines only, so a

@@ -6,7 +6,8 @@
 // A changed line counts when a statement starts on it, and is covered when
 // either file hits one of those statements. A missing unit file cannot
 // answer the check, and neither can a missing podman file where it is
-// required (`--podman-coverage`, the gate): `StructureError`, exit 2.
+// required (`--podman-coverage`, the gate), nor a file that cannot be read,
+// is not JSON or is not istanbul's shape: `StructureError`, exit 2.
 // Elsewhere, a local `npm run structure`, the podman file may be absent, and
 // a line no unit test hits is then `unknown`, never a finding.
 
@@ -17,6 +18,17 @@ import { StructureError } from "./core.mjs";
 
 export const UNIT_COVERAGE = "coverage/unit/coverage-final.json";
 export const PODMAN_COVERAGE = "coverage/podman/coverage-final.json";
+
+const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
+// Whether `json` has the shape `statementHits` reads: per file a `path`, and
+// a start line and a hit count per statement.
+function isCoverage(json) {
+  return isRecord(json) && Object.values(json).every((file) =>
+    isRecord(file) && typeof file.path === "string" && isRecord(file.statementMap) && isRecord(file.s) &&
+    Object.entries(file.statementMap).every(([id, location]) =>
+      Number.isInteger(location?.start?.line) && typeof file.s[id] === "number"));
+}
 
 // A `coverage-final.json` to `Map<path, Map<line, hits>>`: per file relative
 // to `root`, the most any statement starting on a line was hit.
@@ -45,9 +57,12 @@ export function readCoverage(dir, relativePath, required) {
   try {
     json = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
-    if (!(err instanceof SyntaxError)) throw err;
-    throw new StructureError(`${relativePath} is not JSON: ${err.message}`);
+    if (err instanceof SyntaxError) throw new StructureError(`${relativePath} is not JSON: ${err.message}`);
+    // A system error from the read: a directory, no permission.
+    if (typeof err.code === "string") throw new StructureError(`${relativePath} cannot be read: ${err.message}`);
+    throw err;
   }
+  if (!isCoverage(json)) throw new StructureError(`${relativePath} is not istanbul coverage`);
   return statementHits(json, dir);
 }
 

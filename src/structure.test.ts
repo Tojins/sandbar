@@ -209,6 +209,18 @@ describe("version check", () => {
       line: /^version: package\.json at HEAD is not JSON: /,
     },
     {
+      name: "a package.json of null",
+      args: ["version"],
+      packageJson: "null\n",
+      line: /^version: package\.json at HEAD is not a JSON object$/,
+    },
+    {
+      name: "a package.json of a number",
+      args: ["version"],
+      packageJson: "42\n",
+      line: /^version: package\.json at HEAD is not a JSON object$/,
+    },
+    {
       name: "an unknown option",
       args: ["version", "--bogus"],
       line: /--bogus.*; usage: run\.mjs \[version\|missing-tests\]… \[--base <ref>\] \[--git-dir <dir>\] \[--podman-coverage\]$/,
