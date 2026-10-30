@@ -292,6 +292,10 @@ function resolveLabelSync(value: unknown): readonly LabelDeclaration[] {
 // sandbox receives. Like the step-env collision, that is checked wherever a
 // stack meets config.env: at load for an inline stack, and each time a stack
 // file is resolved, so preflight's opening of the stack refuses the run.
+// An `inSandbox` container may also name `sandboxEnv` (#256): literal env for
+// its sandbox copy only, laid over its `env` there (sandbox-stack.ts). No
+// gate-side reader looks at it, `gateStackOf` and `sandboxGateAttachmentsOf`
+// included, so a verdict never sees it.
 //
 // Two forms (#186). The inline stack is validated here, at load. A stack file
 // (`{ path }`) is only a path at load: the run reads it from the source tip
@@ -499,6 +503,11 @@ export type StackContainer = {
   // code holding the credential. Resolution, and what a missing key does, is
   // sandbox-stack.ts's.
   readonly secretEnv?: readonly string[];
+  // Literal env for the SANDBOX copy only (#256), laid over `env` there, so a
+  // key in both takes this value beside the agent while the gate keeps
+  // `env`'s. Only with `inSandbox: true`. The values are the stack file's, so
+  // never a credential: that is `secretEnv`.
+  readonly sandboxEnv?: Readonly<Record<string, string>>;
   // The image has no long-running process of its own: hold it open with
   // `sleep infinity` so steps can `podman exec` into it. This is what makes a
   // one-shot task runner an ordinary container rather than a special case.
@@ -659,6 +668,7 @@ export type ResolvedStackContainer = {
   readonly inSandbox: boolean;
   readonly inGate: boolean;
   readonly secretEnv: readonly string[];
+  readonly sandboxEnv: Readonly<Record<string, string>>;
   readonly hold: boolean;
   readonly readiness: Readiness | null;
   readonly readinessTimeoutMs: number;
@@ -2138,6 +2148,8 @@ const isRecord = (v: unknown): v is Readonly<Record<string, unknown>> =>
 const isString = (v: unknown): v is string => typeof v === "string";
 const isStrings = (v: unknown): boolean =>
   Array.isArray(v) && v.every(isString);
+const isStringRecord = (v: unknown): boolean =>
+  isRecord(v) && Object.values(v).every(isString);
 const isBoolean = (v: unknown): boolean => typeof v === "boolean";
 const isNumber = (v: unknown): boolean => typeof v === "number";
 
@@ -2162,7 +2174,7 @@ const CONTAINER_REQUIRED: FieldShapes<StackContainer, true> = {
 };
 const CONTAINER_OPTIONAL: FieldShapes<StackContainer, false> = {
   lifecycle: [(v) => v === "issue" || v === "attempt", '"issue" or "attempt"'],
-  env: [(v) => isRecord(v) && Object.values(v).every(isString), "an object of strings"],
+  env: [isStringRecord, "an object of strings"],
   args: [isStrings, "a list of strings"],
   mounts: [
     (v) =>
@@ -2179,6 +2191,7 @@ const CONTAINER_OPTIONAL: FieldShapes<StackContainer, false> = {
   inSandbox: [isBoolean, "a boolean"],
   inGate: [isBoolean, "a boolean"],
   secretEnv: [isStrings, "a list of strings"],
+  sandboxEnv: [isStringRecord, "an object of strings"],
   hold: [isBoolean, "a boolean"],
   readiness: [
     (v) => isRecord(v) && (v.command === undefined || isStrings(v.command)),
@@ -2687,10 +2700,13 @@ function checkSecretEnv(
     }
     seen.add(key);
     // Two sources for one key would leave which value wins to spread order.
-    if (Object.hasOwn(c.env ?? {}, key) || key === "CI") {
+    const literal = Object.hasOwn(c.env ?? {}, key)
+      ? "env"
+      : Object.hasOwn(c.sandboxEnv ?? {}, key) ? "sandboxEnv" : null;
+    if (literal !== null || key === "CI") {
       throw new SandbarError(
         `${label}: container '${c.name}' has secretEnv key '${key}', which ` +
-          `${key === "CI" ? "is reserved" : "it also sets in 'env'"}. A key ` +
+          `${literal === null ? "is reserved" : `it also sets in '${literal}'`}. A key ` +
           "has one source.",
       );
     }
@@ -2832,6 +2848,19 @@ function resolveStackContainer(
   }
   const secretEnv = c.secretEnv ?? [];
   if (secretEnv.length > 0) checkSecretEnv(c, inGate, secretEnv, label);
+  if (c.sandboxEnv !== undefined && c.inSandbox !== true) {
+    throw new SandbarError(
+      `${label}: container '${c.name}' sets 'sandboxEnv' without ` +
+        "'inSandbox: true', so it has no sandbox copy to set it on.",
+    );
+  }
+  // A stack file's shapes were checked before this; an inline stack's never
+  // are, and this one goes on to the env file unchanged.
+  if (c.sandboxEnv !== undefined && !isStringRecord(c.sandboxEnv)) {
+    throw new SandbarError(
+      `${label}: container '${c.name}' has 'sandboxEnv' that is not an object of strings.`,
+    );
+  }
   for (const m of c.mounts ?? []) {
     // podman's `-v` spec is colon-delimited with no escape mechanism, so a
     // colon anywhere would re-split the spec into different paths + options.
@@ -2890,7 +2919,7 @@ function resolveStackContainer(
   // The one env key sandbar owns is applied AFTER the consumer's, so a
   // consumer-set CI would be silently discarded. Some runners genuinely change
   // behaviour on it, so say so rather than quietly winning.
-  for (const key of Object.keys(c.env ?? {})) {
+  for (const key of [...Object.keys(c.env ?? {}), ...Object.keys(c.sandboxEnv ?? {})]) {
     if (key === "CI") {
       throw new SandbarError(
         `${label}: container '${c.name}' sets the reserved env key ` +
@@ -2925,6 +2954,7 @@ function resolveStackContainer(
     inSandbox: c.inSandbox ?? false,
     inGate,
     secretEnv,
+    sandboxEnv: c.sandboxEnv ?? {},
     hold,
     readiness,
     readinessTimeoutMs,

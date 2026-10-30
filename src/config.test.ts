@@ -162,6 +162,26 @@ describe("sandbox gate attachments (#166)", () => {
     });
   });
 
+  // Its keys never enter the implementer sandbox, so they may be config.env's.
+  it("leaves a step container's sandboxEnv out (#256)", () => {
+    const resolved = resolveConfig({
+      ...minimal,
+      env: { ADFINITY_PROXY_URL: "http://127.0.0.1:8090" },
+      gateStack: {
+        containers: [{
+          name: "app",
+          image: "runner",
+          mountWorktree: "/workspace",
+          inSandbox: true,
+          env: { FIRST: "yes" },
+          sandboxEnv: { ADFINITY_PROXY_URL: "http://127.0.0.1:8090" },
+        }],
+        steps: [{ name: "test", in: "app", command: ["npm", "test"] }],
+      },
+    });
+    expect(inlineStack(resolved).attachments).toEqual({ env: { FIRST: "yes" }, mounts: [] });
+  });
+
   it("refuses a step-container env key that collides with config.env", () => {
     expect(() => resolveConfig({
       ...minimal,
@@ -322,6 +342,11 @@ describe("resolveStackFile (#186)", () => {
       "an env value that is not a string",
       JSON.stringify({ ...stack, containers: [{ ...stack.containers[0], env: { PORT: 3306 } }] }),
       /containers\[0\] has 'env' that is not an object of strings/,
+    ],
+    [
+      "a sandboxEnv value that is not a string",
+      JSON.stringify({ ...stack, containers: [{ ...stack.containers[0], inSandbox: true, sandboxEnv: { PORT: 8090 } }] }),
+      /containers\[0\] has 'sandboxEnv' that is not an object of strings/,
     ],
     [
       "a step command that is a string",

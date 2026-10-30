@@ -5,6 +5,7 @@ import {
   type GateStackConfig,
   type ResolvedGateStack,
   type ResolvedStackContainer,
+  type StackContainer,
   resolveGateStack,
   resolveImages,
   settledRules,
@@ -59,6 +60,7 @@ const container = (
   inSandbox: false,
   inGate: true,
   secretEnv: [],
+  sandboxEnv: {},
   hold: false,
   readiness: null,
   readinessTimeoutMs: 60_000,
@@ -467,6 +469,20 @@ describe("containerRunArgs", () => {
     // And none of it is in the argv, consumer values included (#154).
     expect(args.join(" ")).not.toContain("APP_ENV");
     expect(args.join(" ")).not.toContain("CONTAINER_HOST");
+  });
+
+  // The gate copy runs what this builds from the resolved container, so a
+  // `sandboxEnv` reaching it would be a verdict off the mocks.
+  it("gives the container its env and never its sandboxEnv (#256)", () => {
+    const { env } = containerRunArgs({
+      ...base,
+      container: container({
+        inSandbox: true,
+        env: { ADFINITY_PROXY_URL: "", APP_ENV: "test" },
+        sandboxEnv: { ADFINITY_PROXY_URL: "http://127.0.0.1:8090", TZ: "UTC" },
+      }),
+    });
+    expect(env).toEqual({ CI: "true", ADFINITY_PROXY_URL: "", APP_ENV: "test" });
   });
 
   it("puts image CMD args AFTER the image ref", () => {
@@ -1291,6 +1307,11 @@ describe("resolveGateStack validation", () => {
       .toThrow(/secretEnv key 'ADFINITY_TOKEN', which it also sets in 'env'/);
   });
 
+  it("refuses a secretEnv key the container also sets in sandboxEnv", () => {
+    expect(() => resolveGateStack(withProxy({ sandboxEnv: { ADFINITY_TOKEN: "x" } })))
+      .toThrow(/secretEnv key 'ADFINITY_TOKEN', which it also sets in 'sandboxEnv'/);
+  });
+
   it("drops inGate: false containers from the stack the gate runs", () => {
     const spec = resolveGateStack(withProxy());
     expect(gateStackOf(spec).containers.map((c) => c.name)).toEqual(["db", "app"]);
@@ -1309,6 +1330,53 @@ describe("resolveGateStack validation", () => {
       false,
       false,
     ]);
+  });
+
+  // ---------------------------------------------------------------------
+  // sandboxEnv (#256)
+  // ---------------------------------------------------------------------
+
+  it("defaults sandboxEnv to none and carries a declared one", () => {
+    expect(resolveGateStack(ok).containers.map((c) => c.sandboxEnv)).toEqual([{}, {}]);
+    const resolved = resolveGateStack({
+      ...ok,
+      containers: [
+        { ...ok.containers[0]!, inSandbox: true, sandboxEnv: { ADFINITY_PROXY_URL: "http://127.0.0.1:8090" } },
+        ok.containers[1]!,
+      ],
+    });
+    expect(resolved.containers[0]?.sandboxEnv).toEqual({ ADFINITY_PROXY_URL: "http://127.0.0.1:8090" });
+  });
+
+  it.each([
+    ["without inSandbox", { sandboxEnv: { TZ: "UTC" } }, /sets 'sandboxEnv' without 'inSandbox: true'/],
+    ["holding the reserved CI key", { inSandbox: true, sandboxEnv: { CI: "false" } }, /reserved env key 'CI'/],
+  ])("refuses sandboxEnv %s", (_, over, message) => {
+    expect(() => resolveGateStack({
+      ...ok,
+      containers: [{ ...ok.containers[0]!, ...over }, ok.containers[1]!],
+    })).toThrow(message);
+  });
+
+  // An inline stack is a program, and its JSON types are checked nowhere
+  // before this; a stack file's are, and fail first (config.test.ts).
+  it.each([
+    ["a number value", { K: 8090 }],
+    ["a boolean value", { K: true }],
+    ["a null value", { K: null }],
+    ["an object value", { K: { a: "b" } }],
+    ["an array value", { K: ["x"] }],
+    ["a string", "str"],
+    ["an array", ["a"]],
+    ["a number", 5],
+  ])("refuses an inline sandboxEnv that is %s", (_, sandboxEnv) => {
+    expect(() => resolveGateStack({
+      ...ok,
+      containers: [
+        { ...ok.containers[0]!, inSandbox: true, sandboxEnv } as unknown as StackContainer,
+        ok.containers[1]!,
+      ],
+    })).toThrow(/container 'db' has 'sandboxEnv' that is not an object of strings/);
   });
 
   it("carries an explicit inSandbox onto the resolved container", () => {

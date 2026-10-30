@@ -4,27 +4,28 @@
 // steps — comes from the source branch, while the images built from the
 // branch's Containerfiles are part of the work under test. A branch that could
 // edit its grader could widen its own mounts or privileges, or weaken a check
-// until it passes. The one exception is container `env`: an env value widens
-// nothing, and outdoor#576 needed exactly that (`TZ` on its database) — except
-// on a container that holds a `secretEnv` credential (#241), where an env
-// value can redirect it, so an env edit there is non-env.
+// until it passes. The one exception is container env, `env` and
+// `sandboxEnv` (#256) alike: an env value widens nothing, and outdoor#576
+// needed exactly that (`TZ` on its database) — except on a container that
+// holds a `secretEnv` credential (#241), where an env value can redirect it,
+// so an env edit there is non-env.
 //
 // So a branch's stack file is classified against the source tip's, over
 // RESOLVED stacks, so key order and a spelled-out default are not changes:
 //
 //   - `same` — nothing the gate reads differs;
 //   - `env-only` — the container names and order, every container field but
-//     `env`, and the steps are all equal. Adding, removing or changing an env
-//     key all count as env. A step's `settles` is a step field, so no branch
-//     drops its own prompts' rule prose (#183), and so is `standalone`, so no
-//     branch moves its own steps into or out of the quality pass's early run
-//     (#247);
+//     `env` and `sandboxEnv`, and the steps are all equal. Adding, removing
+//     or changing an env key all count as env. A step's `settles` is a step
+//     field, so no branch drops its own prompts' rule prose (#183), and so
+//     is `standalone`, so no branch moves its own steps into or out of the
+//     quality pass's early run (#247);
 //   - `non-env` — anything else, and a branch stack file that is missing or
 //     does not validate. Differences name fields, never values.
 //
-// The stack in effect is the tip's, with the branch's `env` laid over it only
+// The stack in effect is the tip's, with the branch's env laid over it only
 // when the change is env-only. It is built FROM THE TIP rather than taken from
-// the branch, so nothing but `env` can cross from the branch even where the
+// the branch, so nothing but env can cross from the branch even where the
 // two would be equal. The overlay is validated again (its env must not
 // collide with `config.env`, #166); a collision is a non-env difference.
 //
@@ -38,6 +39,7 @@ import { canonicalSha256 } from "./canonical-json.js";
 import {
   type ResolvedGateStack,
   type ResolvedStack,
+  type ResolvedStackContainer,
   sandboxGateAttachmentsOf,
 } from "./config.js";
 import { SandbarError } from "./errors.js";
@@ -85,6 +87,10 @@ export const stackChangeOf = (c: StackClassification): StackChange | null =>
 
 const equal = (a: unknown, b: unknown): boolean =>
   canonicalSha256(a) === canonicalSha256(b);
+
+// A container's env, the fields a branch may change.
+const envOf = (c: ResolvedStackContainer | undefined) =>
+  c === undefined ? undefined : { env: c.env, sandboxEnv: c.sandboxEnv };
 
 type Named = { readonly name: string };
 
@@ -150,7 +156,7 @@ export function classifyStackChange(
       (n) => `container '${n}'`,
       tip.containers,
       branch.stack.containers,
-      new Set(["env"]),
+      new Set(["env", "sandboxEnv"]),
     ),
     ...listDifferences(
       "steps",
@@ -165,17 +171,17 @@ export function classifyStackChange(
       .filter((c, i) =>
         c.secretEnv.length > 0 &&
         branch.stack.containers[i]?.name === c.name &&
-        !equal(c.env, branch.stack.containers[i]?.env))
+        !equal(envOf(c), envOf(branch.stack.containers[i])))
       .map((c) => ({ where: `container '${c.name}'`, what: "env (holds secretEnv)" })),
   ];
   if (differences.length > 0) return { kind: "non-env", path, differences };
   const containers = tip.containers
-    .filter((c, i) => !equal(c.env, branch.stack.containers[i]?.env))
+    .filter((c, i) => !equal(envOf(c), envOf(branch.stack.containers[i])))
     .map((c) => c.name);
   return containers.length === 0 ? { kind: "same" } : { kind: "env-only", containers };
 }
 
-// The tip's stack with each container's `env` taken from the branch's
+// The tip's stack with each container's env taken from the branch's
 // container of the same name. Every other field stays the tip's.
 export function overlayBranchEnv(
   tip: ResolvedGateStack,
@@ -185,7 +191,7 @@ export function overlayBranchEnv(
     ...tip,
     containers: tip.containers.map((c) => ({
       ...c,
-      env: branch.containers.find((b) => b.name === c.name)?.env ?? c.env,
+      ...envOf(branch.containers.find((b) => b.name === c.name) ?? c),
     })),
   };
 }
