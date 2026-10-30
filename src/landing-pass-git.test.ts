@@ -132,6 +132,17 @@ describe("realAdapter landing-pass facts (real merge in a linked worktree)", () 
     expect(commitShapeProblem(shape)).toMatch(/worktree was left dirty/);
   });
 
+  it("a reset takes back what an attempt left untracked, and keeps ignored files", async () => {
+    await writeFile(join(repo, ".git", "info", "exclude"), "node_modules/\n");
+    await mkdir(join(wt, "node_modules"), { recursive: true });
+    await writeFile(join(wt, "node_modules", "dep.js"), "dep\n");
+    await writeFile(join(wt, "notes.md"), "scratch\n");
+    await adapter().resetHardSha(merged);
+
+    expect(await adapter().commitShape(merged)).toMatchObject({ dirtyPaths: [], commits: [] });
+    expect(await git(wt, "status", "--porcelain", "--ignored")).toBe("!! node_modules/");
+  });
+
   it("refuses a merge left in progress", async () => {
     await git(repo, "checkout", "-qb", "clash", "main");
     await commit(repo, "services.php", "appversion=9\n");

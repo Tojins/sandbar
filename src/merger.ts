@@ -958,6 +958,9 @@ export type MergerAdapter = ResolveAdapter & LandingPassAdapter & {
   mergeNoFf(unit: MergeUnit): Promise<{ readonly ok: boolean }>;
   abortMerge(): Promise<void>;
   getHeadSha(): Promise<string>;
+  // `reset --hard` to `sha`, then remove untracked files: whatever an agent
+  // left behind would otherwise dirty the next attempt and the next unit.
+  // Ignored files (node_modules) are kept.
   resetHardSha(sha: string): Promise<void>;
   // What the merge result at HEAD changes in the gate stack file beyond
   // container `env` (#186), or null when the landing may keep it.
@@ -4154,6 +4157,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
     },
     async resetHardSha(sha) {
       await exec("git", ["reset", "--hard", sha], { cwd });
+      await exec("git", ["clean", "-fdq"], { cwd });
     },
     stackChange: deps.stackChange,
     async abortMerge() {
