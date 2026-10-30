@@ -210,20 +210,18 @@ export type LandingPassAttemptRecord = ResolveAgentRun & {
   readonly commits: number;
 };
 
-// One attempt as the abandon comment reports it.
-export type LandingPassAttemptSummary = AttemptRunSummary & {
-  readonly outcome: Exclude<LandingPassAttemptOutcome, "halt">;
-  // Why a `retry` was reset.
-  readonly problem: string | null;
-};
+// One attempt as the abandon comment reports it: a pass that ends `done`
+// has no comment, and a `halt` throws.
+export type LandingPassAttemptSummary = AttemptRunSummary & (
+  | { readonly outcome: "retry"; readonly problem: string }
+  | { readonly outcome: "abandon" }
+);
 
 export function formatLandingPassAttempts(
   attempts: readonly LandingPassAttemptSummary[],
 ): string {
   return formatAttemptJournal(attempts, (a) =>
-    a.outcome === "retry"
-      ? `it was reset: ${a.problem ?? "no reason recorded"}`
-      : a.outcome === "abandon" ? "the agent asked to abandon" : "the pass was done");
+    a.outcome === "retry" ? `it was reset: ${a.problem}` : "the agent asked to abandon");
 }
 
 export type LandingPassOutcome =
@@ -324,7 +322,7 @@ export async function runLandingPass(
     await adapter.resetHardSha(mergedSha);
     const summary = attemptRunSummary(run, attempt, logPath);
     if (verdict.outcome === "abandon") {
-      attempts.push({ ...summary, outcome: "abandon", problem: null });
+      attempts.push({ ...summary, outcome: "abandon" });
       await deps.log(`landing-pass ${label} abandon: ${verdict.reason}`);
       return { kind: "abandon", reason: verdict.reason, attempts };
     }
