@@ -10,7 +10,7 @@ import { readEnvFile, splitRoleRouting } from "sandbar";
 const cwd = "/home/outdoor/outdoor";
 const sandboxImage = "localhost/sandbar:outdoor";
 
-// gate/stack.json is written in sandbar's gateStack schema, so scripts/gate.sh,
+// gate/stack.json is written in sandbar's gateStack schema, so gate/gate.sh,
 // CI and sandbar cannot end up checking different things. The daemon reads its
 // containers and steps from origin/main at every gate (Tojins/sandbar#186), so
 // a landed stack change reaches the next gate without a restart; the keys
@@ -105,7 +105,8 @@ export default {
     ...stack.images,
     {
       tag: sandboxImage,
-      containerfile: "Containerfile.sandbar",
+      containerfile: "sandbar/Containerfile.sandbar",
+      context: ".",
       rebuildOn: ["package.json", "package-lock.json", "bower.json", ".bowerrc"],
     },
   ],
@@ -130,13 +131,13 @@ export default {
   sandboxHooks: {
     sandbox: {
       onSandboxReady: [
-        { command: "scripts/sandbox-prepare.sh", timeoutMs: 300_000 },
+        { command: "sandbar/sandbox-prepare.sh", timeoutMs: 300_000 },
       ],
       // After each database copy is swapped in: the branch's migrations on
       // the prod dump, then the agent login (Tojins/outdoor#786). Bounded for
       // a migration that rewrites one of the ~1.7M-row tables.
       onDbCopyReady: [
-        { command: "scripts/sandbox-prepare.sh db-copy", timeoutMs: 1_800_000 },
+        { command: "sandbar/sandbox-prepare.sh db-copy", timeoutMs: 1_800_000 },
       ],
     },
   },
