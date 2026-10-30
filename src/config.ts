@@ -921,7 +921,9 @@ export type DatabaseCopiesConfig = {
   readonly bufferPoolBytes?: number;
   // The import's buffer pool. Default: 1 GiB.
   readonly importBufferPoolBytes?: number;
-  // How long one import may take, bringup to clean shutdown. Default: 4 hours.
+  // How long one import may take, from a ready server to its load's end; the
+  // server's start is bounded by its container's `readinessTimeoutMs`.
+  // Default: 4 hours.
   readonly importTimeoutMs?: number;
   // How old the dump may be before the run complains. Default: 36 hours.
   readonly staleAfterMs?: number;

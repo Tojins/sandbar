@@ -9,7 +9,7 @@
 // are under the host-shared tmpdir, which both clients see at the same path.
 //
 // Each test imports into roots of its own, whose scope names its containers,
-// so the tests run concurrently: one of them waits out a 90s import timeout.
+// so the tests run concurrently.
 
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -129,8 +129,8 @@ describe.runIf(available)("sandbar db-base against real podman", () => {
     expect(await readImportStatus(truncated.layout)).toMatchObject({ detail: "dump-unreadable" });
     expect(await readdir(truncated.root)).not.toContain("current");
 
-    // The server is up inside the timeout; the stream is not done by it.
-    const slow = await fresh({ importTimeoutMs: 90_000 });
+    // The import's clock starts at a ready server; the stream is not done by it.
+    const slow = await fresh({ importTimeoutMs: 2_000 });
     await writeFile(slow.dump, gzipSync(`${ROWS}SELECT SLEEP(3600);\n`));
     const status = await slow.run().then(() => readImportStatus(slow.layout));
     expect(status).toMatchObject({ outcome: "import-failed", detail: "timeout" });
@@ -138,10 +138,12 @@ describe.runIf(available)("sandbar db-base against real podman", () => {
   }, 600_000);
 
   it.concurrent("names a server that will not start not-ready, and an image that will not run container-failed", async ({ expect }) => {
-    // The server runs, but its healthcheck never passes inside the timeout.
-    const broken = await fresh({ importTimeoutMs: 5_000 });
+    // The server runs, but its healthcheck never passes inside its budget.
+    const broken = await fresh();
     await writeFile(broken.dump, gzipSync(ROWS));
-    await expect(broken.run({ ...target, readiness: { kind: "healthcheck", command: ["false"] } }))
+    await expect(broken.run({
+      ...target, readiness: { kind: "healthcheck", command: ["false"] }, readinessTimeoutMs: 5_000,
+    }))
       .resolves.toBe("import-failed");
     expect(await readImportStatus(broken.layout)).toMatchObject({ detail: "not-ready" });
 

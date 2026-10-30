@@ -441,17 +441,17 @@ async function buildBase(
   baseDir: string,
 ): Promise<string | null> {
   const { cfg, target } = opts;
-  const deadline = Date.now() + cfg.importTimeoutMs;
-  const remainingMs = () => Math.max(1, deadline - Date.now());
   const started = await withRuntimeEnv(
     importRunArgs(containerName, target, cfg, baseDir),
     (argv) => boundedPodman(argv, CONTROL_TIMEOUT_MS),
   );
   if (!boundedOk(started)) return "container-failed";
   try {
+    // The server's start is bounded by its container's own readiness budget,
+    // and the import's clock starts once it answers.
     await pollUntilReady(
       containerName,
-      { ...target, readinessTimeoutMs: remainingMs() },
+      target,
       target.readiness,
       "database import",
     );
@@ -461,6 +461,8 @@ async function buildBase(
     opts.log(`db-base: ${err.message}`);
     return "not-ready";
   }
+  const deadline = Date.now() + cfg.importTimeoutMs;
+  const remainingMs = () => Math.max(1, deadline - Date.now());
   const client = ["exec", containerName, "mariadb", "-uroot", "--execute"];
   // The database is an identifier the config's grammar admits.
   const created = await boundedPodman(
