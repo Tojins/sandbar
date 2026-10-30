@@ -21,8 +21,12 @@ import { execFileSync, spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 
 // The check could not be answered. Its message is the one line `run.mjs`
-// prints.
-export class StructureError extends Error {}
+// prints, line breaks folded to spaces: a parser's message can quote text.
+export class StructureError extends Error {
+  constructor(message) {
+    super(message.replace(/\s*\n\s*/g, " "));
+  }
+}
 
 // Where a check that runs tools keeps their work and logs, under the
 // worktree and gitignored (D1 allows a gate to write there).

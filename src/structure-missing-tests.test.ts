@@ -484,6 +484,20 @@ describe("run.mjs missing-tests", () => {
     });
   });
 
+  // JSON.parse quotes the text it choked on, newlines included.
+  it.each([
+    ["a line of garbage", "not json\n"],
+    ["an error page", "<html>\n<body>502</body>\n</html>\n"],
+  ])("cannot answer over coverage that is %s, in one line", async (_name, content) => {
+    const dir = await fixtureRepo("missing-tests-red");
+    await mkdir(join(dir, "coverage/unit"), { recursive: true });
+    await writeFile(join(dir, UNIT_COVERAGE), content);
+    const result = run(dir, "missing-tests", "--base", "origin/main");
+    expect(result).toMatchObject({ status: 2, stderr: "" });
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]).toMatch(/^missing-tests: coverage\/unit\/coverage-final\.json is not JSON: /);
+  });
+
   it("skips the landing shape in one line, with no coverage to read", async () => {
     const dir = await fixtureRepo("missing-tests-red");
     git(dir, "checkout", "-q", "main");

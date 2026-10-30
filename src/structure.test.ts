@@ -1,7 +1,7 @@
 // Sandbar's structural checks (#183, #235): the pure layer as tables, and every
 // check proved able to go red by running `run.mjs` over a fixture branch built
 // in a real repository.
-import { cp } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -198,7 +198,14 @@ describe("version check", () => {
     {
       name: "a package.json that is not JSON",
       args: ["version"],
-      broken: true,
+      packageJson: "export const answer = 42;\n",
+      line: /^version: package\.json at HEAD is not JSON: /,
+    },
+    {
+      // JSON.parse quotes the text it choked on, newlines included.
+      name: "a package.json of one line of garbage",
+      args: ["version"],
+      packageJson: "not json\n",
       line: /^version: package\.json at HEAD is not JSON: /,
     },
     {
@@ -216,10 +223,10 @@ describe("version check", () => {
       args: ["nope"],
       line: /^unknown check 'nope'; usage: run\.mjs \[version\|missing-tests\]… \[--base <ref>\] \[--git-dir <dir>\] \[--podman-coverage\]$/,
     },
-  ])("$name is a one-line exit 2", async ({ args, broken, line }) => {
+  ])("$name is a one-line exit 2", async ({ args, packageJson, line }) => {
     const dir = await fixtureRepo("version-bumped");
-    if (broken === true) {
-      await cp(join(dir, "index.mjs"), join(dir, "package.json"));
+    if (packageJson !== undefined) {
+      await writeFile(join(dir, "package.json"), packageJson);
       git(dir, "commit", "-q", "-am", "broken");
     }
     const result = run(dir, ...args);
