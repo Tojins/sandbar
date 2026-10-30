@@ -78,6 +78,22 @@ describe("decide", () => {
   });
 });
 
+describe("a secretAllow host in report mode (#257)", () => {
+  const policy: EgressPolicy = {
+    mode: "report",
+    entries: [entry("*.adfinity.app")],
+    secretEntries: [entry("api.adfinity.app")],
+  };
+
+  it("is still refused by decide, so the proxy logs would-refuse", () => {
+    expect(decide(policy, "api.adfinity.app", 443)).toBe("refuse");
+  });
+
+  it("is still given no DNS answer by decideDns", () => {
+    expect(decideDns(policy, "api.adfinity.app")).toBe(false);
+  });
+});
+
 describe("decideDns", () => {
   const entries = [entry("registry.example", [8443]), entry("*.example.org")];
 

@@ -384,10 +384,10 @@ async function serve(): Promise<void> {
     readonly host: string;
     readonly port: number;
     readonly reach: EgressReach;
-    readonly enforcing: boolean;
     readonly open: (upstream: Socket) => void;
   }): Promise<void> => {
     const { via, host, port } = s;
+    const enforcing = via === "connect" || enforce;
     let refused = s.reach === "refuse";
     // Every way a lookup can fail (no such name, a timeout, a SERVFAIL) is the
     // upstream's, and is recorded as such rather than thrown.
@@ -408,12 +408,12 @@ async function serve(): Promise<void> {
     if (candidates.length === 0) {
       refused = true;
       record({
-        t: s.enforcing ? "refuse" : "would-refuse",
+        t: enforcing ? "refuse" : "would-refuse",
         via: via === "connect" ? via : "private",
         host,
         port,
       });
-      if (s.enforcing) return refuse(socket, via, host);
+      if (enforcing) return refuse(socket, via, host);
       candidates = resolved;
     }
     let connected = false;
@@ -446,16 +446,15 @@ async function serve(): Promise<void> {
       if (enforce) return refuse(socket, via, host);
     }
     await splice(socket, {
-      via, host, port, reach, enforcing: enforce, open: (upstream) => upstream.write(peeked),
+      via, host, port, reach, open: (upstream) => upstream.write(peeked),
     });
   };
 
   const tunnel = async (socket: Socket, request: ConnectRequest, rest: Buffer): Promise<void> => {
     const { host, port } = request;
     const reach = decideConnect(policy, request);
-    if (reach === "unauthorized" || reach === "refuse") {
+    if (reach === "unauthorized") {
       record({ t: "refuse", via: "connect", host, port });
-      if (reach === "refuse") return refuse(socket, "connect", host);
       return respond(
         socket,
         "407 Proxy Authentication Required",
@@ -463,8 +462,12 @@ async function serve(): Promise<void> {
         'Proxy-Authenticate: Basic realm="sandbar"\r\n',
       );
     }
+    if (reach === "refuse") {
+      record({ t: "refuse", via: "connect", host, port });
+      return refuse(socket, "connect", host);
+    }
     await splice(socket, {
-      via: "connect", host, port, reach, enforcing: true, open: (upstream) => {
+      via: "connect", host, port, reach, open: (upstream) => {
         socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
         upstream.write(rest);
       },
@@ -495,11 +498,11 @@ async function serve(): Promise<void> {
     };
     const onData = (chunk: Buffer): void => {
       peeked = Buffer.concat([peeked, chunk]);
-      const decided = decideFrom(peeked);
-      if (decided === "more" && peeked.length < PEEK_MAX_BYTES) return;
-      if (typeof decided === "string") return opaque();
+      const next = decideFrom(peeked);
+      if (next === "more" && peeked.length < PEEK_MAX_BYTES) return;
+      if (typeof next === "string") return opaque();
       settle();
-      void decided();
+      void next();
     };
     const timer = setTimeout(opaque, PEEK_TIMEOUT_MS);
     socket.on("data", onData);

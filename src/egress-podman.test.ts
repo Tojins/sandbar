@@ -471,6 +471,75 @@ describe.runIf(available)("egress proxy against real podman", () => {
     300_000,
   );
 
+  // Starts an authenticated proxy under `policy`, an agent, and a sibling holding the handle's env.
+  const withSecretSibling = async (name: string, taskId: string, policy: EgressPolicy) => {
+    const token = podmanTestStackId(name, taskId);
+    const proxy = await proxyFor(token, policy, true);
+    const agent = stackContainerNameFor(SCOPE, token, "agent");
+    const sibling = stackContainerNameFor(SCOPE, token, "sibling");
+    await runFixtureContainer([
+      "--name", agent, "--userns=keep-id", "--user", "1000:1000",
+      "--network", sandboxNetworkNameFor(SCOPE, token), ...proxy.dnsArgs,
+      "-v", `${fixtureDir}:/fixture:ro,z`,
+      "--entrypoint", "sleep", EGRESS_BASE_IMAGE, "infinity",
+    ]);
+    await withRuntimeEnv({
+      argv: [
+        "run", "-d", "--image-volume=ignore", "--name", sibling, "--network", `container:${agent}`,
+        "-v", `${fixtureDir}:/fixture:ro,z`,
+        "--entrypoint", "sleep", EGRESS_BASE_IMAGE, "infinity",
+      ],
+      env: proxy.connect!.env,
+    }, (argv) => exec(RUNTIME, argv));
+    const tunnel = async (client: string, url: string, via: string): Promise<string> =>
+      (await podmanExecOutput(client, ["node", "/fixture/client.mjs", "tunnel", url, via])).trim();
+    return { proxy, agent, sibling, tunnel, listener: `${proxy.ip}:${PROXY_CONNECT_PORT}` };
+  };
+
+  it.concurrent(
+    "enforces the authenticated listener in report mode while the transparent path only reports",
+    async ({ expect, task }) => {
+      const { proxy, agent, sibling, tunnel, listener } =
+        await withSecretSibling("egress-secret-report", task.id, { ...WITH_SECRET, mode: "report" });
+
+      expect(await tunnel(sibling, "https://secret.test/", "env")).toBe("200 upstream https secret.test");
+      expect(await tunnel(sibling, "https://blocked.test/", "env")).toBe("PROXY 403");
+      expect(await tunnel(agent, "https://secret.test/", `http://sandbar:wrong@${listener}`)).toBe("PROXY 407");
+      expect(await probe(agent, "get", "https://secret.test/")).toBe("200 upstream https secret.test");
+
+      expect((await proxy.drain()).firstRefusals).toEqual(expect.arrayContaining([
+        { host: "blocked.test", port: 443, via: "connect", enforced: true },
+        { host: "secret.test", port: 443, via: "connect", enforced: true },
+        { host: "secret.test", port: null, via: "dns", enforced: false },
+        { host: "secret.test", port: 443, via: "tls", enforced: false },
+      ]));
+
+      await exec(RUNTIME, ["rm", "-f", "-t", "0", sibling, agent]);
+      await proxy.stop();
+    },
+    300_000,
+  );
+
+  it.concurrent(
+    "refuses a CONNECT to a secretAllow host that resolves only to a private address",
+    async ({ expect, task }) => {
+      const { proxy, agent, sibling, tunnel } = await withSecretSibling(
+        "egress-secret-private",
+        task.id,
+        { ...ENFORCE, secretEntries: [{ host: "secret.test", ports: [443], private: false }] },
+      );
+
+      expect(await tunnel(sibling, "https://secret.test/", "env")).toBe("PROXY 403");
+      expect((await proxy.drain()).firstRefusals).toEqual(expect.arrayContaining([
+        { host: "secret.test", port: 443, via: "connect", enforced: true },
+      ]));
+
+      await exec(RUNTIME, ["rm", "-f", "-t", "0", sibling, agent]);
+      await proxy.stop();
+    },
+    300_000,
+  );
+
   it.concurrent(
     "refuses a secretAllow host to an owner without the authenticated listener",
     async ({ expect, task }) => {

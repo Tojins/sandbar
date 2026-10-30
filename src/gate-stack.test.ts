@@ -1298,8 +1298,10 @@ describe("resolveGateStack validation", () => {
     ["a key that is not an env name", ["1TOKEN"], /not an env name/],
     ["a key listed twice", ["T", "T"], /lists secretEnv key 'T' twice/],
     ["the reserved CI key", ["CI"], /secretEnv key 'CI', which is reserved/],
-    ["a proxy variable (#257)", ["HTTPS_PROXY"], /secretEnv key 'HTTPS_PROXY', which is reserved/],
-    ["a lowercase proxy variable", ["no_proxy"], /secretEnv key 'no_proxy', which is reserved/],
+    ["HTTPS_PROXY (#257)", ["HTTPS_PROXY"], /secretEnv key 'HTTPS_PROXY', which is reserved/],
+    ["https_proxy", ["https_proxy"], /secretEnv key 'https_proxy', which is reserved/],
+    ["NO_PROXY", ["NO_PROXY"], /secretEnv key 'NO_PROXY', which is reserved/],
+    ["no_proxy", ["no_proxy"], /secretEnv key 'no_proxy', which is reserved/],
   ])("refuses %s", (_, secretEnv, message) => {
     expect(() => resolveGateStack(withProxy({ secretEnv }))).toThrow(message);
   });
