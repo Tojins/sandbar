@@ -8,9 +8,14 @@
 // The fixture's certificate comes from the host's `openssl`, which the gate
 // image carries as a dependency of `ca-certificates`. A client verifies it, so
 // an https answer proves the TLS bytes were spliced through unchanged.
+//
+// The authenticated listener (#257) gets the same treatment: a sibling given
+// the handle's env through an env file reaches a `secretAllow` host by
+// `CONNECT`, while the agent beside it is refused that host by DNS, by SNI,
+// and by `CONNECT` without the secret.
 
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -29,7 +34,12 @@ import {
 } from "./egress.js";
 import type { EventInput } from "./events.js";
 import { type Stack, startStack } from "./gate-stack.js";
-import { type EgressPolicy, internalNetworkCreateArgs, proxyIpInspectArgs } from "./egress-policy.js";
+import {
+  type EgressPolicy,
+  PROXY_CONNECT_PORT,
+  internalNetworkCreateArgs,
+  proxyIpInspectArgs,
+} from "./egress-policy.js";
 import type { ImageBuildRecord } from "./ensure-images.js";
 import {
   egressProxyNameFor,
@@ -44,7 +54,8 @@ import {
   podmanTestStackId,
   runFixtureContainer,
 } from "./podman-test-scope.test-util.js";
-import { RUNTIME } from "./runtime.js";
+import { podmanExecOutput } from "./podman-exec.test-util.js";
+import { RUNTIME, withRuntimeEnv } from "./runtime.js";
 
 const exec = promisify(execFile);
 
@@ -68,11 +79,11 @@ http(reply("http")).listen(80);
 const CLIENT_JS = `
 import { lookup } from "node:dns/promises";
 import { readFileSync } from "node:fs";
-import { get as httpGet } from "node:http";
+import { get as httpGet, request as httpRequest } from "node:http";
 import { get as httpsGet } from "node:https";
 import { connect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
-const [probe, target, port] = process.argv.slice(2);
+const [probe, target, port, servername] = process.argv.slice(2);
 const fail = (err) => { console.log(\`ERROR \${err.code ?? err.message}\`); process.exit(0); };
 const body = (res) => { let s = ""; res.on("data", (c) => s += c); res.on("end", () => console.log(\`\${res.statusCode} \${s}\`)); };
 const ca = readFileSync("/fixture/cert.pem");
@@ -80,8 +91,21 @@ if (probe === "get") (target.startsWith("https:") ? httpsGet(target, { ca, timeo
 if (probe === "resolve") lookup(target).then((a) => console.log(a.address), fail);
 if (probe === "connect") connect({ host: target, port: Number(port), timeout: 5000 })
   .on("connect", () => { console.log("connected"); process.exit(0); }).on("error", fail).on("timeout", () => fail({ code: "TIMEOUT" }));
-if (probe === "tls") tlsConnect({ host: target, port: Number(port), rejectUnauthorized: false, timeout: 10000 })
+if (probe === "tls") tlsConnect({ host: target, port: Number(port), servername, rejectUnauthorized: false, timeout: 10000 })
   .on("secureConnect", () => { console.log("secure"); process.exit(0); }).on("error", fail).on("close", () => fail({ code: "CLOSED" }));
+// GET an https URL through a CONNECT to the proxy URL in \`port\`, or "env" for HTTPS_PROXY.
+if (probe === "tunnel") {
+  const proxy = new URL(port === "env" ? process.env.HTTPS_PROXY : port);
+  const dest = new URL(target);
+  const headers = proxy.username === "" ? {} : {
+    "Proxy-Authorization": \`Basic \${Buffer.from(\`\${proxy.username}:\${proxy.password}\`).toString("base64")}\`,
+  };
+  httpRequest({ host: proxy.hostname, port: proxy.port, method: "CONNECT", path: \`\${dest.hostname}:443\`, headers, timeout: 10000 })
+    .on("connect", (res, socket) => {
+      if (res.statusCode !== 200) { console.log(\`PROXY \${res.statusCode}\`); process.exit(0); }
+      httpsGet(target, { ca, headers: { Host: dest.hostname, Connection: "close" }, createConnection: () => tlsConnect({ socket, servername: dest.hostname, ca }) }, body).on("error", fail);
+    }).on("error", fail).end();
+}
 `;
 
 let fixtureDir: string;
@@ -95,7 +119,7 @@ beforeAll(async () => {
   await exec("openssl", [
     "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
     "-nodes", "-days", "1", "-subj", "/CN=allowed.test",
-    "-addext", "subjectAltName=DNS:allowed.test,DNS:blocked.test,DNS:internal.test",
+    "-addext", "subjectAltName=DNS:allowed.test,DNS:blocked.test,DNS:internal.test,DNS:secret.test",
     "-keyout", join(fixtureDir, "key.pem"), "-out", join(fixtureDir, "cert.pem"),
   ]);
   await chmod(join(fixtureDir, "key.pem"), 0o644);
@@ -123,23 +147,34 @@ const ENFORCE: EgressPolicy = {
     // Allowed, but its only address is the fixture's private one.
     { host: "internal.test", ports: [443], private: false },
   ],
+  secretEntries: [],
+};
+
+const WITH_SECRET: EgressPolicy = {
+  ...ENFORCE,
+  secretEntries: [{ host: "secret.test", ports: [443], private: true }],
 };
 
 // The fixture names, mapped to the upstream in a running proxy's /etc/hosts.
 const mapFixtureHosts = async (proxyName: string): Promise<void> => {
-  const hosts = ["allowed.test", "blocked.test", "internal.test"]
+  const hosts = ["allowed.test", "blocked.test", "internal.test", "secret.test"]
     .map((name) => `${upstreamIp} ${name}`).join("\n");
   await exec(RUNTIME, ["exec", proxyName, "sh", "-c", `echo '${hosts}' >> /etc/hosts`]);
 };
 
 // A proxy on its own internal network, its /etc/hosts mapping the fixture
 // names to the upstream.
-async function proxyFor(token: string, policy: EgressPolicy): Promise<EgressHandle> {
+async function proxyFor(
+  token: string,
+  policy: EgressPolicy,
+  authenticated = false,
+): Promise<EgressHandle> {
   const handle = await startEgress({
     scope: SCOPE,
     owner: `sbx-${token}`,
     networkName: sandboxNetworkNameFor(SCOPE, token),
     createNetwork: true,
+    authenticated,
     image,
     policy,
     logDir: join(fixtureDir, "egress"),
@@ -372,6 +407,7 @@ describe.runIf(available)("egress proxy against real podman", () => {
         owner: `sbx-${token}`,
         networkName: network,
         createNetwork: false,
+        authenticated: false,
         image,
         policy: ENFORCE,
         logDir: join(fixtureDir, "egress"),
@@ -380,6 +416,85 @@ describe.runIf(available)("egress proxy against real podman", () => {
       expect(await exists("container", egressProxyNameFor(SCOPE, `sbx-${token}`))).toBe(false);
       expect(await exists("network", network)).toBe(true);
       await exec(RUNTIME, ["network", "rm", "-f", network]);
+    },
+    300_000,
+  );
+
+  it.concurrent(
+    "lets only a secretEnv sibling reach a secretAllow host, through an authenticated CONNECT",
+    async ({ expect, task }) => {
+      const token = podmanTestStackId("egress-secret", task.id);
+      const proxy = await proxyFor(token, WITH_SECRET, true);
+      const connect = proxy.connect!;
+      const policyPath = join(fixtureDir, "egress", `sbx-${token}.policy.json`);
+      expect((await stat(policyPath)).mode & 0o777).toBe(0o600);
+      const agent = stackContainerNameFor(SCOPE, token, "agent");
+      const sibling = stackContainerNameFor(SCOPE, token, "sibling");
+      await runFixtureContainer([
+        "--name", agent, "--userns=keep-id", "--user", "1000:1000",
+        "--network", sandboxNetworkNameFor(SCOPE, token), ...proxy.dnsArgs,
+        "-v", `${fixtureDir}:/fixture:ro,z`,
+        "--entrypoint", "sleep", EGRESS_BASE_IMAGE, "infinity",
+      ]);
+      await withRuntimeEnv({
+        argv: [
+          "run", "-d", "--image-volume=ignore", "--name", sibling, "--network", `container:${agent}`,
+          "-v", `${fixtureDir}:/fixture:ro,z`,
+          "--entrypoint", "sleep", EGRESS_BASE_IMAGE, "infinity",
+        ],
+        env: connect.env,
+      }, (argv) => exec(RUNTIME, argv));
+      const tunnel = async (client: string, url: string, via: string): Promise<string> =>
+        (await podmanExecOutput(client, ["node", "/fixture/client.mjs", "tunnel", url, via])).trim();
+      const listener = `${proxy.ip}:${PROXY_CONNECT_PORT}`;
+
+      expect(await tunnel(sibling, "https://secret.test/", "env")).toBe("200 upstream https secret.test");
+      expect(await tunnel(sibling, "https://allowed.test/", "env")).toBe("PROXY 403");
+      expect(await tunnel(agent, "https://secret.test/", `http://sandbar:wrong@${listener}`)).toBe("PROXY 407");
+      expect(await tunnel(agent, "https://secret.test/", `http://${listener}`)).toBe("PROXY 407");
+      expect(await probe(agent, "get", "https://secret.test/")).toBe("ERROR ENOTFOUND");
+      expect(await probe(agent, "tls", proxy.ip, "443", "secret.test")).toMatch(/^ERROR /);
+
+      expect((await proxy.drain()).firstRefusals).toEqual(expect.arrayContaining([
+        { host: "secret.test", port: null, via: "dns", enforced: true },
+        { host: "secret.test", port: 443, via: "tls", enforced: true },
+        { host: "allowed.test", port: 443, via: "connect", enforced: true },
+        { host: "secret.test", port: 443, via: "connect", enforced: true },
+      ]));
+
+      await exec(RUNTIME, ["rm", "-f", "-t", "0", sibling, agent]);
+      const summary = await proxy.stop();
+      expect(summary.allowed["secret.test:443"]).toBe(1);
+      expect(summary.refused["secret.test:443"]).toBe(3);
+      await expect(stat(policyPath)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+    300_000,
+  );
+
+  it.concurrent(
+    "refuses a secretAllow host to an owner without the authenticated listener",
+    async ({ expect, task }) => {
+      const token = podmanTestStackId("egress-unauth", task.id);
+      const proxy = await proxyFor(token, WITH_SECRET);
+      expect(proxy.connect).toBeNull();
+      const agent = stackContainerNameFor(SCOPE, token, "agent");
+      await runFixtureContainer([
+        "--name", agent, "--userns=keep-id", "--user", "1000:1000",
+        "--network", sandboxNetworkNameFor(SCOPE, token), ...proxy.dnsArgs,
+        "-v", `${fixtureDir}:/fixture:ro,z`,
+        "--entrypoint", "sleep", EGRESS_BASE_IMAGE, "infinity",
+      ]);
+
+      expect(await probe(agent, "resolve", "secret.test")).toBe("ERROR ENOTFOUND");
+      expect(await probe(agent, "tls", proxy.ip, "443", "secret.test")).toMatch(/^ERROR /);
+      expect(await probe(agent, "connect", proxy.ip, String(PROXY_CONNECT_PORT))).toBe("ERROR ECONNREFUSED");
+      expect((await proxy.drain()).firstRefusals).toEqual(expect.arrayContaining([
+        { host: "secret.test", port: null, via: "dns", enforced: true },
+        { host: "secret.test", port: 443, via: "tls", enforced: true },
+      ]));
+
+      await exec(RUNTIME, ["rm", "-f", "-t", "0", agent]);
+      await proxy.stop();
     },
     300_000,
   );

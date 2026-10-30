@@ -261,6 +261,25 @@ describe.runIf(available)("the sandbox container against real podman", () => {
     },
     60_000,
   );
+
+  // #257: a sibling in the agent's netns may carry the egress proxy's secret
+  // over it, so the agent must hold neither capability that captures traffic,
+  // in its bounding set as well as its effective one.
+  it.concurrent(
+    "holds neither CAP_NET_RAW nor CAP_NET_ADMIN",
+    async ({ expect, onTestFinished }) => {
+      const name = await start("with-init");
+      removeFixtureContainerOnTestFinished(onTestFinished, name);
+      const status = await podmanExecOutput(name, ["cat", "/proc/self/status"]);
+      const NET_ADMIN_AND_RAW = (1n << 12n) | (1n << 13n);
+      for (const field of ["CapEff", "CapBnd"]) {
+        const mask = new RegExp(`^${field}:\\s*([0-9a-f]+)$`, "m").exec(status)?.[1];
+        expect(mask, field).toBeDefined();
+        expect(BigInt(`0x${mask}`) & NET_ADMIN_AND_RAW, field).toBe(0n);
+      }
+    },
+    60_000,
+  );
 });
 
 // #189: what the in-container reap does, asserted where only podman can say —
