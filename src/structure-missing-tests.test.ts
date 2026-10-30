@@ -1,4 +1,4 @@
-// The `tests` structural check (#183, #236): its pure layer as tables, the
+// The `missing-tests` structural check (#183, #236): its pure layer as tables, the
 // probe and the deletion map run for real on small trees, and the check proved
 // able to go red by running `run.mjs` over a fixture branch beside its green
 // twin, after a real coverage run.
