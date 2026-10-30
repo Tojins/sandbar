@@ -282,7 +282,7 @@ describe("createDbBaseWatch, the daemon's read of the job", () => {
   it("records each attempt once and complains once per key", async () => {
     await mkdir(join(root, "drop"));
     await writeFile(dumpPath(), "x");
-    const { events, observe } = watch(Date.now() + 120_000);
+    const { events, observe } = watch(Date.now() + 120_000); // wall clock: against the dump's mtime
     await writeFile(layout.status, JSON.stringify(failed("b20261028T030000000Z")));
     await observe();
     await observe();
@@ -301,7 +301,7 @@ describe("createDbBaseWatch, the daemon's read of the job", () => {
   });
 
   it("says only that the dump is missing before any attempt", async () => {
-    const { events, observe } = watch(Date.now());
+    const { events, observe } = watch(Date.now()); // wall clock: against the dump's mtime
     await observe();
     expect(events).toEqual([
       { kind: "complaint", severity: "warning", message: `Database copies: no dump at ${dumpPath()}, so no base can be imported.` },

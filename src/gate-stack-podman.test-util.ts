@@ -24,9 +24,9 @@
 //
 // Since #48 these files run IN THE GATE, against the host's podman over a
 // mounted socket, so those three facts are exercised per attempt rather than
-// by a human remembering to. What a remote client cannot pin — the local client's
-// signal semantics, and whether podman created a transient systemd timer on the
-// HOST — lives in gate-stack-hostpodman.test.ts, which states why.
+// by a human remembering to. What a remote client cannot pin — whether podman
+// created a transient systemd timer on the HOST — lives in
+// gate-stack-hostpodman.test.ts, which states why.
 //
 // WHY CONCURRENT TESTS. The expensive waits are spread across six similarly
 // sized files, so more shards no longer lower the bound. Each test now runs

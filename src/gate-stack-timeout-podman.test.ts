@@ -84,10 +84,10 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
         }),
       );
 
-      const started = Date.now();
+      const started = performance.now();
       const red = await stack.runGate();
       // The bound is real, not just reported: the call returned near it.
-      expect(Date.now() - started).toBeLessThan(60_000);
+      expect(performance.now() - started).toBeLessThan(60_000);
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe("hangs");
       // A killed process has no exit code, and `1` would be indistinguishable
@@ -338,7 +338,7 @@ describe.runIf(available)("sandbar healthcheck timeout", () => {
       const repo = await mkdtemp(join(tmpdir(), "sandbar-hcbound-"));
       try {
         await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
-        const started = Date.now();
+        const started = performance.now();
         await expect(
           startStack({
             stackId: stackId,
@@ -373,7 +373,7 @@ describe.runIf(available)("sandbar healthcheck timeout", () => {
         // Generous, because bringup also pulls/creates the pod — the claim is
         // that the wait ENDS, not that it ends to the millisecond. Without
         // sandbar's own kill it would not end at all.
-        expect(Date.now() - started).toBeLessThan(120_000);
+        expect(performance.now() - started).toBeLessThan(120_000);
       } finally {
         await rm(repo, { recursive: true, force: true });
       }

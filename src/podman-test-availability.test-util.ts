@@ -68,9 +68,8 @@ export type PodmanTestInputs = {
   // This file's assertions hold only for a LOCAL podman client, so a remote
   // one cannot stand in for it. Two files ask for it and they do not ask for
   // quite the same reason, which is why the field is not named after either.
-  // gate-stack-hostpodman.test.ts PINS local-client behaviour (`podman exec`
-  // exits 0 on SIGTERM only there, and whether a transient systemd timer was
-  // created is a question about the host's own session).
+  // gate-stack-hostpodman.test.ts asks whether a transient systemd timer was
+  // created, a question about the host's own session.
   // sandbox-stack-podman.test.ts builds its anchor with the production sandbox
   // run args — keep-id, uid 1000 — and execs into it as the agent, so the
   // invoking user has to be whoever runs the suite rather than whoever owns the

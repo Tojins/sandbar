@@ -29,9 +29,8 @@
 // network namespace, its filesystem, or its signal handling. Those three are
 // what keep work host-only elsewhere — the retired tcp readiness pair landed
 // its publish on the host's loopback while the probe ran in the runner's pod
-// netns, and gate-stack-hostpodman.test.ts pins the local client's own SIGTERM
-// behaviour and the host session's systemd units. This file touches none of
-// them.
+// netns, and gate-stack-hostpodman.test.ts reads the host session's systemd
+// units. This file touches none of them.
 //
 // SO IT IS NO LONGER PART OF THE HUMAN'S STEP. #48 shrank that step from "run
 // the full suite on the host" to three files; #141's host-side cgroup-path
@@ -211,10 +210,10 @@ describe.runIf(available)("the sandbox container against real podman", () => {
   // anything. Returns the last count rather than throwing, so a deadline that
   // does expire fails as the assertion it belongs to.
   const waitForZombie = async (name: string): Promise<number> => {
-    const deadline = Date.now() + 30_000;
+    const deadline = performance.now() + 30_000;
     for (;;) {
       const n = await zombieCount(name);
-      if (n > 0 || Date.now() >= deadline) return n;
+      if (n > 0 || performance.now() >= deadline) return n;
       await delay(250);
     }
   };
@@ -335,18 +334,18 @@ describe.runIf(available)("an agent's process group against real podman (#189)",
     }).length;
   };
   const readPgid = async (tag: string): Promise<string> => {
-    const deadline = Date.now() + 10_000;
+    const deadline = performance.now() + 10_000;
     for (;;) {
       const { stdout } = await exec(RUNTIME, ["exec", name, "sh", "-c", `cat /tmp/${tag}.pgid 2>/dev/null || true`]);
-      if (stdout.trim() !== "" || Date.now() >= deadline) return stdout.trim();
+      if (stdout.trim() !== "" || performance.now() >= deadline) return stdout.trim();
       await delay(100);
     }
   };
   const settlesEmpty = async (pgid: string): Promise<number> => {
-    const deadline = Date.now() + 10_000;
+    const deadline = performance.now() + 10_000;
     for (;;) {
       const n = await groupMembers(pgid);
-      if (n === 0 || Date.now() >= deadline) return n;
+      if (n === 0 || performance.now() >= deadline) return n;
       await delay(100);
     }
   };
