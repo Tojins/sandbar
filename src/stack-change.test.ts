@@ -96,6 +96,31 @@ describe("classifyStackChange", () => {
     });
   });
 
+  it("is `env-only` for a sandboxEnv change (#256), and `non-env` beside a secretEnv", () => {
+    const sandboxed = resolve(config({ containers: [db({ inSandbox: true }), app()] }));
+    expect(classifyStackChange(PATH, sandboxed, ok(config({
+      containers: [db({ inSandbox: true, sandboxEnv: { TZ: "Europe/Brussels" } }), app()],
+    })))).toEqual({ kind: "env-only", containers: ["db"] });
+    const proxy = (sandboxEnv: Record<string, string>): StackContainer => ({
+      name: "proxy",
+      image: "localhost/proxy",
+      inSandbox: true,
+      inGate: false,
+      secretEnv: ["TOKEN"],
+      sandboxEnv,
+    });
+    const withProxy = (sandboxEnv: Record<string, string>) =>
+      resolve(config({ containers: [db(), app(), proxy(sandboxEnv)] }));
+    expect(classifyStackChange(PATH, withProxy({ UPSTREAM: "https://a" }), {
+      kind: "ok",
+      stack: withProxy({ UPSTREAM: "https://evil" }),
+    })).toEqual({
+      kind: "non-env",
+      path: PATH,
+      differences: [{ where: "container 'proxy'", what: "env (holds secretEnv)" }],
+    });
+  });
+
   it("names every container whose env changed", () => {
     expect(classify(ok(config({
       containers: [db({ env: { TZ: "Europe/Brussels" } }), app({ env: { TZ: "Europe/Brussels" } })],
@@ -213,6 +238,15 @@ describe("overlayBranchEnv", () => {
     expect(overlay.containers[0]).toEqual({ ...tip.containers[0], env: { TZ: "Europe/Brussels" } });
     expect(overlay.containers[1]).toEqual(tip.containers[1]);
     expect(overlay.steps).toBe(tip.steps);
+  });
+
+  it("takes sandboxEnv from the branch too (#256)", () => {
+    const sandboxed = resolve(config({ containers: [db({ inSandbox: true }), app()] }));
+    const branch = resolve(config({
+      containers: [db({ inSandbox: true, sandboxEnv: { TZ: "Europe/Brussels" } }), app()],
+    }));
+    expect(overlayBranchEnv(sandboxed, branch).containers[0])
+      .toEqual({ ...sandboxed.containers[0], sandboxEnv: { TZ: "Europe/Brussels" } });
   });
 });
 

@@ -17,9 +17,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { resolveGateStack } from "./config.js";
+import { resolveDatabaseCopies, resolveGateStack } from "./config.js";
 import { setCleanupReporter } from "./cleanup.js";
 import type { ContainerTeardown } from "./container-resources.js";
+import { withDbCopy } from "./db-copy-policy.js";
 import { ContainerBringupError } from "./gate-stack.js";
 import { runScope } from "./naming.js";
 import {
@@ -258,6 +259,54 @@ describe("startSandboxStack (#44 D3)", () => {
       { ADFINITY_TOKEN: "s3cret" },
     );
     expect(envs).toEqual([{ MODE: "record", ADFINITY_TOKEN: "s3cret" }]);
+  });
+
+  // #256: the gate copy is built from `env` alone (gate-stack.test.ts).
+  it("lays sandboxEnv over env for a sibling and for a database copy of it", async () => {
+    const envs: Record<string, string>[] = [];
+    const r = recorder();
+    const sandboxed = resolveGateStack({
+      containers: [
+        {
+          name: "db",
+          image: "mariadb",
+          lifecycle: "issue",
+          inSandbox: true,
+          env: { TZ: "UTC", MODE: "mock" },
+          sandboxEnv: { MODE: "record" },
+        },
+        { name: "app", image: "app", mountWorktree: "/app" },
+      ],
+      steps: [{ name: "test", in: "app", command: ["npm", "test"] }],
+    });
+    const stack = await startSandboxStack(
+      {
+        issueId: "44",
+        scope: SCOPE,
+        spec: sandboxed,
+        worktreePath: "/wt",
+        anchorContainerName: ANCHOR,
+        logDir,
+      },
+      {
+        ...r.deps,
+        bringUp: async (containers, ctx) => {
+          envs.push(...containers.map((c) => c.env));
+          await r.deps.bringUp(containers, ctx);
+        },
+      },
+    );
+    const cfg = resolveDatabaseCopies({
+      dump: "/srv/drops/app/app-latest.sql.gz",
+      root: "/srv/installations/app",
+      container: "db",
+      database: "app",
+    })!;
+    await stack.swapDbCopyIn({
+      container: withDbCopy(sandboxed.containers[0]!, "/srv/installations/app/copies/c1", cfg),
+      label: "c1",
+    });
+    expect(envs).toEqual([{ TZ: "UTC", MODE: "record" }, { TZ: "UTC", MODE: "record" }]);
   });
 
   it.each([["unset", {}], ["empty", { ADFINITY_TOKEN: "" }]])(

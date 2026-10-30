@@ -97,6 +97,14 @@
 // prompt and the event record. Not in the followed log file: what a sibling
 // itself prints is its image's, and a proxy that logs its credential is
 // leaking it to the agent by any route.
+//
+// Sandbox-only env (#256): a sibling's `sandboxEnv` is laid over its `env` at
+// bringup, here and nowhere on the gate side, so a key in both takes the
+// `sandboxEnv` value beside the agent while the gate copy keeps `env`'s
+// (outdoor's `backend` points at its recording proxy, the gate's at the
+// mocks). `secretEnv` comes after it; config.ts refuses a key in both. A
+// database copy inherits its target's `sandboxEnv`: `withDbCopy` keeps the
+// target's fields and the copy comes up through the same bringup.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
@@ -469,7 +477,8 @@ export async function startSandboxStack(
     group: readonly ResolvedStackContainer[],
     groupCtx: BringUpCtx = ctx,
   ): Promise<void> => {
-    const resolved = group.map((c) => {
+    const resolved = group.map((declared) => {
+      const c = { ...declared, env: { ...declared.env, ...declared.sandboxEnv } };
       const r = resolveSecretEnv(c, daemonEnv);
       if (r.kind === "missing") {
         throw new ContainerBringupError(

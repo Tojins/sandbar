@@ -470,8 +470,9 @@ last stack it accepted and logs a warning. At startup there is nothing to fall
 back to, so the run refuses to start. `sandbar gate` reads the file from the
 tree it gates.
 
-A branch never changes its own gate, except for container `env`. When an
-issue branch changes the file, a change to containers' `env` alone applies to
+A branch never changes its own gate, except for container `env` (and
+`sandboxEnv`). When an issue branch changes the file, a change to containers'
+`env` or `sandboxEnv` alone applies to
 that branch's gate-1 (and to its sandbox from the next one) and to the gate
 on its merge result when it lands. Any other change — mounts, images, flags,
 containers added or removed, steps — is not applied: gate-1 runs once on the
@@ -503,6 +504,7 @@ loses `land`, and either gets a comment listing what differs.
 | `inSandbox` | Also run a copy beside the agent. See below. |
 | `inGate` | Default `true`. `false` runs the container only beside the agent. See below. |
 | `secretEnv` | Env keys valued from sandbar's own environment. See below. |
+| `sandboxEnv` | Env set only on the copy beside the agent. See below. |
 
 ### Steps
 
@@ -559,6 +561,20 @@ the agent can run the app while it works:
   `issue` container that fails retries the issue.
 - Cost: one extra container per `inSandbox` entry per active issue.
 
+`sandboxEnv` sets env on that copy only, over its `env`; the gate's copy never
+gets it. For example, the app beside the agent can use a recording proxy while
+the gate stays on its mocks:
+
+```js
+{ name: "backend", image: "localhost/backend", inSandbox: true,
+  sandboxEnv: { ADFINITY_PROXY_URL: "http://127.0.0.1:8090" } }
+```
+
+- Values are literals from the stack, so never put a credential there; use
+  `secretEnv`.
+- A database copy of the container gets it too.
+- A driver older than 0.67.0 ignores it.
+
 ### `inGate: false` and `secretEnv`
 
 `inGate: false` keeps a container out of the gate, so it runs only beside the
@@ -586,8 +602,8 @@ the names:
 - The values are masked in the start-up errors sandbar reports. What the
   container itself logs is in `/sandbar/logs/<name>.log`, which the agent can
   read, so it must not print the secret.
-- A branch's own `env` change to such a container is treated as a stack change,
-  not an env-only one.
+- A branch's own `env` or `sandboxEnv` change to such a container is treated
+  as a stack change, not an env-only one.
 
 ## `sandbar gate`
 
