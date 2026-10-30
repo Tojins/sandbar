@@ -21,11 +21,13 @@
 //
 // The landing shape is skipped in one line: gate-1 settled each branch, and a
 // mutation run in the serialized landing costs minutes per land. It is HEAD
-// reached from `<base>` by first-parent merges alone, as every gate-2 is: a
-// cycle's merges stacked on the source tip, a push race's merge of the moved
-// tip into them, a chunk's member merges and refreshes. A commit of anyone's
-// own on that path, a branch's for gate-1 or a resolve agent's fix, is code
-// no gate has settled, so the check runs.
+// reached from `<base>` by first-parent merges, as every gate-2 is: a cycle's
+// merges stacked on the source tip, a push race's merge of the moved tip into
+// them, a chunk's member merges and refreshes. A commit of its own on that
+// path keeps the shape only when it adds no line the check reads, as the
+// merger's lockfile sync after a merge adds none. Any other, a branch's for
+// gate-1 or a resolve agent's fix, is code no gate has settled, so the check
+// runs.
 //
 // It reads the worktree, which in the gate is the clean HEAD it judges (D1),
 // and writes only under the gitignored `.stryker-tmp/`, cleared first.
@@ -44,9 +46,25 @@ export function isProduction(path) {
   return /^src\/.*\.ts$/.test(path) && !/\.test(?:-util)?\.ts$/.test(path);
 }
 
+// A changed line of `path` is read by the check.
+function isJudged(path) {
+  return isProduction(path) || deletionEntry(path) !== undefined;
+}
+
+// Whether `commit`, not a merge, adds a line the check reads.
+function addsJudgedLine(repo, commit) {
+  const numstat = git(repo, ["diff-tree", "-r", "--root", "--no-commit-id", "--no-renames", "--numstat", "-z", commit]);
+  return numstat.split("\0").some((entry) => {
+    const [added, , path] = entry.split("\t");
+    return added !== "0" && isJudged(path);
+  });
+}
+
 export function isLandingShape(repo, baseRef) {
   const path = git(repo, ["rev-list", "--first-parent", "--parents", "HEAD", "--not", baseRef]).trim();
-  return path.split("\n").every((line) => line.split(" ").length > 2);
+  const commits = path.split("\n").map((line) => line.split(" "));
+  return commits.some((ids) => ids.length > 2) &&
+    commits.every(([commit, ...parents]) => parents.length > 1 || !addsJudgedLine(repo, commit));
 }
 
 const HINTS = [
@@ -100,7 +118,7 @@ export async function checkMissingTests(repo, baseRef, options) {
   const added = addedLines(repo, mergeBase(repo, baseRef));
   const contents = new Map(
     [...added.keys()]
-      .filter((path) => isProduction(path) || deletionEntry(path) !== undefined)
+      .filter(isJudged)
       .map((path) => [path, readFileSync(join(repo.dir, path), "utf8")]),
   );
   const production = new Map([...added].filter(([path]) => isProduction(path)));

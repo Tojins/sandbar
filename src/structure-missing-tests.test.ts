@@ -3,6 +3,7 @@
 // able to go red by running `run.mjs` over a fixture branch beside its green
 // twin, after a real coverage run.
 import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,7 +87,13 @@ describe("which lines the check reads", () => {
 // Each shape built over the `missing-tests-red` fixture: `origin/main` the
 // base, `topic` one commit on it, and `other` another branch's commit.
 describe("the landing shape", () => {
-  const commit = (dir: string, name: string) => {
+  // A commit appending a line to `path`, when given.
+  const commit = (dir: string, name: string, path?: string) => {
+    if (path !== undefined) {
+      mkdirSync(join(dir, path, ".."), { recursive: true });
+      writeFileSync(join(dir, path), `${name}\n`, { flag: "a" });
+      git(dir, "add", path);
+    }
     git(dir, "commit", "-q", "--allow-empty", "-m", name);
     return git(dir, "rev-parse", "HEAD");
   };
@@ -138,13 +145,39 @@ describe("the landing shape", () => {
       moveBase(dir);
       git(dir, "merge", "-q", "--no-ff", "-m", "sync", "origin/main");
     } },
+    { name: "gate-2 after the merger synced the lockfile", landing: true, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
+      commit(dir, "chore: sync dependency lockfile after merge", "package-lock.json");
+    } },
+    { name: "a later gate-2 over a lockfile sync", landing: true, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
+      commit(dir, "chore: sync dependency lockfile after merge", "package-lock.json");
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "other");
+    } },
+    { name: "a merge then a commit only deleting production lines", landing: true, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
+      git(dir, "rm", "-q", "src/calc.ts");
+      commit(dir, "drop");
+    } },
+    { name: "gate-1 of a branch adding no judged line", landing: false, build: (dir: string) => {
+      commit(dir, "docs", "README.md");
+    } },
     { name: "gate-1 of a chunk member seeded from the chunk", landing: false, build: (dir: string) => {
       git(dir, "merge", "-q", "--no-ff", "-m", "chunk", "other");
-      commit(dir, "member");
+      commit(dir, "member", "src/member.ts");
     } },
     { name: "the re-gate of a resolve agent's fix on a merge", landing: false, build: (dir: string) => {
       git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-      commit(dir, "fix");
+      commit(dir, "fix", "src/calc.ts");
+    } },
+    { name: "the re-gate of a resolve agent's fix to a mapped file", landing: false, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
+      commit(dir, "fix", "deploy/app.yml");
+    } },
+    { name: "the re-gate of a resolve agent's fix after a lockfile sync", landing: false, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
+      commit(dir, "chore: sync dependency lockfile after merge", "package-lock.json");
+      commit(dir, "fix", "src/calc.ts");
     } },
   ])("$name: $landing", async ({ build, landing }) => {
     const dir = await shapes();
