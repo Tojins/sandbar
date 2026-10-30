@@ -9,8 +9,7 @@
 // proxy's own address on the asker's subnet, TTL 5; AAAA, HTTPS, SVCB and every
 // other type for an allowed name get NODATA, so a client has no IPv6 and no
 // ECH to try. Any other name, a `secretAllow` one included, gets NXDOMAIN and
-// a log line. Malformed packets
-// are dropped unanswered.
+// a log line. Malformed packets are dropped unanswered.
 //
 // TCP on the union of the `allow` entries' ports. The first bytes name the
 // destination: the SNI of a TLS ClientHello, or the `Host` of an HTTP request.

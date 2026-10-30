@@ -23,10 +23,11 @@
 // container then joins with the proxy as its only DNS and Claude Code's
 // nonessential traffic off; its siblings inherit both, and with
 // `egress.secretAllow` only its proxy gets the authenticated listener, whose
-// env the `secretEnv` siblings get (#257). The gate stack gets
-// its own proxy (gate-stack.ts). Every agent invocation ends at a checkpoint
+// env the `secretEnv` siblings get (#257). The gate stack gets its own proxy
+// (gate-stack.ts). Every agent invocation ends at a checkpoint
 // (`withEgressCheckpoints`) that records the proxy's first-sighted refusals
-// and masks the proxy's secret in what the agent printed; a failed one whose proxy died raises `EgressProxyDiedError` instead, which
+// and masks the proxy's secret in what the agent printed; a failed one whose
+// proxy died raises `EgressProxyDiedError` instead, which
 // even the reviewer's failure classification passes through, so a dead proxy
 // is a HARD-ERROR rather than a role's failure. The proxy stops after the
 // sandbox closes and records its `egress` summary. The implementer is told

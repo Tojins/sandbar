@@ -3862,6 +3862,7 @@ describe("runInnerLoop context terminals (#158)", () => {
     const calls: string[] = [];
     const proxy = (name: string, stop: () => Promise<void> = async () => undefined) => ({
       dnsArgs: ["--dns", "10.0.0.2"],
+      connect: null,
       assertAlive: vi.fn(async () => undefined),
       checkpoint: vi.fn(async () => []),
       stop: vi.fn(async () => {
@@ -3899,6 +3900,7 @@ describe("runInnerLoop context terminals (#158)", () => {
         owner: `sbx-${issue.id}`,
         networkName: network,
         createNetwork: true,
+        authenticated: true,
       });
       expect(innerLoopMocks.podmanOptions).toEqual([
         expect.objectContaining({
