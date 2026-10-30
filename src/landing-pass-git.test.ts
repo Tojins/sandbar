@@ -143,6 +143,15 @@ describe("realAdapter landing-pass facts (real merge in a linked worktree)", () 
     expect(await git(wt, "status", "--porcelain", "--ignored")).toBe("!! node_modules/");
   });
 
+  it("a reset takes back an untracked directory that is itself a repository", async () => {
+    const clone = join(wt, "clone");
+    await exec("git", ["init", "-qb", "main", clone], { env: GIT_ENV });
+    await commit(clone, "x.md", "x\n");
+    await adapter().resetHardSha(merged);
+
+    expect(await adapter().commitShape(merged)).toMatchObject({ dirtyPaths: [], commits: [] });
+  });
+
   it("refuses a merge left in progress", async () => {
     await git(repo, "checkout", "-qb", "clash", "main");
     await commit(repo, "services.php", "appversion=9\n");
