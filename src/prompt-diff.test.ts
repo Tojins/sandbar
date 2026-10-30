@@ -292,6 +292,17 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
     ]);
   });
 
+  // git quotes and octal-escapes such paths in a `diff --git` header.
+  it("names a file under its real path when git would quote it", async () => {
+    const paths = ["café 日本.txt", 'say "hi".txt', "my file.txt"];
+    for (const [i, path] of paths.entries()) await writeFile(join(worktree, path), `${"x".repeat(300 - i * 100)}\n`);
+    await git(worktree, "add", "-A");
+    await git(worktree, "commit", "-qm", "quoted-paths");
+
+    const { largestFiles } = await measureNetDiff(worktree, "origin/main", "main");
+    expect(largestFiles.map((file) => file.path)).toEqual(paths);
+  });
+
   // #187: a later lister reads what changed since the last approved quality
   // head, and a verify what changed since the head before the fixer, both
   // read from git at that anchor.

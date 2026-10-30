@@ -651,11 +651,17 @@ export async function measureNetDiff(
     mergeBase(`origin/${sourceBranch}`),
   ]);
   const tree = await mergedTree(worktreePath, seed, merged);
-  const diff = await readGit(["diff", tree, "HEAD"], worktreePath, what);
-  const files = diff.split(/^(?=diff --git )/m).filter((file) => file !== "").map((file) => {
-    const header = file.slice(0, file.indexOf("\n"));
-    return { path: header.slice(header.lastIndexOf(" b/") + 3), chars: file.length };
-  });
+  // A `diff --git` header quotes and octal-escapes an unusual path; `-z`
+  // names the same files, in the patch's order, verbatim.
+  const [diff, names] = await Promise.all([
+    readGit(["diff", tree, "HEAD"], worktreePath, what),
+    readGit(["diff", "--name-only", "-z", tree, "HEAD"], worktreePath, what),
+  ]);
+  const paths = names.split("\0");
+  const files = diff.split(/^(?=diff --git )/m).filter((file) => file !== "").map((file, i) => ({
+    path: paths[i]!,
+    chars: file.length,
+  }));
   return {
     chars: diff.length,
     largestFiles: files.sort((a, b) => b.chars - a.chars).slice(0, 3),
