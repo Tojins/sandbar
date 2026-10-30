@@ -160,8 +160,8 @@ export default {
 
   // The client version a screen change requires is only known once the
   // landing before it is on main (Tojins/sandbar#258). Until outdoor carries
-  // docs/landing-pass.md, every landing logs the pass as skipped.
-  landingPass: { prompt: { path: "docs/landing-pass.md" }, paths: ["src/app/"] },
+  // sandbar/landing-pass.md, every landing logs the pass as skipped.
+  landingPass: { prompt: { path: "sandbar/landing-pass.md" }, paths: ["src/app/"] },
 
   // Merging main deploys to prod, so nothing lands unreviewed unless the issue
   // opts in with the `auto-land` label. The repo carries the `auto-land`,
