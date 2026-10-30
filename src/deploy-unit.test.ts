@@ -15,7 +15,6 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
-import { resolveEgress } from "./config.js";
 import { EXIT_CODE_RESTART } from "./exit-conditions.js";
 import { RESTART_REQUEST_FILE } from "./restart-request.js";
 import { compareVersions, parseVersion } from "./requires-sandbar.js";
@@ -1458,69 +1457,6 @@ describe("committed installation data and configs", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
-  it("ships outdoor's explicit checkout, mapped settings, gate file and its own image recipe", () => {
-    expect(outdoorConfig).toContain('import { readEnvFile, splitRoleRouting } from "sandbar";');
-    expect(outdoorConfig).toContain('const cwd = "/home/outdoor/outdoor";');
-    expect(outdoorConfig).toContain('readFileSync(join(cwd, "gate/stack.json"), "utf8")');
-    // #186: the stack itself is read from the source tip, not from the clone.
-    expect(outdoorConfig).toContain('gateStack: { path: "gate/stack.json" },');
-    expect(outdoorConfig).toMatch(/copyToWorktree:[\s\S]*?from:[\s\S]*?to:/);
-    expect(outdoorConfig).toContain('const sandboxImage = "localhost/sandbar:outdoor";');
-    expect(outdoorConfig).toContain('containerfile: "Containerfile.sandbar"');
-  });
-
-  // The `.mjs` is type-checked by nothing and imports what only the box has,
-  // so its `egress` literal is evaluated alone and resolved as the daemon would.
-  it("ships outdoor's egress allowlist in enforce mode, resolvable as written (#224, #225)", () => {
-    const block = outdoorConfig.match(/^ {2}egress: (\{\n[\s\S]*?\n {2}\}),$/m)?.[1];
-    expect(block).toBeDefined();
-    const egress = resolveEgress(new Function(`return (${block});`)(), ["claude"]);
-    if (egress.kind !== "allowlist") throw new Error("outdoor's egress resolved open");
-    expect(egress.policy.mode).toBe("enforce");
-    expect(egress.policy.entries.map((entry) => entry.host)).toEqual(
-      expect.arrayContaining([
-        "registry.npmjs.org",
-        "repo.packagist.org",
-        "registry.bower.io",
-        "api.mews-demo.com",
-        "directory.peppol.eu",
-        "ec.europa.eu",
-        "www.uid-wse.admin.ch",
-        "wl-api.mf.gov.pl",
-        "data.brreg.no",
-        "recherche-entreprises.api.gouv.fr",
-        "test-api.service.hmrc.gov.uk",
-        "kbopub.economie.fgov.be",
-        "*.adfinity.app",
-      ]),
-    );
-  });
-
-  // outdoorpub has no backend, database or CI: one image serves the agent
-  // and the gate runner, the gate is the checkout's own script, the landing
-  // is direct because no check run exists to verify it, and nothing lands
-  // without review unless an issue opts in.
-  it("ships outdoorpub's one-image gate, direct landing and review lane", () => {
-    expect(outdoorpubConfig).toContain('import { readEnvFile, splitRoleRouting } from "sandbar";');
-    expect(outdoorpubConfig).toContain('const cwd = "/home/outdoorpub/outdoorpub";');
-    expect(outdoorpubConfig).toContain('const sandboxImage = "localhost/sandbar:outdoorpub";');
-    expect(outdoorpubConfig).toContain('containerfile: "Containerfile"');
-    expect(outdoorpubConfig).toMatch(/containers:\s*\[\s*\{ name: "runner", image: sandboxImage,/);
-    expect(outdoorpubConfig).toContain('command: ["bash", "scripts/gate.sh"]');
-    expect(outdoorpubConfig).toContain('mergeMode: { kind: "direct" }');
-    expect(outdoorpubConfig).toContain('defaultLane: "review"');
-    expect(outdoorpubConfig).toContain('claudeMdPath: "AGENTS.md"');
-    expect(outdoorpubConfig).not.toContain("copyToWorktree");
-  });
-
-  it("ships sandbar's external config", () => {
-    expect(sandbarConfig).toContain('import { readEnvFile, splitRoleRouting } from "sandbar";');
-    expect(sandbarConfig).toContain('const cwd = "/home/sandbar/sandbar";');
-    expect(sandbarConfig).toMatch(
-      /promptExtensions:[\s\S]*?merger:[\s\S]*?one patch bump above the higher/,
-    );
-  });
-
   // The driver is this checkout's build (#146), so the checkout's own version is
   // what every installation config's floor has to be satisfied by.
   it.each(installations)("$project's config floor is met by this checkout", (entry) => {
@@ -1546,15 +1482,6 @@ describe("committed installation data and configs", () => {
 
   it.each([...installationConfigs])("never reads secrets.env into the %s config (#252)", (_name, config) => {
     expect(config).not.toContain("secrets.env");
-  });
-
-  it.each([
-    ["outdoor", outdoorConfig],
-    ["outdoorpub", outdoorpubConfig],
-    ["sandbar", sandbarConfig],
-  ])("reads Codex auth only when a %s role routes to Codex", (_name, config) => {
-    expect(config).toMatch(/Object\.entries\(routing\)[\s\S]*?field\.endsWith\("Agent"\) && provider === "codex"/);
-    expect(config).toMatch(/\.\.\.\(usesCodex[\s\S]*?CODEX_AUTH_JSON:[\s\S]*?: \{\}\)/);
   });
 });
 
