@@ -377,18 +377,20 @@ async function serve(): Promise<void> {
 
   // Resolves `host`, keeps to public addresses unless `reach` allows private
   // ones, connects, and splices both ways once `open` has handed the upstream
-  // what it is owed. `reach` is `refuse` only for a report-mode connection
-  // already logged as `would-refuse`, which is then not also an `allow`.
+  // what it is owed. `refused` is a report-mode connection already logged as
+  // `would-refuse`, which is then not also an `allow`; `enforcing` decides
+  // whether a private-only resolution is refused or let through.
   const splice = async (socket: Socket, s: {
     readonly via: "tls" | "http" | "connect";
     readonly host: string;
     readonly port: number;
-    readonly reach: EgressReach;
+    readonly publicOnly: boolean;
+    readonly enforcing: boolean;
+    readonly refused: boolean;
     readonly open: (upstream: Socket) => void;
   }): Promise<void> => {
-    const { via, host, port } = s;
-    const enforcing = via === "connect" || enforce;
-    let refused = s.reach === "refuse";
+    const { via, host, port, enforcing } = s;
+    let refused = s.refused;
     // Every way a lookup can fail (no such name, a timeout, a SERVFAIL) is the
     // upstream's, and is recorded as such rather than thrown.
     const resolved = await lookup(host, { all: true, order: "ipv4first" }).then(
@@ -402,7 +404,7 @@ async function serve(): Promise<void> {
       socket.destroy();
       return;
     }
-    let candidates = s.reach === "public"
+    let candidates = s.publicOnly
       ? resolved.filter((a) => !isPrivateAddress(a.address))
       : resolved;
     if (candidates.length === 0) {
@@ -446,7 +448,11 @@ async function serve(): Promise<void> {
       if (enforce) return refuse(socket, via, host);
     }
     await splice(socket, {
-      via, host, port, reach, open: (upstream) => upstream.write(peeked),
+      via, host, port,
+      publicOnly: reach === "public",
+      enforcing: enforce,
+      refused: reach === "refuse",
+      open: (upstream) => upstream.write(peeked),
     });
   };
 
@@ -467,19 +473,24 @@ async function serve(): Promise<void> {
       return refuse(socket, "connect", host);
     }
     await splice(socket, {
-      via: "connect", host, port, reach, open: (upstream) => {
+      via: "connect", host, port,
+      publicOnly: reach === "public",
+      enforcing: true,
+      refused: false,
+      open: (upstream) => {
         socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
         upstream.write(rest);
       },
     });
   };
 
-  // Reads a connection's first bytes until `decideFrom` says what they ask
-  // for: more, nothing routable (`opaque`), or the routing to run.
-  const route = (
+  // Reads a connection's first bytes until `peek` says what they ask for:
+  // more, nothing routable (`opaque`), or a request for `serve`.
+  const route = <P extends { readonly kind: "more" | "opaque" | "route" }>(
     socket: Socket,
     port: number,
-    decideFrom: (peeked: Buffer) => "more" | "opaque" | (() => Promise<void>),
+    peek: (peeked: Buffer) => P,
+    serve: (peeked: Buffer, routed: Extract<P, { readonly kind: "route" }>) => Promise<void>,
   ): void => {
     let peeked = Buffer.alloc(0);
     let decided = false;
@@ -498,11 +509,11 @@ async function serve(): Promise<void> {
     };
     const onData = (chunk: Buffer): void => {
       peeked = Buffer.concat([peeked, chunk]);
-      const next = decideFrom(peeked);
-      if (next === "more" && peeked.length < PEEK_MAX_BYTES) return;
-      if (typeof next === "string") return opaque();
+      const next = peek(peeked);
+      if (next.kind === "more" && peeked.length < PEEK_MAX_BYTES) return;
+      if (next.kind !== "route") return opaque();
       settle();
-      void next();
+      void serve(peeked, next as Extract<P, { readonly kind: "route" }>);
     };
     const timer = setTimeout(opaque, PEEK_TIMEOUT_MS);
     socket.on("data", onData);
@@ -527,19 +538,13 @@ async function serve(): Promise<void> {
     listen(dnsTcp, 53),
     ...ports.map((port) =>
       listen(createServer({ allowHalfOpen: true }, (socket) =>
-        route(socket, port, (peeked) => {
-          const peek = peekDestination(peeked);
-          return peek.kind === "route"
-            ? () => forward(socket, peeked, peek.via, peek.host, port)
-            : peek.kind;
-        })), port)
+        route(socket, port, peekDestination, (peeked, peek) =>
+          forward(socket, peeked, peek.via, peek.host, port))), port)
     ),
     ...(policy.secret === null ? [] : [
       listen(createServer({ allowHalfOpen: true }, (socket) =>
-        route(socket, PROXY_CONNECT_PORT, (peeked) => {
-          const peek = peekConnect(peeked);
-          return peek.kind === "route" ? () => tunnel(socket, peek.request, peek.rest) : peek.kind;
-        })), PROXY_CONNECT_PORT),
+        route(socket, PROXY_CONNECT_PORT, peekConnect, (_peeked, peek) =>
+          tunnel(socket, peek.request, peek.rest))), PROXY_CONNECT_PORT),
     ]),
   ]);
   record({ t: "ready" });
