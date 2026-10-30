@@ -1466,7 +1466,7 @@ describe("committed installation data and configs", () => {
     expect(outdoorConfig).toContain('gateStack: { path: "gate/stack.json" },');
     expect(outdoorConfig).toMatch(/copyToWorktree:[\s\S]*?from:[\s\S]*?to:/);
     expect(outdoorConfig).toContain('const sandboxImage = "localhost/sandbar:outdoor";');
-    expect(outdoorConfig).toContain('containerfile: "Containerfile.sandbar"');
+    expect(outdoorConfig).toContain('containerfile: "sandbar/Containerfile.sandbar"');
   });
 
   // The `.mjs` is type-checked by nothing and imports what only the box has,

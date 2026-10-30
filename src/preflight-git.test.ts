@@ -166,7 +166,6 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     agentProviders: ["claude"] as readonly AgentProviderName[],
     deployWatch: null,
     databaseCopies: null,
-    janitor: false,
     onEvent: () => undefined,
   });
   // What `runPreflight` hands `gatherState` once its own `gh` checks pass.
@@ -469,6 +468,24 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
     expect(existsSync(clone)).toBe(false);
     await expect(git(target, "show-ref", "--verify", "refs/heads/sandbar/janitor-tidy")).rejects.toBeDefined();
     expect((await git(origin, "rev-parse", "sandbar/janitor-tidy")).stdout).toBe(originTip);
+  });
+
+  // Every issue's context budget is measured against a `merge-tree` tree (#263).
+  it("refuses a git older than 2.38 without config.janitor", async () => {
+    await installPassingPreflightShims();
+    await giveTargetBareOrigin();
+    await writeFile(join(shimBin, "git"), [
+      "#!/bin/sh",
+      'if [ "$1" = "--version" ]; then echo "git version 2.37.9"; exit 0; fi',
+      `PATH='${originalPath ?? ""}' exec git "$@"`,
+    ].join("\n"), { mode: 0o755 });
+
+    const error = await runPreflight(passingCfg(), localReachability).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(PreflightError);
+    expect((error as PreflightError).failures).toEqual([
+      "sandbar needs git 2.38 or newer for `merge-tree --write-tree`; this host has git version 2.37.9.",
+    ]);
   });
 
   it("abandons an origin-deleted closed branch through preflight and announces it", async () => {

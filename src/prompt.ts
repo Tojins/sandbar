@@ -617,20 +617,71 @@ export function buildCondenserPrompt(issueId: string, issue: IssueJson): string 
   ].join("\n\n---\n\n");
 }
 
+export type NetDiff = {
+  readonly chars: number;
+  // The three largest files of the patch, largest first, so a park can say
+  // what it measured.
+  readonly largestFiles: readonly { readonly path: string; readonly chars: number }[];
+};
+
 // The context budget covers what the provider receives plus the branch patch
 // the role is explicitly told to read on demand (#158). This read is never
 // rendered into a prompt. The transport ceiling merely ensures a pathological
 // branch still returns an over-budget measurement instead of allocating
 // without bound.
-export async function measureNetDiffChars(
+//
+// The patch is HEAD against the merge of the seed with what the branch has
+// merged from the source branch (#263), so a branch that merged
+// `origin/<sourceBranch>` past a trailing chunk seed is not charged for the
+// source branch's own changes. A branch that never merged it measures against
+// its seed's tree, as `seed...HEAD` would. A conflicted merge is measured
+// against the tree `merge-tree` writes anyway, markers and all: the branch
+// already resolved those files, so the overcount is bounded, and falling back
+// to `seed...HEAD` would be the overcount this exists to remove.
+export async function measureNetDiff(
   worktreePath: string,
   baseRef: string,
-): Promise<number> {
-  return (await readGit(
-    ["diff", `${baseRef}...HEAD`],
-    worktreePath,
-    `the net diff size anchored at ${baseRef}`,
-  )).length;
+  sourceBranch: string,
+): Promise<NetDiff> {
+  const what = `the net diff size anchored at ${baseRef}`;
+  const mergeBase = async (ref: string) =>
+    (await readGit(["merge-base", ref, "HEAD"], worktreePath, what)).trim();
+  const [seed, merged] = await Promise.all([
+    mergeBase(baseRef),
+    mergeBase(`origin/${sourceBranch}`),
+  ]);
+  const tree = await mergedTree(worktreePath, seed, merged);
+  // A `diff --git` header quotes and octal-escapes an unusual path; `-z`
+  // names the same files, in the patch's order, verbatim. A type change is
+  // two entries under one header, and one name.
+  const [diff, names] = await Promise.all([
+    readGit(["diff", tree, "HEAD"], worktreePath, what),
+    readGit(["diff", "--name-only", "-z", tree, "HEAD"], worktreePath, what),
+  ]);
+  const paths = names.split("\0");
+  const files: { header: string; path: string; chars: number }[] = [];
+  for (const entry of diff.split(/^(?=diff --git )/m).filter((entry) => entry !== "")) {
+    const header = entry.slice(0, entry.indexOf("\n"));
+    const last = files.at(-1);
+    if (last?.header === header) last.chars += entry.length;
+    else files.push({ header, path: paths[files.length]!, chars: entry.length });
+  }
+  return {
+    chars: diff.length,
+    largestFiles: files.sort((a, b) => b.chars - a.chars).slice(0, 3).map(({ path, chars }) => ({ path, chars })),
+  };
+}
+
+// `merge-tree` exits 1 on a conflict and still writes the tree, its id on the
+// first line.
+async function mergedTree(worktreePath: string, left: string, right: string): Promise<string> {
+  try {
+    return (await exec("git", ["merge-tree", "--write-tree", left, right], { cwd: worktreePath }))
+      .stdout.split("\n")[0]!;
+  } catch (err) {
+    if (!isExitCode(err, 1)) throw err;
+    return String((err as { stdout?: unknown }).stdout).split("\n")[0]!;
+  }
 }
 
 export const contextChars = (prompt: string, netDiffChars: number): number =>

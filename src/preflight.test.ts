@@ -833,7 +833,7 @@ describe("mergeTreeRefusals (#205)", () => {
 
   it.each(["git version 2.37.9", "git version 1.99.0", ""])("refuses %j, naming what it found", (version) => {
     const [refusal] = mergeTreeRefusals(version);
-    expect(refusal).toMatch(/config\.janitor needs git 2\.38 or newer/);
+    expect(refusal).toMatch(/sandbar needs git 2\.38 or newer/);
     expect(refusal).toContain(version.trim() || "an unidentified git");
   });
 });

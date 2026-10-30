@@ -20,7 +20,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   // The verifier workspace's file operations (#238), in the order they ran.
   verifierFs: [] as string[],
   runAppHook: vi.fn(async (): Promise<"ok" | "failed" | "none"> => "none"),
-  measureNetDiffChars: vi.fn(async () => 0),
+  measureNetDiff: vi.fn(async (): Promise<NetDiff> => ({ chars: 0, largestFiles: [] })),
   branchIsAheadOfSeed: vi.fn(async () => false),
   ensureIssueBranch: vi.fn(async () => ({
     ref: "origin/main",
@@ -69,7 +69,7 @@ vi.mock("./prompt.js", async (importOriginal) => ({
   buildCorrectnessPrompt: innerLoopMocks.buildCorrectnessPrompt,
   buildAdjudicatorPrompt: innerLoopMocks.buildAdjudicatorPrompt,
   buildScenarioRunnerPrompt: innerLoopMocks.buildScenarioRunnerPrompt,
-  measureNetDiffChars: innerLoopMocks.measureNetDiffChars,
+  measureNetDiff: innerLoopMocks.measureNetDiff,
   branchIsAheadOfSeed: innerLoopMocks.branchIsAheadOfSeed,
 }));
 
@@ -240,6 +240,7 @@ import {
 import type { DbCopies, DbCopyStatus } from "./db-copy.js";
 import { SandbarError } from "./errors.js";
 import type { DbCopyHolder } from "./db-copy-policy.js";
+import type { NetDiff } from "./prompt.js";
 import {
   containerResourcesOf,
   type ContainerResources,
@@ -263,6 +264,14 @@ const deferred = <T,>() => {
   });
   return { promise, resolve };
 };
+
+// A measured diff a park names the largest files of (#263).
+const LARGEST_FILES: NetDiff["largestFiles"] = [
+  { path: "emoji.json", chars: 990_000 },
+  { path: "own.ts", chars: 1_234 },
+];
+const NAMED_FILES =
+  " Largest files in the measured diff: `emoji.json` (990,000 characters), `own.ts` (1,234 characters).";
 
 // What a quality pass's lister read; the builders are mocked, so its shape is
 // all that matters.
@@ -746,7 +755,7 @@ describe("runPartitionCheck (#158)", () => {
     innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
       "refs/heads/sandbar/issue-158",
     );
-    innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    innerLoopMocks.measureNetDiff.mockReset().mockResolvedValue({ chars: 0, largestFiles: [] });
     const events: EventInput[] = [];
     const sandbox = {
       worktreePath: "/worktree",
@@ -810,13 +819,14 @@ describe("runPartitionCheck (#158)", () => {
 
   it("parks before provider dispatch when the issue anchor exceeds budget", async () => {
     const { ctx, sandbox } = context("", 21);
+    innerLoopMocks.measureNetDiff.mockResolvedValueOnce({ chars: 0, largestFiles: LARGEST_FILES });
     await expect(runPartitionCheck({ kind: "run-partition-check" }, ctx))
       .resolves.toEqual({
         kind: "context-over-budget",
         slot: "partition-check",
         size: 22,
         budget: 21,
-        detail: "The issue anchor alone exceeds the configured context budget.",
+        detail: `The issue anchor alone exceeds the configured context budget.${NAMED_FILES}`,
       });
     expect(sandbox.run).not.toHaveBeenCalled();
   });
@@ -1491,7 +1501,7 @@ describe("runVerifier (#121, #180, #185)", () => {
     }[],
   ) => {
     innerLoopMocks.buildCorrectnessPrompt.mockResolvedValue("correctness prompt");
-    innerLoopMocks.measureNetDiffChars.mockResolvedValue(0);
+    innerLoopMocks.measureNetDiff.mockResolvedValue({ chars: 0, largestFiles: [] });
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("head123");
     innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
@@ -1672,14 +1682,15 @@ describe("runVerifier (#121, #180, #185)", () => {
 
   it("parks an oversized completed branch before dispatching the reviewer", async () => {
     const { sandbox, run } = scripted([]);
-    innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(600_000);
+    innerLoopMocks.measureNetDiff.mockResolvedValueOnce({ chars: 600_000, largestFiles: LARGEST_FILES });
     await expect(run()).resolves.toEqual({
       kind: "context-over-budget",
       slot: "review-correctness",
       size: 600_000 + "correctness prompt".length,
       budget: 600_000,
-      detail: "The completed branch exceeds the configured context budget before review.",
+      detail: `The completed branch exceeds the configured context budget before review.${NAMED_FILES}`,
     });
+    expect(innerLoopMocks.measureNetDiff).toHaveBeenCalledWith("/worktree", "origin/main", "main");
     expect(sandbox.run).not.toHaveBeenCalled();
   });
 
@@ -1739,7 +1750,7 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
     ledger: QualityLedger = { sinceImplementer: [], overrules: [], openRound: null, grader: passGrader, listerReport: "### Tests\nsrc/a.ts:3", stepFindings: null },
   ) => {
     innerLoopMocks.buildQualityReviewPrompt.mockReset().mockResolvedValue("quality review prompt");
-    innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    innerLoopMocks.measureNetDiff.mockReset().mockResolvedValue({ chars: 0, largestFiles: [] });
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("review-head");
     innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue("refs/heads/sandbar/issue-187");
@@ -2064,7 +2075,7 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
     innerLoopMocks.buildQualityReviewPrompt.mockReset()
       .mockResolvedValueOnce("short")
       .mockResolvedValueOnce("a longer project prompt");
-    innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(599_990);
+    innerLoopMocks.measureNetDiff.mockResolvedValueOnce({ chars: 599_990, largestFiles: [] });
     await expect(list(listAction)).resolves.toEqual({
       kind: "context-over-budget",
       slot: "review-quality",
@@ -2077,13 +2088,13 @@ describe("runQualityList and runQualityVerify (#187, #204)", () => {
 
   it("parks an oversized branch before the verify runs", async () => {
     const { sandbox, verify } = reviewer({});
-    innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(600_000);
+    innerLoopMocks.measureNetDiff.mockResolvedValueOnce({ chars: 600_000, largestFiles: LARGEST_FILES });
     await expect(verify(verifyAction)).resolves.toEqual({
       kind: "context-over-budget",
       slot: "review-quality",
       size: 600_000 + "quality review prompt".length,
       budget: 600_000,
-      detail: "The completed branch exceeds the configured context budget before the quality verify.",
+      detail: `The completed branch exceeds the configured context budget before the quality verify.${NAMED_FILES}`,
     });
     expect(sandbox.run).not.toHaveBeenCalled();
   });
@@ -2099,7 +2110,7 @@ describe("runQualityFix (#185, #187)", () => {
   ) => {
     const queue = Array.isArray(outcomes) ? [...outcomes] : null;
     innerLoopMocks.buildQualityFixPrompt.mockReset().mockResolvedValue("quality fix prompt");
-    innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    innerLoopMocks.measureNetDiff.mockReset().mockResolvedValue({ chars: 0, largestFiles: [] });
     innerLoopMocks.branchTip.mockReset()
       .mockResolvedValueOnce("impl-head")
       .mockResolvedValueOnce("impl-head")
@@ -2357,11 +2368,12 @@ describe("runQualityFix (#185, #187)", () => {
 
   it("parks an oversized branch before the fixer runs", async () => {
     const { sandbox, run } = fixer({ kind: "exit" });
-    innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(600_000);
+    innerLoopMocks.measureNetDiff.mockResolvedValueOnce({ chars: 600_000, largestFiles: LARGEST_FILES });
     await expect(run()).resolves.toMatchObject({
       kind: "context-over-budget",
       slot: "review-quality",
       budget: 600_000,
+      detail: `The completed branch exceeds the configured context budget before the quality fixer.${NAMED_FILES}`,
     });
     expect(sandbox.run).not.toHaveBeenCalled();
   });
@@ -2418,7 +2430,7 @@ describe("runVerifier beside the scenario runner (#238)", () => {
     writeFileSync(join(ws, "run", "S2", "rows.txt"), "0 rows\n");
     innerLoopMocks.buildCorrectnessPrompt.mockReset().mockResolvedValue("correctness prompt");
     innerLoopMocks.buildScenarioRunnerPrompt.mockReset().mockResolvedValue("runner prompt");
-    innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    innerLoopMocks.measureNetDiff.mockReset().mockResolvedValue({ chars: 0, largestFiles: [] });
     innerLoopMocks.isAncestor.mockReset().mockResolvedValue(true);
     innerLoopMocks.branchTip.mockReset().mockImplementation(async () => {
       order.push("snapshot");
@@ -3272,7 +3284,7 @@ describe("runAdjudicator (#167)", () => {
 
   it("classifies an adjudication measured over budget before dispatch", async () => {
     innerLoopMocks.buildAdjudicatorPrompt.mockResolvedValueOnce("0123456789");
-    innerLoopMocks.measureNetDiffChars.mockResolvedValueOnce(991);
+    innerLoopMocks.measureNetDiff.mockResolvedValueOnce({ chars: 991, largestFiles: LARGEST_FILES });
     const sandbox = {
       worktreePath: "/worktree",
       run: vi.fn(),
@@ -3285,6 +3297,7 @@ describe("runAdjudicator (#167)", () => {
         slot: "adjudication",
         size: 1001,
         budget: 1000,
+        detail: `The rejected report and branch exceed the configured context budget before adjudication.${NAMED_FILES}`,
       },
     });
     expect(sandbox.run).not.toHaveBeenCalled();
@@ -3694,7 +3707,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       commits: [],
       residue: { dirtyPaths: [], strandedHead: null, rewoundTip: null },
     });
-    innerLoopMocks.measureNetDiffChars.mockReset().mockResolvedValue(0);
+    innerLoopMocks.measureNetDiff.mockReset().mockResolvedValue({ chars: 0, largestFiles: [] });
     innerLoopMocks.branchTip.mockReset().mockResolvedValue("head123");
     innerLoopMocks.dirtyWorktreePaths.mockReset().mockResolvedValue([]);
     innerLoopMocks.symbolicHeadRef.mockReset().mockResolvedValue(
@@ -4371,7 +4384,7 @@ describe("runInnerLoop context terminals (#158)", () => {
   it("parks an oversized resumed branch before any agent invocation", async () => {
     innerLoopMocks.branchIsAheadOfSeed.mockResolvedValue(true);
     innerLoopMocks.buildPrompt.mockResolvedValue("0123456789");
-    innerLoopMocks.measureNetDiffChars.mockResolvedValue(91);
+    innerLoopMocks.measureNetDiff.mockResolvedValue({ chars: 91, largestFiles: LARGEST_FILES });
     const { sandbox, opts } = harness(vi.fn(), {
       partitionCheck: true,
       maxContextChars: 100,
@@ -4383,7 +4396,9 @@ describe("runInnerLoop context terminals (#158)", () => {
       slot: "implementer",
       size: 101,
       budget: 100,
+      detail: `The resumed branch already exceeds the configured context budget.${NAMED_FILES}`,
     });
+    expect(innerLoopMocks.measureNetDiff).toHaveBeenCalledWith("/worktree", "origin/main", "main");
     expect(sandbox.run).not.toHaveBeenCalled();
     expect(innerLoopMocks.buildPartitionCheckPrompt).not.toHaveBeenCalled();
   });
@@ -4609,7 +4624,7 @@ describe("runInnerLoop context terminals (#158)", () => {
     innerLoopMocks.branchIsAheadOfSeed.mockResolvedValue(true);
     innerLoopMocks.buildPrompt.mockClear();
     innerLoopMocks.buildPrompt.mockResolvedValue("0123456789");
-    innerLoopMocks.measureNetDiffChars.mockResolvedValue(91);
+    innerLoopMocks.measureNetDiff.mockResolvedValue({ chars: 91, largestFiles: [] });
     const { opts } = harness(vi.fn(), { maxContextChars: 100 });
     opts.stackSource = {
       ...opts.stackSource,
@@ -4635,7 +4650,7 @@ describe("runInnerLoop context terminals (#158)", () => {
   it("admits a resumed branch at budget and skips the partition classifier", async () => {
     innerLoopMocks.branchIsAheadOfSeed.mockResolvedValue(true);
     innerLoopMocks.buildPrompt.mockResolvedValue("0123456789");
-    innerLoopMocks.measureNetDiffChars.mockResolvedValue(90);
+    innerLoopMocks.measureNetDiff.mockResolvedValue({ chars: 90, largestFiles: [] });
     const { sandbox, opts } = harness(async () => ({
       ...completeRun,
       stdout: "<promise>NEEDS-INFO</promise><questions>Which API?</questions>",

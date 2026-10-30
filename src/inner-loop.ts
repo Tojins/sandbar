@@ -59,9 +59,11 @@
 // budget. Partition runs once per admission and only at the seed; UI runs
 // once per sandbox cycle, so a fresh HARD-ERROR asks it again. Before each
 // quality role and before the verifier, that role's complete picture
-// (rendered prompt plus seed-anchored net diff) is measured against the
-// configured useful-context budget; a resumed branch gets the same
-// enforcement at admission. A provider
+// (rendered prompt plus seed-anchored net diff, net of what the branch merged
+// from the source branch, #263) is measured against the configured
+// useful-context budget; a resumed branch gets the same enforcement at
+// admission, and a measured overrun names the three largest files it counted.
+// A provider
 // size refusal maps to the same partition terminal instead of entering
 // HARD-ERROR replay. Two deliberate exceptions to "all branching lives in the
 // SM" stay within one action each. The promise nudge in runImplementer gives
@@ -453,8 +455,9 @@ import {
   buildQualityReviewPrompt,
   buildScenarioRunnerPrompt,
   buildUiCheckPrompt,
+  type NetDiff,
   contextChars,
-  measureNetDiffChars,
+  measureNetDiff,
   branchIsAheadOfSeed,
 } from "./prompt.js";
 
@@ -705,6 +708,20 @@ export const credentialVerdict = (err: AgentCredentialError): Verdict => ({
   provider: err.provider,
   detail: err.detail,
 });
+
+// The issue branch's patch as the context budget counts it (#263).
+const measureBranchDiff = (ctx: ExecuteActionCtx): Promise<NetDiff> =>
+  measureNetDiff(ctx.sandbox.worktreePath, ctx.base.ref, ctx.config.sourceBranch);
+
+// A measured overrun names the largest files it counted, so a park the source
+// branch's own changes caused is visible from the issue (#263).
+const measuredDetail = (detail: string, diff: NetDiff): string =>
+  diff.largestFiles.length === 0
+    ? detail
+    : `${detail} Largest files in the measured diff: ` +
+      diff.largestFiles
+        .map((file) => `\`${file.path}\` (${file.chars.toLocaleString("en-US")} characters)`)
+        .join(", ") + ".";
 
 class PartitionRequiredError extends Error {
   readonly verdict: Extract<Verdict, { readonly type: "NEEDS-PARTITION" }>;
@@ -1683,10 +1700,8 @@ async function runSandboxCycle(
         egressEnforced: config.egress?.policy.mode === "enforce",
         settled: settledRules(setupStack.stack),
       }, anchorOpts);
-      const size = contextChars(
-        admissionPrompt,
-        await measureNetDiffChars(worktreePath, base.ref),
-      );
+      const diff = await measureNetDiff(worktreePath, base.ref, config.sourceBranch);
+      const size = contextChars(admissionPrompt, diff.chars);
       if (size > config.maxContextChars) {
         return {
           verdict: {
@@ -1695,7 +1710,7 @@ async function runSandboxCycle(
             slot: "implementer",
             size,
             budget: config.maxContextChars,
-            detail: "The resumed branch already exceeds the configured context budget.",
+            detail: measuredDetail("The resumed branch already exceeds the configured context budget.", diff),
           },
           accumulatedCommits: accumulated,
           specGaps,
@@ -2219,17 +2234,15 @@ export async function runPartitionCheck(
     issueAnchorOptionsOf(config),
     config.maxContextChars,
   );
-  const size = contextChars(
-    basePrompt,
-    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
-  );
+  const diff = await measureBranchDiff(ctx);
+  const size = contextChars(basePrompt, diff.chars);
   if (size > config.maxContextChars) {
     return {
       kind: "context-over-budget",
       slot: "partition-check",
       size,
       budget: config.maxContextChars,
-      detail: "The issue anchor alone exceeds the configured context budget.",
+      detail: measuredDetail("The issue anchor alone exceeds the configured context budget.", diff),
     };
   }
 
@@ -2526,7 +2539,7 @@ export async function runQualityList(
   action: Extract<LoopAction, { kind: "run-quality-list" }>,
   ctx: ExecuteActionCtx,
 ): Promise<Extract<LoopEvent, { kind: "quality-review-result" | "context-over-budget" }>> {
-  const { sandbox, opts, config, quality } = ctx;
+  const { opts, config, quality } = ctx;
   quality.openRound = { attempt: action.attempt, timer: startTimer(), quality: null };
   const [standards, settledRulesAtTip] = await Promise.all([
     readQualityStandards({
@@ -2541,21 +2554,21 @@ export async function runQualityList(
   quality.grader = grader;
   const head = await requireIssueTip(ctx, "before the quality listers");
   const overrules = [...quality.overrules];
-  const [prompts, netDiffChars] = await Promise.all([
+  const [prompts, diff] = await Promise.all([
     Promise.all(standards.groups.map((group) => buildQualityReviewPrompt({
       ...branchRoleInputs(ctx),
       ...grader,
       mode: { kind: "list", scope: action.scope, overrules, group },
     }))),
-    measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
+    measureBranchDiff(ctx),
   ]);
   const listers = standards.groups.map((group, i) => {
     const prompt = prompts[i]!;
-    return { group, prompt, measuredContextChars: contextChars(prompt, netDiffChars) };
+    return { group, prompt, measuredContextChars: contextChars(prompt, diff.chars) };
   });
   const largest = Math.max(...listers.map((lister) => lister.measuredContextChars));
   if (largest > config.maxContextChars) {
-    return overQualityBudget(ctx, largest, "listers");
+    return overQualityBudget(ctx, largest, diff, "listers");
   }
   const [early, ...settled] = await Promise.allSettled([
     standaloneStepFindings(ctx, { attempt: action.attempt, mode: "list" }, head),
@@ -2603,12 +2616,10 @@ export async function runQualityVerify(
     ...passGrader(quality),
     mode: { kind: "verify", anchor: action.anchor, report: quality.listerReport },
   });
-  const measuredContextChars = contextChars(
-    prompt,
-    await measureNetDiffChars(ctx.sandbox.worktreePath, ctx.base.ref),
-  );
+  const diff = await measureBranchDiff(ctx);
+  const measuredContextChars = contextChars(prompt, diff.chars);
   if (measuredContextChars > ctx.config.maxContextChars) {
-    return overQualityBudget(ctx, measuredContextChars, "verify");
+    return overQualityBudget(ctx, measuredContextChars, diff, "verify");
   }
   const [verified, rerun] = await Promise.allSettled([
     runQualityReviewer(ctx, {
@@ -2689,13 +2700,17 @@ async function standaloneStepFindings(
 const overQualityBudget = (
   ctx: ExecuteActionCtx,
   size: number,
+  diff: NetDiff,
   role: "listers" | "verify",
 ): Extract<LoopEvent, { kind: "context-over-budget" }> => ({
   kind: "context-over-budget",
   slot: "review-quality",
   size,
   budget: ctx.config.maxContextChars,
-  detail: `The completed branch exceeds the configured context budget before the quality ${role}.`,
+  detail: measuredDetail(
+    `The completed branch exceeds the configured context budget before the quality ${role}.`,
+    diff,
+  ),
 });
 
 // One quality lister or verify: its invocations on the quality routing, each
@@ -2800,17 +2815,18 @@ export async function runQualityFix(
       report: action.report,
       ruling: action.ruling,
     });
-    const measuredContextChars = contextChars(
-      prompt,
-      await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
-    );
+    const diff = await measureBranchDiff(ctx);
+    const measuredContextChars = contextChars(prompt, diff.chars);
     if (measuredContextChars > config.maxContextChars) {
       return {
         kind: "context-over-budget",
         slot: "review-quality",
         size: measuredContextChars,
         budget: config.maxContextChars,
-        detail: "The completed branch exceeds the configured context budget before the quality fixer.",
+        detail: measuredDetail(
+          "The completed branch exceeds the configured context budget before the quality fixer.",
+          diff,
+        ),
       };
     }
     const before = await requireIssueTip(ctx, "before the quality fixer");
@@ -2967,10 +2983,7 @@ export async function runImplementer(
     },
     anchorOpts,
   );
-  const measuredContextChars = contextChars(
-    prompt,
-    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
-  );
+  const measuredContextChars = contextChars(prompt, (await measureBranchDiff(ctx)).chars);
 
   // Covers the nudge below too, when one runs: the whole cost of the attempt's
   // agent leg, which is what every #77 idea trading implementer minutes for
@@ -3478,16 +3491,17 @@ export async function runAdjudicator(
     report,
     units,
   });
-  const measuredContextChars = contextChars(
-    prompt,
-    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
-  );
+  const diff = await measureBranchDiff(ctx);
+  const measuredContextChars = contextChars(prompt, diff.chars);
   if (measuredContextChars > config.maxContextChars) {
     throw new PartitionRequiredError(
       "adjudication",
       measuredContextChars,
       config.maxContextChars,
-      "The rejected report and branch exceed the configured context budget before adjudication.",
+      measuredDetail(
+        "The rejected report and branch exceed the configured context budget before adjudication.",
+        diff,
+      ),
       "measured",
     );
   }
@@ -3712,17 +3726,15 @@ export async function runVerifier(
     scope: reviewScope(ctx.priorReviewRounds, (sha) => contained.get(sha) === true),
     productionData: ctx.dbCopy.kind === "held",
   });
-  const measuredContextChars = contextChars(
-    prompt,
-    await measureNetDiffChars(sandbox.worktreePath, ctx.base.ref),
-  );
+  const diff = await measureBranchDiff(ctx);
+  const measuredContextChars = contextChars(prompt, diff.chars);
   if (measuredContextChars > config.maxContextChars) {
     return {
       kind: "context-over-budget",
       slot: "review-correctness",
       size: measuredContextChars,
       budget: config.maxContextChars,
-      detail: "The completed branch exceeds the configured context budget before review.",
+      detail: measuredDetail("The completed branch exceeds the configured context budget before review.", diff),
     };
   }
   const runnerDeps = {
