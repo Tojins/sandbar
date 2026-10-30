@@ -34,16 +34,21 @@ describe("the chunk-review scan's real adapter", () => {
     await writeFile(log, "");
     oldPath = process.env["PATH"];
     process.env["SANDBAR_TEST_GRAPHQL"] = graphql;
+    // The adapter runs its diffs concurrently: each call appends its record in
+    // one write, so two calls' arguments never interleave in the log.
+    const recordArgv = [
+      `rec='${log}'.$$`,
+      `for a in "$@"; do printf '%s\\0' "$a" >> "$rec"; done`, `printf '\\001' >> "$rec"`,
+      `cat "$rec" >> '${log}'`, `rm -f "$rec"`,
+    ];
     await writeFile(join(bin, "gh"), [
-      "#!/bin/sh", `log='${log}'`,
-      `for a in "$@"; do printf '%s\\0' "$a" >> "$log"; done`, `printf '\\001' >> "$log"`,
+      "#!/bin/sh", ...recordArgv,
       `case "$1 $2" in`, ` "api graphql") printf '%s' "$SANDBAR_TEST_GRAPHQL" ;;`,
       ` "issue view") printf '{"number":%s,"title":"Issue %s","body":"body %s","labels":[{"name":"ready-for-agent"}]}' "$3" "$3" "$3" ;;`,
       "esac",
     ].join("\n") + "\n", { mode: 0o755 });
     await writeFile(join(bin, "git"), [
-      "#!/bin/sh", `log='${log}'`,
-      `for a in "$@"; do printf '%s\\0' "$a" >> "$log"; done`, `printf '\\001' >> "$log"`,
+      "#!/bin/sh", ...recordArgv,
       `case "$1" in`,
       ` rev-list)`,
       `  printf 'merge44 base44 sha44\\nmerge42 base42 sha42\\n'`,
