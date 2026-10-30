@@ -24,7 +24,7 @@ import { join } from "node:path";
 
 import { Instrumenter } from "@stryker-mutator/instrumenter";
 
-import { runLogged, StructureError } from "./core.mjs";
+import { LOG_DIR, runLogged, StructureError, WORK_DIR } from "./core.mjs";
 
 // Every mutator Stryker 10 has. A mutant of any other means an upgrade added
 // one: `plannedMutants` refuses it until it is sorted in here.
@@ -42,8 +42,7 @@ export const PROBED_MUTATORS = [
 
 const EXCLUDED_MUTATORS = ALL_MUTATORS.filter((name) => !PROBED_MUTATORS.includes(name));
 
-export const STRYKER_DIR = ".stryker-tmp";
-const REPORT = `${STRYKER_DIR}/report.json`;
+const REPORT = `${WORK_DIR}/report.json`;
 
 // Ascending line numbers to `[first, last]` runs of consecutive lines.
 export function lineRuns(lines) {
@@ -66,8 +65,7 @@ const quiet = Object.fromEntries(
 
 // The mutants Stryker will test over `runs` of `path` (whose text is
 // `content`): `{ path, line, column }` each, 1-based like Stryker's report,
-// in line order.
-// A mutant a `Stryker disable` hint switched off is not one.
+// in line order. A mutant a `Stryker disable` hint switched off is not one.
 export async function plannedMutants(path, content, runs) {
   const { mutants } = await new Instrumenter(quiet).instrument(
     [{
@@ -105,7 +103,7 @@ export function strykerConfig(mutate) {
     incremental: false,
     reporters: ["json"],
     jsonReporter: { fileName: REPORT },
-    tempDirName: STRYKER_DIR,
+    tempDirName: WORK_DIR,
     cleanTempDir: true,
     ignorePatterns: ["coverage", ".sandbar"],
     allowConsoleColors: false,
@@ -147,18 +145,18 @@ export function probeResult(report, contents) {
   return { findings, killed, statics };
 }
 
-// Stryker over `mutate` in `dir`, whose `logDir` exists; `contents` maps
+// Stryker over `mutate` in `dir`, whose `LOG_DIR` exists; `contents` maps
 // each mutated path to its text.
-export async function runProbe(dir, mutate, contents, logDir) {
-  const config = join(dir, STRYKER_DIR, "stryker.config.json");
+export async function runProbe(dir, mutate, contents) {
+  const config = join(dir, WORK_DIR, "stryker.config.json");
   writeFileSync(config, JSON.stringify(strykerConfig(mutate)));
-  const log = join(logDir, "stryker.log");
+  const log = join(dir, LOG_DIR, "stryker.log");
   const bin = join(dir, "node_modules", "@stryker-mutator", "core", "bin", "stryker.js");
   const code = await runLogged([process.execPath, bin, "run", config], dir, log);
   if (code !== 0) {
     const error = readFileSync(log, "utf8").split("\n").find((line) => line.includes("ERROR"));
     const reason = error === undefined ? "" : `: ${error.replace(/^.*ERROR \S+ /, "")}`;
-    throw new StructureError(`probe: Stryker exited ${code}${reason} (${STRYKER_DIR}/log/stryker.log)`);
+    throw new StructureError(`probe: Stryker exited ${code}${reason} (${LOG_DIR}/stryker.log)`);
   }
   return probeResult(JSON.parse(readFileSync(join(dir, REPORT), "utf8")), contents);
 }

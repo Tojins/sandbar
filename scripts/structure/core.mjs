@@ -1,7 +1,8 @@
 // The shared core of sandbar's structural checks (#183, #235): the one way a
-// check asks git anything, the base it measures the branch against, and the
-// lines the branch adds. Plain ESM like `scripts/stats-classify.mjs`, so a
-// gate step runs it without a build; not shipped.
+// check asks git anything, the base it measures the branch against, the
+// lines the branch adds, and where and how a check runs a tool. Plain ESM
+// like `scripts/stats-classify.mjs`, so a gate step runs it without a build;
+// not shipped.
 //
 // Every git call is `git -C <dir> [--git-dir <gitDir>] -c safe.directory=*`.
 // `gitDir` exists for sandbar's own gate, whose tmpfs over the clone's `.git`
@@ -22,6 +23,11 @@ import { closeSync, openSync } from "node:fs";
 // The check could not be answered. Its message is the one line `run.mjs`
 // prints.
 export class StructureError extends Error {}
+
+// Where a check that runs tools keeps their work and logs, under the
+// worktree and gitignored (D1 allows a gate to write there).
+export const WORK_DIR = ".stryker-tmp";
+export const LOG_DIR = `${WORK_DIR}/log`;
 
 // `repo` is `{ dir, gitDir? }`.
 export function git(repo, args) {

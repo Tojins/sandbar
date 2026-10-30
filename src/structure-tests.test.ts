@@ -189,6 +189,13 @@ describe("coverage", () => {
       .toEqual({ findings, counts });
   });
 
+  it("a coverage file that is not JSON is an error", async () => {
+    const dir = await tempDir();
+    await mkdir(join(dir, "coverage/unit"), { recursive: true });
+    await writeFile(join(dir, UNIT_COVERAGE), "{");
+    expect(() => coverageFindings(dir, new Map(), false)).toThrow(`${UNIT_COVERAGE} is not JSON: `);
+  });
+
   it("a changed file coverage never measured is a finding: it measured another tree", async () => {
     const dir = await tempDir();
     await write(dir, UNIT_COVERAGE, {});
@@ -278,7 +285,7 @@ describe("probe", () => {
       "src/a.test.ts": "import { expect, it } from \"vitest\";\nimport { yes } from \"./a.js\";\nit(\"is red\", () => expect(yes(true)).toBe(false));\n",
     });
     const contents = new Map([["src/a.ts", await readFile(join(dir, "src/a.ts"), "utf8")]]);
-    await expect(runProbe(dir, new Map([["src/a.ts", [[1, 1]]]]), contents, join(dir, ".stryker-tmp", "log")))
+    await expect(runProbe(dir, new Map([["src/a.ts", [[1, 1]]]]), contents))
       .rejects.toThrow(/^probe: Stryker exited 1: .*initial test run.* \(\.stryker-tmp\/log\/stryker\.log\)$/);
   });
 });
@@ -290,7 +297,7 @@ describe("deletion", () => {
       "deploy/app.yml": "name: app\n",
       "src/deploy-app.test.ts": "import { expect, it } from \"vitest\";\nit(\"is red\", () => expect(1).toBe(2));\n",
     });
-    await expect(runDeletions(dir, [{ path: "deploy/app.yml", line: 1 }], join(dir, ".stryker-tmp", "log")))
+    await expect(runDeletions(dir, [{ path: "deploy/app.yml", line: 1 }]))
       .rejects.toThrow("deletion: src/deploy-*.test.ts fail with no line deleted (.stryker-tmp/log/deletion-baseline-1.log)");
   });
 });

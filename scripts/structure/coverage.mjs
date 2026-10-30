@@ -12,6 +12,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
+import { StructureError } from "./core.mjs";
+
 export const UNIT_COVERAGE = "coverage/unit/coverage-final.json";
 export const PODMAN_COVERAGE = "coverage/podman/coverage-final.json";
 
@@ -33,7 +35,15 @@ export function statementHits(json, root) {
 // `relativePath` in `dir` read as statement hits, or null when it is absent.
 export function readCoverage(dir, relativePath) {
   const path = join(dir, relativePath);
-  return existsSync(path) ? statementHits(JSON.parse(readFileSync(path, "utf8")), dir) : null;
+  if (!existsSync(path)) return null;
+  let json;
+  try {
+    json = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    throw new StructureError(`${relativePath} is not JSON: ${err.message}`);
+  }
+  return statementHits(json, dir);
 }
 
 // Each of `lines` of `path` a statement starts on, `{ line, state }`:

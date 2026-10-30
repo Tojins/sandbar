@@ -29,10 +29,10 @@
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import { addedLines, git, mergeBase } from "./core.mjs";
+import { addedLines, git, LOG_DIR, mergeBase, WORK_DIR } from "./core.mjs";
 import { coverageFindings, PODMAN_COVERAGE } from "./coverage.mjs";
 import { deletableLines, deletionEntry, runDeletions } from "./deletion.mjs";
-import { lineRuns, plannedMutants, runProbe, STRYKER_DIR } from "./probe.mjs";
+import { lineRuns, plannedMutants, runProbe } from "./probe.mjs";
 
 export const CAP = 200;
 
@@ -132,13 +132,11 @@ export async function checkTests(repo, baseRef, options) {
   }
   const deleting = deletions.filter((unit) => running.has(unit));
 
-  const stryker = join(repo.dir, STRYKER_DIR);
-  rmSync(stryker, { recursive: true, force: true });
-  const logDir = join(stryker, "log");
-  mkdirSync(logDir, { recursive: true });
+  rmSync(join(repo.dir, WORK_DIR), { recursive: true, force: true });
+  mkdirSync(join(repo.dir, LOG_DIR), { recursive: true });
   const [probe, deletion] = await Promise.all([
-    mutate.size === 0 ? { findings: [], killed: 0, statics: 0 } : runProbe(repo.dir, mutate, contents, logDir),
-    deleting.length === 0 ? { findings: [], caught: 0 } : runDeletions(repo.dir, deleting, logDir),
+    mutate.size === 0 ? { findings: [], killed: 0, statics: 0 } : runProbe(repo.dir, mutate, contents),
+    deleting.length === 0 ? { findings: [], caught: 0 } : runDeletions(repo.dir, deleting),
   ]);
   findings.push(...probe.findings, ...deletion.findings);
 

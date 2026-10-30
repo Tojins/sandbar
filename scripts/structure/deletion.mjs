@@ -14,7 +14,7 @@
 import { cpSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { runLogged, StructureError } from "./core.mjs";
+import { LOG_DIR, runLogged, StructureError, WORK_DIR } from "./core.mjs";
 
 // The first entry whose `paths` matches a file maps it; `tests` are vitest
 // filters, `label` names them in a finding.
@@ -39,13 +39,13 @@ export function deletableLines(content, lines) {
   return lines.filter((line) => !COMMENT_ONLY.test(text[line - 1] ?? ""));
 }
 
-const NOT_COPIED = new Set([".git", "node_modules", ".stryker-tmp", "coverage", ".sandbar"]);
+const NOT_COPIED = new Set([".git", "node_modules", WORK_DIR, "coverage", ".sandbar"]);
 
 // Each of `units` (`{ path, line }`, mapped paths only) deleted in turn in a
-// copy of `dir`; `logDir` exists. Resolves to the green deletions' findings
-// and how many went red.
-export async function runDeletions(dir, units, logDir) {
-  const copy = join(dir, ".stryker-tmp", "deletion");
+// copy of `dir`, whose `LOG_DIR` exists. Resolves to the green deletions'
+// findings and how many went red.
+export async function runDeletions(dir, units) {
+  const copy = join(dir, WORK_DIR, "deletion");
   rmSync(copy, { recursive: true, force: true });
   for (const name of readdirSync(dir).filter((entry) => !NOT_COPIED.has(entry))) {
     cpSync(join(dir, name), join(copy, name), { recursive: true });
@@ -54,13 +54,13 @@ export async function runDeletions(dir, units, logDir) {
   const vitest = (entry, log) => runLogged(
     [process.execPath, join(copy, "node_modules", "vitest", "vitest.mjs"), "run", ...entry.tests],
     copy,
-    join(logDir, log),
+    join(dir, LOG_DIR, log),
   );
   try {
     for (const entry of new Set(units.map((unit) => deletionEntry(unit.path)))) {
       const log = `deletion-baseline-${DELETION_MAP.indexOf(entry)}.log`;
       if (await vitest(entry, log) !== 0) {
-        throw new StructureError(`deletion: ${entry.label} fail with no line deleted (.stryker-tmp/log/${log})`);
+        throw new StructureError(`deletion: ${entry.label} fail with no line deleted (${LOG_DIR}/${log})`);
       }
     }
     const findings = [];
