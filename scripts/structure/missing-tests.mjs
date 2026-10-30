@@ -30,9 +30,11 @@
 // runs.
 //
 // It reads the worktree, which in the gate is the clean HEAD it judges (D1),
-// and writes only under the gitignored `.stryker-tmp/`, cleared first. The
-// worktree is the working directory, `--git-dir` or not: a judged file it
-// lacks or cannot read, or a `.stryker-tmp/` it cannot clear, is exit 2.
+// and writes only under the gitignored `.stryker-tmp/`, cleared first and
+// removed once the tools answer; a tool that cannot leaves it for the log its
+// line names. The worktree is the working directory, `--git-dir` or not: a
+// judged file it lacks or cannot read, or a `.stryker-tmp/` it cannot clear,
+// is exit 2.
 
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -162,6 +164,7 @@ export async function checkMissingTests(repo, baseRef, options) {
     deleting.length === 0 ? { findings: [], caught: 0 } : runDeletions(repo.dir, deleting),
   ]);
   findings.push(...probe.findings, ...deletion.findings);
+  withFsError(`${WORK_DIR} cannot be removed`, () => rmSync(join(repo.dir, WORK_DIR), { recursive: true, force: true }));
 
   return {
     findings,

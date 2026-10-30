@@ -3,7 +3,7 @@
 // able to go red by running `run.mjs` over a fixture branch beside its green
 // twin, after a real coverage run.
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -502,15 +502,17 @@ describe("run.mjs missing-tests", () => {
       stderr: "",
     });
     expect(git(dir, "status", "--porcelain")).toBe("");
+    expect(existsSync(join(dir, ".stryker-tmp"))).toBe(false);
   });
 
   it("passes its green twin in one line", { timeout: SLOW }, async () => {
-    const { result } = await gateRun("missing-tests-green");
+    const { dir, result } = await gateRun("missing-tests-green");
     expect(result).toEqual({
       status: 0,
       lines: ["missing-tests: 2 lines covered, 5 mutants killed, 2 line deletions caught, 0 survived (unprobed: 1 podman-only line)"],
       stderr: "",
     });
+    expect(existsSync(join(dir, ".stryker-tmp"))).toBe(false);
   });
 
   it("cannot answer without the coverage the test steps write, in one line", async () => {
