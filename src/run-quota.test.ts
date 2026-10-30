@@ -1075,7 +1075,7 @@ describe("run quota orchestration (#109)", () => {
     });
 
     it("holds tracker reads on a rate limit, says so, and stops kicking while held", async () => {
-      const heldUntil = Date.now() + 3_600_000;
+      const heldUntil = Date.now() + 3_600_000; // wall clock: the run holds until it
       vi.mocked(fetchRateLimitResumeAt).mockResolvedValueOnce(heldUntil);
       seams.plan.mockResolvedValue(resolution([]));
       vi.mocked(fetchOriginRefs)
@@ -1723,7 +1723,7 @@ describe("run quota orchestration (#109)", () => {
         { code: 1, stderr },
       ))
       .mockImplementation(async () => {
-        replannedAt ||= Date.now();
+        replannedAt ||= Date.now(); // wall clock: against the run's resume time
         return resolution([arrived]);
       });
     vi.mocked(fetchOriginRefs).mockResolvedValue({
@@ -4030,7 +4030,7 @@ describe("run quota orchestration (#109)", () => {
       // The request is withdrawn while open, so nothing lands between the
       // closures: only the closure bookkeeping is under test.
       seams.landRequestPullRequests.mockImplementation(async () =>
-        Date.now() === OPEN.getTime()
+        Date.now() === OPEN.getTime() // wall clock: the fake system time
           ? []
           : [{ number: 9, headRefName: target.branch, title: target.title, labels: ["land"] }]
       );

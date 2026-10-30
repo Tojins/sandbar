@@ -154,7 +154,8 @@ export type BoundedRuntime = (
 ) => Promise<BoundedRuntimeResult>;
 
 // Own the deadline rather than using execFile's `timeout`: Podman can turn the
-// latter's SIGTERM into exit 0, laundering a timed-out exec into success (#26).
+// latter's SIGTERM into exit 0 (5.7 does, 5.8 does not), laundering a
+// timed-out exec into success (#26).
 // Every host-side Podman control/read call shares this exact classification.
 export const boundedRuntime: BoundedRuntime = (
   args,

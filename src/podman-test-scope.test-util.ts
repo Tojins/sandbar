@@ -83,9 +83,9 @@
 // All four lines are load-bearing, and the middle two are the ones easily
 // dropped as redundant. `pod rm -f` takes its member containers and the pod's
 // unreachably-named infra container, but it reaches neither the fixture
-// containers these files start outside a pod (`killprobe`, `hctimer`,
-// `hcnotimer`, `initprobe` — and `killprobe` is a
-// `sleep infinity`, i.e. a container left RUNNING forever) nor
+// containers these files start outside a pod (`hctimer`, `hcnotimer`,
+// `initprobe` — the first two a `sleep infinity`, i.e. a container left
+// RUNNING forever) nor
 // the network sandbar created for the pod, which outlives it. Under the old fixed scope both classes reaped
 // themselves, because the next run recomputed the same names and the fixtures'
 // own `rm -f` / `startStack` reclaimed them; per-process, nothing ever

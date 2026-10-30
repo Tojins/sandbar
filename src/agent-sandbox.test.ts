@@ -1215,9 +1215,9 @@ describe("the agent's process group (#189)", () => {
       { stdio: "ignore" },
     );
     try {
-      const deadline = Date.now() + 3000;
+      const deadline = performance.now() + 3000;
       while (!existsSync(childFile) || (await readFile(childFile, "utf8")).trim() === "") {
-        if (Date.now() >= deadline) throw new Error("background child never started");
+        if (performance.now() >= deadline) throw new Error("background child never started");
         await new Promise((r) => setTimeout(r, 20));
       }
       const child = Number((await readFile(childFile, "utf8")).trim());
@@ -1682,9 +1682,9 @@ describe("createSandbox integration (local provider)", () => {
       const agent = scriptedAgent(
         `printf '%s\\n' '${JSON.stringify({ type: "result", result: "done" })}'`,
       );
-      const started = Date.now();
+      const started = performance.now();
       const first = await sandbox.run({ agent, prompt: "first", completionSignal: [] });
-      const firstElapsed = Date.now() - started;
+      const firstElapsed = performance.now() - started;
       const second = await sandbox.run({ agent, prompt: "second", completionSignal: [] });
 
       expect(first).toMatchObject({ peakMemoryBytes: 2048, oomKilled: true });
@@ -2778,7 +2778,7 @@ describe("createSandbox integration (local provider)", () => {
           `printf '%s\\n' 'completion stderr tail' >&2 && ` +
           `sleep 30`,
       );
-      const start = Date.now();
+      const start = performance.now();
       const err = await sandbox.run({
         name: "implementer-4-attempt-1",
         model: "test-model",
@@ -2791,7 +2791,7 @@ describe("createSandbox integration (local provider)", () => {
           records.push(record);
         },
       }).then(() => null, (e: unknown) => e);
-      const elapsed = Date.now() - start;
+      const elapsed = performance.now() - start;
       expect(err).toBeInstanceOf(AgentError);
       expect((err as Error).message).toContain("without exiting");
       expect(agentPartialOutput(err)).toContain("<promise>COMPLETE</promise>");
@@ -2913,10 +2913,10 @@ describe("createSandbox integration (local provider)", () => {
       `sleep 31 & echo $! > ${join(markers, name)}`;
     const reaped = async (name: string): Promise<boolean> => {
       const pid = Number((await readFile(join(markers, name), "utf8")).trim());
-      const deadline = Date.now() + 3000;
+      const deadline = performance.now() + 3000;
       for (;;) {
         if (await processExited(pid)) return true;
-        if (Date.now() >= deadline) return false;
+        if (performance.now() >= deadline) return false;
         await new Promise((r) => setTimeout(r, 25));
       }
     };
@@ -2997,7 +2997,7 @@ describe("createSandbox integration (local provider)", () => {
     it("re-arms on later lines, so a notification turn runs and its result counts", async () => {
       const sandbox = await sandboxFor("sandbar/issue-189-rearm");
       try {
-        const start = Date.now();
+        const start = performance.now();
         const run = await sandbox.run({
           agent: scriptedAgent(
             `${success("first")} && sleep 0.3 && ` +
@@ -3012,7 +3012,7 @@ describe("createSandbox integration (local provider)", () => {
         });
         expect(run.endedBy).toBe("result-then-silence");
         expect(run.stdout).toBe("second <promise>COMPLETE</promise>");
-        expect(Date.now() - start).toBeGreaterThanOrEqual(1100);
+        expect(performance.now() - start).toBeGreaterThanOrEqual(1100);
       } finally {
         await sandbox.close();
       }
@@ -3106,7 +3106,7 @@ describe("createSandbox integration (local provider)", () => {
       it("does not accept the turn end; the task-completion turn reaches the run", async () => {
         const sandbox = await sandboxFor("sandbar/issue-192-waiting");
         try {
-          const start = Date.now();
+          const start = performance.now();
           const run = await sandbox.run({
             agent: scriptedAgent(
               `${tasks("suite")} && ${success("waiting for the suite")} && sleep 0.8 && ` +
@@ -3121,7 +3121,7 @@ describe("createSandbox integration (local provider)", () => {
           expect(run.endedBy).toBe("result-then-silence");
           expect(run.stdout).toBe("suite passed");
           expect(run.backgroundTasks).toBe(0);
-          expect(Date.now() - start).toBeGreaterThanOrEqual(1000);
+          expect(performance.now() - start).toBeGreaterThanOrEqual(1000);
         } finally {
           await sandbox.close();
         }

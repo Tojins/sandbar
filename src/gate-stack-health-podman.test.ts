@@ -157,7 +157,7 @@ describe.runIf(available)(
         const before = await idOf("svc");
 
         await wedge(repo);
-        const started = Date.now();
+        const started = performance.now();
         const gate = stack.runGate();
         const unwedge = setTimeout(() => {
           void rm(join(repo, WEDGE)).catch(() => {});
@@ -169,7 +169,7 @@ describe.runIf(available)(
         }
         // It WAITED. Without this the test passes just as happily with the
         // whole check deleted, since a gate that never looks is also green.
-        expect(Date.now() - started).toBeGreaterThan(2_500);
+        expect(performance.now() - started).toBeGreaterThan(2_500);
         expect(await idOf("svc")).toBe(before);
       },
       240_000,

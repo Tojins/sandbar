@@ -2242,13 +2242,13 @@ describe("pollUntilHealthy", () => {
   // interval at the top of every gate run for every probed issue container.
   it("returns healthy on the first probe, without sleeping", async () => {
     const { probe, calls } = healthProbeOf([podmanSaid({})]);
-    const started = Date.now();
+    const started = performance.now();
     expect(await pollUntilHealthy("c", probed(), probe)).toEqual({
       verdict: "healthy",
       detail: "",
     });
     expect(calls).toEqual(["healthcheck"]);
-    expect(Date.now() - started).toBeLessThan(READY_POLL_INTERVAL_MS);
+    expect(performance.now() - started).toBeLessThan(READY_POLL_INTERVAL_MS);
   });
 
   // It POLLS rather than deciding on one shot: a database mid-GC or a service
