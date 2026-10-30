@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { StructureError } from "../scripts/structure/core.mjs";
 import {
   coverageFindings, lineCoverage, PODMAN_COVERAGE, statementHits, UNIT_COVERAGE, uncoveredFindings,
 } from "../scripts/structure/coverage.mjs";
@@ -209,6 +210,18 @@ describe("coverage", () => {
     await writeFile(join(dir, path), JSON.stringify(files));
   };
 
+  const coverageDir = async (files: string[]) => {
+    const dir = await tempDir();
+    const a = join(dir, "src/a.ts");
+    if (files.includes(UNIT_COVERAGE)) {
+      await write(dir, UNIT_COVERAGE, { [a]: coverageFile(a, [[1, 1], [2, 0], [3, 0]]) });
+    }
+    if (files.includes(PODMAN_COVERAGE)) {
+      await write(dir, PODMAN_COVERAGE, { [a]: coverageFile(a, [[1, 0], [2, 0], [3, 4]]) });
+    }
+    return dir;
+  };
+
   it.each([
     {
       name: "both files, the gate",
@@ -218,37 +231,26 @@ describe("coverage", () => {
       counts: { covered: 1, unknown: 0, podmanOnly: 1 },
     },
     {
-      name: "no podman file in the gate",
-      files: [UNIT_COVERAGE],
-      requirePodman: true,
-      findings: [`${PODMAN_COVERAGE}: missing, the test step wrote no coverage`],
-      counts: { covered: 1, unknown: 2, podmanOnly: 0 },
-    },
-    {
       name: "no podman file locally",
       files: [UNIT_COVERAGE],
       requirePodman: false,
       findings: [],
       counts: { covered: 1, unknown: 2, podmanOnly: 0 },
     },
-    {
-      name: "no unit file",
-      files: [PODMAN_COVERAGE],
-      requirePodman: false,
-      findings: [`${UNIT_COVERAGE}: missing, the test step wrote no coverage`],
-      counts: { covered: 0, unknown: 0, podmanOnly: 0 },
-    },
   ])("$name", async ({ files, requirePodman, findings, counts }) => {
-    const dir = await tempDir();
-    const a = join(dir, "src/a.ts");
-    if (files.includes(UNIT_COVERAGE)) {
-      await write(dir, UNIT_COVERAGE, { [a]: coverageFile(a, [[1, 1], [2, 0], [3, 0]]) });
-    }
-    if (files.includes(PODMAN_COVERAGE)) {
-      await write(dir, PODMAN_COVERAGE, { [a]: coverageFile(a, [[1, 0], [2, 0], [3, 4]]) });
-    }
+    const dir = await coverageDir(files);
     expect(coverageFindings(dir, new Map([["src/a.ts", [1, 2, 3]]]), requirePodman))
       .toEqual({ findings, counts });
+  });
+
+  // Missing coverage cannot answer the check: exit 2, never a finding.
+  it.each([
+    { name: "no podman file in the gate", files: [UNIT_COVERAGE], requirePodman: true, missing: PODMAN_COVERAGE },
+    { name: "no unit file", files: [PODMAN_COVERAGE], requirePodman: false, missing: UNIT_COVERAGE },
+  ])("$name is an error", async ({ files, requirePodman, missing }) => {
+    const dir = await coverageDir(files);
+    expect(() => coverageFindings(dir, new Map([["src/a.ts", [1, 2, 3]]]), requirePodman))
+      .toThrow(new StructureError(`${missing} is missing: the test step wrote no coverage`));
   });
 
   it("a coverage file that is not JSON is an error", async () => {
@@ -421,7 +423,6 @@ describe("run.mjs missing-tests", () => {
     expect(result).toEqual({
       status: 1,
       lines: [
-        "missing-tests: 4 findings",
         "src/calc.ts:7  Stryker disable hint without a reason",
         "src/calc.ts:9  uncovered",
         "src/calc.ts:2  survived EqualityOperator: n > max → n >= max",
@@ -437,6 +438,15 @@ describe("run.mjs missing-tests", () => {
     expect(result).toEqual({
       status: 0,
       lines: ["missing-tests: 2 lines covered, 5 mutants killed, 2 line deletions caught, 0 survived (unprobed: 1 podman-only line)"],
+      stderr: "",
+    });
+  });
+
+  it("cannot answer without the coverage the test steps write, in one line", async () => {
+    const dir = await fixtureRepo("missing-tests-red");
+    expect(run(dir, "missing-tests", "--base", "origin/main", "--podman-coverage")).toEqual({
+      status: 2,
+      lines: ["missing-tests: coverage/unit/coverage-final.json is missing: the test step wrote no coverage"],
       stderr: "",
     });
   });

@@ -142,7 +142,7 @@ export async function checkMissingTests(repo, baseRef, options) {
   findings.push(...probe.findings, ...deletion.findings);
 
   return {
-    findings: findings.length === 0 ? [] : [`missing-tests: ${findings.length} findings`, ...findings],
+    findings,
     summary: missingTestsSummary({ ...coverage.counts, ...probe, caught: deletion.caught, over }),
   };
 }

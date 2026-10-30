@@ -4,10 +4,11 @@
 // `coverage/podman/` from `podman-test`.
 //
 // A changed line counts when a statement starts on it, and is covered when
-// either file hits one of those statements. The gate requires podman coverage
-// (`--podman-coverage`), so there a missing file is a finding. Elsewhere, a
-// local `npm run structure`, it may be absent, and a line no unit test hits
-// is then `unknown`, never a finding.
+// either file hits one of those statements. A missing unit file cannot
+// answer the check, and neither can a missing podman file where it is
+// required (`--podman-coverage`, the gate): `StructureError`, exit 2.
+// Elsewhere, a local `npm run structure`, the podman file may be absent, and
+// a line no unit test hits is then `unknown`, never a finding.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -32,10 +33,14 @@ export function statementHits(json, root) {
   return files;
 }
 
-// `relativePath` in `dir` read as statement hits, or null when it is absent.
-export function readCoverage(dir, relativePath) {
+// `relativePath` in `dir` read as statement hits, or null when it is absent
+// and not `required`.
+export function readCoverage(dir, relativePath, required) {
   const path = join(dir, relativePath);
-  if (!existsSync(path)) return null;
+  if (!existsSync(path)) {
+    if (required) throw new StructureError(`${relativePath} is missing: the test step wrote no coverage`);
+    return null;
+  }
   let json;
   try {
     json = JSON.parse(readFileSync(path, "utf8"));
@@ -82,15 +87,12 @@ export function uncoveredFindings(path, counted) {
 
 // The coverage findings over `added` (`Map<path, number[]>`, production
 // paths only) in `dir`, and how many lines were covered, unknown and
-// podman-only. `requirePodman`: a missing podman file is a finding.
+// podman-only. `requirePodman`: a missing podman file is an error.
 export function coverageFindings(dir, added, requirePodman) {
   const findings = [];
-  const unit = readCoverage(dir, UNIT_COVERAGE);
-  const podman = readCoverage(dir, PODMAN_COVERAGE);
-  if (unit === null) findings.push(`${UNIT_COVERAGE}: missing, the test step wrote no coverage`);
-  if (podman === null && requirePodman) findings.push(`${PODMAN_COVERAGE}: missing, the test step wrote no coverage`);
+  const unit = readCoverage(dir, UNIT_COVERAGE, true);
+  const podman = readCoverage(dir, PODMAN_COVERAGE, requirePodman);
   const counts = { covered: 0, unknown: 0, podmanOnly: 0 };
-  if (unit === null) return { findings, counts };
   for (const [path, lines] of added) {
     const counted = lineCoverage(path, lines, unit, podman);
     if (counted === null) {
