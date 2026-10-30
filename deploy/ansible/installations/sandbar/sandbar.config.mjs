@@ -100,7 +100,7 @@ export default {
         name: "tests-structure",
         in: "runner",
         command: [
-          "node", "scripts/structure/run.mjs", "tests",
+          "node", "scripts/structure/run.mjs", "missing-tests",
           "--base", "origin/main", "--git-dir", gitDir, "--podman-coverage",
         ],
         timeoutMs: 1_500_000,

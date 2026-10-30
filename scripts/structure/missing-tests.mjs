@@ -1,6 +1,6 @@
-// The `tests` check (#183, #236), the `tests-structure` step, which settles
-// `missing-tests`: every line the branch adds is executed and pinned by a
-// test. Over the lines `merge-base(HEAD, <base>)..HEAD` adds:
+// The `missing-tests` check (#183, #236), the `tests-structure` step, which
+// settles the rule of that name: every line the branch adds is executed and
+// pinned by a test. Over the lines `merge-base(HEAD, <base>)..HEAD` adds:
 //
 //   coverage  a changed line of `src/**/*.ts` (not `*.test.ts` or
 //             `*.test-util.ts`) a statement starts on is hit by some test
@@ -80,22 +80,22 @@ export function cappedRuns(runs, planned, kept) {
 const count = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
 
 // The success line from what each part counted.
-export function testsSummary({ covered, unknown, podmanOnly, killed, caught, statics, over }) {
+export function missingTestsSummary({ covered, unknown, podmanOnly, killed, caught, statics, over }) {
   const unprobed = [
     [podmanOnly, "podman-only line"],
     [statics, "static mutant"],
     [over, "unit over the cap"],
   ].filter(([n]) => n > 0).map(([n, noun]) => count(n, noun));
-  return `tests: ${count(covered, "line")} covered, ${count(killed, "mutant")} killed, ` +
+  return `missing-tests: ${count(covered, "line")} covered, ${count(killed, "mutant")} killed, ` +
     `${count(caught, "line deletion")} caught, 0 survived` +
     (unprobed.length === 0 ? "" : ` (unprobed: ${unprobed.join(", ")})`) +
     (unknown === 0 ? "" : `; ${count(unknown, "line")} unknown without ${PODMAN_COVERAGE}`);
 }
 
 // `options.podmanCoverage`: podman coverage is required (coverage.mjs).
-export async function checkTests(repo, baseRef, options) {
+export async function checkMissingTests(repo, baseRef, options) {
   if (isLandingShape(repo, baseRef)) {
-    return { findings: [], summary: `tests: skipped, HEAD merges onto ${baseRef} (gate-1 settled the branch)` };
+    return { findings: [], summary: `missing-tests: skipped, HEAD merges onto ${baseRef} (gate-1 settled the branch)` };
   }
   const added = addedLines(repo, mergeBase(repo, baseRef));
   const contents = new Map(
@@ -142,7 +142,7 @@ export async function checkTests(repo, baseRef, options) {
   findings.push(...probe.findings, ...deletion.findings);
 
   return {
-    findings: findings.length === 0 ? [] : [`tests: ${findings.length} findings`, ...findings],
-    summary: testsSummary({ ...coverage.counts, ...probe, caught: deletion.caught, over }),
+    findings: findings.length === 0 ? [] : [`missing-tests: ${findings.length} findings`, ...findings],
+    summary: missingTestsSummary({ ...coverage.counts, ...probe, caught: deletion.caught, over }),
   };
 }

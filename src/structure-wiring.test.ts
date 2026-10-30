@@ -1,7 +1,7 @@
 // Sandbar's own gate runs the structural checks (#183, #235, #236): the
 // installation config, imported as the daemon imports it, has the steps, their
 // `settles`, the read-only `.git` they read through `--git-dir`, and the
-// coverage the `tests` check reads.
+// coverage the `missing-tests` check reads.
 import { dirname } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
@@ -32,11 +32,11 @@ describe("sandbar's gate runs the structural checks", () => {
     });
   });
 
-  it("runs the tests check last, settling missing-tests", () => {
+  it("runs the missing-tests check last, settling missing-tests", () => {
     expect(stack.steps.at(-1)).toMatchObject({
       name: "tests-structure",
       command: [
-        "node", "scripts/structure/run.mjs", "tests",
+        "node", "scripts/structure/run.mjs", "missing-tests",
         "--base", "origin/main", "--git-dir", "/workspace-git", "--podman-coverage",
       ],
       timeoutMs: 1_500_000,
@@ -48,7 +48,7 @@ describe("sandbar's gate runs the structural checks", () => {
   it.each([
     ["test", ["npm", "test", "--", "--exclude", "**/*-podman.test.ts"], UNIT_COVERAGE],
     ["podman-test", ["npm", "test", "--", "podman.test.ts"], PODMAN_COVERAGE],
-  ])("the %s step runs its suite writing the %s the tests check reads", (name, suite, file) => {
+  ])("the %s step runs its suite writing the %s the missing-tests check reads", (name, suite, file) => {
     const command = stack.steps.find((step) => step.name === name)?.command ?? [];
     expect(command.slice(0, suite.length)).toEqual(suite);
     expect(command.slice(-2)).toEqual(["--coverage.enabled", `--coverage.reportsDirectory=${dirname(file)}`]);

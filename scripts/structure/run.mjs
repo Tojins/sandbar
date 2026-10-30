@@ -4,19 +4,19 @@
 // step of sandbar's own gate (deploy/ansible/installations/sandbar), and the
 // step's `settles` drops the matching prose from the prompts:
 //
-//   version  the branch moves `version` above its base (version.mjs), the
-//            `version` step, which settles `commit-ritual`
-//   tests    every added production line is covered and pinned by a test
-//            (tests.mjs), the `tests-structure` step, which settles
-//            `missing-tests`
+//   version        the branch moves `version` above its base (version.mjs),
+//                  the `version` step, which settles `commit-ritual`
+//   missing-tests  every added production line is covered and pinned by a
+//                  test (missing-tests.mjs), the `tests-structure` step,
+//                  which settles the rule it is named for
 //
 //   node scripts/structure/run.mjs [check…] [--base <ref>] [--git-dir <dir>]
 //                                  [--podman-coverage]
 //
 // No check named runs every check; `--base` defaults to `origin/main`. The
 // repository is the working directory, or `--git-dir` (core.mjs).
-// `--podman-coverage`: `tests` requires the podman tests' coverage, as the
-// gate, whose `podman-test` step writes it, does (coverage.mjs).
+// `--podman-coverage`: `missing-tests` requires the podman tests' coverage,
+// as the gate, whose `podman-test` step writes it, does (coverage.mjs).
 //
 // Output is compact, because a red reaches the implementer as a gate trace
 // and every line of it is context paid for: a red check prints one line per
@@ -27,10 +27,10 @@
 import { parseArgs } from "node:util";
 
 import { StructureError } from "./core.mjs";
-import { checkTests } from "./tests.mjs";
+import { checkMissingTests } from "./missing-tests.mjs";
 import { checkVersion } from "./version.mjs";
 
-const CHECKS = { version: checkVersion, tests: checkTests };
+const CHECKS = { version: checkVersion, "missing-tests": checkMissingTests };
 
 const USAGE = `usage: run.mjs [${Object.keys(CHECKS).join("|")}]… [--base <ref>] [--git-dir <dir>] [--podman-coverage]`;
 

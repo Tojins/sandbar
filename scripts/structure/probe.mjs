@@ -1,6 +1,6 @@
-// The Stryker probe of the `tests` check (#183 decision 5, #236): the changed
-// lines of `src/**/*.ts` are mutated, and a mutant the suite survives is a
-// line no test pins.
+// The Stryker probe of the `missing-tests` check (#183 decision 5, #236):
+// the changed lines of `src/**/*.ts` are mutated, and a mutant the suite
+// survives is a line no test pins.
 //
 // The run is a child process whose output goes to `.stryker-tmp/log/`, never
 // to the check's: `@stryker-mutator/vitest-runner` over
@@ -17,7 +17,7 @@
 //
 // `plannedMutants` asks Stryker's own instrumenter which mutants a run over
 // the same ranges will test, so the check can cap the run before paying for
-// it (tests.mjs).
+// it (missing-tests.mjs).
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

@@ -204,17 +204,17 @@ describe("version check", () => {
     {
       name: "an unknown option",
       args: ["version", "--bogus"],
-      line: /--bogus.*; usage: run\.mjs \[version\|tests\]… \[--base <ref>\] \[--git-dir <dir>\] \[--podman-coverage\]$/,
+      line: /--bogus.*; usage: run\.mjs \[version\|missing-tests\]… \[--base <ref>\] \[--git-dir <dir>\] \[--podman-coverage\]$/,
     },
     {
       name: "an option missing its value",
       args: ["--base"],
-      line: /--base.*; usage: run\.mjs \[version\|tests\]…/,
+      line: /--base.*; usage: run\.mjs \[version\|missing-tests\]…/,
     },
     {
       name: "an unknown check",
       args: ["nope"],
-      line: /^unknown check 'nope'; usage: run\.mjs \[version\|tests\]… \[--base <ref>\] \[--git-dir <dir>\] \[--podman-coverage\]$/,
+      line: /^unknown check 'nope'; usage: run\.mjs \[version\|missing-tests\]… \[--base <ref>\] \[--git-dir <dir>\] \[--podman-coverage\]$/,
     },
   ])("$name is a one-line exit 2", async ({ args, broken, line }) => {
     const dir = await fixtureRepo("version-bumped");

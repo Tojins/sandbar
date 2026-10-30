@@ -1,9 +1,9 @@
-// The line-deletion map of the `tests` check (#183 decision 5, #236): for the
-// files Stryker cannot mutate, the literal form of "a line whose deletion
-// leaves the suite green". Each changed line of a mapped file is deleted in
-// a copy of the worktree, the tests mapped to it run there, and a green run
-// is a finding. A blank or comment-only line is not probed: deleting it can
-// change nothing.
+// The line-deletion map of the `missing-tests` check (#183 decision 5,
+// #236): for the files Stryker cannot mutate, the literal form of "a line
+// whose deletion leaves the suite green". Each changed line of a mapped file
+// is deleted in a copy of the worktree, the tests mapped to it run there, and
+// a green run is a finding. A blank or comment-only line is not probed:
+// deleting it can change nothing.
 //
 // The copy is one tree under `.stryker-tmp/deletion/` (gitignored, D1),
 // sharing the worktree's `node_modules`; each probe writes its one file and

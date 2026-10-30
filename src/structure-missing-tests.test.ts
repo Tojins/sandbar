@@ -16,8 +16,8 @@ import {
   lineRuns, plannedMutants, probeResult, runProbe, strykerConfig,
 } from "../scripts/structure/probe.mjs";
 import {
-  capUnits, cappedRuns, hintFinding, isLandingShape, isProduction, testsSummary,
-} from "../scripts/structure/tests.mjs";
+  capUnits, cappedRuns, hintFinding, isLandingShape, isProduction, missingTestsSummary,
+} from "../scripts/structure/missing-tests.mjs";
 import { git, run, useFixtures } from "./structure.test-util.js";
 
 const NODE_MODULES = fileURLToPath(new URL("../node_modules", import.meta.url));
@@ -60,7 +60,7 @@ describe("which lines the check reads", () => {
     ["src/run.test.ts", false],
     ["src/podman-exec.test-util.ts", false],
     ["src/ui.js", false],
-    ["scripts/structure/tests.mjs", false],
+    ["scripts/structure/missing-tests.mjs", false],
   ])("isProduction(%s) is %s", (path, expected) => {
     expect(isProduction(path)).toBe(expected);
   });
@@ -82,15 +82,15 @@ describe("which lines the check reads", () => {
   });
 });
 
-// Each shape built over the `tests-red` fixture: `origin/main` the base,
-// `topic` one commit on it, and `other` another branch's commit.
+// Each shape built over the `missing-tests-red` fixture: `origin/main` the
+// base, `topic` one commit on it, and `other` another branch's commit.
 describe("the landing shape", () => {
   const commit = (dir: string, name: string) => {
     git(dir, "commit", "-q", "--allow-empty", "-m", name);
     return git(dir, "rev-parse", "HEAD");
   };
   const shapes = async () => {
-    const dir = await fixtureRepo("tests-red");
+    const dir = await fixtureRepo("missing-tests-red");
     git(dir, "branch", "other", "origin/main");
     git(dir, "checkout", "-q", "other");
     commit(dir, "other");
@@ -393,35 +393,35 @@ describe("the cap", () => {
 describe("summary", () => {
   const counts = { covered: 1, unknown: 0, podmanOnly: 0, killed: 1, caught: 1, statics: 0, over: 0 };
   it.each([
-    { name: "nothing unprobed", counts, line: "tests: 1 line covered, 1 mutant killed, 1 line deletion caught, 0 survived" },
+    { name: "nothing unprobed", counts, line: "missing-tests: 1 line covered, 1 mutant killed, 1 line deletion caught, 0 survived" },
     {
       name: "every kind unprobed, and unknown lines",
       counts: { covered: 37, unknown: 3, podmanOnly: 4, killed: 52, caught: 0, statics: 2, over: 1 },
-      line: "tests: 37 lines covered, 52 mutants killed, 0 line deletions caught, 0 survived " +
+      line: "missing-tests: 37 lines covered, 52 mutants killed, 0 line deletions caught, 0 survived " +
         `(unprobed: 4 podman-only lines, 2 static mutants, 1 unit over the cap); 3 lines unknown without ${PODMAN_COVERAGE}`,
     },
   ])("$name", ({ counts: c, line }) => {
-    expect(testsSummary(c)).toBe(line);
+    expect(missingTestsSummary(c)).toBe(line);
   });
 });
 
 // The proofs that the check can go red (#183 §3), beside the green twin:
 // coverage from a real vitest v8 run of each test step, then the check.
-describe("run.mjs tests", () => {
+describe("run.mjs missing-tests", () => {
   const gateRun = async (fixture: string) => {
     const dir = await fixtureRepo(fixture);
     await symlink(NODE_MODULES, join(dir, "node_modules"));
     vitest(dir, "--exclude", "**/*-podman.test.ts", "--coverage.enabled", "--coverage.reportsDirectory=coverage/unit");
     vitest(dir, "podman.test.ts", "--coverage.enabled", "--coverage.reportsDirectory=coverage/podman");
-    return { dir, result: run(dir, "tests", "--base", "origin/main", "--podman-coverage") };
+    return { dir, result: run(dir, "missing-tests", "--base", "origin/main", "--podman-coverage") };
   };
 
   it("goes red on an uncovered line, a survivor, a green deletion and a bare hint", { timeout: SLOW }, async () => {
-    const { dir, result } = await gateRun("tests-red");
+    const { dir, result } = await gateRun("missing-tests-red");
     expect(result).toEqual({
       status: 1,
       lines: [
-        "tests: 4 findings",
+        "missing-tests: 4 findings",
         "src/calc.ts:7  Stryker disable hint without a reason",
         "src/calc.ts:9  uncovered",
         "src/calc.ts:2  survived EqualityOperator: n > max → n >= max",
@@ -433,21 +433,21 @@ describe("run.mjs tests", () => {
   });
 
   it("passes its green twin in one line", { timeout: SLOW }, async () => {
-    const { result } = await gateRun("tests-green");
+    const { result } = await gateRun("missing-tests-green");
     expect(result).toEqual({
       status: 0,
-      lines: ["tests: 2 lines covered, 5 mutants killed, 2 line deletions caught, 0 survived (unprobed: 1 podman-only line)"],
+      lines: ["missing-tests: 2 lines covered, 5 mutants killed, 2 line deletions caught, 0 survived (unprobed: 1 podman-only line)"],
       stderr: "",
     });
   });
 
   it("skips the landing shape in one line, with no coverage to read", async () => {
-    const dir = await fixtureRepo("tests-red");
+    const dir = await fixtureRepo("missing-tests-red");
     git(dir, "checkout", "-q", "main");
     git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-    expect(run(dir, "tests", "--base", "origin/main")).toEqual({
+    expect(run(dir, "missing-tests", "--base", "origin/main")).toEqual({
       status: 0,
-      lines: ["tests: skipped, HEAD merges onto origin/main (gate-1 settled the branch)"],
+      lines: ["missing-tests: skipped, HEAD merges onto origin/main (gate-1 settled the branch)"],
       stderr: "",
     });
   });

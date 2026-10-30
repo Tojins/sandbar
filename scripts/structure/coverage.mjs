@@ -1,6 +1,6 @@
-// Changed-line coverage for the `tests` check (#183, #236), read from the
-// `coverage-final.json` files the gate's test steps write (istanbul's shape,
-// as `@vitest/coverage-v8` writes it): `coverage/unit/` from `test`,
+// Changed-line coverage for the `missing-tests` check (#183, #236), read from
+// the `coverage-final.json` files the gate's test steps write (istanbul's
+// shape, as `@vitest/coverage-v8` writes it): `coverage/unit/` from `test`,
 // `coverage/podman/` from `podman-test`.
 //
 // A changed line counts when a statement starts on it, and is covered when
