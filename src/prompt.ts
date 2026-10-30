@@ -652,19 +652,23 @@ export async function measureNetDiff(
   ]);
   const tree = await mergedTree(worktreePath, seed, merged);
   // A `diff --git` header quotes and octal-escapes an unusual path; `-z`
-  // names the same files, in the patch's order, verbatim.
+  // names the same files, in the patch's order, verbatim. A type change is
+  // two entries under one header, and one name.
   const [diff, names] = await Promise.all([
     readGit(["diff", tree, "HEAD"], worktreePath, what),
     readGit(["diff", "--name-only", "-z", tree, "HEAD"], worktreePath, what),
   ]);
   const paths = names.split("\0");
-  const files = diff.split(/^(?=diff --git )/m).filter((file) => file !== "").map((file, i) => ({
-    path: paths[i]!,
-    chars: file.length,
-  }));
+  const files: { header: string; path: string; chars: number }[] = [];
+  for (const entry of diff.split(/^(?=diff --git )/m).filter((entry) => entry !== "")) {
+    const header = entry.slice(0, entry.indexOf("\n"));
+    const last = files.at(-1);
+    if (last?.header === header) last.chars += entry.length;
+    else files.push({ header, path: paths[files.length]!, chars: entry.length });
+  }
   return {
     chars: diff.length,
-    largestFiles: files.sort((a, b) => b.chars - a.chars).slice(0, 3),
+    largestFiles: files.sort((a, b) => b.chars - a.chars).slice(0, 3).map(({ path, chars }) => ({ path, chars })),
   };
 }
 

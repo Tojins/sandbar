@@ -14,7 +14,7 @@
 // property under test is that a ref resolves in a repo git constructed, and a
 // fixture that adds a local `main` of its own passes with the bug restored.
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -301,6 +301,29 @@ describe("prompt slots resolve their base ref in a worktree of the bare cache (#
 
     const { largestFiles } = await measureNetDiff(worktree, "origin/main", "main");
     expect(largestFiles.map((file) => file.path)).toEqual(paths);
+  });
+
+  // A type change is two patch entries, a deletion and an addition, under one
+  // `diff --git` header and one listed name.
+  it("names the files after a type change under their own paths", async () => {
+    await writeFile(join(worktree, "a.txt"), "a\n");
+    await writeFile(join(worktree, "f.txt"), `${"f".repeat(200)}\n`);
+    await git(worktree, "add", "-A");
+    await git(worktree, "commit", "-qm", "regular-f");
+    const base = (await git(worktree, "rev-parse", "HEAD")).stdout.trim();
+    await writeFile(join(worktree, "a.txt"), `${"a".repeat(100)}\n`);
+    await rm(join(worktree, "f.txt"));
+    await symlink("a.txt", join(worktree, "f.txt"));
+    await writeFile(join(worktree, "h.txt"), `${"h".repeat(600)}\n`);
+    await git(worktree, "add", "-A");
+    await git(worktree, "commit", "-qm", "f-becomes-a-symlink");
+
+    const sizeOf = async (path: string) => (await git(worktree, "diff", base, "HEAD", "--", path)).stdout.length;
+    expect((await measureNetDiff(worktree, base, "main")).largestFiles).toEqual([
+      { path: "h.txt", chars: await sizeOf("h.txt") },
+      { path: "f.txt", chars: await sizeOf("f.txt") },
+      { path: "a.txt", chars: await sizeOf("a.txt") },
+    ]);
   });
 
   // #187: a later lister reads what changed since the last approved quality
