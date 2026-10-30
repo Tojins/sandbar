@@ -4535,6 +4535,7 @@ describe("sandboxRunArgs (#42)", () => {
       "--user",
       "1000:1000",
       "--userns=keep-id:uid=1000,gid=1000",
+      "--cap-drop=NET_RAW,NET_ADMIN",
       "--image-volume=ignore",
       "-w",
       SANDBOX_REPO_DIR,

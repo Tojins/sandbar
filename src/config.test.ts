@@ -1897,6 +1897,29 @@ describe("resolveConfig — egress (#202)", () => {
     expect(entries).toHaveLength(defaults().length + expected.length);
   });
 
+  it("resolves secretAllow apart from allow, with the same entries (#257)", () => {
+    const { policy } = allowlist({
+      allow: ["docs.example.com"],
+      secretAllow: ["Live.Example.COM", "*.adfinity.app", { host: "rec.example.com", ports: [9000], private: true }],
+    });
+    expect(policy.entries).toEqual(expect.arrayContaining([
+      { host: "docs.example.com", ports: [443, 80], private: false },
+    ]));
+    expect(policy.entries).toHaveLength(defaults().length + 1);
+    expect(policy.secretEntries).toEqual([
+      { host: "*.adfinity.app", ports: [443, 80], private: false },
+      { host: "live.example.com", ports: [443, 80], private: false },
+      { host: "rec.example.com", ports: [9000], private: true },
+    ]);
+    expect(allowlist({ allow: [] }).policy.secretEntries).toEqual([]);
+  });
+
+  it("lets allow name the CONNECT port only without secretAllow", () => {
+    expect(() => allowlist({ allow: ["squid.example.com:3128"] })).not.toThrow();
+    expect(() => allowlist({ allow: ["squid.example.com:3128"], secretAllow: ["live.example.com"] }))
+      .toThrow(/allow names squid\.example\.com:3128, the port the proxy's authenticated listener takes/);
+  });
+
   it("deduplicates an entry the defaults already hold", () => {
     expect(allowlist({ allow: ["github.com", "GitHub.com."] }).policy.entries).toEqual(defaults());
   });
@@ -1910,11 +1933,16 @@ describe("resolveConfig — egress (#202)", () => {
     expect(allowlist({ allow: ["x.example.com", "npm"] }).digest).toBe(a);
     expect(allowlist({ mode: "report", allow: ["npm", "x.example.com"] }).digest).not.toBe(a);
     expect(allowlist({ allow: ["npm"] }).digest).not.toBe(a);
+    expect(allowlist({ allow: ["npm", "x.example.com"], secretAllow: ["y.example.com"] }).digest).not.toBe(a);
   });
 
   it.each([
     ["a non-object", ["npm"], /config\.egress must be/],
     ["a missing allow", {}, /config\.egress must be/],
+    ["a non-array secretAllow", { allow: [], secretAllow: "live.example.com" }, /config\.egress must be/],
+    ["an IP literal in secretAllow", { allow: [], secretAllow: ["10.0.0.1"] }, /secretAllow\[0\] is the IP literal/],
+    ["a bad secretAllow object", { allow: [], secretAllow: [{ host: "a.example.com", ports: [] }] },
+      /secretAllow\[0\]\.ports must be/],
     ["an unknown mode", { mode: "audit", allow: [] }, /config\.egress\.mode/],
     ["an IPv4 literal", { allow: ["10.0.0.1"] }, /IP literal/],
     ["an IPv4 literal with a port", { allow: ["1.1.1.1:443"] }, /IP literal/],

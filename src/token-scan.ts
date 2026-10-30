@@ -25,6 +25,11 @@
 //
 // Both return a fresh global regex per call: `matchAll` requires the `g` flag
 // and a shared instance would leak `lastIndex` between parses.
+//
+// A secret is scanned for the same way, as a literal and never a pattern:
+// `maskSecrets` masks a `secretEnv` value (#241) in the bringup errors that
+// reach a prompt, and a live egress owner's secret (#257) in its agent's
+// output.
 
 const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -47,4 +52,14 @@ export function lastToken(stdout: string, pattern: RegExp): string | null {
   const last = matches[matches.length - 1];
   if (last === undefined) return null;
   return (last[1] ?? "").trim();
+}
+
+// `text` with every secret value masked. Longest first, so a value that
+// contains another is masked whole.
+export function maskSecrets(text: string, values: readonly string[]): string {
+  let masked = text;
+  for (const value of [...values].sort((a, b) => b.length - a.length)) {
+    masked = masked.split(value).join("<secret>");
+  }
+  return masked;
 }

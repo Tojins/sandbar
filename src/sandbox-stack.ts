@@ -17,11 +17,14 @@
 // Egress (#202): with an allowlist the anchor sits on its own internal network
 // behind its own proxy (inner-loop.ts), and the siblings, sharing its netns,
 // are covered without any work here. The flip side is that whatever a sibling
-// must reach live, every process in the namespace can: outdoor's adfinity
-// recording proxy (Tojins/outdoor#785) needs its live host allowlisted, which
-// the agent can then reach too, and what protects adfinity is that only the
-// sibling holds its credentials. A sibling's own `127.0.0.1` traffic never
-// touches the proxy.
+// must reach live through `egress.allow`, every process in the namespace can.
+// A live host a `secretEnv` sibling needs (outdoor's adfinity recording proxy,
+// Tojins/outdoor#785) belongs in `secretAllow` instead (#257): every
+// `secretEnv` sibling, and no other, gets `egressConnect`'s env laid over its
+// own at bringup — `HTTPS_PROXY` naming the proxy's authenticated listener
+// with the sandbox's secret, in `withRuntimeEnv`'s file like any env — and
+// the secret is masked with the `secretEnv` values. A sibling's own
+// `127.0.0.1` traffic never touches the proxy.
 //
 // Ordering. Up: worktree → `onWorktreeReady` → anchor → siblings →
 // `onSandboxReady` — siblings BEFORE the sandbox-ready hooks, because those
@@ -113,6 +116,7 @@ import { join } from "node:path";
 
 import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
 import type { ResolvedGateStack, ResolvedStackContainer } from "./config.js";
+import type { EgressConnect } from "./egress.js";
 import { SandbarError } from "./errors.js";
 import {
   type BringUpCtx,
@@ -139,6 +143,7 @@ import {
   type ContainerTeardown,
 } from "./container-resources.js";
 import { startTimer } from "./timing.js";
+import { maskSecrets } from "./token-scan.js";
 
 // What this stack is called in the messages `bringUpContainers` raises about
 // it. The whole reason `BringUpCtx` carries a label: the shared bringup is the
@@ -220,6 +225,9 @@ export type SandboxStackOptions = {
   // Where `secretEnv` values are read from. Default: this process's own
   // environment, which on the installation is its env file (#241).
   readonly daemonEnv?: Readonly<Record<string, string | undefined>>;
+  // The sandbox proxy's authenticated listener (#257), whose env every
+  // `secretEnv` sibling gets. Default: none.
+  readonly egressConnect?: EgressConnect | null;
   readonly onNotice?: (message: string) => void | Promise<void>;
   readonly onContainerTeardown?: (
     record: ContainerTeardown,
@@ -308,16 +316,6 @@ export function resolveSecretEnv(
     container: { ...c, env },
     values: c.secretEnv.map((key) => env[key]!),
   };
-}
-
-// `text` with every secret value masked. Longest first, so a value that
-// contains another is masked whole.
-export function maskSecrets(text: string, values: readonly string[]): string {
-  let masked = text;
-  for (const value of [...values].sort((a, b) => b.length - a.length)) {
-    masked = masked.split(value).join("<secret>");
-  }
-  return masked;
 }
 
 function maskedError(err: unknown, values: readonly string[]): unknown {
@@ -472,13 +470,15 @@ export async function startSandboxStack(
   // Every secret value resolved so far, so a later group's error masks an
   // earlier group's too.
   const daemonEnv = opts.daemonEnv ?? process.env;
-  const secretValues: string[] = [];
+  const connect = opts.egressConnect ?? null;
+  const secretValues: string[] = connect === null ? [] : [connect.secret];
   const bringUp = async (
     group: readonly ResolvedStackContainer[],
     groupCtx: BringUpCtx = ctx,
   ): Promise<void> => {
     const resolved = group.map((declared) => {
-      const c = { ...declared, env: { ...declared.env, ...declared.sandboxEnv } };
+      const proxyEnv = connect !== null && declared.secretEnv.length > 0 ? connect.env : {};
+      const c = { ...declared, env: { ...declared.env, ...declared.sandboxEnv, ...proxyEnv } };
       const r = resolveSecretEnv(c, daemonEnv);
       if (r.kind === "missing") {
         throw new ContainerBringupError(

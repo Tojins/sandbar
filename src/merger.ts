@@ -3644,6 +3644,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
             owner: `resolve-${attempt}`,
             networkName: network,
             createNetwork: true,
+            authenticated: false,
           });
       const runInvocation = buildResolveRunArgv({
         container,

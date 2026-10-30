@@ -1,7 +1,8 @@
 // The egress proxy's records on the caller side (#202): `egressReport` turns a
 // drain's first sightings and a teardown summary into run events, and the
 // inner loop checkpoints the sandbox's proxy after every agent invocation and
-// lets a dead proxy, not the agent, own a failure.
+// lets a dead proxy, not the agent, own a failure and the agent's output
+// carry its secret (#257).
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -41,7 +42,7 @@ describe("egressReport", () => {
 });
 
 describe("withEgressCheckpoints", () => {
-  const setup = (run: Sandbox["run"], alive = true) => {
+  const setup = (run: Sandbox["run"], alive = true, connect: OwnerProxy["connect"] = null) => {
     const inner = {
       branch: "b",
       worktreePath: "/w",
@@ -54,6 +55,7 @@ describe("withEgressCheckpoints", () => {
     } satisfies Sandbox;
     const egress = {
       dnsArgs: [],
+      connect,
       checkpoint: vi.fn(async () => ["evil.test:443"]),
       assertAlive: vi.fn(async () => {
         if (!alive) throw new EgressProxyDiedError("egress proxy p died (gone)");
@@ -66,7 +68,7 @@ describe("withEgressCheckpoints", () => {
 
   it("checkpoints the proxy after an invocation", async () => {
     const { sandbox, egress } = setup(async () => result);
-    await expect(sandbox.run({} as never)).resolves.toBe(result);
+    await expect(sandbox.run({} as never)).resolves.toEqual(result);
     expect(egress.checkpoint).toHaveBeenCalledOnce();
     expect(egress.assertAlive).not.toHaveBeenCalled();
   });
@@ -86,6 +88,17 @@ describe("withEgressCheckpoints", () => {
       throw new AgentError("exit 1");
     }, false);
     await expect(sandbox.run({} as never)).rejects.toBeInstanceOf(EgressProxyDiedError);
+  });
+
+  it("masks the proxy's secret in the agent's output and in its failure", async () => {
+    const connect = { secret: "s3cr3t", env: {} };
+    const leaked = { ...result, stdout: "found s3cr3t in history" };
+    const { sandbox } = setup(async () => leaked, true, connect);
+    await expect(sandbox.run({} as never)).resolves.toEqual({ ...leaked, stdout: "found <secret> in history" });
+    const failing = setup(async () => {
+      throw new AgentError("exit 1: s3cr3t");
+    }, true, connect);
+    await expect(failing.sandbox.run({} as never)).rejects.toThrow(/^exit 1: <secret>$/);
   });
 
   it("leaves every other sandbox member the sandbox's own", async () => {

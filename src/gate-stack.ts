@@ -923,6 +923,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       networkName,
       createNetwork: false,
       ip,
+      authenticated: false,
     });
     return proxy;
   };

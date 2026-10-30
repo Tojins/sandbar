@@ -1200,6 +1200,7 @@ describe("resolve provider invocation (#74)", () => {
       owner: "resolve-2",
       networkName: resolveNetworkNameFor(scope, 2),
       createNetwork: true,
+      authenticated: false,
     });
     expect(order[0]).toBe("proxy-start");
     expect(order.indexOf("proxy-stop")).toBeGreaterThan(order.lastIndexOf("rm"));

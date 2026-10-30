@@ -361,6 +361,43 @@ describe("startSandboxStack (#44 D3)", () => {
     expect(stack.statuses[0]?.failure).not.toMatch(/s3cret/);
   });
 
+  // #257: only a secretEnv sibling is routed through the authenticated
+  // listener, and its secret is masked like the secretEnv values.
+  it("gives the proxy env to every secretEnv sibling and to no other", async () => {
+    const proxyUrl = "http://sandbar:pxs3cret@10.89.3.1:3128";
+    const egressConnect = {
+      secret: "pxs3cret",
+      env: { HTTPS_PROXY: proxyUrl, https_proxy: proxyUrl, NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" },
+    };
+    const envs = new Map<string, Record<string, string>>();
+    const r = recorder((n) => n === "proxy"
+      ? new ContainerBringupError("sandbar-x-sbx-44-proxy", `proxy refused ${proxyUrl}`, "(none)")
+      : null);
+    const spec = withSecret("attempt");
+    const stack = await startSandboxStack(
+      {
+        issueId: "44",
+        scope: SCOPE,
+        spec: { ...spec, containers: [...spec.containers, { ...spec.containers[1]!, name: "cache", secretEnv: [], env: {} }] },
+        worktreePath: "/wt",
+        anchorContainerName: ANCHOR,
+        logDir,
+        daemonEnv: { ADFINITY_TOKEN: "s3cret" },
+        egressConnect,
+      },
+      {
+        ...r.deps,
+        bringUp: async (containers, ctx) => {
+          for (const c of containers) envs.set(c.name, c.env);
+          await r.deps.bringUp(containers, ctx);
+        },
+      },
+    );
+    expect(envs.get("proxy")).toEqual({ MODE: "record", ...egressConnect.env, ADFINITY_TOKEN: "s3cret" });
+    expect(envs.get("cache")).toEqual({});
+    expect(stack.statuses[0]?.failure).toMatch(/proxy refused http:\/\/sandbar:<secret>@10\.89\.3\.1:3128/);
+  });
+
   // The bringup code is the GATE's, and its messages are the one string D3
   // hands a degraded sibling — rendered into the implementer's prompt right
   // under a paragraph saying the gate's stack is a namespace it cannot reach.

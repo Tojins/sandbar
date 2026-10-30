@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   EMPTY_EGRESS_TALLY,
+  type EgressPolicy,
+  PROXY_CONNECT_PORT,
+  type ProxyPolicy,
   type ResolvedEgressEntry,
   decide,
+  decideConnect,
   decideDns,
   egressDnsArgs,
   egressProxyRunArgs,
@@ -11,8 +15,10 @@ import {
   internalNetworkCreateArgs,
   isPrivateAddress,
   parseEgressLogLine,
-  parseEgressPolicy,
+  parseProxyPolicy,
+  proxyAuthorization,
   proxyIpInspectArgs,
+  secretProxyEnv,
 } from "./egress-policy.js";
 
 const entry = (
@@ -20,6 +26,11 @@ const entry = (
   ports: readonly number[] = [443, 80],
   isPrivate = false,
 ): ResolvedEgressEntry => ({ host, ports, private: isPrivate });
+
+const policyOf = (
+  entries: readonly ResolvedEgressEntry[],
+  secretEntries: readonly ResolvedEgressEntry[] = [],
+): EgressPolicy => ({ mode: "enforce", entries, secretEntries });
 
 describe("decide", () => {
   const entries = [
@@ -44,12 +55,26 @@ describe("decide", () => {
     ["a private entry", "internal.test", 443, "private"],
     ["an unknown host", "example.com", 443, "refuse"],
   ])("%s", (_what, host, port, reach) => {
-    expect(decide(entries, host, port)).toBe(reach);
+    expect(decide(policyOf(entries), host, port)).toBe(reach);
   });
 
   it("lets a private entry widen a public one that also matches", () => {
-    expect(decide([entry("*.test"), entry("a.test", [443], true)], "a.test", 443))
+    expect(decide(policyOf([entry("*.test"), entry("a.test", [443], true)]), "a.test", 443))
       .toBe("private");
+  });
+
+  // #257: a secretAllow host is unlisted to the transparent path.
+  it.each([
+    ["a secret host", "api.adfinity.app", "refuse"],
+    ["a secret host an allow wildcard also matches", "live.adfinity.app", "refuse"],
+    ["a secret host on a port its entry lacks", "API.adfinity.app.", "refuse"],
+    ["an allow host beside a secret one", "docs.adfinity.app", "public"],
+  ])("%s", (_what, host, reach) => {
+    const policy = policyOf(
+      [entry("*.adfinity.app")],
+      [entry("api.adfinity.app", [8443]), entry("live.adfinity.app")],
+    );
+    expect(decide(policy, host, 443)).toBe(reach);
   });
 });
 
@@ -63,7 +88,58 @@ describe("decideDns", () => {
     ["a wildcard's apex", "example.org", false],
     ["an unknown name", "example.com", false],
   ])("%s", (_what, name, allowed) => {
-    expect(decideDns(entries, name)).toBe(allowed);
+    expect(decideDns(policyOf(entries), name)).toBe(allowed);
+  });
+
+  it("gives a secret host no answer, whatever allow matches", () => {
+    const policy = policyOf([entry("*.adfinity.app")], [entry("api.adfinity.app")]);
+    expect(decideDns(policy, "api.adfinity.app")).toBe(false);
+    expect(decideDns(policy, "docs.adfinity.app")).toBe(true);
+  });
+});
+
+describe("decideConnect", () => {
+  const policy: ProxyPolicy = {
+    ...policyOf([entry("github.com")], [entry("*.adfinity.app"), entry("db.internal", [5432], true)]),
+    secret: "s3cr3t",
+  };
+  const good = proxyAuthorization("s3cr3t");
+
+  it.each([
+    ["a secret host with the secret", "api.adfinity.app", 443, good, "public"],
+    ["a private secret entry", "db.internal", 5432, good, "private"],
+    ["a secret host on a port its entry lacks", "api.adfinity.app", 8443, good, "refuse"],
+    ["an allow host, which this path never reaches", "github.com", 443, good, "refuse"],
+    ["no credential", "api.adfinity.app", 443, null, "unauthorized"],
+    ["a wrong secret", "api.adfinity.app", 443, proxyAuthorization("guess"), "unauthorized"],
+    ["the secret under another scheme", "api.adfinity.app", 443, good.replace("Basic", "Bearer"), "unauthorized"],
+    ["the secret's prefix", "api.adfinity.app", 443, good.slice(0, -1), "unauthorized"],
+  ])("%s", (_what, host, port, authorization, reach) => {
+    expect(decideConnect(policy, { host, port, authorization })).toBe(reach);
+  });
+
+  it("refuses every credential where the owner has no secret", () => {
+    expect(decideConnect({ ...policy, secret: null }, {
+      host: "api.adfinity.app", port: 443, authorization: good,
+    })).toBe("unauthorized");
+  });
+});
+
+describe("secretProxyEnv", () => {
+  it("names the authenticated listener with the secret, and keeps loopback off it", () => {
+    const url = `http://sandbar:s3cr3t@10.89.3.1:${PROXY_CONNECT_PORT}`;
+    expect(secretProxyEnv("s3cr3t", "10.89.3.1")).toEqual({
+      HTTPS_PROXY: url,
+      https_proxy: url,
+      NO_PROXY: "127.0.0.1,localhost",
+      no_proxy: "127.0.0.1,localhost",
+    });
+  });
+
+  it("is the credential a client derives from that URL", () => {
+    const { username, password } = new URL(secretProxyEnv("s3cr3t", "10.0.0.1").HTTPS_PROXY);
+    expect(`Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`)
+      .toBe(proxyAuthorization("s3cr3t"));
   });
 });
 
@@ -99,21 +175,30 @@ describe("isPrivateAddress", () => {
   });
 });
 
-describe("parseEgressPolicy", () => {
-  it("reads back what sandbar writes", () => {
-    const policy = { mode: "report", entries: [entry("a.test"), entry("b.test", [8443], true)] };
-    expect(parseEgressPolicy(JSON.stringify(policy))).toEqual(policy);
+describe("parseProxyPolicy", () => {
+  const valid = { mode: "enforce", entries: [], secretEntries: [], secret: null };
+
+  it.each([
+    ["without a secret", {
+      mode: "report", entries: [entry("a.test"), entry("b.test", [8443], true)], secretEntries: [], secret: null,
+    }],
+    ["with a secret", { ...valid, secretEntries: [entry("c.test")], secret: "s3cr3t" }],
+  ])("reads back what sandbar writes %s", (_what, policy) => {
+    expect(parseProxyPolicy(JSON.stringify(policy))).toEqual(policy);
   });
 
   it.each([
-    ["a bad mode", { mode: "open", entries: [] }, "bad mode"],
-    ["no entries", { mode: "enforce" }, "entries is not an array"],
-    ["an empty host", { mode: "enforce", entries: [{ ...entry("a"), host: "" }] }, "bad entry"],
-    ["a port out of range", { mode: "enforce", entries: [entry("a", [0])] }, "bad ports"],
-    ["no ports", { mode: "enforce", entries: [entry("a", [])] }, "bad ports"],
-    ["no private flag", { mode: "enforce", entries: [{ host: "a", ports: [443] }] }, "bad private"],
+    ["a bad mode", { ...valid, mode: "open" }, "bad mode"],
+    ["no entries", { ...valid, entries: undefined }, "entries is not an array"],
+    ["no secret entries", { ...valid, secretEntries: undefined }, "secretEntries is not an array"],
+    ["an empty host", { ...valid, entries: [{ ...entry("a"), host: "" }] }, "bad entry"],
+    ["a port out of range", { ...valid, entries: [entry("a", [0])] }, "bad ports"],
+    ["no ports", { ...valid, secretEntries: [entry("a", [])] }, "bad ports"],
+    ["no private flag", { ...valid, entries: [{ host: "a", ports: [443] }] }, "bad private"],
+    ["an empty secret", { ...valid, secret: "" }, "bad secret"],
+    ["no secret field", { ...valid, secret: undefined }, "bad secret"],
   ])("refuses %s", (_what, value, message) => {
-    expect(() => parseEgressPolicy(JSON.stringify(value))).toThrow(message);
+    expect(() => parseProxyPolicy(JSON.stringify(value))).toThrow(message);
   });
 });
 
@@ -168,6 +253,23 @@ describe("foldEgressLog", () => {
     ]);
     expect(second.refused).toEqual(["evil.test", "x.test:443"]);
     expect(foldEgressLog([], second.tally).refused).toEqual([]);
+  });
+
+  // #257: a refused CONNECT is sighted even after a direct refusal of the
+  // same destination, since it means a client tried the authenticated path.
+  it("sights a refused CONNECT apart from a transparent refusal of its destination", () => {
+    const first = foldEgressLog([
+      line({ t: "refuse", via: "tls", host: "api.adfinity.app", port: 443 }),
+      line({ t: "refuse", via: "connect", host: "api.adfinity.app", port: 443 }),
+      line({ t: "refuse", via: "connect", host: "api.adfinity.app", port: 443 }),
+      line({ t: "allow", via: "connect", host: "api.adfinity.app", port: 443 }),
+    ], EMPTY_EGRESS_TALLY);
+    expect(first.firstRefusals).toEqual([
+      { host: "api.adfinity.app", port: 443, via: "tls", enforced: true },
+      { host: "api.adfinity.app", port: 443, via: "connect", enforced: true },
+    ]);
+    expect(first.tally.refused).toEqual({ "api.adfinity.app:443": 3 });
+    expect(first.tally.allowed).toEqual({ "api.adfinity.app:443": 1 });
   });
 
   it("reports a report-mode refusal as not enforced", () => {

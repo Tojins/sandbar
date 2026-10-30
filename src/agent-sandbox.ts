@@ -179,7 +179,8 @@
 // pod cannot carry keep-id and the agent CLI refuses to run as root.
 // Behind an egress allowlist (#202) the podman provider is handed the anchor's
 // internal network and its proxy's `--dns` (`PodmanOptions.dnsArgs`); without
-// one the argv carries neither.
+// one the argv carries neither. The agent never holds NET_RAW or NET_ADMIN
+// (#257), so it cannot read a sibling's proxy credential off the shared netns.
 // A catch may only classify one named expected condition checked explicitly,
 // clean up on failure while preserving the original error, or report a failed
 // best-effort hygiene action whose result is unrelated to the current run
@@ -2143,6 +2144,10 @@ export function sandboxRunArgs(opts: {
     ...(opts.userns
       ? [`--userns=keep-id:uid=${opts.containerUid},gid=${opts.containerGid}`]
       : []),
+    // Whatever podman's default set holds: the agent shares its netns with
+    // a sibling that may carry the egress proxy's secret over it (#257), and
+    // must not be able to capture that traffic.
+    "--cap-drop=NET_RAW,NET_ADMIN",
     // No anonymous volume for the image's builtin `VOLUME` directives (#50).
     // The consumer's own `sandboxImage` is free to declare one, and podman's
     // default (`--image-volume=bind`) would provision a fresh volume per

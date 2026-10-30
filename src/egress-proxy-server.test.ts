@@ -10,6 +10,7 @@ import {
   dnsQueryName,
   dnsResponse,
   parseDnsQuery,
+  peekConnect,
   peekDestination,
   peekHttpHost,
   peekTlsSni,
@@ -194,6 +195,44 @@ describe("peekHttpHost", () => {
 
   it("calls an empty peek incomplete, not opaque", () => {
     expect(peekDestination(Buffer.alloc(0))).toEqual({ kind: "more" });
+  });
+});
+
+describe("peekConnect", () => {
+  const bytes = (text: string): Buffer => Buffer.from(text, "latin1");
+
+  it.each([
+    ["a credential", "CONNECT api.adfinity.app:443 HTTP/1.1\r\nHost: api.adfinity.app:443\r\n" +
+      "Proxy-Authorization: Basic c2FuZGJhcjp4\r\n\r\n", "api.adfinity.app", 443, "Basic c2FuZGJhcjp4"],
+    ["a lowercase header name", "CONNECT a.test:8443 HTTP/1.0\r\nproxy-authorization:  Basic x \r\n\r\n",
+      "a.test", 8443, "Basic x"],
+    ["no credential", "CONNECT a.test:443 HTTP/1.1\r\n\r\n", "a.test", 443, null],
+    ["a bracketed IPv6 literal", "CONNECT [::1]:443 HTTP/1.1\r\n\r\n", "[::1]", 443, null],
+  ])("routes a request with %s", (_what, text, host, port, authorization) => {
+    expect(peekConnect(bytes(text))).toEqual({
+      kind: "route", request: { host, port, authorization }, rest: Buffer.alloc(0),
+    });
+  });
+
+  it("keeps what the client sent past the request head", () => {
+    const peek = peekConnect(bytes("CONNECT a.test:443 HTTP/1.1\r\n\r\n\u0016\u0003\u0001"));
+    expect(peek.kind === "route" && [...peek.rest]).toEqual([0x16, 0x03, 0x01]);
+  });
+
+  it("asks for more while the head is still arriving", () => {
+    expect(peekConnect(bytes("CONNECT a.test:443 HTTP/1.1\r\n"))).toEqual({ kind: "more" });
+  });
+
+  it.each([
+    ["a GET", "GET http://a.test/ HTTP/1.1\r\nHost: a.test\r\n\r\n"],
+    ["no port", "CONNECT a.test HTTP/1.1\r\n\r\n"],
+    ["port zero", "CONNECT a.test:0 HTTP/1.1\r\n\r\n"],
+    ["a port out of range", "CONNECT a.test:70000 HTTP/1.1\r\n\r\n"],
+    ["an unbracketed IPv6 literal", "CONNECT ::1:443 HTTP/1.1\r\n\r\n"],
+    ["no version", "CONNECT a.test:443\r\n\r\n"],
+    ["a head longer than any", `CONNECT a.test:443 HTTP/1.1\r\nX: ${"a".repeat(16_384)}`],
+  ])("calls %s opaque", (_what, text) => {
+    expect(peekConnect(bytes(text))).toEqual({ kind: "opaque" });
   });
 });
 
