@@ -7,14 +7,18 @@
 //
 // The copy is one tree under `.stryker-tmp/deletion/` (gitignored, D1),
 // sharing the worktree's `node_modules`, made before any tool runs; a
-// worktree it cannot copy (a file it may not read) throws `StructureError`.
+// worktree it cannot copy (a file or directory it may not read) throws
+// `StructureError`. The copy is walked here, not `cpSync`'d: Node's native
+// `cpSync` aborts the process over a directory it may not read.
 // Each probe replaces its one file and restores it. The mapped tests first
 // run on the untouched copy, and a red there throws `StructureError`: no
 // deletion could be judged against it. vitest's output goes to
 // `.stryker-tmp/log/`.
 
-import { cpSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  copyFileSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 import { LOG_DIR, runLogged, StructureError, withFsError, WORK_DIR } from "./core.mjs";
 
@@ -45,12 +49,27 @@ const NOT_COPIED = new Set([".git", "node_modules", WORK_DIR, "coverage", ".sand
 
 const COPY = `${WORK_DIR}/deletion`;
 
+// `from` copied to `to` as `cpSync` would: a symlink's copy points at
+// its target's absolute path, and a FIFO or socket is left out.
+function copyTree(from, to) {
+  const stat = lstatSync(from);
+  if (stat.isDirectory()) {
+    mkdirSync(to);
+    for (const name of readdirSync(from)) copyTree(join(from, name), join(to, name));
+  } else if (stat.isSymbolicLink()) {
+    symlinkSync(resolve(dirname(from), readlinkSync(from)), to);
+  } else if (stat.isFile()) {
+    copyFileSync(from, to);
+  }
+}
+
 // `dir` copied for `runDeletions`, into its `WORK_DIR`.
 export function copyWorktree(dir) {
   const copy = join(dir, COPY);
   withFsError("deletion: the worktree cannot be copied", () => {
+    mkdirSync(copy);
     for (const name of readdirSync(dir).filter((entry) => !NOT_COPIED.has(entry))) {
-      cpSync(join(dir, name), join(copy, name), { recursive: true });
+      copyTree(join(dir, name), join(copy, name));
     }
     symlinkSync(join(dir, "node_modules"), join(copy, "node_modules"));
   });

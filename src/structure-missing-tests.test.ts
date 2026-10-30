@@ -4,7 +4,7 @@
 // twin, after a real coverage run.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -437,12 +437,32 @@ describe("deletion", () => {
       .rejects.toThrow("deletion: src/deploy-*.test.ts fail with no line deleted (.stryker-tmp/log/deletion-baseline-1.log)");
   });
 
-  it.skipIf(process.getuid?.() === 0)("a worktree it cannot copy is a one-line error", async () => {
-    const dir = await tree({ "locked.txt": "secret\n" });
-    await chmod(join(dir, "locked.txt"), 0);
-    expect(() => copyWorktree(dir)).toThrow(new StructureError(
-      `deletion: the worktree cannot be copied: EACCES: permission denied, copyfile '${dir}/locked.txt' -> '${dir}/.stryker-tmp/deletion/locked.txt'`,
-    ));
+  // Node's own cpSync aborts the process over a directory it may not read.
+  it.skipIf(process.getuid?.() === 0).each([
+    ["a file", "locked/x.txt", "copyfile '{dir}/locked/x.txt' -> '{dir}/.stryker-tmp/deletion/locked/x.txt'"],
+    ["a directory", "locked", "scandir '{dir}/locked'"],
+  ])("a worktree with %s it cannot read is a one-line error", async (_name, locked, syscall) => {
+    const dir = await tree({ "locked/x.txt": "secret\n" });
+    await chmod(join(dir, locked), 0);
+    try {
+      expect(() => copyWorktree(dir)).toThrow(new StructureError(
+        `deletion: the worktree cannot be copied: EACCES: permission denied, ${syscall.replaceAll("{dir}", dir)}`,
+      ));
+    } finally {
+      await chmod(join(dir, locked), 0o755);
+    }
+  });
+
+  it("copies files, directories and symlinks, and skips a FIFO as cpSync did", async () => {
+    const dir = await tree({ "deploy/app.yml": "name: app\n" });
+    await symlink("deploy/app.yml", join(dir, "app.yml"));
+    expect(spawnSync("mkfifo", [join(dir, "deploy/pipe")]).status).toBe(0);
+    copyWorktree(dir);
+    const copy = join(dir, ".stryker-tmp/deletion");
+    expect(await readFile(join(copy, "deploy/app.yml"), "utf8")).toBe("name: app\n");
+    expect(await readlink(join(copy, "app.yml"))).toBe(join(dir, "deploy/app.yml"));
+    expect(await readlink(join(copy, "node_modules"))).toBe(join(dir, "node_modules"));
+    expect(existsSync(join(copy, "deploy/pipe"))).toBe(false);
   });
 
   // A symlink's copy points into the worktree, and a read-only file's copy
@@ -665,15 +685,24 @@ describe("run.mjs missing-tests", () => {
     expectCannotAnswer(result, /^missing-tests: \.stryker-tmp cannot be cleared: EACCES\b/);
   });
 
-  it.skipIf(asRoot)("cannot answer over a worktree it cannot copy for the line deletions, in one line", async () => {
+  it.skipIf(asRoot).each([
+    ["a file", "locked/x.txt", /copyfile '.*\/locked\/x\.txt' /],
+    ["a directory", "locked", /scandir '.*\/locked'$/],
+  ])("cannot answer over a worktree with %s the line deletions cannot copy, in one line", async (_name, locked, syscall) => {
     const dir = await fixtureRepo("missing-tests-red");
     await writeCoverage(dir, "{}");
-    await writeFile(join(dir, "locked.txt"), "secret\n");
-    await chmod(join(dir, "locked.txt"), 0);
-    expectCannotAnswer(
-      run(dir, "missing-tests", "--base", "origin/main"),
-      /^missing-tests: deletion: the worktree cannot be copied: EACCES: permission denied, copyfile '.*\/locked\.txt' /,
-    );
+    await mkdir(join(dir, "locked"));
+    await writeFile(join(dir, "locked/x.txt"), "secret\n");
+    await chmod(join(dir, locked), 0);
+    let result: ReturnType<typeof run>;
+    try {
+      result = run(dir, "missing-tests", "--base", "origin/main");
+    } finally {
+      await chmod(join(dir, locked), 0o755);
+    }
+    expectCannotAnswer(result, new RegExp(
+      `^missing-tests: deletion: the worktree cannot be copied: EACCES: permission denied, ${syscall.source}`,
+    ));
     expect(existsSync(join(dir, ".stryker-tmp"))).toBe(false);
   });
 
