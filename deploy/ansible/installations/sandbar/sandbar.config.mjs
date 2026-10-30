@@ -21,7 +21,7 @@ export default {
   ghOwner: "Tojins",
   ghRepo: "sandbar",
   developers: ["Tojins"],
-  requiresSandbar: "0.60.12",
+  requiresSandbar: "0.70.0",
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
   contextMdPath: "AGENTS.md",
@@ -64,7 +64,11 @@ export default {
       },
     ],
     steps: [
-      { name: "check", in: "runner", command: ["npm", "run", "check"] },
+      // `tsc` type-checks as it emits, and both suites below read `dist/`
+      // (the CLI tests run it), so they run vitest without `npm test`'s
+      // rebuild and side by side: the unit suite is CPU-bound, the podman
+      // suite mostly waits on podman.
+      { name: "build", in: "runner", command: ["npm", "run", "build"] },
       {
         name: "version",
         in: "runner",
@@ -78,7 +82,7 @@ export default {
         name: "test",
         in: "runner",
         command: [
-          "npm", "test", "--", "--exclude", "**/*-podman.test.ts",
+          "npx", "vitest", "run", "--exclude", "**/*-podman.test.ts",
           "--coverage.enabled", "--coverage.reportsDirectory=coverage/unit",
         ],
         timeoutMs: 900_000,
@@ -86,8 +90,9 @@ export default {
       {
         name: "podman-test",
         in: "runner",
+        parallel: true,
         command: [
-          "npm", "test", "--", "podman.test.ts",
+          "npx", "vitest", "run", "podman.test.ts",
           "--exclude", "src/gate-stack-hostpodman.test.ts",
           "--exclude", "src/sandbox-stack-podman.test.ts",
           "--exclude", "src/container-resources-podman.test.ts",

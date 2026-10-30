@@ -433,6 +433,42 @@ describe("a standalone step (#247)", () => {
   });
 });
 
+describe("a parallel step", () => {
+  const LABEL = "gate/stack.json at origin/main";
+  const stack = minimal.gateStack as GateStackConfig;
+  const withStep = (name: string, fields: Record<string, unknown>) => ({
+    ...stack,
+    steps: stack.steps.map((s) => (s.name === name ? { ...s, ...fields } : s)),
+  });
+  const parallelOf = (resolved: { readonly steps: readonly { readonly name: string; readonly parallel: boolean }[] }) =>
+    resolved.steps.map((s) => [s.name, s.parallel]);
+
+  it("is not parallel by default, inline or in a stack file", () => {
+    expect(parallelOf(inlineStack(resolveConfig(minimal)).stack)).toEqual([["check", false], ["test", false]]);
+    expect(parallelOf(resolveStackFile(JSON.stringify(stack), LABEL, {}).stack))
+      .toEqual([["check", false], ["test", false]]);
+  });
+
+  it("resolves the field inline and from a stack file alike", () => {
+    const inline = resolveConfig({ ...minimal, gateStack: withStep("test", { parallel: true }) as GateStackConfig });
+    expect(parallelOf(inlineStack(inline).stack)).toEqual([["check", false], ["test", true]]);
+    expect(parallelOf(resolveStackFile(JSON.stringify(withStep("test", { parallel: true })), LABEL, {}).stack))
+      .toEqual([["check", false], ["test", true]]);
+  });
+
+  it("refuses a stack file whose parallel is not a boolean", () => {
+    expect(() => resolveStackFile(JSON.stringify(withStep("test", { parallel: "yes" })), LABEL, {}))
+      .toThrow(/^gate\/stack\.json at origin\/main: steps\[1\] has 'parallel' that is not a boolean/);
+  });
+
+  it("refuses a parallel first step", () => {
+    const first = withStep("check", { parallel: true });
+    const message = /step 'check' is parallel but is the first step/;
+    expect(() => resolveConfig({ ...minimal, gateStack: first as GateStackConfig })).toThrow(message);
+    expect(() => resolveStackFile(JSON.stringify(first), LABEL, {})).toThrow(message);
+  });
+});
+
 describe("resolveCopyToWorktree (#147)", () => {
   const cwd = "/consumer/checkout";
 

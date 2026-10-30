@@ -104,6 +104,78 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
     180_000,
   );
 
+  it.concurrent(
+    "parallel steps that time out in one container reap it once, after the whole batch",
+    async ({ expect, task, onTestFinished }) => {
+      const { repo, stackId, hold } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+      );
+      const teardowns: string[] = [];
+
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              // An `issue` container is recreated by its reap, so a second
+              // reap would tear the replacement down too.
+              { name: "held", image: IMAGE, lifecycle: "issue", hold: true },
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              {
+                name: "sees-code",
+                in: "runner",
+                command: ["cat", "marker.txt"],
+              },
+              {
+                name: "first",
+                in: "held",
+                command: ["sleep", "602"],
+                timeoutMs: 2_000,
+              },
+              // Outlives its sibling's bound, so a reap at that bound would
+              // kill it mid-step.
+              {
+                name: "second",
+                in: "held",
+                command: ["sleep", "603"],
+                timeoutMs: 6_000,
+                parallel: true,
+              },
+            ],
+          }),
+          onContainerTeardown: (record) => {
+            teardowns.push(record.name);
+          },
+        }),
+      );
+
+      const red = await stack.runGate();
+      expect(red.failedStep).toBe("first");
+      expect(red.exitCode).toBe(124);
+      expect(red.stdout).toContain("step 'first' was still running after 2000ms");
+      expect(red.stdout).toContain("step 'second' was still running after 6000ms");
+      expect(red.steps.slice(-2).map((x) => [x.name, x.ok])).toEqual([
+        ["first", false],
+        ["second", false],
+      ]);
+      await stack.stop();
+      // The reap's, and the replacement's at stop.
+      expect(teardowns.filter((name) => name === "held")).toHaveLength(2);
+    },
+    180_000,
+  );
+
   // The note #26 makes about killing the step: the `podman exec` CLIENT dying
   // does nothing to the process in the container (#26 and git history), so
   // without a reap the timed-out work keeps running — burning CPU beside the

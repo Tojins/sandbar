@@ -250,7 +250,6 @@ const NO_CONFIG_LOCK_FLAGS = [
 const WORKTREE_TIMEOUT_MS = 30_000;
 const COPY_TO_WORKTREE_TIMEOUT_MS = 60_000;
 const GIT_SETUP_TIMEOUT_MS = 10_000;
-const CODEX_ROLLOUT_PROBE_TIMEOUT_MS = 10_000;
 const COMMIT_COLLECTION_TIMEOUT_MS = 30_000;
 const HOOK_TIMEOUT_MS = 60_000;
 const GIT_SETUP_MAX_RETRIES = 2;
@@ -560,6 +559,10 @@ export type RunOptions = {
   readonly env?: Readonly<Record<string, string>>;
   readonly idleTimeoutSeconds?: number;
   readonly completionTimeoutSeconds?: number;
+  // The bound on each control call around the run, the Codex rollout probes
+  // and the process-group reap. Default 10s; a test of a call that never
+  // returns sets less.
+  readonly controlTimeoutMs?: number;
 };
 
 export type AgentInvocationRecord = ContainerResources & {
@@ -2460,7 +2463,9 @@ type CodexRolloutCursor =
 
 const shellLiteral = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
-const REAP_TIMEOUT_MS = 10_000;
+// The default bound on each control call around an agent run: the Codex
+// rollout probes and the process-group reap (`RunOptions.controlTimeoutMs`).
+const CONTROL_TIMEOUT_MS = 10_000;
 
 class ReapTimeoutError extends Error {}
 
@@ -2543,6 +2548,7 @@ export const turnSettledAfter = (
 const captureCodexRolloutCursor = async (
   handle: SandboxHandle,
   sandboxRepoDir: string,
+  timeoutMs: number,
 ): Promise<CodexRolloutCursor> => {
   const result = await withTimeout(
       handle.exec(
@@ -2551,9 +2557,9 @@ const captureCodexRolloutCursor = async (
           "test -n \"$f\" && printf '%s\\n' \"$f\" && wc -c < \"$f\" || true",
         { cwd: sandboxRepoDir },
       ),
-      CODEX_ROLLOUT_PROBE_TIMEOUT_MS,
+      timeoutMs,
       () => new Error(
-        `Codex rollout cursor probe timed out after ${CODEX_ROLLOUT_PROBE_TIMEOUT_MS}ms`,
+        `Codex rollout cursor probe timed out after ${timeoutMs}ms`,
       ),
     ).then(
       (probe) => probe,
@@ -2576,6 +2582,7 @@ type AgentInvocation = {
   readonly model: string | null;
   readonly onEnd?: (record: AgentInvocationRecord) => Promise<void>;
   readonly env?: Readonly<Record<string, string>>;
+  readonly controlTimeoutMs: number;
 };
 
 type InvokeAgentResult = {
@@ -2607,7 +2614,7 @@ const invokeAgent = async (
   // boundary before starting the process so this invocation cannot inherit an
   // earlier invocation's larger depth or stale rate-limit evidence (#124).
   const rolloutCursor = agent.name === "codex"
-    ? await captureCodexRolloutCursor(handle, sandboxRepoDir)
+    ? await captureCodexRolloutCursor(handle, sandboxRepoDir, invocation.controlTimeoutMs)
     : { kind: "unknown" } as const;
   const invocationTimer = startTimer();
 
@@ -2704,8 +2711,8 @@ const invokeAgent = async (
       const reaper = new AbortController();
       const failure = await withTimeout(
         handle.exec(reapProcessGroupCommand(pidfile), { signal: reaper.signal }),
-        REAP_TIMEOUT_MS,
-        () => new ReapTimeoutError(`timed out after ${REAP_TIMEOUT_MS}ms`),
+        invocation.controlTimeoutMs,
+        () => new ReapTimeoutError(`timed out after ${invocation.controlTimeoutMs}ms`),
       ).then(
         (r) => r.exitCode === 0 ? null : `exit ${r.exitCode}: ${r.stderr.trim()}`,
         (err: unknown) => {
@@ -2838,9 +2845,9 @@ const invokeAgent = async (
                 readNewRecords,
               { cwd: sandboxRepoDir },
             ),
-            CODEX_ROLLOUT_PROBE_TIMEOUT_MS,
+            invocation.controlTimeoutMs,
             () => new Error(
-              `Codex rollout probe timed out after ${CODEX_ROLLOUT_PROBE_TIMEOUT_MS}ms`,
+              `Codex rollout probe timed out after ${invocation.controlTimeoutMs}ms`,
             ),
           );
           for (const line of rollout.stdout.split("\n")) {
@@ -3032,6 +3039,7 @@ const measuredAgentRun = async <T extends InvokeAgentResult>(
       agent: o.name ?? o.agent.name,
       model: o.model ?? null,
       ...(o.env === undefined ? {} : { env: o.env }),
+      controlTimeoutMs: o.controlTimeoutMs ?? CONTROL_TIMEOUT_MS,
       onEnd: async (record) => {
         durationMs = record.durationMs;
         const resourceEnd = await sandbox.containerResourceSnapshot?.(containerName);

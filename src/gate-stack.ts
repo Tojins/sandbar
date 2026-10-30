@@ -106,6 +106,13 @@
 // stack lifecycle aware of orchestration. `sandbar gate` calls the stack
 // directly and therefore ignores the host's run-only `maxConcurrentGates`.
 //
+// Steps run in declared order, except that a `parallel` step starts with the
+// one before it (`stepBatches`): a batch runs together, every member runs to
+// its own end, and only then does the first red in declared order name the
+// gate, with every member's timing and output reported. A batch's kills reap
+// once per container after the whole batch, so a sibling still running there
+// is not cut short.
+//
 // A step that exceeds its bound is a gate RED, not a HARD-ERROR — same
 // argument as D5. Killing the `podman exec` CLIENT does not touch the process
 // inside the container, so `reapKilledStep` removes the container itself
@@ -142,6 +149,7 @@ import { isAbsolute, resolve as resolvePath } from "node:path";
 import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
 import type {
   ResolvedGateStack,
+  ResolvedGateStep,
   ResolvedStackContainer,
   ResolvedStackMount,
 } from "./config.js";
@@ -2514,84 +2522,40 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
 
   let stdout = "";
   let stderr = "";
-  for (const step of ctx.spec.steps) {
-    const container = ctx.spec.containers.find((c) => c.name === step.in);
-    // resolveGateStack proved this at config time; a miss here is a bug.
-    if (container === undefined) {
-      throw new SandbarError(
-        `gate stack: step '${step.name}' targets unknown container '${step.in}'.`,
-      );
-    }
-    const containerName = ctx.nameOf(container);
-    const banner = `\n== ${step.name} (${step.in})\n`;
-    // The banner goes to the live view too, and before the step rather than
-    // with its first byte: a step that produces nothing for minutes is exactly
-    // the one whose name a watcher needs (#45).
-    ctx.onStepOutput?.(banner);
-    const resourceStart = await ctx.resourceSnapshotReader?.(containerName);
-    const tStep = startTimer();
-    const stepExec = stepExecArgs(containerName, step.command);
-    const r = await withRuntimeEnv(stepExec, (argv) =>
-      boundedPodman(argv, step.timeoutMs, ctx.onStepOutput),
-    );
-    const durationMs = tStep();
-    const resourceEnd = await ctx.resourceSnapshotReader?.(containerName);
-    const resources = resourceEnd === undefined
-      ? await ctx.resourceReader(containerName)
-      : containerResourcesSince(resourceEnd, resourceStart);
-    steps.push({
-      name: step.name,
-      ok: boundedOk(r),
-      durationMs,
-      ...resources,
-    });
-    if (boundedOk(r)) {
-      stdout += banner + stripAnsi(r.stdout);
-      stderr += stripAnsi(r.stderr);
+  for (const batch of stepBatches(ctx.spec.steps)) {
+    // A batch is one step, or one with the `parallel` steps behind it: they
+    // start together and all of them finish before anything is decided, so
+    // every one of them has a verdict and a duration to report.
+    const runs = await Promise.all(batch.map((step) => runStep(step, ctx)));
+    for (const run of runs) steps.push(run.timing);
+    const batchStdout = runs.map((run) => run.banner + stripAnsi(run.r.stdout) + run.note).join("");
+    const batchStderr = runs.map((run) => stripAnsi(run.r.stderr)).join("");
+    const red = runs.find((run) => !boundedOk(run.r));
+    if (red === undefined) {
+      stdout += batchStdout;
+      stderr += batchStderr;
       continue;
     }
-
-    // Named, because otherwise the two kills below are indistinguishable from
-    // an ordinary red: node reports a maxBuffer kill with a STRING code, so it
-    // would land as a plain `exitCode: 1` with silently truncated output — a
-    // verbose but PASSING suite reading as a real, unexplained failure that
-    // reproduces identically every attempt until the budget dies — and a
-    // timeout arrives with no output and no exit code at all.
-    const note = r.timedOut
-      ? `\n\n[sandbar] step '${step.name}' was still running after ` +
-        `${step.timeoutMs}ms and was killed (this step's \`timeoutMs\`, or ` +
-        "sandbar's default for one). A step that exceeds its bound is a red " +
-        "gate, not an infrastructure failure: the usual cause is the branch's " +
-        "own code — a test awaiting a promise that never resolves, a suite " +
-        "whose reporter never exits. The step's own output above is only what " +
-        "it had flushed before the kill and is often empty, so the diagnosis " +
-        "is usually in the container logs. Raise `timeoutMs` for this step if " +
-        "the work is genuinely this slow.\n"
-      : r.maxBufferExceeded
-        ? `\n\n[sandbar] step '${step.name}' produced more than ` +
-          `${RUNTIME_MAX_BUFFER} bytes of output and was killed; the output above is ` +
-          "truncated and the exit code is unknown. This is an output-volume " +
-          "failure, not necessarily a test failure — quieten the step's " +
-          "reporter.\n"
-        : "";
 
     // Stop at the first red. Every later step tends to read what an earlier
     // one built, so running them would bury the real failure under derived
     // ones: a test suite that fails because the build step before it never
-    // produced anything reports N failures that are all one failure.
+    // produced anything reports N failures that are all one failure. In a
+    // batch the first red in declared order names the gate, and every
+    // member's output is kept.
     //
     // The container logs are collected BEFORE the reap below — removing the
     // container first would throw away the one diagnostic a hang leaves.
-    const red = await withContainerLogs(
+    const verdict = await withContainerLogs(
       {
         ok: false,
-        stdout: stdout + banner + stripAnsi(r.stdout) + note,
-        stderr: stderr + stripAnsi(r.stderr),
+        stdout: stdout + batchStdout,
+        stderr: stderr + batchStderr,
         // 124 is GNU `timeout`'s convention, and the alternative is worse than
         // arbitrary: a killed process has no exit code, so the honest-looking
         // `1` is indistinguishable from a suite that ran and failed once.
-        exitCode: r.timedOut ? 124 : (r.exitCode ?? 1),
-        failedStep: step.name,
+        exitCode: red.r.timedOut ? 124 : (red.r.exitCode ?? 1),
+        failedStep: red.step.name,
         durationMs: total(),
         steps,
         containerLogs: "",
@@ -2601,11 +2565,15 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     // Both kills leave the work running inside the container — node SIGTERMs
     // the client for a maxBuffer overflow exactly as the timer does, and podman
     // exits 0 either way — so both reap. An ordinary non-zero exit does not:
-    // the process is already gone.
-    if (r.timedOut || r.maxBufferExceeded) {
-      await reapKilledStep(container, containerName, ctx, red.failedStep ?? "");
+    // the process is already gone. Once per container, after the whole batch:
+    // a sibling still running in it would be reaped mid-step.
+    const reaped = new Set<string>();
+    for (const run of runs) {
+      if (!(run.r.timedOut || run.r.maxBufferExceeded) || reaped.has(run.containerName)) continue;
+      reaped.add(run.containerName);
+      await reapKilledStep(run.container, run.containerName, ctx, run.step.name);
     }
-    return red;
+    return verdict;
   }
   return {
     ok: true,
@@ -2616,6 +2584,96 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     durationMs: total(),
     steps,
     containerLogs: "",
+  };
+}
+
+// The steps in runs that start together: each step that is not `parallel`
+// opens a batch, and the `parallel` steps after it join it (config.ts proves
+// the first step opens one).
+export function stepBatches(
+  steps: readonly ResolvedGateStep[],
+): readonly (readonly ResolvedGateStep[])[] {
+  const batches: ResolvedGateStep[][] = [];
+  for (const step of steps) {
+    const last = batches.at(-1);
+    if (step.parallel && last !== undefined) last.push(step);
+    else batches.push([step]);
+  }
+  return batches;
+}
+
+type StepRun = {
+  readonly step: ResolvedGateStep;
+  readonly container: ResolvedStackContainer;
+  readonly containerName: string;
+  readonly banner: string;
+  readonly r: BoundedResult;
+  // Why the step was killed, after its output; empty for an exit of its own.
+  readonly note: string;
+  readonly timing: GateStepTiming;
+};
+
+// One step, run and measured. Two steps of one batch in the same container
+// each report that container's memory peak and OOM count over their own span,
+// which covers the other's work too.
+async function runStep(step: ResolvedGateStep, ctx: RunGateCtx): Promise<StepRun> {
+  const container = ctx.spec.containers.find((c) => c.name === step.in);
+  // resolveGateStack proved this at config time; a miss here is a bug.
+  /* v8 ignore next -- unreachable: config.ts refuses a step's unknown container */
+  if (container === undefined) {
+    throw new SandbarError(
+      `gate stack: step '${step.name}' targets unknown container '${step.in}'.`,
+    );
+  }
+  const containerName = ctx.nameOf(container);
+  const banner = `\n== ${step.name} (${step.in})\n`;
+  // The banner goes to the live view too, and before the step rather than
+  // with its first byte: a step that produces nothing for minutes is exactly
+  // the one whose name a watcher needs (#45). A batch's steps share the live
+  // view, their output interleaved as it arrives.
+  ctx.onStepOutput?.(banner);
+  const resourceStart = await ctx.resourceSnapshotReader?.(containerName);
+  const tStep = startTimer();
+  const stepExec = stepExecArgs(containerName, step.command);
+  const r = await withRuntimeEnv(stepExec, (argv) =>
+    boundedPodman(argv, step.timeoutMs, ctx.onStepOutput),
+  );
+  const durationMs = tStep();
+  const resourceEnd = await ctx.resourceSnapshotReader?.(containerName);
+  const resources = resourceEnd === undefined
+    ? await ctx.resourceReader(containerName)
+    : containerResourcesSince(resourceEnd, resourceStart);
+  // Named, because otherwise the two kills below are indistinguishable from
+  // an ordinary red: node reports a maxBuffer kill with a STRING code, so it
+  // would land as a plain `exitCode: 1` with silently truncated output — a
+  // verbose but PASSING suite reading as a real, unexplained failure that
+  // reproduces identically every attempt until the budget dies — and a
+  // timeout arrives with no output and no exit code at all.
+  const note = r.timedOut
+    ? `\n\n[sandbar] step '${step.name}' was still running after ` +
+      `${step.timeoutMs}ms and was killed (this step's \`timeoutMs\`, or ` +
+      "sandbar's default for one). A step that exceeds its bound is a red " +
+      "gate, not an infrastructure failure: the usual cause is the branch's " +
+      "own code — a test awaiting a promise that never resolves, a suite " +
+      "whose reporter never exits. The step's own output above is only what " +
+      "it had flushed before the kill and is often empty, so the diagnosis " +
+      "is usually in the container logs. Raise `timeoutMs` for this step if " +
+      "the work is genuinely this slow.\n"
+    : r.maxBufferExceeded
+      ? `\n\n[sandbar] step '${step.name}' produced more than ` +
+        `${RUNTIME_MAX_BUFFER} bytes of output and was killed; the output above is ` +
+        "truncated and the exit code is unknown. This is an output-volume " +
+        "failure, not necessarily a test failure — quieten the step's " +
+        "reporter.\n"
+      : "";
+  return {
+    step,
+    container,
+    containerName,
+    banner,
+    r,
+    note,
+    timing: { name: step.name, ok: boundedOk(r), durationMs, ...resources },
   };
 }
 

@@ -19,7 +19,7 @@
 //     or changing an env key all count as env. A step's `settles` is a step
 //     field, so no branch drops its own prompts' rule prose (#183), and so
 //     is `standalone`, so no branch moves its own steps into or out of the
-//     quality pass's early run (#247);
+//     quality pass's early run (#247), and `parallel`;
 //   - `non-env` — anything else, and a branch stack file that is missing or
 //     does not validate. Differences name fields, never values.
 //

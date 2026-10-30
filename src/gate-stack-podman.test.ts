@@ -392,6 +392,78 @@ describe.runIf(available)("gate stack against real podman", () => {
   );
 
   it.concurrent(
+    "parallel steps start together, and the batch's first red names the gate once all of it ran",
+    async ({ expect, task, onTestFinished }) => {
+      const { repo, stackId, hold } = await gateStackFixture(
+        SCOPE,
+        task.id,
+        onTestFinished,
+      );
+
+      const stack = hold(
+        await startStack({
+          stackId: stackId,
+          scope: SCOPE,
+          worktreePath: repo,
+          spec: resolveGateStack({
+            containers: [
+              {
+                name: "runner",
+                image: IMAGE,
+                mountWorktree: "/work",
+                hold: true,
+              },
+            ],
+            steps: [
+              // Green only if `signal`, behind it, runs while it waits.
+              {
+                name: "wait",
+                in: "runner",
+                command: ["sh", "-c", "for i in $(seq 60); do test -e /tmp/flag && exit 0; sleep 0.5; done; exit 1"],
+              },
+              {
+                name: "signal",
+                in: "runner",
+                command: ["sh", "-c", "touch /tmp/flag; exit 4"],
+                parallel: true,
+              },
+              // Red too, later than `signal`, and still run to its end.
+              {
+                name: "late",
+                in: "runner",
+                command: markExec(["sh", "-c", "sleep 2; echo LATE; exit 5"]),
+                parallel: true,
+              },
+              {
+                name: "never",
+                in: "runner",
+                command: ["sh", "-c", "echo RAN-ANYWAY"],
+              },
+            ],
+          }),
+          containerResources: async () => ({}),
+        }),
+      );
+
+      const red = await retryUndelivered(
+        () => stack.runGate(),
+        (r) => [r.stdout.split("== late (runner)")[1] ?? ""],
+      );
+      expect(red.ok).toBe(false);
+      expect(red.failedStep).toBe("signal");
+      expect(red.exitCode).toBe(4);
+      expect(red.stdout).toContain("LATE");
+      expect(`${red.stdout}${red.stderr}`).not.toContain("RAN-ANYWAY");
+      expect(red.steps.slice(-3).map((x) => [x.name, x.ok])).toEqual([
+        ["wait", true],
+        ["signal", false],
+        ["late", false],
+      ]);
+    },
+    180_000,
+  );
+
+  it.concurrent(
     "refuses to gate a dirty worktree instead of reporting a verdict about it",
     async ({ expect, task, onTestFinished }) => {
       const { repo, stackId, hold } = await gateStackFixture(

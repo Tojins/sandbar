@@ -326,7 +326,9 @@ function resolveLabelSync(value: unknown): readonly LabelDeclaration[] {
 // A step may also claim to be `standalone` (#247): the quality pass then runs
 // it early as well, in a networkless copy of its container
 // (standalone-steps.ts). Both claims are the consumer's; sandbar checks only
-// that a standalone step's container mounts the worktree.
+// that a standalone step's container mounts the worktree. A step may run
+// `parallel` with the step before it (gate-stack.ts runs such a run of steps
+// together); the first step has no step before it to run beside.
 //
 // This replaces the single `dbSidecar` + two fixed `gateCommands` of #20/#15.
 // The sidecar dissolved into `containers[]` the moment the pod removed the need
@@ -578,6 +580,11 @@ export type GateStep = {
   // verify the claim: a step that makes it falsely hands the fixer a red it
   // cannot fix. Default: false.
   readonly standalone?: boolean;
+  // This step starts together with the step before it instead of after it,
+  // so a run of `parallel` steps behind one ordinary step runs at once, and
+  // the next ordinary step waits for all of them. Each still needs nothing
+  // the others write; sandbar cannot verify that either. Default: false.
+  readonly parallel?: boolean;
 };
 
 // The closed set of rules a gate step may settle (#183). `missing-tests`: a
@@ -700,6 +707,7 @@ export type ResolvedGateStep = {
   // stack change (stack-change.ts).
   readonly settles: readonly SettledRule[];
   readonly standalone: boolean;
+  readonly parallel: boolean;
 };
 
 export type ResolvedGateStack = {
@@ -913,7 +921,9 @@ export type DatabaseCopiesConfig = {
   readonly bufferPoolBytes?: number;
   // The import's buffer pool. Default: 1 GiB.
   readonly importBufferPoolBytes?: number;
-  // How long one import may take, bringup to clean shutdown. Default: 4 hours.
+  // How long one import may take, from a ready server to its load's end; the
+  // server's start is bounded by its container's `readinessTimeoutMs`.
+  // Default: 4 hours.
   readonly importTimeoutMs?: number;
   // How old the dump may be before the run complains. Default: 36 hours.
   readonly staleAfterMs?: number;
@@ -2321,6 +2331,7 @@ const STEP_OPTIONAL: FieldShapes<GateStep, false> = {
   timeoutMs: [isNumber, "a number"],
   settles: [isStrings, "a list of strings"],
   standalone: [isBoolean, "a boolean"],
+  parallel: [isBoolean, "a boolean"],
 };
 
 function checkFieldShapes(
@@ -2510,6 +2521,13 @@ export function resolveGateStack(
           "has to see the code under test.",
       );
     }
+    const parallel = step.parallel ?? false;
+    if (parallel && steps.length === 0) {
+      throw new SandbarError(
+        `${label}: step '${step.name}' is parallel but is the first step, ` +
+          "so there is no step before it to run beside.",
+      );
+    }
     steps.push({
       name: step.name,
       in: step.in,
@@ -2517,6 +2535,7 @@ export function resolveGateStack(
       timeoutMs,
       settles: SETTLED_RULES.filter((rule) => settles.includes(rule)),
       standalone,
+      parallel,
     });
   }
 
