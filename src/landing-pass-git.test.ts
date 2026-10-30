@@ -70,6 +70,15 @@ describe("realAdapter landing-pass facts (real merge in a linked worktree)", () 
       .toEqual(["services.php", "src/app/screen.ts"]);
   });
 
+  it("reads the prompt file at the pre-merge sha and refuses a directory there", async () => {
+    await commit(repo, "docs/landing-pass.md", "rules\n");
+    const tip = await git(repo, "rev-parse", "main");
+
+    expect(await adapter().readFileAt(tip, "docs/landing-pass.md")).toBe("rules\n");
+    expect(await adapter().readFileAt(tip, "docs/absent.md")).toBeNull();
+    await expect(adapter().readFileAt(tip, "docs")).rejects.toThrow(/not a file/);
+  });
+
   it("keeps a clean single-parent chain on the merge", async () => {
     const first = await commit(wt, "services.php", "appversion=5\n");
     const second = await commit(wt, "src/app/required.ts", "5\n");

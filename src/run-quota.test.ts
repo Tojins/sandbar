@@ -173,7 +173,7 @@ vi.mock("./events.js", () => ({
     })),
     landing: vi.fn(() => ({
       dir: "/tmp/run-quota-test/landing-1", appendMerger: vi.fn(),
-      writeMergerGate: vi.fn(), writeResolveAttempt: vi.fn(),
+      writeMergerGate: vi.fn(), writeResolveAttempt: vi.fn(), writeLandingPassAttempt: vi.fn(),
     })),
   })),
 }));
@@ -3843,7 +3843,7 @@ describe("run quota orchestration (#109)", () => {
         task: "docs", branch: "sandbar/janitor-docs", title: "Idle task: docs",
         pullRequest: 77, landLabels: ["land"],
       };
-      const runJanitorAt = async (now: Date): Promise<void> => {
+      const runJanitorAt = async (now: Date, extra: Partial<typeof config> = {}): Promise<void> => {
         seams.plan.mockResolvedValue(resolution([]));
         seams.landRequestPullRequests.mockImplementation(async () =>
           seams.merger.mock.calls.length > 0 ? [] : [janitorPr]
@@ -3860,6 +3860,7 @@ describe("run quota orchestration (#109)", () => {
           await expect(run({
             ...config,
             landingWindow,
+            ...extra,
             janitor: { tasks: [{ name: "docs", prompt: "standards", runsPerDay: 1 }] },
             maxParallelIssues: 1,
             pollIntervalMs: 1,
@@ -3928,6 +3929,43 @@ describe("run quota orchestration (#109)", () => {
           expect(event).toEqual(expect.objectContaining({ janitor: "docs" }));
           expect(event).not.toHaveProperty("issue");
         }
+      });
+
+      describe("landing-pass attempts (#258)", () => {
+        it("emits a landing-pass-attempt event with its outcome and commits when configured", async () => {
+          seams.merger.mockImplementation(async (
+            _batch: unknown, _adapter: unknown, _log: unknown, _gate: unknown,
+            options: RunMergerOptions,
+          ) => {
+            await options.landingPass?.onAttempt("janitor-docs", {
+              issueId: "janitor-docs", unit: "janitor-docs", attempt: 1, container: "c", end: "exit",
+              exitCode: 0, signal: null, durationMs: 4, stdout: "", stderr: "",
+              outcome: "done", commits: 2,
+            } as never);
+            return summary([]);
+          });
+
+          await runJanitorAt(OPEN, { landingPass: { prompt: { text: "bump" } } });
+
+          expect(eventsOf("landing-pass-attempt")).toEqual([expect.objectContaining({
+            janitor: "docs", attempt: 1, outcome: "done", commits: 2,
+          })]);
+        });
+
+        it("hands the merger no landingPass option, and emits nothing, without config.landingPass", async () => {
+          seams.merger.mockImplementation(async (
+            _batch: unknown, _adapter: unknown, _log: unknown, _gate: unknown,
+            options: RunMergerOptions,
+          ) => {
+            expect(options.landingPass).toBeUndefined();
+            return summary([]);
+          });
+
+          await runJanitorAt(OPEN);
+
+          expect(seams.merger).toHaveBeenCalledOnce();
+          expect(eventsOf("landing-pass-attempt")).toEqual([]);
+        });
       });
 
       it("complains once about the residue a landed wrap-up left", async () => {
