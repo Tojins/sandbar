@@ -26,3 +26,13 @@ a mid-change HEAD. The command also updates the two matching entries in
 `package-lock.json`; both files belong to the commit. Patch for a fix or an
 internal change, minor for anything a host repo's config or expectations have to
 move for.
+
+## Run the structural checks before promising
+
+Before promising, run `npm run structure` after a test run that writes the
+coverage it reads; gate-1 runs the same checks:
+
+```sh
+npm test -- --coverage.enabled --coverage.reportsDirectory=coverage/unit
+npm run structure
+```
