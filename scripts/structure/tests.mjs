@@ -46,7 +46,7 @@ export function isProduction(path) {
 
 export function isLandingShape(repo, baseRef) {
   const path = git(repo, ["rev-list", "--first-parent", "--parents", "HEAD", "--not", baseRef]).trim();
-  return path !== "" && path.split("\n").every((line) => line.split(" ").length > 2);
+  return path.split("\n").every((line) => line.split(" ").length > 2);
 }
 
 const HINTS = [
