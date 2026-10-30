@@ -139,6 +139,13 @@ export default {
       onDbCopyReady: [
         { command: "sandbar/sandbox-prepare.sh db-copy", timeoutMs: 1_800_000 },
       ],
+      // Before each verifier round runs scenarios (Tojins/sandbar#238): the
+      // app on :3000 is a built copy, so it is rebuilt when the branch moved
+      // its inputs, then the backend and playwright are checked. Bounded like
+      // onSandboxReady: the script alone waits up to 180s for :3000.
+      beforeScenarioRun: [
+        { command: "sandbar/sandbox-prepare.sh scenario-run", timeoutMs: 300_000 },
+      ],
     },
   },
 
