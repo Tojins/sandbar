@@ -5,7 +5,7 @@
 // members on `sandbar/chunk-<root>-<slug>` and pushed it, #62 opened the DRAFT
 // pull request a human reviews. Everything since then has been true of a chunk
 // that never lands: the branch grows, the PR is re-bodied, the members sit OPEN
-// under `needs-review`, and nothing reaches the source branch. This module is what
+// under `3-human-review`, and nothing reaches the source branch. This module is what
 // closes that loop.
 //
 // ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@
 // `land` is HARDCODED on the same ground as `AUTO_LAND_LABEL` in `lanes.ts`:
 // the configurable labels (`LabelConfig`) name a host's own handoff conventions,
 // while this one is protocol — a human addressing sandbar. Its SPELLING is
-// declared in `chunks.ts` beside the display-only `NEEDS_REVIEW_LABEL`, which
+// declared in `chunks.ts` beside the display-only `HUMAN_REVIEW_LABEL`, which
 // remains hardcoded because making it configurable is outside #93's scope, and
 // re-exported below: the PR body that invites the label,
 // the code that reads it and the code that takes it off again are three
@@ -45,7 +45,7 @@
 // this module reads finalise's bot prefix, so finalise cannot read a constant
 // back out of it.)
 //
-// The label is also the QUEUE, exactly as `ready-for-agent` is the queue for
+// The label is also the QUEUE, exactly as `2-agent-build` is the queue for
 // issues, and every failure path below is written from that reading:
 //
 //   * landed        — the label comes OFF and the PR is closed, so it can
@@ -98,7 +98,7 @@
 //                     set and dependency-safe close order from the refs that
 //                     tip brings beyond its source merge base (#175).
 //                     The same bucket covers #94 rework: a member carrying an
-//                     authoritative `ready-for-agent` is still in flight, so
+//                     authoritative `2-agent-build` is still in flight, so
 //                     landing waits, keeps `land`, and names that member on
 //                     the PR rather than closing it with feedback unbuilt.
 //   * stacked       — the chunk is stacked on another whose branch is still on
@@ -145,7 +145,7 @@
 // What the wrap-up does, and the order it does it in
 // ---------------------------------------------------------------------------
 //
-// Close every member explicitly, drop `needs-review`, take `land` back off the
+// Close every member explicitly, drop `3-human-review`, take `land` back off the
 // pull request, close it, move the pull requests of chunks stacked on this one
 // onto the source branch (#243), then atomically delete the chunk branch, its
 // member refs, and each published issue branch that has no non-merge commit
@@ -276,7 +276,7 @@ import { promisify } from "node:util";
 import {
   type ChunkBranchDrift,
   type ChunkMember,
-  NEEDS_REVIEW_LABEL,
+  HUMAN_REVIEW_LABEL,
   LAND_HOTFIX_LABEL,
   LAND_LABEL,
   LAND_REQUEST_LABELS,
@@ -597,7 +597,7 @@ export const CHUNK_MEMBER_CLOSED_COMMENT = (args: {
     (others.length > 0
       ? `: ${others.map((m) => `#${m.number}`).join(", ")}`
       : "") +
-    `. Its \`${NEEDS_REVIEW_LABEL}\` label is dropped — the commits live on ` +
+    `. Its \`${HUMAN_REVIEW_LABEL}\` label is dropped — the commits live on ` +
     `\`${args.sourceBranch}\` from here, and the chunk branch is retired once every ` +
     `issue on it has closed.`
   );
@@ -773,7 +773,7 @@ export const CHUNK_LAND_DEFERRED_PR_COMMENT = (args: {
     ? `these members are queued for rework — ${members}`
     : `these members still have ongoing sandbar work — ${members}`;
   const resume = args.reason === "rework"
-    ? `Landing resumes after the named issues leave the \`ready-for-agent\` queue.`
+    ? `Landing resumes after the named issues leave the \`2-agent-build\` queue.`
     : `Landing resumes after the named issues land or park.`;
   return `${BOT_COMMENT_PREFIX} this chunk is labelled \`${LAND_LABEL}\`, and it was NOT ` +
     `landed now: ${cause}.\n\nMerging now would move commits onto ` +
@@ -1324,8 +1324,8 @@ export async function wrapUpLandedChunk(
     // the issue is already closed.
     await attempt(
       residue,
-      `#${member.number} is closed but kept its \`${NEEDS_REVIEW_LABEL}\` label (harmless)`,
-      () => adapter.removeLabel(member.number, NEEDS_REVIEW_LABEL),
+      `#${member.number} is closed but kept its \`${HUMAN_REVIEW_LABEL}\` label (harmless)`,
+      () => adapter.removeLabel(member.number, HUMAN_REVIEW_LABEL),
     );
   }
   await log(
@@ -1544,7 +1544,7 @@ export const JANITOR_RESIDUE_BANNER = (args: {
 //                failed. Operator-actionable, and honestly described as
 //                temporary.
 //   * UNTIDY   — the branch retired and a line was left behind anyway: an
-//                `needs-review` label that would not come off a CLOSED issue, a
+//                `3-human-review` label that would not come off a CLOSED issue, a
 //                pull request that would not close or lose its `land`. NOTHING
 //                will retry these — the branch a retry would be found through
 //                is gone — so they are cosmetic by construction, and telling a

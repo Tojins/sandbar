@@ -21,7 +21,7 @@ export default {
   ghRepo: "YOUR_GITHUB_REPO",
 
   // Required: only these forge logins (plus the login behind this run's token)
-  // may apply the most recent `ready-for-agent` label. Bots and GitHub Apps may
+  // may apply the most recent `2-agent-build` label. Bots and GitHub Apps may
   // be listed by their recorded login. Use `"anyone"` to admit every labelled
   // issue, matching sandbar's behavior before 0.37.0.
   developers: ["YOUR_GITHUB_LOGIN"],
@@ -137,13 +137,13 @@ export default {
   // keepAwakeWhileIdle: false,
 
   // Rename the handoff label every park applies, if it differs in this repository.
-  // labels: { handoff: "needs-human" },
+  // labels: { handoff: "2-human-unstick" },
   // What `sandbar labels sync` makes the repo's labels match, beside the
   // protocol labels sandbar declares itself: host labels (description and
   // colour required), a protocol label's description, and renames (`from`).
   // labelSync: [
-  //   { name: "ready-for-human", description: "Triaged for a human", color: "d93f0b" },
-  //   { name: "needs-human", from: "needs-info" },
+  //   { name: "design", description: "Needs a design pass", color: "d93f0b" },
+  //   { name: "1-human-spec", description: "Triaged for a human" },
   // ],
   // Copy host-only paths into each issue worktree before setup runs.
   // copyToWorktree: [],
@@ -160,9 +160,9 @@ export default {
   // mergeMode: { kind: "verified", requiredChecks: ["tests"] },
 
   // Watch the deploy workflow a push to the source branch runs. A red run that
-  // deployed a sandbar merge files one `ready-for-human` bug issue mentioning
+  // deployed a sandbar merge files one `1-human-spec` bug issue mentioning
   // `notifyLogin`, who must not be the token's own login. The `deploy-red`
-  // label (or `label`) and `ready-for-human` must already exist.
+  // label (or `label`) and `1-human-spec` must already exist.
   // deployWatch: { workflow: "deploy.yml", notifyLogin: "your-login" },
 
   // Weekly hours in which nothing lands on the source branch: a chunk's

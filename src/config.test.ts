@@ -1404,8 +1404,8 @@ describe("resolveConfig", () => {
   });
 
   it("defaults the one handoff label and takes a host's override", () => {
-    expect(resolveConfig(minimal).labels).toEqual({ handoff: "needs-human" });
-    expect(DEFAULT_LABELS).toEqual({ handoff: "needs-human" });
+    expect(resolveConfig(minimal).labels).toEqual({ handoff: "2-human-unstick" });
+    expect(DEFAULT_LABELS).toEqual({ handoff: "2-human-unstick" });
     const r = resolveConfig({ ...minimal, labels: { handoff: "blocked" } });
     expect(r.labels).toEqual({ handoff: "blocked" });
   });
@@ -1428,13 +1428,13 @@ describe("resolveConfig", () => {
     const r = resolveConfig({
       ...minimal,
       labelSync: [
-        { name: "ready-for-human", description: "A human picks this up", color: "D93F0B" },
-        { name: "needs-human", from: "needs-info" },
+        { name: "1-human-spec", description: "A human picks this up", color: "D93F0B" },
+        { name: "2-human-unstick", from: "needs-info" },
       ],
     });
     expect(r.labelSync).toEqual([
-      { name: "ready-for-human", description: "A human picks this up", color: "d93f0b" },
-      { name: "needs-human", from: "needs-info" },
+      { name: "1-human-spec", description: "A human picks this up", color: "d93f0b" },
+      { name: "2-human-unstick", from: "needs-info" },
     ]);
   });
 

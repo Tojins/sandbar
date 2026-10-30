@@ -67,7 +67,7 @@ describe("routeChunkReviewFollowUps", () => {
     number: 40,
     title: "Root",
     body: "body",
-    labels: ["ready-for-agent"],
+    labels: ["2-agent-build"],
   };
   const adapter = (
     overrides: Partial<ChunkFollowUpAdapter> = {},

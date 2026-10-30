@@ -56,4 +56,4 @@ export { AUTO_LAND_LABEL, type Lane } from "./lanes.js";
 // host may create it for reviewers or omit it without affecting correctness.
 // `sandbar labels sync` (#245) creates it with the other protocol labels; a
 // setup script of a host's own should spell it from here rather than by hand.
-export { NEEDS_REVIEW_LABEL } from "./chunks.js";
+export { HUMAN_REVIEW_LABEL } from "./chunks.js";

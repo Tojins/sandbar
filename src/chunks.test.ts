@@ -4,7 +4,7 @@ import {
   type ChunkDerivation,
   type ChunkIssue,
   type ChunkTarget,
-  NEEDS_REVIEW_LABEL,
+  HUMAN_REVIEW_LABEL,
   UNSETTLED,
   deriveChunks,
   landedChunksOf,
@@ -683,9 +683,9 @@ describe("deriveChunks — determinism", () => {
 // #59 — the spelling is protocol: a later issue writes this label onto the
 // tracker and `plan-resolver.ts` reads it back, so a typo on either side is a
 // chunk that never advances rather than a failure anyone sees.
-describe("NEEDS_REVIEW_LABEL (#93)", () => {
-  it("is spelled `needs-review`", () => {
-    expect(NEEDS_REVIEW_LABEL).toBe("needs-review");
+describe("HUMAN_REVIEW_LABEL (#93)", () => {
+  it("is spelled `3-human-review`", () => {
+    expect(HUMAN_REVIEW_LABEL).toBe("3-human-review");
   });
 });
 

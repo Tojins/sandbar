@@ -39,7 +39,7 @@ import {
 
 const CONFIGURED = { owner: "acme", name: "app" };
 
-describe("authoritative ready-for-agent provenance (#136)", () => {
+describe("authoritative 2-agent-build provenance (#136)", () => {
   let shimBin: string;
   let originalPath: string | undefined;
   let callsPath: string;
@@ -54,7 +54,7 @@ describe("authoritative ready-for-agent provenance (#136)", () => {
       '  *"query=query{viewer{login}}"*)',
       '    printf "%s" "$SANDBAR_TEST_VIEWER_RESPONSE" ;;',
       "  *)",
-      '    printf \'{"data":{"repository":{"i12":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]},"timelineItems":{"nodes":[{"actor":{"login":"alice"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T10:00:00Z"},{"actor":{"login":"mallory"},"label":{"name":"waiting"},"createdAt":"2026-09-08T12:00:00Z"},{"actor":{"login":"bob"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T11:00:00Z"}]}}}}}\' ;;',
+      '    printf \'{"data":{"repository":{"i12":{"state":"OPEN","labels":{"nodes":[{"name":"2-agent-build"}]},"timelineItems":{"nodes":[{"actor":{"login":"alice"},"label":{"name":"2-agent-build"},"createdAt":"2026-09-08T10:00:00Z"},{"actor":{"login":"mallory"},"label":{"name":"1-human-later"},"createdAt":"2026-09-08T12:00:00Z"},{"actor":{"login":"bob"},"label":{"name":"2-agent-build"},"createdAt":"2026-09-08T11:00:00Z"}]}}}}}\' ;;',
       "esac",
     ].join("\n") + "\n", { mode: 0o755 });
     originalPath = process.env["PATH"];
@@ -73,7 +73,7 @@ describe("authoritative ready-for-agent provenance (#136)", () => {
   });
 
   // The shim answers every query with #12 alone, OPEN and labelled
-  // ready-for-agent, so #13 and #14 come back missing from the batch.
+  // 2-agent-build, so #13 and #14 come back missing from the batch.
   const graphqlReads = async (): Promise<string[]> =>
     (await readFile(callsPath, "utf8"))
       .split("\n")
@@ -98,7 +98,7 @@ describe("authoritative ready-for-agent provenance (#136)", () => {
     expect(await graphqlReads()).toHaveLength(1);
     expect(facts.get(12)).toEqual({
       state: "OPEN",
-      labels: ["ready-for-agent"],
+      labels: ["2-agent-build"],
       readyLabelApplication: null,
     });
   });
@@ -234,10 +234,10 @@ describe("fetchCandidates names the configured repo (#34)", () => {
     expect(candidates[0]?.title).not.toBe("(no-remote)");
   });
 
-  it("lists the queue on `ready-for-agent`", async () => {
+  it("lists the queue on `2-agent-build`", async () => {
     const queue = await fetchCandidates(CONFIGURED);
 
-    expect(queue[0]?.body).toBe("ready-for-agent");
+    expect(queue[0]?.body).toBe("2-agent-build");
   });
 });
 
@@ -256,7 +256,7 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
     number: 50,
     title: "Chunk #10: address alice's review feedback",
     body: "## Blocked by\n- #10\n",
-    labels: ["ready-for-agent"],
+    labels: ["2-agent-build"],
   };
 
   beforeEach(async () => {
@@ -277,7 +277,7 @@ describe("buildPlan takes candidates the listing cannot have yet (#63)", () => {
         'case "$1 $2" in',
         '  "issue list") printf "[]" ;;',
         '  "api graphql")',
-        '    printf \'{"data":{"repository":{"i50":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]}},"i10":{"state":"CLOSED","labels":{"nodes":[]}}}}}\' ;;',
+        '    printf \'{"data":{"repository":{"i50":{"state":"OPEN","labels":{"nodes":[{"name":"2-agent-build"}]}},"i10":{"state":"CLOSED","labels":{"nodes":[]}}}}}\' ;;',
         "esac",
         "exit 0",
       ].join("\n") + "\n",
@@ -370,7 +370,7 @@ describe("buildPlan loads git-derived members into the candidate graph (#93, #94
       '  *"number title body labels(first: 100)"*)',
       '    printf \'{"data":{"repository":{"i60":{"number":60,"title":"Root","body":"","state":"OPEN","labels":{"nodes":[]}}}}}\' ;;',
       '  *"state labels(first: 100)"*)',
-      '    printf \'{"data":{"repository":{"i60":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]}}}}}\' ;;',
+      '    printf \'{"data":{"repository":{"i60":{"state":"OPEN","labels":{"nodes":[{"name":"2-agent-build"}]}}}}}\' ;;',
       "  *) exit 64 ;;",
       "esac",
     ].join("\n") + "\n", { mode: 0o755 });
@@ -413,7 +413,7 @@ describe("buildPlan connects source containment to refresh admission (#174)", ()
     number: 400,
     title: "Dependent",
     body: "## Blocked by\n- #245\n- #399\n",
-    labels: ["ready-for-agent"],
+    labels: ["2-agent-build"],
   };
 
   beforeEach(async () => {
@@ -448,7 +448,7 @@ describe("buildPlan connects source containment to refresh admission (#174)", ()
       '  *"number title body labels(first: 100)"*)',
       '    printf \'{"data":{"repository":{"i245":{"number":245,"title":"Root","body":"","state":"OPEN","labels":{"nodes":[]}}}}}\' ;;',
       '  *"state labels(first: 100)"*)',
-      '    printf \'{"data":{"repository":{"i245":{"state":"OPEN","labels":{"nodes":[]}},"i399":{"state":"CLOSED","labels":{"nodes":[]}},"i400":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]}}}}}\' ;;',
+      '    printf \'{"data":{"repository":{"i245":{"state":"OPEN","labels":{"nodes":[]}},"i399":{"state":"CLOSED","labels":{"nodes":[]}},"i400":{"state":"OPEN","labels":{"nodes":[{"name":"2-agent-build"}]}}}}}\' ;;',
       "  *) exit 64 ;;",
       "esac",
     ].join("\n") + "\n", { mode: 0o755 });

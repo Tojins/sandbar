@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { IssueCloneReclaim } from "./agent-sandbox.js";
 
-import { NEEDS_REVIEW_LABEL } from "./chunks.js";
+import { HUMAN_REVIEW_LABEL } from "./chunks.js";
 import { DEFAULT_LABELS, type LabelConfig } from "./config.js";
 import { SandbarError } from "./errors.js";
 import {
@@ -15,7 +15,7 @@ import {
   NEEDS_PARTITION_COMMENT_TEMPLATE,
   NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE,
   NO_PROTOTYPE_NEEDED_PHRASE,
-  READY_FOR_AGENT_LABEL as READY_FOR_AGENT,
+  AGENT_BUILD_LABEL,
   REVIEW_BUDGET_EXHAUSTED_COMMENT_TEMPLATE,
   SPEC_GAPS_COMMENT,
   STACK_CHANGE_COMMENT_TEMPLATE,
@@ -160,11 +160,11 @@ function makeAdapter(
       if (add.length > 0 && script.addLabelEditOk === false) {
         return {
           ok: false,
-          error: script.addLabelEditError ?? "'needs-review' not found",
+          error: script.addLabelEditError ?? "'3-human-review' not found",
         };
       }
       if (script.labelEditOk === false) {
-        return { ok: false, error: script.labelEditError ?? "'needs-human' not found" };
+        return { ok: false, error: script.labelEditError ?? "'2-human-unstick' not found" };
       }
       return { ok: true };
     },
@@ -196,7 +196,7 @@ describe("comment templates", () => {
       "sandbar/issue-45-t-45",
       "Q1?\nQ2?",
       HANDOFF,
-      READY_FOR_AGENT,
+      AGENT_BUILD_LABEL,
       null,
       { kind: "removed" },
     );
@@ -205,21 +205,21 @@ describe("comment templates", () => {
     expect(body).toContain("Q1?");
     expect(body).toContain("Q2?");
     expect(body).toContain(HANDOFF);
-    expect(body).toContain(READY_FOR_AGENT);
+    expect(body).toContain(AGENT_BUILD_LABEL);
     // The branch is a LOCATION here and nothing more. STRANDED_COMMITS_NOTE is
     // appended to this same body when the run went off-branch, and it says none
     // of the work is on the branch — so this template may not claim it is.
     // Asserted as the absence of the WORD, not of the sentence that once said
     // it: "push" is what a payload claim is built out of, and the note below
     // this one in the composed comment is the only part entitled to use it.
-    expect(body.endsWith("re-apply `ready-for-agent`.")).toBe(true);
+    expect(body.endsWith("re-apply `2-agent-build`.")).toBe(true);
   });
   it("NEEDS-UI-PROTOTYPE body includes bot prefix, the impact prose, both unblock routes, and the configured labels", () => {
     const body = NEEDS_UI_PROTOTYPE_COMMENT_TEMPLATE(
       45,
       "New settings screen; tab order and empty state invented.",
       HANDOFF,
-      READY_FOR_AGENT,
+      AGENT_BUILD_LABEL,
       null,
       null,
       { kind: "removed" },
@@ -236,7 +236,7 @@ describe("comment templates", () => {
     expect(body).toContain("precise prose specification");
     expect(body).toContain("push it to the source branch before re-labelling");
     expect(body).toContain(HANDOFF);
-    expect(body).toContain(READY_FOR_AGENT);
+    expect(body).toContain(AGENT_BUILD_LABEL);
     // The suggested path carries the real issue number, not a literal <n>.
     expect(body).toContain("docs/prototypes/issue-45.html");
     expect(body).not.toContain("issue-<n>");
@@ -250,7 +250,7 @@ describe("comment templates", () => {
       45,
       "x",
       HANDOFF,
-      READY_FOR_AGENT,
+      AGENT_BUILD_LABEL,
       null,
       null,
       { kind: "removed" },
@@ -261,7 +261,7 @@ describe("comment templates", () => {
       45,
       "x",
       HANDOFF,
-      READY_FOR_AGENT,
+      AGENT_BUILD_LABEL,
       "sandbar/issue-45-t-45",
       null,
       { kind: "removed" },
@@ -276,7 +276,7 @@ describe("comment templates", () => {
       600_000,
       "The branch is too broad.",
       HANDOFF,
-      READY_FOR_AGENT,
+      AGENT_BUILD_LABEL,
       "sandbar/issue-45-t-45",
     );
     expect(body).toContain("stopped for partitioning (measured");
@@ -294,21 +294,21 @@ describe("comment templates", () => {
       "E: boom\nstack…",
       "Reviewer report",
       HANDOFF,
-      READY_FOR_AGENT,
+      AGENT_BUILD_LABEL,
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/issue-45-t-45"); // #70
     expect(body).toContain("E: boom");
     expect(body).toContain("stack…");
     expect(body).toContain(HANDOFF);
-    expect(body).toContain(READY_FOR_AGENT);
+    expect(body).toContain(AGENT_BUILD_LABEL);
     expect(body).toContain("stopped after 4 consecutive attempts without a green gate-1");
     expect(body).toContain("latest failing step: `tests`");
     expect(body).not.toContain("step `tests` was red for 4");
     expect(body.indexOf("Latest verifier report (an earlier round)")).toBeLessThan(
       body.indexOf("<details>"),
     );
-    expect(body.endsWith("re-apply `ready-for-agent`.")).toBe(true);
+    expect(body.endsWith("re-apply `2-agent-build`.")).toBe(true);
   });
   // #186: stop line, the differences and the tip-stack verdict, action line.
   it("STACK_CHANGE body names the file, each difference and the tip-stack verdict", () => {
@@ -324,7 +324,7 @@ describe("comment templates", () => {
       stackChange,
       { ok: false, failedStep: "test", failureTrace: "TimezoneAgreementTest failed" },
       HANDOFF,
-      READY_FOR_AGENT,
+      AGENT_BUILD_LABEL,
     )).toBe(
       `${BOT_COMMENT_PREFIX} stopped: this branch changes \`gate/stack.json\` beyond ` +
         "container `env`, and a branch never changes its own gate.\n\n" +
@@ -333,14 +333,14 @@ describe("comment templates", () => {
         "<details><summary>Gate trace</summary>\n\n" +
         "```\nTimezoneAgreementTest failed\n```\n\n</details>\n\n" +
         "Action: use `sandbar/issue-576-tz`; land the stack change on the source " +
-        `branch by hand, then drop \`${HANDOFF}\` and re-apply \`ready-for-agent\`.`,
+        `branch by hand, then drop \`${HANDOFF}\` and re-apply \`2-agent-build\`.`,
     );
     expect(STACK_CHANGE_COMMENT_TEMPLATE(
       "sandbar/issue-576-tz",
       stackChange,
       { ok: true, failedStep: null, failureTrace: "" },
       HANDOFF,
-      READY_FOR_AGENT,
+      AGENT_BUILD_LABEL,
     )).toContain("Gate-1 is green on the source branch's stack.\n\nAction:");
   });
 
@@ -350,7 +350,7 @@ describe("comment templates", () => {
       4,
       "## Bar violations\n- foo not extracted\n- naming is unclear",
       HANDOFF,
-      READY_FOR_AGENT,
+      AGENT_BUILD_LABEL,
     );
     expect(body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(body).toContain("sandbar/issue-45-t-45"); // #70
@@ -360,7 +360,7 @@ describe("comment templates", () => {
     // The LAST positional argument, which is what a signature shift silently
     // drops off the end: without this the whole call could slide one slot and
     // every other assertion here would still pass.
-    expect(body).toContain(READY_FOR_AGENT);
+    expect(body).toContain(AGENT_BUILD_LABEL);
     expect(body).toContain(
       "verifier stopped after 4 consecutive rejections",
     );
@@ -402,7 +402,7 @@ describe("finalizeOne", () => {
     expect(calls.comments).toEqual([{ n: 400, body: "refresh diagnostics" }]);
     expect(calls.labelEdits).toEqual([{
       n: 400,
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
       add: [HANDOFF],
     }]);
     expect(calls.pushes).toEqual([]);
@@ -412,19 +412,19 @@ describe("finalizeOne", () => {
   it("fails loud when a refresh park label flip is refused", async () => {
     const { adapter, calls } = makeAdapter({
       labelEditOk: false,
-      labelEditError: "'needs-human' not found",
+      labelEditError: "'2-human-unstick' not found",
     });
 
     await expect(finalizeOne({
       kind: "chunk-refresh-failed",
       issue: issue(400),
       comment: "refresh diagnostics",
-    }, adapter, LABELS)).rejects.toThrow(/#400.*needs-human.*config/s);
+    }, adapter, LABELS)).rejects.toThrow(/#400.*2-human-unstick.*config/s);
 
     expect(calls.comments).toEqual([{ n: 400, body: "refresh diagnostics" }]);
     expect(calls.labelEdits).toEqual([{
       n: 400,
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
       add: [HANDOFF],
     }]);
   });
@@ -526,7 +526,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("`codex`");
     expect(calls.comments[0]!.body).toContain("`seven_day`");
     expect(calls.comments[0]!.body).toContain("1970-01-01T00:00:42.000Z");
-    expect(calls.comments[0]!.body).toContain("remains `ready-for-agent`");
+    expect(calls.comments[0]!.body).toContain("remains `2-agent-build`");
     expect(calls.labelEdits).toEqual([]);
   });
 
@@ -557,10 +557,10 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]?.body).toContain("refused its credential");
     expect(calls.comments[0]?.body).toContain("CODEX_AUTH_JSON");
     expect(calls.comments[0]?.body).toContain("Log in again on the host");
-    expect(calls.comments[0]?.body).toContain("remains `ready-for-agent`");
+    expect(calls.comments[0]?.body).toContain("remains `2-agent-build`");
     expect(calls.labelEdits).toEqual([]);
   });
-  it("merged: removes worktree before deleting branch, drops ready-for-agent on the closed issue, no push, no comment", async () => {
+  it("merged: removes worktree before deleting branch, drops 2-agent-build on the closed issue, no push, no comment", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne({ kind: "merged", issue: i }, adapter, LABELS);
@@ -571,7 +571,7 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([]);
     expect(calls.comments).toEqual([]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [] },
     ]);
   });
 
@@ -609,7 +609,7 @@ describe("finalizeOne", () => {
   // #60 — the third success shape. Everything here is deliberately NOT what
   // `merged` does: the issue is not closed, it is not left carrying the queue
   // label, and it gets a comment.
-  it("chunk-landed: swaps ready-for-agent for needs-review, comments the branch, deletes the local branch", async () => {
+  it("chunk-landed: swaps 2-agent-build for 3-human-review, comments the branch, deletes the local branch", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
@@ -626,8 +626,8 @@ describe("finalizeOne", () => {
     expect(action).toEqual({ kind: "deleted-local" });
     expect(calls.reclaims).toEqual([{ branch: i.branch }]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [] },
-      { n: 45, remove: [], add: [NEEDS_REVIEW_LABEL] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [] },
+      { n: 45, remove: [], add: [HUMAN_REVIEW_LABEL] },
     ]);
     expect(calls.deletes).toEqual([i.branch]);
     // The branch is on origin under the chunk's name, so it is never pushed
@@ -698,8 +698,8 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]?.body).toContain("sandbar/chunk-45-x");
     expect(calls.deletes).toEqual([i.branch]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [] },
-      { n: 45, remove: [], add: [NEEDS_REVIEW_LABEL] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [] },
+      { n: 45, remove: [], add: [HUMAN_REVIEW_LABEL] },
     ]);
   });
 
@@ -724,7 +724,7 @@ describe("finalizeOne", () => {
     expect(calls.labelEdits).toHaveLength(2);
   });
 
-  it("merge-conflict: removes worktree, pushes branch + adds the handoff label (merger already commented + dropped ready-for-agent)", async () => {
+  it("merge-conflict: removes worktree, pushes branch + adds the handoff label (merger already commented + dropped 2-agent-build)", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
@@ -743,7 +743,7 @@ describe("finalizeOne", () => {
     ]);
   });
 
-  it("merge-gate-red: removes worktree, pushes branch + adds the handoff label (merger already commented + dropped ready-for-agent)", async () => {
+  it("merge-gate-red: removes worktree, pushes branch + adds the handoff label (merger already commented + dropped 2-agent-build)", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
@@ -762,7 +762,7 @@ describe("finalizeOne", () => {
     ]);
   });
 
-  it("forge-unverified: pushes the branch + parks it (the merger already commented + dropped ready-for-agent)", async () => {
+  it("forge-unverified: pushes the branch + parks it (the merger already commented + dropped 2-agent-build)", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
@@ -815,7 +815,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -844,7 +844,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("New settings screen; tab order invented.");
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -893,7 +893,7 @@ describe("finalizeOne", () => {
     // label flip regardless of what happened to the local branch.
     expect(calls.comments.length).toBe(1);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -963,7 +963,7 @@ describe("finalizeOne", () => {
     expect(calls.deletes).toEqual([]);
     expect(calls.forceDeletes).toEqual([]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -984,7 +984,7 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([i.branch]);
     expect(calls.comments[0]?.body).toContain("input_too_large");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -1047,7 +1047,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -1075,7 +1075,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("- container 'db': mounts");
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.labelEdits).toEqual([
-      { n: 576, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 576, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -1143,7 +1143,7 @@ describe("finalizeOne", () => {
     // Nor is it a gate failure — the gate is what went green.
     expect(body).not.toContain("without a green gate");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -1184,7 +1184,7 @@ describe("finalizeOne", () => {
     // terminal, and the harness trace is not the reviewer speaking.
     expect(body).not.toContain("the code reviewer's `CHANGES-REQUESTED` is the blocker");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -1258,7 +1258,7 @@ describe("finalizeOne", () => {
       expect(body).toContain("refs/sandbar/stranded/deadbeef1234");
       expect(calls.reclaims).toEqual([{ branch: i.branch }]);
       expect(calls.labelEdits).toEqual([
-        { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+        { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
       ]);
     },
   );
@@ -1419,7 +1419,7 @@ describe("finalizeOne", () => {
     expect(body).toContain("cherry-pick");
   });
 
-  it("review-budget-exhausted: removes worktree, pushes, comments with latest reviewer prose, swaps labels to needs-human", async () => {
+  it("review-budget-exhausted: removes worktree, pushes, comments with latest reviewer prose, swaps labels to 2-human-unstick", async () => {
     const { adapter, calls } = makeAdapter();
     const i = issue(45);
     const action = await finalizeOne(
@@ -1450,7 +1450,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain(i.branch);
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -1481,7 +1481,7 @@ describe("finalizeOne", () => {
     expect(anchored).toContain("_(quoted review omitted.)_");
     expect(anchored).toContain("Action:");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -1548,7 +1548,7 @@ describe("finalizeOne", () => {
       { branch: i.branch, keep: expect.stringContaining("human inspection") },
     ]);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
     expect(calls.comments[0]!.body).toContain(refusal);
     expect(calls.comments[0]!.body).toContain("abc123");
@@ -1562,7 +1562,7 @@ describe("finalizeOne", () => {
     );
     expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
     expect(calls.comments[0]!.body.endsWith(
-      "resolve the handoff above, then drop `needs-human` and re-apply `ready-for-agent`.",
+      "resolve the handoff above, then drop `2-human-unstick` and re-apply `2-agent-build`.",
     )).toBe(true);
   });
 
@@ -1601,7 +1601,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("Inspect the preserved clone");
     expect(calls.comments[0]!.body).toContain("Reviewer rewound the branch");
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
@@ -1653,11 +1653,11 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("<details><summary>Git refusal</summary>");
     expect(calls.comments[0]!.body).toContain("git -C '/host/.sandbar/repo.git' push");
     expect(calls.comments[0]!.body.endsWith(
-      "resolve the handoff above, then drop `needs-human` and re-apply `ready-for-agent`.",
+      "resolve the handoff above, then drop `2-human-unstick` and re-apply `2-agent-build`.",
     )).toBe(true);
     expect(calls.labelEdits).toEqual([{
       n: 63,
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
       add: [HANDOFF],
     }]);
   });
@@ -1682,7 +1682,7 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).not.toContain("resolve the handoff above");
     expect(calls.labelEdits).toEqual([{
       n: 64,
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
       add: [HANDOFF],
     }]);
   });
@@ -1698,7 +1698,7 @@ describe("finalizeOne", () => {
         resetsAt: 42,
       } as const,
       context: "subscription quota window",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "credential",
@@ -1709,7 +1709,7 @@ describe("finalizeOne", () => {
         detail: "token revoked",
       } as const,
       context: "CODEX_AUTH_JSON",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "UI prototype",
@@ -1720,7 +1720,7 @@ describe("finalizeOne", () => {
         strandedHead: null,
       } as const,
       context: "invented navigation",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "partition",
@@ -1734,7 +1734,7 @@ describe("finalizeOne", () => {
         detail: "split the migrations",
       } as const,
       context: "split the migrations",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "gate-red",
@@ -1748,7 +1748,7 @@ describe("finalizeOne", () => {
         strandedHead: null,
       } as const,
       context: "gate exploded",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "uncommittable worktree",
@@ -1762,7 +1762,7 @@ describe("finalizeOne", () => {
         strandedHead: null,
       } as const,
       context: "stopped because the worktree stayed uncommitted",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "no-signal exhaustion",
@@ -1776,7 +1776,7 @@ describe("finalizeOne", () => {
         strandedHead: null,
       } as const,
       context: "stopped after 4 consecutive attempts without a green gate-1",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "reviewer harness failure",
@@ -1790,7 +1790,7 @@ describe("finalizeOne", () => {
         strandedHead: null,
       } as const,
       context: "stopped after 2 reviewer-harness failures",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "off-branch head",
@@ -1810,7 +1810,7 @@ describe("finalizeOne", () => {
         },
       } as const,
       context: "implementer remained off `sandbar/issue-744-t-744`",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "review budget",
@@ -1821,7 +1821,7 @@ describe("finalizeOne", () => {
         latestReviewerProse: "still violates the contract",
       } as const,
       context: "still violates the contract",
-      remove: [READY_FOR_AGENT],
+      remove: [AGENT_BUILD_LABEL],
     },
     {
       name: "landing conflict",
@@ -2178,14 +2178,14 @@ describe("finalizeOne", () => {
     expect(calls.comments[0]!.body).toContain("2 times");
     expect(calls.comments[0]!.body.startsWith(BOT_COMMENT_PREFIX)).toBe(true);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
   it("needs-human with a failed handoff label flip: still pushes + comments, then THROWS SandbarError (fail loud, #8)", async () => {
     const { adapter, calls } = makeAdapter({
       labelEditOk: false,
-      labelEditError: "'needs-human' not found",
+      labelEditError: "'2-human-unstick' not found",
     });
     const i = issue(45);
     await expect(
@@ -2208,12 +2208,12 @@ describe("finalizeOne", () => {
     expect(calls.pushes).toEqual([i.branch]);
     expect(calls.comments.length).toBe(1);
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
     ]);
   });
 
   it("needs-human flip failure: the thrown error names the issue and the config cause", async () => {
-    const { adapter } = makeAdapter({ labelEditOk: false, labelEditError: "'needs-human' not found" });
+    const { adapter } = makeAdapter({ labelEditOk: false, labelEditError: "'2-human-unstick' not found" });
     await expect(
       finalizeOne(
         {
@@ -2227,7 +2227,7 @@ describe("finalizeOne", () => {
         adapter,
         LABELS,
       ),
-    ).rejects.toThrow(/#45.*needs-human.*config/s);
+    ).rejects.toThrow(/#45.*2-human-unstick.*config/s);
   });
 
   it("review-budget-exhausted with a failed handoff label flip: throws SandbarError", async () => {
@@ -2300,7 +2300,7 @@ describe("finalizeOne", () => {
     const action = await finalizeOne({ kind: "merged", issue: issue(45) }, adapter, LABELS);
     // Closed-issue label cleanup is benign — the planner only lists open issues.
     expect(action).toEqual({ kind: "deleted-local" });
-    expect(calls.labelEdits).toEqual([{ n: 45, remove: [READY_FOR_AGENT], add: [] }]);
+    expect(calls.labelEdits).toEqual([{ n: 45, remove: [AGENT_BUILD_LABEL], add: [] }]);
   });
 
   it("a thrown required side-effect (push) propagates — finalizeOne does not swallow", async () => {
@@ -2347,7 +2347,7 @@ describe("finalizeOne", () => {
     // The queue label removed is the fixed protocol label; only the handoff
     // (add) label is host-configurable.
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: ["human-takeover"] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: ["human-takeover"] },
     ]);
     expect(calls.comments[0]!.body).toContain("human-takeover");
   });
@@ -2364,13 +2364,13 @@ describe("finalizeOne", () => {
     await finalizeOne({ kind: "merge-conflict", issue: issue(46) }, adapter, LABELS);
 
     expect(calls.labelEdits).toEqual([
-      { n: 45, remove: [READY_FOR_AGENT], add: ["needs-human"] },
-      { n: 46, remove: [], add: ["needs-human"] },
+      { n: 45, remove: [AGENT_BUILD_LABEL], add: ["2-human-unstick"] },
+      { n: 46, remove: [], add: ["2-human-unstick"] },
     ]);
     // The merger posts the conflict's comment (asserted in merger.test.ts).
     expect(calls.comments.map((c) => c.n)).toEqual([45]);
     expect(calls.comments[0]!.body).toContain(
-      "answer the questions, then drop `needs-human` and re-apply `ready-for-agent`.",
+      "answer the questions, then drop `2-human-unstick` and re-apply `2-agent-build`.",
     );
   });
 
@@ -2415,13 +2415,13 @@ describe("finalizeOne", () => {
 
   it("merged is exempt from the closed-issue guard (the merge closed it by design)", async () => {
     // CLOSED is the expected state for a merged issue; it must still run its
-    // worktree+branch cleanup and the cosmetic ready-for-agent drop.
+    // worktree+branch cleanup and the cosmetic 2-agent-build drop.
     const { adapter, calls } = makeAdapter({ issueState: "CLOSED" });
     const action = await finalizeOne({ kind: "merged", issue: issue(45) }, adapter, LABELS);
 
     expect(action).toEqual({ kind: "deleted-local" });
     expect(calls.stateChecks).toEqual([]);
-    expect(calls.labelEdits).toEqual([{ n: 45, remove: [READY_FOR_AGENT], add: [] }]);
+    expect(calls.labelEdits).toEqual([{ n: 45, remove: [AGENT_BUILD_LABEL], add: [] }]);
   });
 });
 
@@ -2466,8 +2466,8 @@ describe("finalizeAll", () => {
       { branch: "sandbar/issue-13-t-13" },
     ]);
     expect(calls.labelEdits).toEqual([
-      { n: 10, remove: [READY_FOR_AGENT], add: [] },
-      { n: 11, remove: [READY_FOR_AGENT], add: [HANDOFF] },
+      { n: 10, remove: [AGENT_BUILD_LABEL], add: [] },
+      { n: 11, remove: [AGENT_BUILD_LABEL], add: [HANDOFF] },
       { n: 12, remove: [], add: [HANDOFF] },
     ]);
   });

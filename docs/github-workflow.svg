@@ -57,7 +57,7 @@
         <!-- github: issues -->
         <rect class="node" x="310" y="212" width="150" height="56" rx="6"/>
         <text class="t" x="324" y="235">Issues</text>
-        <text class="s" x="324" y="254">ready-for-agent</text>
+        <text class="s" x="324" y="254">2-agent-build</text>
         <path class="e" d="M385 118V210"/>
 
         <!-- sandbar: pick + work -->
@@ -73,10 +73,10 @@
         <!-- park loop -->
         <rect class="node" x="500" y="212" width="150" height="56" rx="6"/>
         <text class="t" x="514" y="235">Question / stuck</text>
-        <text class="s" x="514" y="254">needs-human</text>
+        <text class="s" x="514" y="254">2-human-unstick</text>
         <rect class="human" x="500" y="62" width="150" height="56" rx="6"/>
         <text class="t" x="514" y="85">Answer</text>
-        <text class="s" x="514" y="104">re-add ready-for-agent</text>
+        <text class="s" x="514" y="104">re-add 2-agent-build</text>
         <path class="e-bad" d="M575 362V270"/>
         <path class="e-bad" d="M575 212V120"/>
         <path class="e-bad" d="M500 106H480V240H462"/>
@@ -88,7 +88,7 @@
         <path class="e" d="M650 390H688"/>
         <rect class="node" x="690" y="212" width="150" height="56" rx="6"/>
         <text class="t" x="704" y="235">Draft PR</text>
-        <text class="s" x="704" y="254">needs-review</text>
+        <text class="s" x="704" y="254">3-human-review</text>
         <path class="e" d="M765 362V270"/>
 
         <!-- human review -->

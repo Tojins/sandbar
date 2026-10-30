@@ -16,7 +16,7 @@
 // write after cleanup has released the ref.
 //
 //   Recompute:                 Deterministic resolver picks the unblocked
-//                              `ready-for-agent` issues after checking the
+//                              `2-agent-build` issues after checking the
 //                              latest label actor against required configured
 //                              developers or this run's token login (#136;
 //                              `"anyone"` disables the check). The token login
@@ -661,7 +661,7 @@ export async function verifyFinalizedTrackerState(
     if (!finalizationIntendsNotReady(result)) continue;
     const issueNum = issueNumberOf(result.input.issue);
     const observed = await issueLabels(issueNum);
-    if (observed.includes("ready-for-agent")) {
+    if (observed.includes("2-agent-build")) {
       throw new SandbarError(
         `Tracker read-back mismatch for issue #${issueNum}: sandbar wrote ` +
           `not-ready but observed labels [${observed.join(", ")}].`,
@@ -1638,7 +1638,7 @@ export async function run(
   // Issue numbers merged+closed earlier in THIS run. The listing endpoint the
   // planner uses lags label/close writes, so without this an issue
   // merged in a prior iteration can resurface as a candidate, get re-planned,
-  // and get stamped `needs-human` on a closed-COMPLETED issue (#16). Fed to
+  // and get stamped `2-human-unstick` on a closed-COMPLETED issue (#16). Fed to
   // buildPlan as a hard exclusion alongside its live-state CLOSED check.
   const mergedThisRun = new Set<number>();
 
@@ -1924,7 +1924,7 @@ export async function run(
         kind: "complaint",
         severity: "warning",
         message: `Issue #${excluded.issue} (${excluded.title}) excluded from the queue: ` +
-          `the most recent recorded \`ready-for-agent\` application was by ${actor}.`,
+          `the most recent recorded \`2-agent-build\` application was by ${actor}.`,
       });
     }
     deferredChunksForRecompute = [];
@@ -2604,7 +2604,7 @@ export async function run(
       // one step whose whole job is to make the tracker agree with git before
       // anything reads either. It needs the derivation the plan just built
       // (only that graph knows which issues are on a chunk branch), and what
-      // it does — closing members, dropping `needs-review` — changes the answer to
+      // it does — closing members, dropping `3-human-review` — changes the answer to
       // every question the plan asked, so the plan is REBUILT when it acted.
       //
       // Rebuilt immediately rather than left stale for the next recompute: closing a member
@@ -3042,7 +3042,7 @@ export async function run(
       // running them after it meant any non-MergerError throw from the
       // landing (a ContainerBringupError from the merger stack is the live
       // example) escaped to the top-level handler before a single one was
-      // written, so an issue kept `ready-for-agent` and burned through its
+      // written, so an issue kept `2-agent-build` and burned through its
       // inner-loop budgets again next run. The mirror-image risk is strictly
       // smaller: a
       // required side-effect failing here stops the run before the landing,
@@ -3353,13 +3353,13 @@ export async function run(
             // `run-end (normal-exit)` on a run whose merger has already thrown.
             cleanupReason = "merger-halted";
             // The halt stops the OUTER loop; it must not strand issues the
-            // merger already commented on and stripped `ready-for-agent` from.
+            // merger already commented on and stripped `2-agent-build` from.
             // Those need their handoff label applied before we stop, or they
             // sit on no queue at all — invisible to the planner and to a human
-            // filtering on `needs-human`. Nothing here lands code ON THE SOURCE
+            // filtering on `2-human-unstick`. Nothing here lands code ON THE SOURCE
             // BRANCH: `merged` is always empty on this path. `chunkLanded`
             // (#60) may not be, and that is not a contradiction — those commits
-            // are on origin's chunk branch and the issues receive `needs-review`
+            // are on origin's chunk branch and the issues receive `3-human-review`
             // label whether the landing went on to halt or not.
             haltPartial = err.partial;
             if (haltPartial && haltPartial.merged.length > 0) {
@@ -3505,7 +3505,7 @@ export async function run(
       // repair whose next attempt is a whole cycle away.
       //
       // WHAT DOES NOT HALT is a chunk that retired cleanly and left a cosmetic
-      // line behind: a `needs-review` label that would not come off a CLOSED issue
+      // line behind: a `3-human-review` label that would not come off a CLOSED issue
       // (the wrap-up calls that harmless itself, and the planner never reads
       // that display label), or a pull request that would not close. Neither leaves an
       // issue on no queue, and halting on one would abandon the rest of the
@@ -3561,7 +3561,7 @@ export async function run(
       await reportJanitorResidue(mergerSummary?.mergedJanitors ?? []);
 
       // Post-push close failures (issue #14): the merges are durable on origin
-      // and Phase 4b above already dropped `ready-for-agent` for every merged
+      // and Phase 4b above already dropped `2-agent-build` for every merged
       // issue, so the planner won't re-pick them — but they're still OPEN on the
       // tracker. Surface them as an operator-actionable list and halt loud,
       // AFTER finalise so the merged work is fully reconciled locally.
@@ -3574,7 +3574,7 @@ export async function run(
           severity: "error",
           message: `Merger pushed all merges but could not close ` +
             `${mergerSummary.unclosed.length} issue(s) after retries: ${list}.\n` +
-            "Their merges are durable on origin and `ready-for-agent` was removed " +
+            "Their merges are durable on origin and `2-agent-build` was removed " +
             "during finalise, so the planner will NOT re-pick them — but they " +
             "remain OPEN. Close them manually to reconcile the tracker.",
         });

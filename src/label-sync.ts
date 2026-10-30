@@ -8,9 +8,11 @@
 //
 // The declared set has two sources (`declaredLabels`):
 //   - PROTOCOL labels come from here, so they cannot drift from the code that
-//     reads them: `ready-for-agent`, `waiting`, `auto-land`, `needs-review`,
-//     `land` and the configured handoff label, each with a canonical
-//     description and colour.
+//     reads them: `1-human-spec`, `1-human-later`, `2-agent-build`,
+//     `2-agent-later`, the configured handoff label (`2-human-unstick`),
+//     `3-human-review`, `auto-land` and `land`, each with a canonical
+//     description and colour. Each workflow label is named by its stage and
+//     who acts next, and carries a built-in rename from its old name.
 //   - `config.labelSync` adds HOST labels (name, description and colour all
 //     required), overrides a protocol label's description or colour, and
 //     declares renames (`from`).
@@ -28,12 +30,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { LAND_LABEL, NEEDS_REVIEW_LABEL } from "./chunks.js";
-import type { LabelConfig, LabelDeclaration } from "./config.js";
+import { LAND_LABEL, HUMAN_REVIEW_LABEL } from "./chunks.js";
+import { DEFAULT_LABELS, type LabelConfig, type LabelDeclaration } from "./config.js";
+import { HUMAN_SPEC_LABEL } from "./deploy-watch.js";
 import { SandbarError } from "./errors.js";
-import { READY_FOR_AGENT_LABEL } from "./finalize.js";
+import { AGENT_BUILD_LABEL } from "./finalize.js";
 import { AUTO_LAND_LABEL } from "./lanes.js";
-import { WAITING_LABEL } from "./plan-resolver.js";
+import { AGENT_LATER_LABEL, HUMAN_LATER_LABEL } from "./plan-resolver.js";
 import { type RepoRef, repoSlug } from "./repo-ref.js";
 
 const exec = promisify(execFile);
@@ -72,37 +75,58 @@ export type LabelSyncPlan = {
 
 const key = (name: string): string => name.toLowerCase();
 
-function protocolLabels(labels: LabelConfig): readonly Omit<SyncedLabel, "from">[] {
+// Each label's `from` is the name it had before the labels were named by stage
+// and next actor, so one sync moves a repo's issues across. The handoff label
+// renames only under its default name; a host that configured its own keeps it.
+function protocolLabels(labels: LabelConfig): readonly SyncedLabel[] {
   return [
     {
-      name: READY_FOR_AGENT_LABEL,
+      name: HUMAN_SPEC_LABEL,
+      description: "A human finishes the spec before an agent can take it",
+      color: "fbca04",
+      from: "ready-for-human",
+    },
+    {
+      name: HUMAN_LATER_LABEL,
+      description: "Not a priority now; a human decides when it moves on",
+      color: "fef2c0",
+      from: "waiting",
+    },
+    {
+      name: AGENT_BUILD_LABEL,
       description: "Queued for sandbar: its agent loop works this issue",
       color: "0e8a16",
+      from: "ready-for-agent",
     },
     {
-      name: WAITING_LABEL,
-      description: "Held out of sandbar's queue until the label comes off",
-      color: "d4c5f9",
-    },
-    {
-      name: AUTO_LAND_LABEL,
-      description: "Sandbar lands this issue on a green gate, without a review chunk",
-      color: "5319e7",
-    },
-    {
-      name: NEEDS_REVIEW_LABEL,
-      description: "Sandbar's work is on a review chunk branch awaiting a human",
-      color: "c5def5",
-    },
-    {
-      name: LAND_LABEL,
-      description: "On a sandbar chunk pull request: land the chunk",
-      color: "1d76db",
+      name: AGENT_LATER_LABEL,
+      description: "For sandbar once a human moves it to 2-agent-build",
+      color: "c2e0c6",
+      from: "agent-queued",
     },
     {
       name: labels.handoff,
       description: "Sandbar stopped; its comment says what a human does next",
       color: "d93f0b",
+      from: labels.handoff === DEFAULT_LABELS.handoff ? "needs-human" : null,
+    },
+    {
+      name: HUMAN_REVIEW_LABEL,
+      description: "Sandbar's work is on a review chunk branch awaiting a human",
+      color: "c5def5",
+      from: "needs-review",
+    },
+    {
+      name: AUTO_LAND_LABEL,
+      description: "Sandbar lands this issue on a green gate, without a review chunk",
+      color: "5319e7",
+      from: null,
+    },
+    {
+      name: LAND_LABEL,
+      description: "On a sandbar chunk pull request: land the chunk",
+      color: "1d76db",
+      from: null,
     },
   ];
 }
@@ -129,7 +153,7 @@ export function declaredLabels(
         name: label.name,
         description: declaration?.description ?? label.description,
         color: declaration?.color ?? label.color,
-        from: declaration?.from ?? null,
+        from: declaration?.from ?? label.from,
       };
     }),
     ...declarations

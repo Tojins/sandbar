@@ -11,7 +11,7 @@ import {
   type ChunkLandTarget,
   type JanitorLandTarget,
 } from "./chunk-land.js";
-import { NEEDS_REVIEW_LABEL, type ChunkRefresh } from "./chunks.js";
+import { HUMAN_REVIEW_LABEL, type ChunkRefresh } from "./chunks.js";
 import type { StackChange } from "./stack-change.js";
 import {
   SOURCE_TARGET,
@@ -19,7 +19,7 @@ import {
   buildStackChangeComment,
   buildForgeUnverifiedComment,
   MergerError,
-  READY_FOR_AGENT_LABEL,
+  AGENT_BUILD_LABEL,
   groupByChunk,
   type IssueRef,
   type MergerAdapter,
@@ -47,7 +47,7 @@ const runMergerWithAdapter = (
   } = {},
 ) => runMergerCore(issues, adapter, log, onGateRed, {
   ...options,
-  handoffLabel: options.handoffLabel ?? "needs-human",
+  handoffLabel: options.handoffLabel ?? "2-human-unstick",
   repoSlug: options.repoSlug ?? "acme/app",
   observations: options.observations ?? DISCARD_MERGER_OBSERVATIONS,
 });
@@ -887,7 +887,7 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
       { n: 42, msg: buildInstallFailedComment(SOURCE_TARGET) },
     ]);
     expect(calls.removedLabels).toEqual([
-      { n: 42, label: READY_FOR_AGENT_LABEL },
+      { n: 42, label: AGENT_BUILD_LABEL },
     ]);
   });
 });
@@ -947,10 +947,10 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
     expect(calls.comments[0]!.msg).toContain("stopped on conflicts after 1 resolve attempt");
     expect(calls.comments[0]!.msg).toContain(reason);
     expect(calls.comments[0]!.msg.endsWith(
-      "drop `needs-human` and re-apply `ready-for-agent`.",
+      "drop `2-human-unstick` and re-apply `2-agent-build`.",
     )).toBe(true);
     expect(calls.removedLabels).toEqual([
-      { n: 42, label: READY_FOR_AGENT_LABEL },
+      { n: 42, label: AGENT_BUILD_LABEL },
     ]);
   });
 
@@ -1049,7 +1049,7 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
     // Still fail-loud, still not swallowed — but as a MergerError, because that
     // is the only class run.ts routes to Phase 4 (#33). Nothing is stranded in
     // this particular arrangement: the label removal is what de-queues an
-    // issue, and it is the call that failed, so #42 is still `ready-for-agent`
+    // issue, and it is the call that failed, so #42 is still `2-agent-build`
     // and needs no handoff — hence an empty partial rather than a missing one.
     const { adapter } = makeAdapter({
       merges: ["conflict"],
@@ -1480,7 +1480,7 @@ describe("runMergerWithAdapter — gate-red enters resolve loop", () => {
     expect(calls.comments[0]!.msg).toContain("after 1 fix attempt");
     expect(calls.comments[0]!.msg).toContain(reason);
     expect(calls.removedLabels).toEqual([
-      { n: 42, label: READY_FOR_AGENT_LABEL },
+      { n: 42, label: AGENT_BUILD_LABEL },
     ]);
   });
 
@@ -1952,7 +1952,7 @@ describe("runMergerWithAdapter — logging", () => {
 describe("runMergerWithAdapter — an unexpected throw inside the loop (#33)", () => {
   it("carries the issues it already parked out on MergerError.partial", async () => {
     // The concrete cycle from #33: #40 conflicts and the resolve loop abandons,
-    // so the merger comments on it and strips `ready-for-agent` — Phase 4b has
+    // so the merger comments on it and strips `2-agent-build` — Phase 4b has
     // not yet applied the handoff label. Then #42 conflicts too and the `gh`
     // call for its sibling context fails. Unwrapped, that SandbarError skips
     // run.ts's `instanceof MergerError` branch entirely and #40 ends commented,
@@ -1997,7 +1997,7 @@ describe("runMergerWithAdapter — an unexpected throw inside the loop (#33)", (
     ]);
     // The tracker writes the partial describes genuinely happened.
     expect(calls.comments.map((c) => c.n)).toEqual([40]);
-    expect(calls.removedLabels).toEqual([{ n: 40, label: READY_FOR_AGENT_LABEL }]);
+    expect(calls.removedLabels).toEqual([{ n: 40, label: AGENT_BUILD_LABEL }]);
   });
 
   it("reports no merges even when branches had merged before the throw", async () => {
@@ -2285,8 +2285,8 @@ describe("runMergerWithAdapter — verified merge mode", () => {
     expect(vCalls.fastForwards).toEqual([]);
     expect(calls.closes).toEqual([]);
     expect(calls.removedLabels).toEqual([
-      { n: 7, label: READY_FOR_AGENT_LABEL },
-      { n: 9, label: READY_FOR_AGENT_LABEL },
+      { n: 7, label: AGENT_BUILD_LABEL },
+      { n: 9, label: AGENT_BUILD_LABEL },
     ]);
     // Each issue is told it may not be the one at fault, and names its siblings.
     expect(calls.comments.map((c) => c.n)).toEqual([7, 9]);
@@ -2377,7 +2377,7 @@ describe("runMergerWithAdapter — verified merge mode", () => {
 
   it("hands back what it had already applied to the tracker when it halts", async () => {
     // The halt stops the run, but #7 has already been commented and stripped
-    // of `ready-for-agent` — without this it would sit on no queue at all.
+    // of `2-agent-build` — without this it would sit on no queue at all.
     const { adapter } = makeAdapter({
       merges: ["ok", "ok"],
       gates: [gateRed(), { ok: true }],
@@ -2424,7 +2424,7 @@ describe("runMergerWithAdapter — verified merge mode", () => {
   });
   it("wraps a raw throw from the landing so the tracker state still reaches Phase 4", async () => {
     // The stranding this prevents: #7 has already been commented and stripped
-    // of `ready-for-agent` when the forge becomes unreachable. A plain Error
+    // of `2-agent-build` when the forge becomes unreachable. A plain Error
     // escapes run.ts's `instanceof MergerError` check, Phase 4 never runs, and
     // #7 ends on no queue and under no handoff label — invisible to the planner
     // and to every human filter.
@@ -2758,7 +2758,7 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
   it("halts on a rejected chunk push, carrying the chunks that DID land in the partial", async () => {
     // The rejection means the branch moved under this cycle, so the
     // composition is not built on it — never force-pushed, never retried. The
-    // earlier chunk's members are on origin and still owe their `needs-review`
+    // earlier chunk's members are on origin and still owe their `3-human-review`
     // label, which is what the partial carries to Phase 4.
     const { adapter, calls } = makeAdapter({
       merges: ["ok", "ok"],
@@ -2828,8 +2828,8 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
       "sandbar/chunk-44-c",
     ]);
     expect(calls.removedLabels).toEqual([
-      { n: 42, label: READY_FOR_AGENT_LABEL },
-      { n: 43, label: READY_FOR_AGENT_LABEL },
+      { n: 42, label: AGENT_BUILD_LABEL },
+      { n: 43, label: AGENT_BUILD_LABEL },
     ]);
     expect(calls.comments).toHaveLength(2);
     expect(calls.comments.map(({ n }) => n)).toEqual([42, 43]);
@@ -2840,7 +2840,7 @@ describe("runMergerWithAdapter — chunk landing (#60)", () => {
       expect(comment.msg).toContain(`tip-${member.branch}`);
       expect(comment.msg).toContain(`refs/heads/${member.branch}`);
       expect(comment.msg).toContain("/host/.sandbar/repo.git");
-      expect(comment.msg).toContain("ready-for-agent");
+      expect(comment.msg).toContain("2-agent-build");
     }
   });
 
@@ -2949,7 +2949,7 @@ describe("runMergerWithAdapter — the chunk PR (#62)", () => {
 
   it("halts when the PR cannot be opened, keeping the landing in the partial", async () => {
     // The push already happened: those commits are on origin and their issues
-    // still owe `needs-review`, so the partial has to carry them. What is lost is
+    // still owe `3-human-review`, so the partial has to carry them. What is lost is
     // the cycle, not the work.
     const { adapter, calls } = makeAdapter({
       merges: ["ok"],
@@ -3314,7 +3314,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     expect(calls.prComments[0]?.pr).toBe(542);
     expect(calls.prComments[0]?.body).toContain("#43 — t-43");
     // The chunk landing itself is untouched: #43 is on the branch and owed its
-    // `needs-review` display label.
+    // `3-human-review` display label.
     expect(summary.chunkLanded.map((c) => c.issue.id)).toEqual(["43"]);
   });
 
@@ -3349,7 +3349,7 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     ]);
     expect(calls.prLabelRemovals).toEqual([]);
     expect(calls.prComments[0]?.body).toContain("queued for rework");
-    expect(calls.prComments[0]?.body).toContain("leave the `ready-for-agent` queue");
+    expect(calls.prComments[0]?.body).toContain("leave the `2-agent-build` queue");
     expect(log).toContain(
       "chunk sandbar/chunk-42-c: not landed (queued for rework: #43); `land` kept",
     );
@@ -3414,12 +3414,12 @@ describe("runMergerWithAdapter — landing a reviewed chunk (#64)", () => {
     ]);
     expect(summary.pushed).toBe(true);
     // …and only then the wrap-up: every member closed — deepest first, the
-    // root last — `needs-review` dropped, the pull request closed, the branch
+    // root last — `3-human-review` dropped, the pull request closed, the branch
     // deleted.
     expect(calls.closes.map((c) => c.n)).toEqual([43, 42]);
     expect(calls.removedLabels).toEqual([
-      { n: 43, label: NEEDS_REVIEW_LABEL },
-      { n: 42, label: NEEDS_REVIEW_LABEL },
+      { n: 43, label: HUMAN_REVIEW_LABEL },
+      { n: 42, label: HUMAN_REVIEW_LABEL },
     ]);
     // `land` off before the close, so a pull request that would not close is
     // still not a request the next cycle honours.
@@ -3870,11 +3870,11 @@ describe("runMergerWithAdapter — a merge result that changes the gate stack be
         stackChange: change,
         target: SOURCE_TARGET,
         branch: issue(42).branch,
-        handoffLabel: "needs-human",
+        handoffLabel: "2-human-unstick",
       }),
     }]);
     expect(calls.comments[0]!.msg).toContain("- container 'db': image");
-    expect(calls.removedLabels).toEqual([{ n: 42, label: READY_FOR_AGENT_LABEL }]);
+    expect(calls.removedLabels).toEqual([{ n: 42, label: AGENT_BUILD_LABEL }]);
     expect(outcomes).toEqual([{
       kind: "skipped",
       issue: issue(42),

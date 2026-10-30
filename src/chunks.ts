@@ -37,7 +37,7 @@
 // answers which issues share a landing target and what that target is called,
 // and since #60 the merge phase acts on the answer — a DONE review-gated issue
 // is merged onto `chunk.branch` instead of onto the source branch, and finalise
-// then puts the display-only `needs-review` label on it.
+// then puts the display-only `3-human-review` label on it.
 //
 // A whole chunk is WORKED, one layer at a time. `plan-resolver.ts` plans any
 // member whose blockers are satisfied (#61). A parentless member that has not
@@ -55,14 +55,14 @@
 // working it could only end in auto-landing unreviewed code.
 //
 // ---------------------------------------------------------------------------
-// `needs-review`, the display label a landed member carries (#93)
+// `3-human-review`, the display label a landed member carries (#93)
 // ---------------------------------------------------------------------------
 //
 // A review-gated issue whose branch has landed on its chunk's branch is done as
 // far as sandbar is concerned, and not done at all as far as a human is:
 // nothing has reached the source branch yet, and the review that would justify
 // closing the issue has not happened. So the issue stays OPEN, and sandbar
-// attempts to replace `ready-for-agent` with `needs-review` for humans.
+// attempts to replace `2-agent-build` with `3-human-review` for humans.
 //
 // The swap is not authoritative. Containment by any fetched chunk branch is
 // the fail-safe de-queue fact; membership on the exact selected branch is the
@@ -207,10 +207,10 @@ import {
 // The display label a review-gated issue carries once its work is on its chunk
 // branch: OPEN and still to be reviewed. Sandbar writes and later removes it,
 // but never reads it; git history is the membership source of truth (#93).
-export const NEEDS_REVIEW_LABEL = "needs-review";
+export const HUMAN_REVIEW_LABEL = "3-human-review";
 
 // The label a HUMAN puts on a chunk's pull request to land it (#64). The other
-// end of the same lifecycle: `needs-review` tells a human review is pending,
+// end of the same lifecycle: `3-human-review` tells a human review is pending,
 // `land` says a reviewer is done with it and the next run should merge the
 // branch into the source branch and close every member on it.
 //

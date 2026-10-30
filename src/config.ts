@@ -58,10 +58,12 @@ export const DEFAULT_STEP_TIMEOUT_MS = 900_000;
 // should do, is carried in the bot comment, not encoded in the label. Nothing
 // reads the label back, so a second one would only be one more thing for a
 // host to define and filter on.
-// `ready-for-human` is intentionally NOT in this set — it's reserved for
-// human-by-triage.
+// Its default, `2-human-unstick`, is named like the workflow labels: stage
+// (a park happens while the issue is being built), then who acts next, then
+// what they do. `1-human-spec` is not a handoff: it marks an issue a human is
+// still speccing, before any agent has seen it.
 //
-// `ready-for-agent` (the planner queue label) is deliberately NOT configurable:
+// `2-agent-build` (the planner queue label) is deliberately NOT configurable:
 // it's the protocol entry label, hardcoded in the planner's `gh issue list`
 // filter, the merger, and the host's issue-creation workflow. Making it a knob
 // in only one of those places would silently desync the queue.
@@ -200,7 +202,7 @@ export function resolvePromptExtensions(
 }
 
 export const DEFAULT_LABELS: LabelConfig = {
-  handoff: "needs-human",
+  handoff: "2-human-unstick",
 };
 
 // #242 folded `needsInfo` and `agentStuck` into `handoff`. The config is
@@ -798,7 +800,7 @@ export type DeployWatchSettings = {
 
 // The deploy watch (#198, `deploy-watch.ts`): the consumer's own deploy
 // workflow, watched on every poll; a red run that deployed a sandbar merge
-// files one `ready-for-human` bug issue carrying `label` and @-mentions
+// files one `1-human-spec` bug issue carrying `label` and @-mentions
 // `notifyLogin` in it. Preflight refuses a workflow or label the repository
 // does not have (#8: sandbar never creates a label) and a `notifyLogin` that
 // is the token's own login, which GitHub would not notify.
@@ -961,7 +963,7 @@ export type RunConfig = {
   readonly ghOwner: string;
   readonly ghRepo: string;
 
-  // Who may put an issue in sandbar's `ready-for-agent` queue (#136). In the
+  // Who may put an issue in sandbar's `2-agent-build` queue (#136). In the
   // restricted form, the most recent recorded application of that label must
   // come from one of these forge logins or from the token running sandbar.
   // Logins are compared case-insensitively; bots and GitHub Apps are ordinary
@@ -1326,7 +1328,7 @@ export type RunConfig = {
   // Approval is deliberately not the trigger — see `chunk-land.ts`.
   //
   // The `land` label must exist in the repo (sandbar never creates it and it is
-  // not configurable — see chunks.ts). `needs-review` is a display-only label;
+  // not configurable — see chunks.ts). `3-human-review` is a display-only label;
   // a missing or removed copy does not affect membership or landing. The `gh`
   // credentials must be allowed to open, edit, comment on and close pull
   // requests AND to delete branches on

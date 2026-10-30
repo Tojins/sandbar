@@ -242,8 +242,8 @@ export function waitingReasonText(reason: WaitingReason): string {
     case "ongoing": return "ongoing";
     case "label-actor":
       return reason.actor === null
-        ? "excluded: ready-for-agent label actor unknown"
-        : `excluded: ready-for-agent applied by @${reason.actor}`;
+        ? "excluded: 2-agent-build label actor unknown"
+        : `excluded: 2-agent-build applied by @${reason.actor}`;
   }
 }
 

@@ -1,7 +1,7 @@
 // Deterministic plan resolver.
 //
 // Picks the issues that are ready to work this cycle by parsing the
-// `## Blocked by` section that /to-issues writes into every ready-for-agent
+// `## Blocked by` section that /to-issues writes into every 2-agent-build
 // issue and batch-checking the referenced issues' state.
 //
 // The listing endpoint `fetchCandidates` uses lags label/close
@@ -11,12 +11,12 @@
 // passes in `excluded` — the issues this run already merged — and (b) anything
 // whose authoritative state (fetched per-candidate alongside blocker states via
 // strongly-consistent GraphQL) reads CLOSED. Candidate labels have two distinct
-// consistency rules (#94, #96): `in-chunk` membership and `waiting` are
+// consistency rules (#94, #96): `in-chunk` membership and the `-later` labels are
 // fail-safe unions, so either the listing or the authoritative batch keeps an
-// issue out. `ready-for-agent` is authoritative-only whenever the batch knows
+// issue out. `2-agent-build` is authoritative-only whenever the batch knows
 // the issue: absence de-queues it, presence is the explicit chunk-rework
 // override, and the lagging listing decides neither direction. In restricted
-// mode (#136), presence is not enough: the most recent `ready-for-agent`
+// mode (#136), presence is not enough: the most recent `2-agent-build`
 // LABELED_EVENT, read per issue after the batch, must name a configured developer or the
 // token's viewer login. A missing issue or an event outside the bounded
 // timeline window is an unknown verdict and fails closed. `"anyone"` keeps the
@@ -92,7 +92,7 @@
 // undefined is never equal to a chunk root.
 //
 // One consequence for what this module LISTS: an issue that has landed on a
-// chunk branch has left the `ready-for-agent` query, yet it must stay in the
+// chunk branch has left the `2-agent-build` query, yet it must stay in the
 // graph this module derives lanes and chunks from. `readChunkMembers` therefore
 // enumerates issue numbers from member refs contained by fetched chunk branches
 // and fetches those issues directly. Dropping those issues from the
@@ -104,7 +104,7 @@
 // from the lane graph) and auto-land unreviewed chunk code onto the source
 // branch, which is the back door `lanes.ts` exists to shut. They are listed
 // back in and dropped from the plan when ANY fetched chunk branch names them.
-// The deliberate inverse is #94: re-applying `ready-for-agent` asks for rework
+// The deliberate inverse is #94: re-applying `2-agent-build` asks for rework
 // and overrides that de-queue. Only the authoritative GraphQL facts may make
 // that exception; the search listing can retain the label briefly after a
 // landing and would otherwise re-plan the same member forever. Membership is
@@ -239,8 +239,15 @@ import type { HeldReason, WaitingReason } from "./events.js";
 
 const exec = promisify(execFile);
 
-export const WAITING_LABEL = "waiting";
-const READY_LABEL = "ready-for-agent";
+// The two "later" labels: a human decides when the issue
+// moves on, to `1-human-spec` or `2-agent-build`. Neither is queued by
+// itself; each also holds an issue that still carries `2-agent-build`.
+export const HUMAN_LATER_LABEL = "1-human-later";
+export const AGENT_LATER_LABEL = "2-agent-later";
+const LATER_LABELS = [HUMAN_LATER_LABEL, AGENT_LATER_LABEL] as const;
+const isLater = (labels: readonly string[] | undefined): boolean =>
+  labels !== undefined && LATER_LABELS.some((label) => labels.includes(label));
+const AGENT_BUILD_LABEL = "2-agent-build";
 const LABEL_EVENT_WINDOW = 100;
 
 export type IssueState = "OPEN" | "CLOSED";
@@ -265,7 +272,7 @@ export type IssueFacts = {
   readonly state: IssueState;
   readonly labels: readonly string[];
   // Null means the bounded timeline window contains no usable application of
-  // `ready-for-agent`; restricted admission treats that unknown as excluded.
+  // `2-agent-build`; restricted admission treats that unknown as excluded.
   readonly readyLabelApplication: ReadyLabelApplication | null;
 };
 
@@ -297,8 +304,8 @@ export function readyQueueVerdict(input: {
   const { authoritative } = input;
   if (authoritative?.state === "CLOSED") return { kind: "closed" };
   const ready = authoritative
-    ? authoritative.labels.includes(READY_LABEL)
-    : input.listedLabels.includes(READY_LABEL);
+    ? authoritative.labels.includes(AGENT_BUILD_LABEL)
+    : input.listedLabels.includes(AGENT_BUILD_LABEL);
   if (!ready) return { kind: "not-ready" };
   if (input.policy === "anyone" || input.trusted) return { kind: "admitted" };
   const actor = authoritative?.readyLabelApplication?.actor ?? null;
@@ -334,7 +341,7 @@ export type PlanResolution = {
   // issues that are not currently ready. The event reducer joins this with
   // cached refs to name parked work without another tracker query (#132).
   readonly candidates: readonly PlanCandidate[];
-  // Every ready-for-agent issue not admitted by this recompute, with the
+  // Every 2-agent-build issue not admitted by this recompute, with the
   // scheduler fact that kept it out. This is state for the UI, not prose the
   // caller reconstructs from a discarded slice (#132).
   readonly waiting: readonly {
@@ -614,11 +621,11 @@ export function resolvePlan(
     // is not waiting for anything this cycle can give it.
     if (
       publishedChunkMembers.has(c.number) &&
-      !authoritative?.labels.includes(READY_LABEL)
+      !authoritative?.labels.includes(AGENT_BUILD_LABEL)
     ) return { kind: "omitted", reason: "published" };
     if (
-      c.labels.includes(WAITING_LABEL) ||
-      authoritative?.labels.includes(WAITING_LABEL)
+      isLater(c.labels) ||
+      isLater(authoritative?.labels)
     ) return { kind: "omitted", reason: "waiting" };
     if (ongoing.has(c.number)) return { kind: "ongoing" };
     if (excluded.has(c.number)) return { kind: "omitted", reason: "excluded" };
@@ -715,7 +722,7 @@ export function resolvePlan(
           disposition.kind === "chunk-refresh" || disposition.kind === "ongoing" ||
           (disposition.kind === "held" && disposition.why === "frozen") ||
           (disposition.kind === "omitted" && disposition.reason === "excluded")) &&
-          authoritative?.labels.includes(READY_LABEL);
+          authoritative?.labels.includes(AGENT_BUILD_LABEL);
       })
       .map(({ candidate }) => candidate.number),
   );
@@ -886,7 +893,7 @@ async function listOpenIssuesLabelled(
   }));
 }
 
-// The queue: open and `ready-for-agent`. This is the set an issue is IN or OUT
+// The queue: open and `2-agent-build`. This is the set an issue is IN or OUT
 // of, and preflight's resume classification reads it for exactly that meaning,
 // so the chunk members below are deliberately not folded in here — a landed
 // member is out of the queue, and its issue branch is not a branch this cycle
@@ -894,7 +901,7 @@ async function listOpenIssuesLabelled(
 export async function fetchCandidates(
   repo: RepoRef,
 ): Promise<readonly IssueSummary[]> {
-  return listOpenIssuesLabelled(repo, READY_LABEL);
+  return listOpenIssuesLabelled(repo, AGENT_BUILD_LABEL);
 }
 
 // One local read for the recompute event (#132). Origin governs this bare
@@ -1061,7 +1068,7 @@ function latestReadyLabelApplication(
 ): ReadyLabelApplication | null {
   const applications = (issue.timelineItems?.nodes ?? []).flatMap((event) => {
     if (
-      event?.label?.name !== READY_LABEL ||
+      event?.label?.name !== AGENT_BUILD_LABEL ||
       typeof event.createdAt !== "string"
     ) return [];
     const login = event.actor?.login;
@@ -1168,7 +1175,7 @@ async function ghIssueEach(
 
 // Authoritative facts for a set of issue numbers: state and labels in one
 // `ghIssueBatch`, then — only when `readyProvenance` asks for it — the
-// `ready-for-agent` timeline of each OPEN issue that carries the label, one
+// `2-agent-build` timeline of each OPEN issue that carries the label, one
 // `ghIssueEach` request apiece. No other issue's verdict reads the
 // application (`readyQueueVerdict` stops at closed / not-ready first), so its
 // `readyLabelApplication` is null without a read. Used for both blockers (the
@@ -1192,7 +1199,7 @@ export async function fetchIssueStates(
   const needsTimeline = readyProvenance
     ? [...new Set(numbers)].filter((n) => {
         const v = records[`i${n}`];
-        return v && v.state !== "CLOSED" && labelsOf(v).includes(READY_LABEL);
+        return v && v.state !== "CLOSED" && labelsOf(v).includes(AGENT_BUILD_LABEL);
       })
     : [];
   const timelines = await ghIssueEach(
@@ -1278,7 +1285,7 @@ export async function buildPlan(
   // The queue plus issues found by fetched branch containment (#93), in one graph
   // because lane inheritance and chunk derivation need both sets. Deduped by
   // number with the queue entry winning if the listing still returns a
-  // member whose `ready-for-agent` removal has not become visible yet.
+  // member whose `2-agent-build` removal has not become visible yet.
   const listed = [
     ...(await fetchCandidates(repo)),
     ...(await fetchIssueSummaries(chunkMemberNumbers, repo)),

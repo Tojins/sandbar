@@ -72,7 +72,7 @@
 //     merely recorded: a required name still absent while every other check on
 //     the sha has concluded, held for the grace window, is `missing-required`
 //     and FATAL. Waiting it out instead would spend a full CI timeout every
-//     cycle and drain the backlog into `needs-human` over a name that doesn't
+//     cycle and drain the backlog into `2-human-unstick` over a name that doesn't
 //     match what the forge publishes, which is the likeliest misconfiguration
 //     of the lot.
 //   * AN UNKNOWN IS AN UNKNOWN WHOEVER OWNS IT. A check outside
@@ -228,7 +228,7 @@ export type ChecksVerdict =
       // ones that are merely still running. The caller needs the distinction:
       // a name that never appears while everything else concludes is a naming
       // mistake, not a slow forge, and parking on it every cycle would drain
-      // the backlog into `needs-human` for a fault no agent can fix.
+      // the backlog into `2-human-unstick` for a fault no agent can fix.
       readonly missingRequired?: readonly string[];
     }
   | { readonly kind: "green"; readonly names: readonly string[] }
@@ -386,7 +386,7 @@ export type ChecksOutcome =
   // rather than a slow one — almost always a name that doesn't match what the
   // forge reports (`test` vs `test (20.x)`, or the workflow's name rather than
   // the job's). Distinct from `timeout` because parking on it burns a full CI
-  // wait every cycle and converts the backlog into `needs-human` for a typo.
+  // wait every cycle and converts the backlog into `2-human-unstick` for a typo.
   | { readonly kind: "missing-required"; readonly names: readonly string[] };
 
 // How long a sha may report zero check runs before we conclude nothing is going
@@ -891,7 +891,7 @@ export async function runVerifiedLanding(
       // FATAL, not parked. "Nothing runs for this ref" is a property of the
       // repository's configuration, not of this cycle's code: the next cycle
       // will hit it identically, and the one after that. Parking would quietly
-      // convert the entire backlog into `needs-human`, one cycle at a time,
+      // convert the entire backlog into `2-human-unstick`, one cycle at a time,
       // for a failure no agent caused and no human was told about. Halting
       // loudly on the first occurrence is the only outcome an operator can act
       // on — and matches sandbar's rule that infrastructure failures stop the
@@ -907,7 +907,7 @@ export async function runVerifiedLanding(
       // Same class as no-checks, and the likelier one: the forge IS building
       // the ref, but a name in `requiredChecks` matches nothing it reports.
       // Every cycle would wait out the full check timeout and park, so the
-      // backlog drains into `needs-human` at one CI wall-clock apiece for what
+      // backlog drains into `2-human-unstick` at one CI wall-clock apiece for what
       // is almost always a typo.
       return fatal(
         `required check(s) never reported for ${sha}: ${outcome.names.join(", ")}. ` +

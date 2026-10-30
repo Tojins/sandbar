@@ -25,7 +25,7 @@ export default {
   ghOwner: "Tojins",
   ghRepo: "outdoorpub",
 
-  // Whose `ready-for-agent` counts (Tojins/sandbar#136). Every collaborator
+  // Whose `2-agent-build` counts (Tojins/sandbar#136). Every collaborator
   // on this private repo may queue an issue.
   developers: "anyone",
 
@@ -84,7 +84,7 @@ export default {
 
   // Merging main is what the operator deploys from, so nothing lands
   // unreviewed unless the issue opts in with the `auto-land` label. The repo
-  // carries the `auto-land`, `needs-review` and `land` labels this needs;
+  // carries the `auto-land`, `3-human-review` and `land` labels this needs;
   // sandbar creates none of them.
   defaultLane: "review",
 

@@ -13,7 +13,7 @@
 // a draft PR disables GitHub's merge button while leaving review completely
 // functional. Sandbar composes chunk branches and means to land them itself, so
 // a merge from the PR page is a landing the orchestrator does not know about —
-// issues left open, `needs-review` labels left applied, a chunk branch nobody
+// issues left open, `3-human-review` labels left applied, a chunk branch nobody
 // retires. Draft state makes the accident hard and leaves the deliberate act
 // available: a human can mark the PR ready and merge it by hand in two steps.
 // That override is TOLERATED, not fought — `forge-pr.ts` re-titles and
