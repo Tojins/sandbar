@@ -617,6 +617,13 @@ export function buildCondenserPrompt(issueId: string, issue: IssueJson): string 
   ].join("\n\n---\n\n");
 }
 
+export type NetDiff = {
+  readonly chars: number;
+  // The three largest files of the patch, largest first, so a park can say
+  // what it measured.
+  readonly largestFiles: readonly { readonly path: string; readonly chars: number }[];
+};
+
 // The context budget covers what the provider receives plus the branch patch
 // the role is explicitly told to read on demand (#158). This read is never
 // rendered into a prompt. The transport ceiling merely ensures a pathological
@@ -631,13 +638,6 @@ export function buildCondenserPrompt(issueId: string, issue: IssueJson): string 
 // against the tree `merge-tree` writes anyway, markers and all: the branch
 // already resolved those files, so the overcount is bounded, and falling back
 // to `seed...HEAD` would be the overcount this exists to remove.
-export type NetDiff = {
-  readonly chars: number;
-  // The three largest files of the patch, largest first, so a park can say
-  // what it measured.
-  readonly largestFiles: readonly { readonly path: string; readonly chars: number }[];
-};
-
 export async function measureNetDiff(
   worktreePath: string,
   baseRef: string,

@@ -265,8 +265,6 @@ const deferred = <T,>() => {
   return { promise, resolve };
 };
 
-// What a quality pass's lister read; the builders are mocked, so its shape is
-// all that matters.
 // A measured diff a park names the largest files of (#263).
 const LARGEST_FILES: NetDiff["largestFiles"] = [
   { path: "emoji.json", chars: 990_000 },
@@ -275,6 +273,8 @@ const LARGEST_FILES: NetDiff["largestFiles"] = [
 const NAMED_FILES =
   " Largest files in the measured diff: `emoji.json` (990,000 characters), `own.ts` (1,234 characters).";
 
+// What a quality pass's lister read; the builders are mocked, so its shape is
+// all that matters.
 const passStandards: QualityStandards = { groups: [], preamble: "", leaveAlone: [], warnings: [] };
 const passGrader = { standards: passStandards, settled: new Set<never>() };
 
