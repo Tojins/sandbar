@@ -5,6 +5,7 @@ import {
   type GateStackConfig,
   type ResolvedGateStack,
   type ResolvedStackContainer,
+  type StackContainer,
   resolveGateStack,
   resolveImages,
   settledRules,
@@ -1355,6 +1356,27 @@ describe("resolveGateStack validation", () => {
       ...ok,
       containers: [{ ...ok.containers[0]!, ...over }, ok.containers[1]!],
     })).toThrow(message);
+  });
+
+  // An inline stack is a program, and its JSON types are checked nowhere
+  // before this; a stack file's are, and fail first (config.test.ts).
+  it.each([
+    ["a number value", { K: 8090 }],
+    ["a boolean value", { K: true }],
+    ["a null value", { K: null }],
+    ["an object value", { K: { a: "b" } }],
+    ["an array value", { K: ["x"] }],
+    ["a string", "str"],
+    ["an array", ["a"]],
+    ["a number", 5],
+  ])("refuses an inline sandboxEnv that is %s", (_, sandboxEnv) => {
+    expect(() => resolveGateStack({
+      ...ok,
+      containers: [
+        { ...ok.containers[0]!, inSandbox: true, sandboxEnv } as unknown as StackContainer,
+        ok.containers[1]!,
+      ],
+    })).toThrow(/container 'db' has 'sandboxEnv' that is not an object of strings/);
   });
 
   it("carries an explicit inSandbox onto the resolved container", () => {

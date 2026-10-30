@@ -2854,6 +2854,13 @@ function resolveStackContainer(
         "'inSandbox: true', so it has no sandbox copy to set it on.",
     );
   }
+  // A stack file's shapes were checked before this; an inline stack's never
+  // are, and this one goes on to the env file unchanged.
+  if (c.sandboxEnv !== undefined && !isStringRecord(c.sandboxEnv)) {
+    throw new SandbarError(
+      `${label}: container '${c.name}' has 'sandboxEnv' that is not an object of strings.`,
+    );
+  }
   for (const m of c.mounts ?? []) {
     // podman's `-v` spec is colon-delimited with no escape mechanism, so a
     // colon anywhere would re-split the spec into different paths + options.
