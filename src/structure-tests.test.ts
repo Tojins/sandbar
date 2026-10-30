@@ -80,13 +80,75 @@ describe("which lines the check reads", () => {
     const content = ["a: 1", "", "  # why", "{# note #}", "// why", " * doc", "<!-- x -->", "b: 2"].join("\n");
     expect(deletableLines(content, [1, 2, 3, 4, 5, 6, 7, 8])).toEqual([1, 8]);
   });
+});
+
+// Each shape built over the `tests-red` fixture: `origin/main` the base,
+// `topic` one commit on it, and `other` another branch's commit.
+describe("the landing shape", () => {
+  const commit = (dir: string, name: string) => {
+    git(dir, "commit", "-q", "--allow-empty", "-m", name);
+    return git(dir, "rev-parse", "HEAD");
+  };
+  const shapes = async () => {
+    const dir = await fixtureRepo("tests-red");
+    git(dir, "branch", "other", "origin/main");
+    git(dir, "checkout", "-q", "other");
+    commit(dir, "other");
+    git(dir, "checkout", "-q", "--detach", "origin/main");
+    return dir;
+  };
+  // Moves `origin/main` one commit on, as another landing would.
+  const moveBase = (dir: string) => {
+    const head = git(dir, "rev-parse", "HEAD");
+    git(dir, "checkout", "-q", "--detach", "origin/main");
+    git(dir, "update-ref", "refs/remotes/origin/main", commit(dir, "moved"));
+    git(dir, "checkout", "-q", "--detach", head);
+  };
 
   it.each([
-    { name: "no merge", parents: ["h", "p"], expected: false },
-    { name: "a merge onto the base", parents: ["h", "base", "topic"], expected: true },
-    { name: "a merge of the base into the branch", parents: ["h", "topic", "base"], expected: false },
-  ])("isLandingShape: $name", ({ parents, expected }) => {
-    expect(isLandingShape(parents, "base")).toBe(expected);
+    { name: "gate-2 of a cycle's first branch", landing: true, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
+    } },
+    { name: "gate-2 of a cycle's second branch", landing: true, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "other");
+    } },
+    { name: "the re-gate after a push race merged the moved base in", landing: true, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "other");
+      moveBase(dir);
+      git(dir, "merge", "-q", "--no-ff", "-m", "sync", "origin/main");
+    } },
+    { name: "a member landing on a chunk cut before the base moved", landing: true, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "chunk", "topic");
+      moveBase(dir);
+      git(dir, "merge", "-q", "--no-ff", "-m", "chunk", "other");
+    } },
+    { name: "a chunk refresh", landing: true, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "chunk", "topic");
+      moveBase(dir);
+      git(dir, "merge", "-q", "--no-ff", "-m", "refresh", "origin/main");
+    } },
+    { name: "gate-1 of a branch", landing: false, build: (dir: string) => {
+      git(dir, "checkout", "-q", "topic");
+    } },
+    { name: "gate-1 of a branch that merged the base in", landing: false, build: (dir: string) => {
+      git(dir, "checkout", "-q", "topic");
+      moveBase(dir);
+      git(dir, "merge", "-q", "--no-ff", "-m", "sync", "origin/main");
+    } },
+    { name: "gate-1 of a chunk member seeded from the chunk", landing: false, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "chunk", "other");
+      commit(dir, "member");
+    } },
+    { name: "the re-gate of a resolve agent's fix on a merge", landing: false, build: (dir: string) => {
+      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
+      commit(dir, "fix");
+    } },
+  ])("$name: $landing", async ({ build, landing }) => {
+    const dir = await shapes();
+    build(dir);
+    expect(isLandingShape({ dir }, "origin/main")).toBe(landing);
   });
 });
 

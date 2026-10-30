@@ -19,9 +19,13 @@
 // deleted line) in path and line order; the summary counts the rest as
 // unprobed. They run beside each other.
 //
-// The landing shape (HEAD a merge whose first parent is `<base>`: gate-2,
-// the resolve re-gate) is skipped in one line: gate-1 settled it on the
-// branch, and a mutation run in the serialized landing costs minutes per land.
+// The landing shape is skipped in one line: gate-1 settled each branch, and a
+// mutation run in the serialized landing costs minutes per land. It is HEAD
+// reached from `<base>` by first-parent merges alone, as every gate-2 is: a
+// cycle's merges stacked on the source tip, a push race's merge of the moved
+// tip into them, a chunk's member merges and refreshes. A commit of anyone's
+// own on that path, a branch's for gate-1 or a resolve agent's fix, is code
+// no gate has settled, so the check runs.
 //
 // It reads the worktree, which in the gate is the clean HEAD it judges (D1),
 // and writes only under the gitignored `.stryker-tmp/`, cleared first.
@@ -40,10 +44,9 @@ export function isProduction(path) {
   return /^src\/.*\.ts$/.test(path) && !/\.test(?:-util)?\.ts$/.test(path);
 }
 
-// `parents` is `git rev-list --parents -n 1 HEAD` split: HEAD, then its
-// parents.
-export function isLandingShape(parents, baseSha) {
-  return parents.length > 2 && parents[1] === baseSha;
+export function isLandingShape(repo, baseRef) {
+  const path = git(repo, ["rev-list", "--first-parent", "--parents", "HEAD", "--not", baseRef]).trim();
+  return path !== "" && path.split("\n").every((line) => line.split(" ").length > 2);
 }
 
 const HINTS = [
@@ -91,9 +94,7 @@ export function testsSummary({ covered, unknown, podmanOnly, killed, caught, sta
 
 // `options.podmanCoverage`: podman coverage is required (coverage.mjs).
 export async function checkTests(repo, baseRef, options) {
-  const parents = git(repo, ["rev-list", "--parents", "-n", "1", "HEAD"]).trim().split(" ");
-  const baseSha = git(repo, ["rev-parse", "--verify", `${baseRef}^{commit}`]).trim();
-  if (isLandingShape(parents, baseSha)) {
+  if (isLandingShape(repo, baseRef)) {
     return { findings: [], summary: `tests: skipped, HEAD merges onto ${baseRef} (gate-1 settled the branch)` };
   }
   const added = addedLines(repo, mergeBase(repo, baseRef));
