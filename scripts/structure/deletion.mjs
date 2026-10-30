@@ -23,14 +23,15 @@ import { dirname, join, resolve } from "node:path";
 import { LOG_DIR, runLogged, StructureError, withFsError, WORK_DIR } from "./core.mjs";
 
 // The first entry whose `paths` matches a file maps it; `tests` are vitest
-// filters, `label` names them in a finding.
+// filters, `label` names them in a finding. An installation's files are
+// config, and config needs no test: nothing under
+// `deploy/ansible/installations/` is probed.
 export const DELETION_MAP = [
   {
-    paths: /^deploy\/ansible\/installations\//,
-    tests: ["src/deploy-", "src/structure-wiring.test.ts"],
-    label: "src/deploy-*.test.ts and src/structure-wiring.test.ts",
+    paths: /^deploy\/(?!ansible\/installations\/).*\.(?:yml|j2|mjs)$/,
+    tests: ["src/deploy-"],
+    label: "src/deploy-*.test.ts",
   },
-  { paths: /^deploy\/.*\.(?:yml|j2|mjs)$/, tests: ["src/deploy-"], label: "src/deploy-*.test.ts" },
 ];
 
 export function deletionEntry(path) {

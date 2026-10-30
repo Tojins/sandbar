@@ -68,8 +68,9 @@ describe("which lines the check reads", () => {
   });
 
   it.each([
-    ["deploy/ansible/installations/sandbar/sandbar.config.mjs", "src/deploy-*.test.ts and src/structure-wiring.test.ts"],
-    ["deploy/ansible/installations/outdoor/files/settings.local.json", "src/deploy-*.test.ts and src/structure-wiring.test.ts"],
+    ["deploy/ansible/installations/sandbar/sandbar.config.mjs", undefined],
+    ["deploy/ansible/installations/outdoor/files/settings.local.json", undefined],
+    ["deploy/ansible/installations/outdoor/vars.yml", undefined],
     ["deploy/ansible/roles/sandbar/tasks/main.yml", "src/deploy-*.test.ts"],
     ["deploy/ansible/roles/sandbar/templates/sandbar.service.j2", "src/deploy-*.test.ts"],
     ["deploy/ansible/README.md", undefined],
@@ -434,7 +435,7 @@ describe("deletion", () => {
     });
     copyWorktree(dir);
     await expect(runDeletions(dir, [{ path: "deploy/app.yml", line: 1 }], new Map([["deploy/app.yml", "name: app\n"]])))
-      .rejects.toThrow("deletion: src/deploy-*.test.ts fail with no line deleted (.stryker-tmp/log/deletion-baseline-1.log)");
+      .rejects.toThrow("deletion: src/deploy-*.test.ts fail with no line deleted (.stryker-tmp/log/deletion-baseline-0.log)");
   });
 
   // Node's own cpSync aborts the process over a directory it may not read.
