@@ -89,7 +89,8 @@ export function testsSummary({ covered, unknown, podmanOnly, killed, caught, sta
     (unknown === 0 ? "" : `; ${count(unknown, "line")} unknown without ${PODMAN_COVERAGE}`);
 }
 
-export async function checkTests(repo, baseRef) {
+// `options.podmanCoverage`: podman coverage is required (coverage.mjs).
+export async function checkTests(repo, baseRef, options) {
   const parents = git(repo, ["rev-list", "--parents", "-n", "1", "HEAD"]).trim().split(" ");
   const baseSha = git(repo, ["rev-parse", "--verify", `${baseRef}^{commit}`]).trim();
   if (isLandingShape(parents, baseSha)) {
@@ -111,7 +112,7 @@ export async function checkTests(repo, baseRef) {
       if (finding !== null) findings.push(finding);
     }
   }
-  const coverage = coverageFindings(repo.dir, production, process.env.SANDBAR_REQUIRE_PODMAN_TESTS === "1");
+  const coverage = coverageFindings(repo.dir, production, options.podmanCoverage);
   findings.push(...coverage.findings);
 
   const runs = new Map([...production].map(([path, lines]) => [path, lineRuns(lines)]));

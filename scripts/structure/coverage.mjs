@@ -4,11 +4,10 @@
 // `coverage/podman/` from `podman-test`.
 //
 // A changed line counts when a statement starts on it, and is covered when
-// either file hits one of those statements. Podman coverage is required where
-// podman tests are (`SANDBAR_REQUIRE_PODMAN_TESTS=1`, the gate runner's env):
-// there a missing file is a finding. Elsewhere, a local `npm run structure`,
-// it may be absent, and a line no unit test hits is then `unknown`, never a
-// finding.
+// either file hits one of those statements. The gate requires podman coverage
+// (`--podman-coverage`), so there a missing file is a finding. Elsewhere, a
+// local `npm run structure`, it may be absent, and a line no unit test hits
+// is then `unknown`, never a finding.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";

@@ -11,9 +11,12 @@
 //            `missing-tests`
 //
 //   node scripts/structure/run.mjs [check…] [--base <ref>] [--git-dir <dir>]
+//                                  [--podman-coverage]
 //
 // No check named runs every check; `--base` defaults to `origin/main`. The
 // repository is the working directory, or `--git-dir` (core.mjs).
+// `--podman-coverage`: `tests` requires the podman tests' coverage, as the
+// gate, whose `podman-test` step writes it, does (coverage.mjs).
 //
 // Output is compact, because a red reaches the implementer as a gate trace
 // and every line of it is context paid for: a red check prints one line per
@@ -29,14 +32,18 @@ import { checkVersion } from "./version.mjs";
 
 const CHECKS = { version: checkVersion, tests: checkTests };
 
-const USAGE = `usage: run.mjs [${Object.keys(CHECKS).join("|")}]… [--base <ref>] [--git-dir <dir>]`;
+const USAGE = `usage: run.mjs [${Object.keys(CHECKS).join("|")}]… [--base <ref>] [--git-dir <dir>] [--podman-coverage]`;
 
 function parse(argv) {
   let parsed;
   try {
     parsed = parseArgs({
       args: argv,
-      options: { base: { type: "string", default: "origin/main" }, "git-dir": { type: "string" } },
+      options: {
+        base: { type: "string", default: "origin/main" },
+        "git-dir": { type: "string" },
+        "podman-coverage": { type: "boolean", default: false },
+      },
       strict: true,
       allowPositionals: true,
     });
@@ -51,17 +58,18 @@ function parse(argv) {
     names,
     base: parsed.values.base,
     repo: { dir: process.cwd(), gitDir: parsed.values["git-dir"] },
+    options: { podmanCoverage: parsed.values["podman-coverage"] },
   };
 }
 
 // Each named check's lines, and the exit code for all of them.
-async function runChecks(names, repo, base) {
+async function runChecks(names, repo, base, options) {
   const lines = [];
   let exitCode = 0;
   for (const name of names) {
     let result;
     try {
-      result = await CHECKS[name](repo, base);
+      result = await CHECKS[name](repo, base, options);
     } catch (err) {
       if (!(err instanceof StructureError)) throw err;
       lines.push(`${name}: ${err.message}`);
@@ -83,7 +91,7 @@ if ("error" in args) {
   console.log(`${args.error}; ${USAGE}`);
   process.exitCode = 2;
 } else {
-  const { lines, exitCode } = await runChecks(args.names, args.repo, args.base);
+  const { lines, exitCode } = await runChecks(args.names, args.repo, args.base, args.options);
   console.log(lines.join("\n"));
   process.exitCode = exitCode;
 }

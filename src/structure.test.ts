@@ -204,7 +204,7 @@ describe("version check", () => {
     {
       name: "an unknown option",
       args: ["version", "--bogus"],
-      line: /--bogus.*; usage: run\.mjs \[version\|tests\]… \[--base <ref>\] \[--git-dir <dir>\]$/,
+      line: /--bogus.*; usage: run\.mjs \[version\|tests\]… \[--base <ref>\] \[--git-dir <dir>\] \[--podman-coverage\]$/,
     },
     {
       name: "an option missing its value",
@@ -214,7 +214,7 @@ describe("version check", () => {
     {
       name: "an unknown check",
       args: ["nope"],
-      line: /^unknown check 'nope'; usage: run\.mjs \[version\|tests\]… \[--base <ref>\] \[--git-dir <dir>\]$/,
+      line: /^unknown check 'nope'; usage: run\.mjs \[version\|tests\]… \[--base <ref>\] \[--git-dir <dir>\] \[--podman-coverage\]$/,
     },
   ])("$name is a one-line exit 2", async ({ args, broken, line }) => {
     const dir = await fixtureRepo("version-bumped");

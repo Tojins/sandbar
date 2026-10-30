@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   coverageFindings, lineCoverage, PODMAN_COVERAGE, statementHits, UNIT_COVERAGE, uncoveredFindings,
@@ -26,9 +26,6 @@ const VITEST = join(NODE_MODULES, "vitest", "vitest.mjs");
 const SLOW = 300_000;
 
 const { tempDir, fixtureRepo } = useFixtures();
-afterEach(() => {
-  vi.unstubAllEnvs();
-});
 
 // A file's istanbul entry with one statement per `[line, hits]`.
 const coverageFile = (path: string, statements: [number, number][]) => ({
@@ -159,7 +156,7 @@ describe("coverage", () => {
       counts: { covered: 1, unknown: 0, podmanOnly: 1 },
     },
     {
-      name: "no podman file where podman tests are required",
+      name: "no podman file in the gate",
       files: [UNIT_COVERAGE],
       requirePodman: true,
       findings: [`${PODMAN_COVERAGE}: missing, the test step wrote no coverage`],
@@ -347,8 +344,7 @@ describe("run.mjs tests", () => {
     await symlink(NODE_MODULES, join(dir, "node_modules"));
     vitest(dir, "--exclude", "**/*-podman.test.ts", "--coverage.enabled", "--coverage.reportsDirectory=coverage/unit");
     vitest(dir, "podman.test.ts", "--coverage.enabled", "--coverage.reportsDirectory=coverage/podman");
-    vi.stubEnv("SANDBAR_REQUIRE_PODMAN_TESTS", "1");
-    return { dir, result: run(dir, "tests", "--base", "origin/main") };
+    return { dir, result: run(dir, "tests", "--base", "origin/main", "--podman-coverage") };
   };
 
   it("goes red on an uncovered line, a survivor, a green deletion and a bare hint", { timeout: SLOW }, async () => {
