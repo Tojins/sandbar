@@ -404,7 +404,7 @@ describe("createBranchImages", () => {
     // Cached, one transient failure (a registry 5xx on the FROM pull, ENOSPC)
     // is a DEAD END: the fingerprint does not move unless the agent touches the
     // lockfile again, so every remaining attempt re-throws the same stale error
-    // and no build is ever attempted again — the issue lands on `needs-human`
+    // and no build is ever attempted again — the issue lands on `2-human-unstick`
     // with a trace telling its author their dependencies do not install.
     const source = await tree({ Containerfile: "FROM x", "package-lock.json": "{}" });
     const branch = await tree({ Containerfile: "FROM x", "package-lock.json": "b" });

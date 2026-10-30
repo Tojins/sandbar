@@ -7,7 +7,7 @@
 // deliberately no `review` label — the host states its default once in config
 // and labels only the exceptions. `defaultLane` defaults to "auto", which
 // leaves this whole file inert. The label name is hardcoded for the reason
-// `ready-for-agent` is: it is protocol, not vocabulary, and a knob would only
+// `2-agent-build` is: it is protocol, not vocabulary, and a knob would only
 // let the two spellings drift.
 //
 // Review-gating is inherited DOWNWARD, transitively, along blocker →
@@ -18,7 +18,7 @@
 // `postLaneOverrideNotices` says so on the issue itself.
 //
 // The graph is whatever the caller passes — for the planner, the
-// `ready-for-agent` OPEN candidate list plus the git-derived chunk members the
+// `2-agent-build` OPEN candidate list plus the git-derived chunk members the
 // planner fetches back in. A blocker OUTSIDE that set contributes
 // no gating (there is no lane to read); that is sound because an eligible
 // issue's blockers are each CLOSED — landed work, which for a review-gated
@@ -161,7 +161,7 @@ export function laneOverrides(
 // ---------------------------------------------------------------------------
 
 // What makes the notice idempotent. A review-gated issue is held out of the
-// plan and keeps its `ready-for-agent` label, so it is a candidate again every
+// plan and keeps its `2-agent-build` label, so it is a candidate again every
 // cycle of every run — a notice posted unconditionally would be a comment per
 // cycle, forever, on an issue nobody is working. An HTML comment because
 // GitHub renders it to nothing: the marker is for sandbar, and a human reading

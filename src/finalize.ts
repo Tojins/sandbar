@@ -36,7 +36,7 @@
 // `[remote rejected]` ref line as a fact about this branch's content or ref,
 // distinct from a non-fast-forward race and from transport. Finalise comments
 // with the exact refusal, tip sha, cache ref/path and recovery command, then
-// swaps `ready-for-agent` for `handoff`; the rest of the queue continues.
+// swaps `2-agent-build` for `handoff`; the rest of the queue continues.
 // Races and transport failures still halt loudly except at the reviewer-write
 // handoff: that pre-existing evidence-preservation path parks after any failed
 // publish because its authoritative state is the deliberately retained clone.
@@ -75,9 +75,9 @@
 // merger's branch/conflict-or-gate evidence and flips the dependent directly,
 // without inventing or reclaiming an issue branch.
 //
-// `chunk-landed` (#60) must remove `ready-for-agent`: on a published member that
+// `chunk-landed` (#60) must remove `2-agent-build`: on a published member that
 // label now requests rework (#94). It also applies the display-only
-// `needs-review` label, whose failure still costs only the human cue and never
+// `3-human-review` label, whose failure still costs only the human cue and never
 // blocks landing. The issue comment remains required: it names the review
 // branch even when that optional display-label edit fails.
 //
@@ -96,7 +96,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { type IssueCloneReclaim, reclaimIssueClone } from "./agent-sandbox.js";
-import { NEEDS_REVIEW_LABEL } from "./chunks.js";
+import { HUMAN_REVIEW_LABEL } from "./chunks.js";
 import { strandedHeadRef } from "./naming.js";
 import type { LabelConfig } from "./config.js";
 import { SandbarError, isExitCode } from "./errors.js";
@@ -125,7 +125,7 @@ const exec = promisify(execFile);
 // The planner queue label sandbar removes when an issue leaves the queue. Fixed
 // (not in LabelConfig) — it's the protocol entry label, shared with the
 // planner's list filter and the merger; see config.ts LabelConfig.
-export const READY_FOR_AGENT_LABEL = "ready-for-agent";
+export const AGENT_BUILD_LABEL = "2-agent-build";
 
 export const BOT_COMMENT_PREFIX = "**Sandbar:**";
 
@@ -567,7 +567,7 @@ type FinalizeKindInput =
   // #60 — a review-gated issue whose branch landed on its chunk's branch, which
   // is now on origin. NOT a close: nothing has reached the source branch and
   // the review that would justify closing has not happened. The issue stays
-  // OPEN and attempts to swap `ready-for-agent` for `needs-review` for display.
+  // OPEN and attempts to swap `2-agent-build` for `3-human-review` for display.
   | {
       readonly kind: "chunk-landed";
       readonly issue: IssueRef;
@@ -605,7 +605,7 @@ type FinalizeKindInput =
       readonly strandedHead: StrandedHead | null;
     }
   // #21 — implementer escalated on non-trivial UI impact with no prototype.
-  // Same handoff shape as needs-info (comment + `ready-for-agent` → handoff),
+  // Same handoff shape as needs-info (comment + `2-agent-build` → handoff),
   // but the branch is pushed only when structurally ahead of its seed: the
   // escalation normally fires before code exists, and pushing then would
   // publish a remote branch identical to the source tip — one junk ref per
@@ -698,9 +698,9 @@ type FinalizeKindInput =
     }
   // Silent-noop under the retry cap: discard the branch + worktree so the
   // next execution starts fresh against current source. The issue
-  // stays `ready-for-agent` and the planner re-picks it.
+  // stays `2-agent-build` and the planner re-picks it.
   | { readonly kind: "fresh-attempt"; readonly issue: IssueRef }
-  // Silent-noop retries exhausted: drop `ready-for-agent`, add the handoff
+  // Silent-noop retries exhausted: drop `2-agent-build`, add the handoff
   // label, post a comment explaining the failure mode. No branch is pushed
   // (each silent-noop deleted it; there's nothing on the remote to inspect).
   | {
@@ -758,7 +758,7 @@ export type FinalizeAdapter = {
   // Removes then adds, as SEPARATE `gh issue edit` calls (remove first). A
   // single `gh issue edit` is atomic: if any --add-label target doesn't exist,
   // gh rejects the whole command and the --remove-label is collateral damage —
-  // the issue keeps `ready-for-agent` and the planner re-picks it forever (#8).
+  // the issue keeps `2-agent-build` and the planner re-picks it forever (#8).
   // Splitting guarantees the queue-removal lands even when the handoff label is
   // missing/misconfigured, and the result reports what failed so the caller can
   // fail loud instead of swallowing.
@@ -814,7 +814,7 @@ const HANDOFF_KINDS: ReadonlySet<FinalizeInput["kind"]> = new Set([
   "silent-noop-exhausted",
 ]);
 
-// Only these successful finalizations decide to remove `ready-for-agent`.
+// Only these successful finalizations decide to remove `2-agent-build`.
 // Quota and infrastructure terminals deliberately leave the issue queued, and
 // a closed-issue handoff performs no tracker write at all (#16).
 export function finalizationIntendsNotReady(result: FinalizeResult): boolean {
@@ -888,7 +888,7 @@ function needsHumanComments(
             input.failureTrace,
             input.latestReviewerProse,
             labels.handoff,
-            READY_FOR_AGENT_LABEL,
+            AGENT_BUILD_LABEL,
           ),
           refused:
             `${REVIEWER_HARNESS_STOP}\n\n` +
@@ -904,7 +904,7 @@ function needsHumanComments(
             gateRounds,
             input.failureTrace,
             labels.handoff,
-            READY_FOR_AGENT_LABEL,
+            AGENT_BUILD_LABEL,
           ),
           refused:
             `${uncommittableStop(gateRounds)}\n\n` +
@@ -922,7 +922,7 @@ function needsHumanComments(
             input.strandedHead,
             reclaim,
             labels.handoff,
-            READY_FOR_AGENT_LABEL,
+            AGENT_BUILD_LABEL,
           ),
           refused:
             `${offBranchStop(input.issue.branch, gateRounds)}\n\n` +
@@ -942,7 +942,7 @@ function needsHumanComments(
             input.failureTrace,
             input.latestReviewerProse,
             labels.handoff,
-            READY_FOR_AGENT_LABEL,
+            AGENT_BUILD_LABEL,
           ),
           refused:
             `${gateRedStop(failedStep, gateRounds)}\n\n` +
@@ -959,7 +959,7 @@ function needsHumanComments(
             gateRounds,
             input.failureTrace,
             labels.handoff,
-            READY_FOR_AGENT_LABEL,
+            AGENT_BUILD_LABEL,
           ),
           refused:
             `${noSignalStop(gateRounds)}\n\n` +
@@ -1015,13 +1015,13 @@ async function parkRefusedPush(
       reasons: push.reasons,
       recovery,
       handoffLabel: labels.handoff,
-      readyLabel: READY_FOR_AGENT_LABEL,
+      readyLabel: AGENT_BUILD_LABEL,
       ...(options.context === undefined ? {} : { context: options.context }),
     }),
   );
   const flip = await adapter.editLabels(
     n,
-    options.queueAlreadyRemoved ? [] : [READY_FOR_AGENT_LABEL],
+    options.queueAlreadyRemoved ? [] : [AGENT_BUILD_LABEL],
     [labels.handoff],
   );
   requireFlip(flip, n);
@@ -1115,13 +1115,13 @@ export async function finalizeOne(
       // leaves a dangling worktree pointing at a deleted ref.
       await adapter.reclaimIssueClone(input.issue.branch);
       // The merger's merge commit auto-closes the issue, but GitHub doesn't
-      // strip labels on close — drop `ready-for-agent` so the closed issue
+      // strip labels on close — drop `2-agent-build` so the closed issue
       // isn't left advertising itself as plannable (#7). Best-effort: a failure
       // here is benign (the planner lists open issues, so a closed issue still
       // carrying the label is never re-picked).
       await adapter.editLabels(
         issueNumberOf(input.issue),
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [],
       );
       // `-d` may refuse: if the resolve loop produced a different tree on the
@@ -1136,27 +1136,27 @@ export async function finalizeOne(
       // duplicate and `-D` is safe on the same structural certainty. What
       // differs is everything issue-facing: no close (the review has not
       // happened), and the label flip moves the issue out of the agent queue.
-      // It is required because `ready-for-agent` on a published member now
+      // It is required because `2-agent-build` on a published member now
       // deliberately requests another implementation pass (#94).
       const n = issueNumberOf(input.issue);
       await adapter.reclaimIssueClone(input.issue.branch);
       const dequeue = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [],
       );
       if (!dequeue.ok) {
         throw new SandbarError(
           `Could not move chunk member #${n} into review: removing ` +
-            `\`${READY_FOR_AGENT_LABEL}\` failed ` +
+            `\`${AGENT_BUILD_LABEL}\` failed ` +
             `(${dequeue.error ?? "unknown error"}). The issue may still be in the ` +
             `agent queue, so its local branch was kept; fix the label configuration ` +
             `or forge failure, then re-run.`,
         );
       }
       // Display only: the durable comment below still points the human to the
-      // review branch when a host has not created `needs-review`.
-      await adapter.editLabels(n, [], [NEEDS_REVIEW_LABEL]);
+      // review branch when a host has not created `3-human-review`.
+      await adapter.editLabels(n, [], [HUMAN_REVIEW_LABEL]);
       await adapter.postComment(
         n,
         CHUNK_LANDED_COMMENT_TEMPLATE(
@@ -1173,7 +1173,7 @@ export async function finalizeOne(
         queueAlreadyRemoved: true,
       });
       if (refused) return refused;
-      // The merger already dropped `ready-for-agent`; finalize only parks it
+      // The merger already dropped `2-agent-build`; finalize only parks it
       // under the handoff label.
       const r = await adapter.editLabels(n, [], [labels.handoff]);
       requireFlip(r, n);
@@ -1203,7 +1203,7 @@ export async function finalizeOne(
       await adapter.postComment(n, input.comment);
       const r = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [labels.handoff],
       );
       requireFlip(r, n);
@@ -1216,7 +1216,7 @@ export async function finalizeOne(
         input.issue.branch,
         input.questions,
         labels.handoff,
-        READY_FOR_AGENT_LABEL,
+        AGENT_BUILD_LABEL,
         input.strandedHead,
         reclaim,
       );
@@ -1234,7 +1234,7 @@ export async function finalizeOne(
       );
       const r = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [labels.handoff],
       );
       requireFlip(r, n);
@@ -1262,7 +1262,7 @@ export async function finalizeOne(
           n,
           input.uiImpact,
           labels.handoff,
-          READY_FOR_AGENT_LABEL,
+          AGENT_BUILD_LABEL,
           aheadOfSeed ? input.issue.branch : null,
           input.strandedHead,
           reclaim,
@@ -1270,7 +1270,7 @@ export async function finalizeOne(
       );
       const r = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [labels.handoff],
       );
       requireFlip(r, n);
@@ -1326,13 +1326,13 @@ export async function finalizeOne(
           input.budget,
           input.detail,
           labels.handoff,
-          READY_FOR_AGENT_LABEL,
+          AGENT_BUILD_LABEL,
           aheadOfSeed ? input.issue.branch : null,
         ),
       );
       const labelsResult = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [labels.handoff],
       );
       requireFlip(labelsResult, n);
@@ -1355,7 +1355,7 @@ export async function finalizeOne(
       await adapter.postComment(n, comments.published);
       const r = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [labels.handoff],
       );
       requireFlip(r, n);
@@ -1377,12 +1377,12 @@ export async function finalizeOne(
           input.stackChange,
           input.gate,
           labels.handoff,
-          READY_FOR_AGENT_LABEL,
+          AGENT_BUILD_LABEL,
         ),
       );
       const r = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [labels.handoff],
       );
       requireFlip(r, n);
@@ -1403,7 +1403,7 @@ export async function finalizeOne(
         n,
         `${BOT_COMMENT_PREFIX} ${explanation} The branch ` +
           `\`${input.issue.branch}\` was pushed. This issue remains ` +
-          `\`ready-for-agent\` for the next run.`,
+          `\`2-agent-build\` for the next run.`,
       );
       return { kind: "pushed" };
     }
@@ -1420,7 +1420,7 @@ export async function finalizeOne(
         n,
         `${BOT_COMMENT_PREFIX} ${explanation} The ` +
           `branch \`${input.issue.branch}\` was pushed. This issue remains ` +
-          `\`ready-for-agent\` for the next run.`,
+          `\`2-agent-build\` for the next run.`,
       );
       return { kind: "pushed" };
     }
@@ -1432,7 +1432,7 @@ export async function finalizeOne(
         input.roundsUsed,
         input.latestReviewerProse,
         labels.handoff,
-        READY_FOR_AGENT_LABEL,
+        AGENT_BUILD_LABEL,
       );
       const refused = await pushBranchOrPark(input, adapter, labels, {
         context: reviewBudgetExhaustedExplanation(input.latestReviewerProse),
@@ -1444,7 +1444,7 @@ export async function finalizeOne(
       );
       const r = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [labels.handoff],
       );
       requireFlip(r, n);
@@ -1481,13 +1481,13 @@ export async function finalizeOne(
           handoffAction(
             input.issue.branch,
             labels.handoff,
-            READY_FOR_AGENT_LABEL,
+            AGENT_BUILD_LABEL,
             "inspect the preserved clone",
           ),
       );
       const r = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [labels.handoff],
       );
       requireFlip(r, n);
@@ -1518,7 +1518,7 @@ export async function finalizeOne(
       // Same shape as `merged`: worktree first, then branch (with `-D`
       // fallback because the silent-noop branch has commits that aren't on
       // the source branch and `-d` would refuse). No push, no comment, no
-      // label flip — the issue stays `ready-for-agent` while its ongoing unit
+      // label flip — the issue stays `2-agent-build` while its ongoing unit
       // reacquires a pool slot.
       await adapter.reclaimIssueClone(input.issue.branch);
       return deleteBranchForcing(adapter, input.issue.branch);
@@ -1537,12 +1537,12 @@ export async function finalizeOne(
         SILENT_NOOP_EXHAUSTED_COMMENT_TEMPLATE(
           input.attempts,
           labels.handoff,
-          READY_FOR_AGENT_LABEL,
+          AGENT_BUILD_LABEL,
         ),
       );
       const r2 = await adapter.editLabels(
         n,
-        [READY_FOR_AGENT_LABEL],
+        [AGENT_BUILD_LABEL],
         [labels.handoff],
       );
       requireFlip(r2, n);

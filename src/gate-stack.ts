@@ -1225,7 +1225,7 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
     // Resolving here would put a per-branch build — which can fail because of
     // the branch — outside every gate run, where its only exit is a throw, i.e.
     // HARD-ERROR: two fresh-stack retries reproducing the same broken lockfile
-    // and then `needs-human` with an "environment" trace. Leaving it to the
+    // and then `2-human-unstick` with an "environment" trace. Leaving it to the
     // first `runGate` gives that failure the one exit that names the branch,
     // and costs at most one extra container start on a resumed issue.
     //

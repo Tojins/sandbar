@@ -114,7 +114,7 @@
 //
 // A failure to open it HALTS, like every other tracker write in this loop. The
 // landing survives in the partial (those issues are on origin and still owe
-// `needs-review`), so what the halt costs is the cycle, and what carrying on would
+// `3-human-review`), so what the halt costs is the cycle, and what carrying on would
 // cost is a chunk branch growing under a human who was never shown it.
 //
 // ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@
 // the source branch and the cycle's issues are not. It is also why
 // `attemptMerge` exists: the merge, the resolve loop, the gate and the revert
 // are identical for an issue branch and a chunk branch, and only the tracker
-// half — `ready-for-agent` on an issue, `land` on a pull request — differs.
+// half — `2-agent-build` on an issue, `land` on a pull request — differs.
 //
 // CHUNKS FIRST inside that pass, because their commits are the older ones: they
 // were cut from a source branch that has since moved, and a review already said
@@ -152,7 +152,7 @@
 // reached and refused this content or ref. On a Phase-A chunk push that fact is
 // attributable to the group just composed, so every member in the atomic push
 // is commented with the exact refusal and its host-cache recovery point,
-// removed from `ready-for-agent`, and the batch continues. The Phase-B source
+// removed from `2-agent-build`, and the batch continues. The Phase-B source
 // push remains cycle-wide and cannot be attributed, so its refusal still halts.
 // Nothing lands or closes in any of these cases.
 //
@@ -187,7 +187,7 @@
 // ON THE BRANCH explicitly (the git-derived ones — a component member that was
 // never worked has no commits here and must not be closed; and no `Closes #N`
 // will ever fire, since GitHub honours those on its own merge of that pull
-// request and sandbar composed this one locally), drop `needs-review`, close the
+// request and sandbar composed this one locally), drop `3-human-review`, close the
 // PR, delete the chunk branch on origin. A forge write that fails never throws
 // out of it: the wrap-up is entirely inside the post-`landed` window, where a
 // wrapped throw would report `merged: []` against a source branch that moved,
@@ -243,7 +243,7 @@
 //
 // Every throw that can follow a tracker write is a `MergerError` (#33). The
 // loop writes as it goes — a branch it cannot land is commented on and stripped
-// of `ready-for-agent` on the spot, while applying the handoff label is Phase
+// of `2-agent-build` on the spot, while applying the handoff label is Phase
 // 4b's job — so from the first skip onward there are issues sitting on no queue
 // at all until finalise runs. `MergerError.partial` is the only thing that
 // survives a halt, and run.ts reaches it through `instanceof MergerError`, so a
@@ -558,7 +558,7 @@ const gitFailureDetail = (err: unknown): string => {
   return typeof e?.message === "string" ? e.message : String(err);
 };
 
-export const READY_FOR_AGENT_LABEL = "ready-for-agent";
+export const AGENT_BUILD_LABEL = "2-agent-build";
 
 // What a branch was being merged INTO, for the prose that has to name it (#60).
 // Every comment the merge loop writes used to say "the source branch", which is
@@ -584,7 +584,7 @@ export function buildInstallFailedComment(target: MergeTarget): string {
   return (
     `Sandbar merged this branch into ${describeMergeTarget(target)} locally, but \`npm install\` against ` +
     "the merged tree failed — the post-merge gate could not run. The merge has been " +
-    "reverted and `ready-for-agent` removed; please investigate the dependency change " +
+    "reverted and `2-agent-build` removed; please investigate the dependency change " +
     "before re-labelling."
   );
 }
@@ -603,7 +603,7 @@ export function buildStackChangeComment(args: {
     `${renderLandingStackChange(args.stackChange)}\n\n` +
     "Action: land the stack change on the source branch by hand, or remove " +
     `it from \`${args.branch}\`; drop \`${args.handoffLabel}\` and re-apply ` +
-    `\`${READY_FOR_AGENT_LABEL}\`.`
+    `\`${AGENT_BUILD_LABEL}\`.`
   );
 }
 
@@ -616,9 +616,9 @@ export function buildChunkPushRefusedComment(args: {
     `Sandbar merged this branch onto its chunk branch \`${args.chunkBranch}\` ` +
     "and the gate passed, but origin refused the atomic landing push. This is " +
     "a refusal of the pushed content or ref, not a transient push race, so " +
-    "`ready-for-agent` was removed and the same push will not be retried " +
+    "`2-agent-build` was removed and the same push will not be retried " +
     `automatically. ${pushRefusedRecoveryNote(args)}\n\n` +
-    "Then drop the human-handoff label and re-apply `ready-for-agent`. " +
+    "Then drop the human-handoff label and re-apply `2-agent-build`. " +
     "Sandbar will re-run the gate and reviews on the unchanged tip and retry " +
     "the chunk landing once origin already carries the branch."
   );
@@ -656,7 +656,7 @@ function buildAbandonComment(args: {
     `Agent's reason: ${args.reason}\n\n` +
     `<details><summary>Resolve diagnostics</summary>\n\n${diagnostics}\n\n</details>\n\n` +
     `Action: push a fix on \`${args.branch}\`; drop \`${args.handoffLabel}\` and ` +
-    `re-apply \`${READY_FOR_AGENT_LABEL}\`.`
+    `re-apply \`${AGENT_BUILD_LABEL}\`.`
   );
 }
 
@@ -704,7 +704,7 @@ export function buildForgeUnverifiedComment(args: {
     "Sandbar merged this branch into the source branch locally and the post-merge " +
       `gate passed, but ${cause[args.reason]} — so **nothing was landed on ` +
       `\`${args.sourceBranch}\`** and the merge has been reverted. ` +
-      "`ready-for-agent` was removed.",
+      "`2-agent-build` was removed.",
     "",
     `Verification failure: ${args.detail}`,
     "",
@@ -841,7 +841,7 @@ export function buildChunkRefreshFailedComment(args: {
     `**Sandbar:** refresh of chunk branch \`${args.chunkBranch}\` stopped because ${stopped}\n\n` +
     (details ? `${details}\n\n` : "") +
     `Action: merge \`${args.upstream}\` into \`${args.chunkBranch}\`, then drop ` +
-    `\`${args.handoffLabel}\` and re-apply \`${READY_FOR_AGENT_LABEL}\`.`
+    `\`${args.handoffLabel}\` and re-apply \`${AGENT_BUILD_LABEL}\`.`
   );
 }
 
@@ -1097,7 +1097,7 @@ const JANITOR_RESOLVE_ANCHOR = loadTemplate("resolve-janitor-anchor");
 // (#60). Recorded only after the push, so the label finalise applies from it
 // never claims durability the commits do not have. Not `merged`: nothing of it
 // has reached the source branch, the issue stays OPEN, and what it earns is
-// `needs-review` rather than a close.
+// `3-human-review` rather than a close.
 export type ChunkLanding = {
   readonly issue: IssueRef;
   readonly chunkBranch: string;
@@ -1157,7 +1157,7 @@ export type MergerSummary = {
   readonly pushed: boolean;
   // Issues that merged + pushed but could NOT be closed on the tracker after
   // the retry budget (issue #14). The merge is durable; the only residue is an
-  // OPEN issue. Phase 4 still drops `ready-for-agent` so these are never
+  // OPEN issue. Phase 4 still drops `2-agent-build` so these are never
   // re-picked, but the orchestrator surfaces them as an operator-actionable
   // list and halts. Empty on the happy path.
   readonly unclosed: readonly {
@@ -1253,7 +1253,7 @@ const defaultSleep = (ms: number): Promise<void> =>
 
 export class MergerError extends Error {
   // What the merger had already DONE to the tracker before it halted. Issues
-  // skipped earlier in the cycle have a comment posted and `ready-for-agent`
+  // skipped earlier in the cycle have a comment posted and `2-agent-build`
   // removed, so if the halt discarded them they would be invisible to the
   // planner AND carry no handoff label — off every queue a human looks at.
   // The orchestrator finalises this before it stops.
@@ -1601,7 +1601,7 @@ export async function settleIdenticalBump(
 // tree is back where it started.
 //
 // What is deliberately NOT here is the tracker. An issue branch that could not
-// land is commented on and stripped of `ready-for-agent`; a chunk that could
+// land is commented on and stripped of `2-agent-build`; a chunk that could
 // not land is commented on and stripped of `land` (#64). The repo half of
 // those two is identical and the tracker half shares nothing, so the split is
 // exactly where the two stop agreeing.
@@ -1815,9 +1815,9 @@ export async function runMergerWithAdapter(
   const sleep = opts.sleep ?? defaultSleep;
   // Every exit from this function after its first tracker write has to carry
   // that write to Phase 4. The loop below comments on an issue and drops
-  // `ready-for-agent`, but applying the HANDOFF label is Phase 4b's job — so
+  // `2-agent-build`, but applying the HANDOFF label is Phase 4b's job — so
   // between those two moments the issue is on no queue at all, invisible to
-  // the planner and to a human filtering on `needs-human`. `MergerError.partial`
+  // the planner and to a human filtering on `2-human-unstick`. `MergerError.partial`
   // is the only channel that survives a halt (run.ts finalises it, then stops),
   // and run.ts's `instanceof MergerError` check is what routes to it, so
   // anything else thrown out of the loop or the landing is re-thrown WRAPPED
@@ -1843,7 +1843,7 @@ export async function runMergerWithAdapter(
   //
   // `chunkLanded` is the opposite and is carried VERBATIM: those commits really
   // are on origin (the entry is written after the push) and the issues really
-  // receive their `needs-review` display label. Landing a chunk does not move the source
+  // receive their `3-human-review` display label. Landing a chunk does not move the source
   // branch, so it takes nothing away from the `merged: []` claim beside it —
   // the two answer different questions. `skipped` and `skippedChunks` are the
   // same: a tracker write already made, which is the whole reason a partial
@@ -1972,7 +1972,7 @@ export async function runMergerWithAdapter(
         logDetail: string,
       ): Promise<null> => {
         await adapter.commentOnIssue(n, comment);
-        await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+        await adapter.removeLabel(n, AGENT_BUILD_LABEL);
         skipped.push({ issue, reason });
         await opts.observations.onOutcome({
           kind: "skipped",
@@ -2051,7 +2051,7 @@ export async function runMergerWithAdapter(
   // `attemptMerge`: it WRITES `chunkLanded`, and it has to write it before the
   // pull-request call below, which halts. Returning the landed members for a
   // caller to record instead would mean a halt on the PR left them out of the
-  // partial — and their commits are on origin by then, so `needs-review` is owed
+  // partial — and their commits are on origin by then, so `3-human-review` is owed
   // whether or not the review surface came up.
   const landChunkGroup = async (group: ChunkGroup): Promise<void> => {
     const branch = group.target.branch;
@@ -2102,7 +2102,7 @@ export async function runMergerWithAdapter(
               recovery,
             }),
           );
-          await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+          await adapter.removeLabel(n, AGENT_BUILD_LABEL);
           skipped.push({ issue, reason: "push-refused" });
           await opts.observations.onOutcome({
             kind: "skipped",
@@ -2132,7 +2132,7 @@ export async function runMergerWithAdapter(
         `Could not push chunk branch ${branch} (${push.kind === "race" ? "rejected — the branch moved under this cycle" : push.reason}). ` +
           `${landedMembers.length} issue(s) merged onto it locally and were NOT landed: ` +
           `${landedMembers.map(({ issue }) => `#${issueNumberOf(issue)}`).join(", ")}. ` +
-          `They keep ready-for-agent and their branches; the composition is discarded with the merger worktree.`,
+          `They keep 2-agent-build and their branches; the composition is discarded with the merger worktree.`,
         nothingLanded(),
       );
     }
@@ -2182,14 +2182,14 @@ export async function runMergerWithAdapter(
       .catch(
         // Loud, like every other tracker write in this loop. The landing is
         // durable and the partial carries it, so the members still get
-        // `needs-review`; what is missing is the thing a human reviews, and a run
+        // `3-human-review`; what is missing is the thing a human reviews, and a run
         // that carried on would keep landing work onto a branch nobody had
         // been shown.
         asHalt(
           `Chunk branch ${branch} is on origin with ` +
             `${landedMembers.map(({ issue }) => `#${issueNumberOf(issue)}`).join(", ")} landed on it, ` +
             `but its draft pull request could not be opened or updated. Those issues keep ` +
-            `their landing and are labelled needs-review when that display write succeeds; ` +
+            `their landing and are labelled 3-human-review when that display write succeeds; ` +
             `open or update the PR by hand (or fix ` +
             `gh's permissions — the next cycle that lands a member on this chunk retries it)`,
         ),
@@ -2740,7 +2740,7 @@ export async function runMergerWithAdapter(
     // Everything from here to the end of the cycle runs AFTER issues have been
     // commented on and de-labelled earlier in this loop, so anything that
     // escapes must still carry that tracker state to Phase 4 — otherwise those
-    // issues end with `ready-for-agent` stripped and no handoff label: off the
+    // issues end with `2-agent-build` stripped and no handoff label: off the
     // planner's list and off every human's filter.
     //
     // Wrapping matters at least as much here as in the loop: verified landing
@@ -2797,7 +2797,7 @@ export async function runMergerWithAdapter(
       // earlier in this cycle — they are already commented and de-labelled.
       //
       // The merged-but-unlanded issues are named in the message: they keep
-      // `ready-for-agent` and their branches (the next run's preflight picks
+      // `2-agent-build` and their branches (the next run's preflight picks
       // them up as resumable), but nothing else tells the operator which work
       // was composed and thrown away with the worktree.
       const stranded = merged.map((m) => `#${issueNumberOf(m)}`).join(", ");
@@ -2805,7 +2805,7 @@ export async function runMergerWithAdapter(
         `Verified merge could not land: ${landing.detail}` +
           (stranded
             ? ` — ${merged.length} issue(s) merged locally and NOT landed: ${stranded}. ` +
-              `They keep ready-for-agent and their branches; the merge result itself is discarded ` +
+              `They keep 2-agent-build and their branches; the merge result itself is discarded ` +
               `with the ephemeral merger worktree.`
             : ""),
         nothingLanded(),
@@ -2840,7 +2840,7 @@ export async function runMergerWithAdapter(
               hasResolveCommits: landing.resolveCommits,
             }),
           );
-          await adapter.removeLabel(n, READY_FOR_AGENT_LABEL);
+          await adapter.removeLabel(n, AGENT_BUILD_LABEL);
           skipped.push({ issue, reason: "forge-unverified" });
           await opts.observations.onOutcome({
             kind: "skipped",

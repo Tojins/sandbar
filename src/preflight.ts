@@ -15,7 +15,7 @@
 // workdir both reached it, and the loser was not turned away until afterwards.
 // (Note the branch CLASSIFICATION below is not part of that argument: a
 // concurrent run's in-flight branches map to issues that are still open and
-// still `ready-for-agent` — the label flips happen in Phase 4 — so they read as
+// still `2-agent-build` — the label flips happen in Phase 4 — so they read as
 // `resumable`, not as a spurious `unmerged` refusal.)
 // It also removes `snapshotsDir` whole before anything else (#203): a seed
 // snapshot belongs to one run's issue, so under the workdir lock every one
@@ -97,7 +97,7 @@
 //
 // The deploy watch (#198) is asked about only when `config.deployWatch` is
 // set and `gh` is authenticated (`deployWatchRefusals`): its workflow must
-// exist in the repository, its dedupe label and `ready-for-human` must exist
+// exist in the repository, its dedupe label and `1-human-spec` must exist
 // (#8: sandbar never creates a label), and `notifyLogin` must not be the
 // token's own login, because GitHub sends no notification for a
 // self-mention and the bug's one @-mention would reach nobody. The token
@@ -124,7 +124,7 @@
 // `attempt`-lifecycle, so #24 D5 charges that failure to the BRANCH. The
 // implementer is then handed a gate red about a statfs source it can neither
 // see nor fix, on every attempt, for every issue in the cycle — the whole
-// budget spent onto `needs-human` with an "environment" trace. #48 made it
+// budget spent onto `2-human-unstick` with an "environment" trace. #48 made it
 // reachable rather than theoretical: this repo's own gate mounts
 // `/run/user/<uid>/podman/podman.sock`, which exists only while that user's
 // `podman.socket` unit is active.
@@ -155,7 +155,7 @@
 // host paths and this check is complete at that scope.
 //
 // Leftover `sandbar/issue-*` branches are classified five ways (#13, #179):
-//   - resumable — the branch maps to a still-open `ready-for-agent` issue whose
+//   - resumable — the branch maps to a still-open `2-agent-build` issue whose
 //                 latest label actor passes #136's queue policy, i.e.
 //                 stranded work from an interrupted run (killed after the issue
 //                 agents finished but before/inside the merger). NOT an error:
@@ -163,7 +163,7 @@
 //                 from the branch's commits, so a killed run just restarts and
 //                 finishes.
 //   - parked    — the branch maps to an issue that is still OPEN but not
-//                 admitted to the queue: `ready-for-agent` is absent, or its
+//                 admitted to the queue: `2-agent-build` is absent, or its
 //                 latest actor fails #136's restricted policy. NOT an error
 //                 either, and the branch is KEPT: a preflight
 //                 that refused over it forced the operator to destroy exactly
@@ -257,7 +257,7 @@ import type {
   ResolvedStackContainer,
 } from "./config.js";
 import { dbVolumeRefusals } from "./db-copy.js";
-import { READY_FOR_HUMAN_LABEL } from "./deploy-watch.js";
+import { HUMAN_SPEC_LABEL } from "./deploy-watch.js";
 import { checkWorktreeImageUids, pulledImagesOf } from "./ensure-images.js";
 import type { EnvReader } from "./env.js";
 import { SandbarError, hasExitCode, isErrno, isExitStatus } from "./errors.js";
@@ -523,7 +523,7 @@ export type RepoState = StackHostState & {
   // Tracker-confirmed CLOSED branches. They are reconciled and reported by
   // runPreflight before invariant evaluation; they never refuse startup.
   readonly closedIssueBranches: readonly string[];
-  // Stranded branches that map to a still-open `ready-for-agent` issue — not a
+  // Stranded branches that map to a still-open `2-agent-build` issue — not a
   // failure (resumed, not refused). Carried on the state purely so runPreflight
   // can announce them; checkInvariants emits no Invariant for them.
   readonly resumableIssueBranches: readonly string[];
@@ -936,7 +936,7 @@ function lookedUp(l: IssueNumberLookup): ReadonlySet<number> {
 }
 
 // The set of issue numbers currently in the planner queue (open + authorized
-// `ready-for-agent`). Reuses the planner's candidate query, authoritative facts
+// `2-agent-build`). Reuses the planner's candidate query, authoritative facts
 // batch and actor decision so the resume classification can never desync from
 // what the next cycle actually picks up.
 // A gh hiccup answers `ok: false`: no branch is treated as resumable, and the
@@ -1662,7 +1662,7 @@ export async function deployWatchRefusals(args: {
           ? [l.name]
           : []),
     );
-    const missing = [READY_FOR_HUMAN_LABEL, watch.label].filter((l) => !names.has(l));
+    const missing = [HUMAN_SPEC_LABEL, watch.label].filter((l) => !names.has(l));
     if (missing.length > 0) {
       refusals.push(
         `config.deployWatch: ${repoFlag} has no label ${missing.map((l) => `\`${l}\``).join(" or ")}; ` +
@@ -1811,16 +1811,16 @@ export async function runPreflightAfterReachability(
       detail: `Resuming ${resumable.length} stranded issue ` +
         `branch(es) from an interrupted run: ` +
         `${resumable.join(", ")}. The planner will re-pick ` +
-        "the matching open `ready-for-agent` issue(s) and the inner loop " +
+        "the matching open `2-agent-build` issue(s) and the inner loop " +
         "continues from each branch's commits.",
     });
   }
   if (parked.length > 0) {
     const reason = readyLabelPolicy === "anyone"
-      ? "Each maps to an open issue that is not `ready-for-agent`; re-applying " +
+      ? "Each maps to an open issue that is not `2-agent-build`; re-applying " +
         "the label resumes from the branch's commits."
       : "Each maps to an open issue outside the admitted queue: the " +
-        "`ready-for-agent` label is absent or its latest recorded actor is " +
+        "`2-agent-build` label is absent or its latest recorded actor is " +
         "not a configured developer or this run's token login. An admitted " +
         "actor can remove and re-apply the label to resume from the branch's commits.";
     await cfg.onEvent({

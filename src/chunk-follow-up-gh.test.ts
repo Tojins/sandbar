@@ -38,7 +38,7 @@ describe("the chunk-review scan's real adapter", () => {
       "#!/bin/sh", `log='${log}'`,
       `for a in "$@"; do printf '%s\\0' "$a" >> "$log"; done`, `printf '\\001' >> "$log"`,
       `case "$1 $2" in`, ` "api graphql") printf '%s' "$SANDBAR_TEST_GRAPHQL" ;;`,
-      ` "issue view") printf '{"number":%s,"title":"Issue %s","body":"body %s","labels":[{"name":"ready-for-agent"}]}' "$3" "$3" "$3" ;;`,
+      ` "issue view") printf '{"number":%s,"title":"Issue %s","body":"body %s","labels":[{"name":"2-agent-build"}]}' "$3" "$3" "$3" ;;`,
       "esac",
     ].join("\n") + "\n", { mode: 0o755 });
     await writeFile(join(bin, "git"), [
@@ -79,8 +79,8 @@ describe("the chunk-review scan's real adapter", () => {
       beforeOriginWrite,
     }) });
     expect(result).toEqual([
-      { number: 42, title: "Issue 42", body: "body 42", labels: ["ready-for-agent"] },
-      { number: 44, title: "Issue 44", body: "body 44", labels: ["ready-for-agent"] },
+      { number: 42, title: "Issue 42", body: "body 42", labels: ["2-agent-build"] },
+      { number: 44, title: "Issue 44", body: "body 44", labels: ["2-agent-build"] },
     ]);
     const recorded = await calls();
     expect(recorded.find((call) => call[0] === "api")).toEqual([
@@ -100,7 +100,7 @@ describe("the chunk-review scan's real adapter", () => {
       expect(comment).toEqual(["issue", "comment", String(number), "--repo", "acme/app", "--body", expect.any(String)]);
       expect(comment?.[6]).toContain(number === 42 ? "src/first.ts" : "src/second.ts");
       expect(comment?.[6]).not.toContain(number === 42 ? "src/second.ts" : "src/first.ts");
-      expect(recorded).toContainEqual(["issue", "edit", String(number), "--repo", "acme/app", "--add-label", "ready-for-agent"]);
+      expect(recorded).toContainEqual(["issue", "edit", String(number), "--repo", "acme/app", "--add-label", "2-agent-build"]);
       expect(recorded).toContainEqual(["issue", "view", String(number), "--repo", "acme/app", "--json", "number,title,body,labels"]);
     }
     const ledger = recorded.find((call) => call[0] === "pr" && call[1] === "comment");

@@ -43,8 +43,8 @@
 // The bug body carries `<!-- sandbar:deploy-run=<id> attempt=<n> -->`; the one
 // @-mention of the operator is in that body, so a chunk of eight members sends
 // one email. This module holds the ONLY `gh issue create` in `src/`
-// (`issue-create-site.test.ts`); the issue carries `ready-for-human` plus the
-// dedupe label, never `ready-for-agent`.
+// (`issue-create-site.test.ts`); the issue carries `1-human-spec` plus the
+// dedupe label, never `2-agent-build`.
 //
 // RERUNS. `gh run list` reports a run's latest attempt only. When a filed run
 // shows a newer concluded attempt, the bug issue gets one comment for that
@@ -100,7 +100,7 @@ export const BUG_LOG_JOBS = 3;
 export const BUG_LOG_LINES_PER_JOB = 60;
 // GitHub refuses an issue body over 65 536 characters.
 export const BUG_BODY_MAX_CHARS = 60_000;
-export const READY_FOR_HUMAN_LABEL = "ready-for-human";
+export const HUMAN_SPEC_LABEL = "1-human-spec";
 
 const EXEC_TIMEOUT_MS = 60_000;
 const TRUNCATED_NOTE = "\n\n(truncated)";
@@ -735,7 +735,7 @@ export function realDeployWatchAdapter(deps: RealDeployWatchAdapterDeps): Deploy
           "--body",
           body,
           "--label",
-          READY_FOR_HUMAN_LABEL,
+          HUMAN_SPEC_LABEL,
           "--label",
           deps.label,
         ])

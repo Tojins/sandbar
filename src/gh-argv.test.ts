@@ -123,7 +123,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       });
 
       await guarded.postComment(42, "handoff body");
-      await guarded.editLabels(42, ["ready-for-agent"], ["needs-human"]);
+      await guarded.editLabels(42, ["2-agent-build"], ["2-human-unstick"]);
       expect(beforeOriginWrite).toHaveBeenCalledTimes(3);
     });
 
@@ -136,7 +136,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
         beforeOriginWrite: async () => { throw lost; },
       });
 
-      await expect(guarded.editLabels(42, ["ready-for-agent"], []))
+      await expect(guarded.editLabels(42, ["2-agent-build"], []))
         .rejects.toBe(lost);
       expect(await calls()).toEqual([]);
     });
@@ -145,7 +145,7 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
     // the flag — a labelled-in-one-repo, de-queued-in-another split would
     // re-pick the issue forever.
     it("names the repo on both halves of the label flip", async () => {
-      await adapter().editLabels(42, ["ready-for-agent"], ["needs-human"]);
+      await adapter().editLabels(42, ["2-agent-build"], ["2-human-unstick"]);
 
       const recorded = await calls();
       expect(recorded).toHaveLength(2);
@@ -304,16 +304,16 @@ describe("the tracker WRITE calls name the repository (#34)", () => {
       expect(await records()).toEqual([["lease"], argv]);
     });
 
-    // The same call the auto lane drops `ready-for-agent` with, which is why it
+    // The same call the auto lane drops `2-agent-build` with, which is why it
     // is not spelled twice either.
     it("drops a label in the configured repo", async () => {
-      await adapter().removeLabel(7, "needs-review");
+      await adapter().removeLabel(7, "3-human-review");
 
       const [argv] = await calls();
       expect(argv?.slice(0, 3)).toEqual(["issue", "edit", "7"]);
       expect(repoFlagOf(argv ?? [])).toBe("acme/app");
       expect(argv).toContain("--remove-label");
-      expect(argv).toContain("needs-review");
+      expect(argv).toContain("3-human-review");
       expect(await records()).toEqual([["lease"], argv]);
     });
 

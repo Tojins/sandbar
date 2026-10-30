@@ -2390,7 +2390,7 @@ describe("run quota orchestration (#109)", () => {
       },
       action: { kind: "pushed" },
     }]);
-    seams.issueLabels.mockResolvedValue(["ready-for-agent", "needs-human"]);
+    seams.issueLabels.mockResolvedValue(["2-agent-build", "2-human-unstick"]);
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`EXIT:${code}`);
     }) as never);

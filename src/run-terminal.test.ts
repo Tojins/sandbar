@@ -209,19 +209,19 @@ describe("tracker finalization read-back (#87)", () => {
   };
 
   it("accepts the intended not-ready state", async () => {
-    await expect(verifyFinalizedTrackerState([result], async () => ["needs-human"]))
+    await expect(verifyFinalizedTrackerState([result], async () => ["2-human-unstick"]))
       .resolves.toBeUndefined();
   });
 
   it("halts loudly when the queue label remains", async () => {
     await expect(verifyFinalizedTrackerState(
       [result],
-      async () => ["ready-for-agent", "needs-human"],
-    )).rejects.toThrow(/Tracker read-back mismatch for issue #87.*not-ready.*ready-for-agent/);
+      async () => ["2-agent-build", "2-human-unstick"],
+    )).rejects.toThrow(/Tracker read-back mismatch for issue #87.*not-ready.*2-agent-build/);
   });
 
   it("does not read back finalizations that intentionally keep the issue ready", async () => {
-    const issueLabels = vi.fn(async () => ["ready-for-agent"]);
+    const issueLabels = vi.fn(async () => ["2-agent-build"]);
     await verifyFinalizedTrackerState([
       {
         input: {

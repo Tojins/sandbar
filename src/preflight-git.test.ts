@@ -521,7 +521,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       'if [ "$1 $2" = "api user" ]; then exit 0; fi',
       'case "$*" in *viewer*) printf \'{"data":{"viewer":{"login":"tojins"}}}\'; exit 0;; esac',
       'if [ "$1 $2" = "workflow view" ]; then exit 0; fi',
-      'if [ "$1 $2" = "label list" ]; then printf \'[{"name":"ready-for-human"},{"name":"deploy-red"}]\'; exit 0; fi',
+      'if [ "$1 $2" = "label list" ]; then printf \'[{"name":"1-human-spec"},{"name":"deploy-red"}]\'; exit 0; fi',
       "exit 1",
     ]);
     await writeFile(join(shimBin, "podman"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
@@ -549,7 +549,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       'if [ "$1 $2" = "api user" ]; then exit 0; fi',
       `case "$*" in *viewer*) echo viewer >> ${viewerLog}; printf '{"data":{"viewer":{"login":"tojins"}}}'; exit 0;; esac`,
       'if [ "$1 $2" = "workflow view" ]; then exit 0; fi',
-      'if [ "$1 $2" = "label list" ]; then printf \'[{"name":"ready-for-human"},{"name":"deploy-red"}]\'; exit 0; fi',
+      'if [ "$1 $2" = "label list" ]; then printf \'[{"name":"1-human-spec"},{"name":"deploy-red"}]\'; exit 0; fi',
       "exit 1",
     ]);
     await writeFile(join(shimBin, "podman"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
@@ -996,11 +996,11 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await writeGhShim([
         "#!/bin/sh",
         'if [ "$1 $2" = "issue list" ]; then',
-        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"2-agent-build"}]}]\'',
         "  exit 0",
         "fi",
         'if [ "$1 $2" = "api graphql" ]; then',
-        '  printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]},"timelineItems":{"nodes":[{"actor":{"login":"mallory"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\'',
+        '  printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[{"name":"2-agent-build"}]},"timelineItems":{"nodes":[{"actor":{"login":"mallory"},"label":{"name":"2-agent-build"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\'',
         "  exit 0",
         "fi",
         "exit 1",
@@ -1021,11 +1021,11 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await writeGhShim([
         "#!/bin/sh",
         'if [ "$1 $2" = "issue list" ]; then',
-        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"2-agent-build"}]}]\'',
         "  exit 0",
         "fi",
         'if [ "$1 $2" = "api graphql" ]; then',
-        '  printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[]},"timelineItems":{"nodes":[{"actor":{"login":"alice"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\'',
+        '  printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[]},"timelineItems":{"nodes":[{"actor":{"login":"alice"},"label":{"name":"2-agent-build"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\'',
         "  exit 0",
         "fi",
         "exit 1",
@@ -1046,7 +1046,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       await writeGhShim([
         "#!/bin/sh",
         'if [ "$1 $2" = "issue list" ]; then',
-        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"2-agent-build"}]}]\'',
         "  exit 0",
         "fi",
         'if [ "$1 $2" = "api graphql" ]; then printf "not-json"; exit 0; fi',
@@ -1068,13 +1068,13 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
         "#!/bin/sh",
         'if [ "$1 $2" = "auth status" ]; then exit 0; fi',
         'if [ "$1 $2" = "issue list" ]; then',
-        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"ready-for-agent"}]}]\'',
+        '  printf \'[{"number":7,"title":"Seven","body":"","labels":[{"name":"2-agent-build"}]}]\'',
         "  exit 0",
         "fi",
         'if [ "$1 $2" = "api graphql" ]; then',
         '  case "$*" in',
         '    *"viewer{login}"*) printf \'{"data":{"viewer":{"login":"token-bot"}}}\' ;;',
-        '    *) printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[{"name":"ready-for-agent"}]},"timelineItems":{"nodes":[{"actor":{"login":"mallory"},"label":{"name":"ready-for-agent"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\' ;;',
+        '    *) printf \'{"data":{"repository":{"i7":{"state":"OPEN","labels":{"nodes":[{"name":"2-agent-build"}]},"timelineItems":{"nodes":[{"actor":{"login":"mallory"},"label":{"name":"2-agent-build"},"createdAt":"2026-09-08T12:00:00Z"}]}}}}}\' ;;',
         "  esac",
         "  exit 0",
         "fi",
@@ -1099,7 +1099,7 @@ describe("preflight operates on the named repo, not process.cwd() (#34, #38)", (
       expect(parked).toContain("outside the admitted queue");
       expect(parked).toContain("configured developer or this run's token login");
       expect(parked).toContain("remove and re-apply the label");
-      expect(parked).not.toContain("that is not `ready-for-agent`");
+      expect(parked).not.toContain("that is not `2-agent-build`");
     });
 
     it("classifies the target's issue branches, not the launch directory's", async () => {
