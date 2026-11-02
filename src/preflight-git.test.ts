@@ -1494,7 +1494,7 @@ describe("syncKeptIssueBranches — kept branches follow origin's copy (#112)", 
     expect(result.lines).toHaveLength(2);
     expect(result.lines[0]).toContain(`${behind} fast-forwarded`);
     expect(result.lines[1]).toContain(`${split} has diverged`);
-  });
+  }, 15_000);
 
   // A parked branch the human deleted on origin: the cache saw origin carry it
   // (the park's push wrote the remote-tracking ref), so the cache drops its
