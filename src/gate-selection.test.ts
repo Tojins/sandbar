@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -311,10 +311,12 @@ describe("the stored gate picks (#267)", () => {
     await expect(readGatePicks(dir, [7, 8])).resolves.toEqual([{ issue: 7, ...pick }]);
   });
 
-  it("refuses a stored pick that is not one", async () => {
+  it("refuses a stored pick that is not one, or cannot be read", async () => {
     const dir = await mkdtemp(join(tmpdir(), "gate-picks-"));
     await writeFile(join(dir, "9.json"), JSON.stringify({ domains: [{ name: "gate" }], tests: [] }));
     await expect(readGatePicks(dir, [9])).rejects.toThrow("domains is not a list of { name, reason }");
+    await mkdir(join(dir, "10.json"));
+    await expect(readGatePicks(dir, [10])).rejects.toMatchObject({ code: "EISDIR" });
   });
 
 });
