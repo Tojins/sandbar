@@ -314,6 +314,25 @@ describe("resolveStackFile (#186)", () => {
   const LABEL = "gate/stack.json at origin/main";
   const stack = minimal.gateStack as GateStackConfig;
 
+  // An inline stack is a program no compiler checked: it meets the same tables.
+  it.each([
+    ["a number value", { K: 8090 }],
+    ["a boolean value", { K: true }],
+    ["a null value", { K: null }],
+    ["an object value", { K: { a: "b" } }],
+    ["an array value", { K: ["x"] }],
+    ["a string", "str"],
+    ["an array", ["a"]],
+    ["a number", 5],
+  ])("refuses an inline sandboxEnv that is %s, naming config.gateStack", (_, sandboxEnv) => {
+    const gateStack = {
+      ...stack,
+      containers: [{ ...stack.containers[0], inSandbox: true, sandboxEnv }, stack.containers[1]],
+    } as unknown as GateStackConfig;
+    expect(() => resolveConfig({ ...minimal, gateStack }))
+      .toThrow(/^config\.gateStack: containers\[0\] has 'sandboxEnv' that is not an object of strings/);
+  });
+
   it("reads containers and steps and ignores every other top-level key", () => {
     const text = JSON.stringify({
       anchor: "gate/README.md",
