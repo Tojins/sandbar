@@ -175,10 +175,17 @@ a written set.
 - **Gate stack**: `gate-stack.ts`, `sandbox-stack.ts` (#44); a stack file
   (`gateStack: { path }`) is read from the source tip at gate time by
   `stack-source.ts` (#186), never from the operator's clone. A branch's own
-  edit to it applies to its gates only when it is env-only
+  edit to it applies to its gates only when it is env-only, or `domains`
+  (its test selection, which only adds tests and lands with the branch)
   (`stack-change.ts`); any other edit parks `NEEDS-STACK-CHANGE` at gate-1
   and is reverted as skip reason `stack-change` at landing. A gate
-  verdict is about a clean, on-branch commit (D1, #27, #127). A step's
+  verdict is about a clean, on-branch commit (D1, #27, #127). A stack whose
+  steps declare `tests` runs a selection of whole test files (#259, #266,
+  `gate-selection.ts`): global, core and domain sanity sets, the `related`
+  pass (a pseudo-step in the stack) and the branch's own test files, over the
+  diff gate-1 (branch vs its seed's fork), gate-2 (merge result vs source) and
+  `sandbar gate` (worktree vs `origin/<source>`'s fork, `--domains`) read;
+  a `gate-selection` event records it. A step's
   `settles` (#183) names rules it checks mechanically; while one does, the
   implementer and quality prompts drop that rule's prose fragment
   (`prompts/quality-tests-uncovered-*.md`, `prompts/commit-ritual-*.md`);
@@ -197,7 +204,9 @@ a written set.
   `background-tasks.md`); implementer attempt slot 6.8k (2.9k of it
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
   configured, +0.2k an enforced egress allowlist, +0.6k a held database
-  copy); quality lister 5.7k for the built-in group, 2.8k + its group for a
+  copy, +0.3k a stack file, +0.2k on attempt 1 a selecting gate; a red
+  selecting gate's trace leads with the files it ran); quality lister 5.7k
+  for the built-in group, 2.8k + its group for a
   project group; verify 6.0k (+0.1k when the report held only gate-step
   findings), fixer 5.6k (its report +0.2k and the output's tail per red
   standalone step, #247); verifier white-box 4.1k (+0.1k

@@ -147,17 +147,27 @@ import { isIPv4 } from "node:net";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 
 import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
-import type {
-  ResolvedGateStack,
-  ResolvedGateStep,
-  ResolvedStackContainer,
-  ResolvedStackMount,
+import {
+  CHANGED_TOKEN,
+  TESTS_TOKEN,
+  type ResolvedGateRelated,
+  type ResolvedGateStack,
+  type ResolvedGateStep,
+  type ResolvedStackContainer,
+  type ResolvedStackMount,
 } from "./config.js";
 import type { OwnerEgress, OwnerProxy } from "./egress.js";
 import { internalNetworkCreateArgs } from "./egress-policy.js";
 import { type ImageMap, ImageBuildError } from "./ensure-images.js";
 import { SandbarError } from "./errors.js";
 import { type GateResult, type GateStepTiming, stripAnsi } from "./gate.js";
+import {
+  type GateSelection,
+  type SelectionPlan,
+  expandToken,
+  finishSelection,
+  parseRelatedOutput,
+} from "./gate-selection.js";
 import { type Clock, monotonicClock, startTimer } from "./timing.js";
 import { dirtyWorktreePaths } from "./git-ops.js";
 import {
@@ -478,8 +488,10 @@ export type Stack = {
   // old" is exactly what an operator debugging a surprising verdict needs to be
   // told without having to ask podman.
   readonly reused: readonly string[];
-  // Recreate the attempt-lifecycle containers and run every step in order.
-  readonly runGate: () => Promise<GateResult>;
+  // Recreate the attempt-lifecycle containers and run every step in order,
+  // the steps that declare `tests` over `plan`'s selection (#266). `plan` is
+  // null exactly when no step declares `tests`.
+  readonly runGate: (plan: SelectionPlan | null) => Promise<GateResult>;
   readonly stop: () => Promise<void>;
 };
 
@@ -1293,8 +1305,8 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
       networkName,
       reused: reused.map((c) => c.name),
       stop,
-      runGate: async () => {
-        const result = await runStackGate({
+      runGate: async (plan) => {
+        const result = await runStackGate(plan, {
           spec,
           attemptContainers,
           issueContainers,
@@ -2294,7 +2306,10 @@ async function assertIssueContainerHealthy(
   }
 }
 
-async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
+async function runStackGate(
+  plan: SelectionPlan | null,
+  ctx: RunGateCtx,
+): Promise<GateResult> {
   // The verdict is about a commit, so the tree had better BE the commit. This
   // also covers gate-2 in the merger worktree, where the resolve agent can
   // leave edits behind; the inner loop short-circuits earlier (the state
@@ -2522,43 +2537,33 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
 
   let stdout = "";
   let stderr = "";
-  for (const batch of stepBatches(ctx.spec.steps)) {
-    // A batch is one step, or one with the `parallel` steps behind it: they
-    // start together and all of them finish before anything is decided, so
-    // every one of them has a verdict and a duration to report.
-    const runs = await Promise.all(batch.map((step) => runStep(step, ctx)));
-    for (const run of runs) steps.push(run.timing);
-    const batchStdout = runs.map((run) => run.banner + stripAnsi(run.r.stdout) + run.note).join("");
-    const batchStderr = runs.map((run) => stripAnsi(run.r.stderr)).join("");
-    const red = runs.find((run) => !boundedOk(run.r));
-    if (red === undefined) {
-      stdout += batchStdout;
-      stderr += batchStderr;
-      continue;
-    }
-
-    // Stop at the first red. Every later step tends to read what an earlier
-    // one built, so running them would bury the real failure under derived
-    // ones: a test suite that fails because the build step before it never
-    // produced anything reports N failures that are all one failure. In a
-    // batch the first red in declared order names the gate, and every
-    // member's output is kept.
-    //
-    // The container logs are collected BEFORE the reap below — removing the
-    // container first would throw away the one diagnostic a hang leaves.
+  // Stop at the first red. Every later step tends to read what an earlier one
+  // built, so running them would bury the real failure under derived ones: a
+  // test suite that fails because the build step before it never produced
+  // anything reports N failures that are all one failure. In a batch the first
+  // red in declared order names the gate, and every member's output is kept.
+  //
+  // The container logs are collected BEFORE the reap below — removing the
+  // container first would throw away the one diagnostic a hang leaves.
+  const red = async (
+    runs: readonly StepRun[],
+    failed: StepRun,
+    selection: GateSelection | undefined,
+  ): Promise<GateResult> => {
     const verdict = await withContainerLogs(
       {
         ok: false,
-        stdout: stdout + batchStdout,
-        stderr: stderr + batchStderr,
+        stdout,
+        stderr,
         // 124 is GNU `timeout`'s convention, and the alternative is worse than
         // arbitrary: a killed process has no exit code, so the honest-looking
         // `1` is indistinguishable from a suite that ran and failed once.
-        exitCode: red.r.timedOut ? 124 : (red.r.exitCode ?? 1),
-        failedStep: red.step.name,
+        exitCode: failed.r.timedOut ? 124 : (failed.r.exitCode ?? 1),
+        failedStep: failed.step.name,
         durationMs: total(),
         steps,
         containerLogs: "",
+        ...(selection === undefined ? {} : { selection }),
       },
       ctx,
     );
@@ -2574,6 +2579,46 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
       await reapKilledStep(run.container, run.containerName, ctx, run.step.name);
     }
     return verdict;
+  };
+  const record = (runs: readonly StepRun[]) => {
+    for (const run of runs) steps.push(run.timing);
+    stdout += runs.map((run) => run.banner + stripAnsi(run.r.stdout) + run.note).join("");
+    stderr += runs.map((run) => stripAnsi(run.r.stderr)).join("");
+  };
+
+  // The selection's last part (#266): the `related` pass, a red of its own
+  // when it fails or prints a path the tree does not have.
+  let selection: GateSelection | undefined;
+  if (plan !== null) {
+    let related: readonly string[] = [];
+    if (ctx.spec.related !== null && plan.relatedInput.length > 0) {
+      const ran = await runStep(relatedStep(ctx.spec.related, plan.relatedInput), ctx, null);
+      const parsed = boundedOk(ran.r) ? parseRelatedOutput(ran.r.stdout, plan.tree) : null;
+      const run = parsed !== null && "missing" in parsed ? untrusted(ran, parsed.missing) : ran;
+      record([run]);
+      if (parsed === null || "missing" in parsed) return red([run], run, undefined);
+      related = parsed.files;
+    }
+    selection = finishSelection(plan, related, ctx.spec.steps);
+  }
+
+  for (const batch of stepBatches(ctx.spec.steps)) {
+    // A batch is one step, or one with the `parallel` steps behind it: they
+    // start together and all of them finish before anything is decided, so
+    // every one of them has a verdict and a duration to report. A step whose
+    // `tests` match no selected file is skipped, and says so in the output.
+    const skipped = batch.filter((step) => selection?.steps[step.name]?.length === 0);
+    for (const step of skipped) {
+      const banner = `\n== ${step.name} (${step.in}) skipped: no selected test file matches its tests\n`;
+      ctx.onStepOutput?.(banner);
+      stdout += banner;
+    }
+    const runs = await Promise.all(batch
+      .filter((step) => !skipped.includes(step))
+      .map((step) => runStep(step, ctx, selection ?? null)));
+    record(runs);
+    const failed = runs.find((run) => !boundedOk(run.r));
+    if (failed !== undefined) return red(runs, failed, selection);
   }
   return {
     ok: true,
@@ -2584,6 +2629,37 @@ async function runStackGate(ctx: RunGateCtx): Promise<GateResult> {
     durationMs: total(),
     steps,
     containerLogs: "",
+    ...(selection === undefined ? {} : { selection }),
+  };
+}
+
+// A `related` pass that exited 0 but printed paths the tree does not have:
+// a red, since a selection built on them could leave out what it must run.
+function untrusted(run: StepRun, missing: readonly string[]): StepRun {
+  return {
+    ...run,
+    r: { ...run.r, exitCode: 1 },
+    note: `\n[sandbar] the related pass printed path(s) that are not files of the ` +
+      `gated tree, so its selection cannot be trusted:\n${missing.join("\n")}\n`,
+    timing: { ...run.timing, ok: false },
+  };
+}
+
+// The `related` pass as the pseudo-step it runs as: `failedStep` names it
+// `related` when it is red.
+function relatedStep(
+  related: ResolvedGateRelated,
+  changed: readonly string[],
+): ResolvedGateStep {
+  return {
+    name: "related",
+    in: related.in,
+    command: expandToken(related.command, CHANGED_TOKEN, changed),
+    timeoutMs: related.timeoutMs,
+    settles: [],
+    standalone: false,
+    parallel: false,
+    tests: null,
   };
 }
 
@@ -2608,7 +2684,8 @@ type StepRun = {
   readonly containerName: string;
   readonly banner: string;
   readonly r: BoundedResult;
-  // Why the step was killed, after its output; empty for an exit of its own.
+  // Why the step was killed or its output refused, after its output; empty
+  // for an exit of its own.
   readonly note: string;
   readonly timing: GateStepTiming;
 };
@@ -2616,7 +2693,11 @@ type StepRun = {
 // One step, run and measured. Two steps of one batch in the same container
 // each report that container's memory peak and OOM count over their own span,
 // which covers the other's work too.
-async function runStep(step: ResolvedGateStep, ctx: RunGateCtx): Promise<StepRun> {
+async function runStep(
+  step: ResolvedGateStep,
+  ctx: RunGateCtx,
+  selection: GateSelection | null,
+): Promise<StepRun> {
   const container = ctx.spec.containers.find((c) => c.name === step.in);
   // resolveGateStack proved this at config time; a miss here is a bug.
   /* v8 ignore next -- unreachable: config.ts refuses a step's unknown container */
@@ -2634,7 +2715,7 @@ async function runStep(step: ResolvedGateStep, ctx: RunGateCtx): Promise<StepRun
   ctx.onStepOutput?.(banner);
   const resourceStart = await ctx.resourceSnapshotReader?.(containerName);
   const tStep = startTimer();
-  const stepExec = stepExecArgs(containerName, step.command);
+  const stepExec = stepExecArgs(containerName, stepCommand(step, selection));
   const r = await withRuntimeEnv(stepExec, (argv) =>
     boundedPodman(argv, step.timeoutMs, ctx.onStepOutput),
   );
@@ -2675,6 +2756,17 @@ async function runStep(step: ResolvedGateStep, ctx: RunGateCtx): Promise<StepRun
     note,
     timing: { name: step.name, ok: boundedOk(r), durationMs, ...resources },
   };
+}
+
+// A step's argv, its `{tests}` expanded to its share of the selection.
+function stepCommand(step: ResolvedGateStep, selection: GateSelection | null): readonly string[] {
+  if (step.tests === null) return step.command;
+  // A stack with a step that declares `tests` always gets a plan.
+  /* v8 ignore next 3 -- unreachable: every caller plans a selection for such a stack */
+  if (selection === null) {
+    throw new Error(`gate stack: step '${step.name}' declares tests but the gate has no selection`);
+  }
+  return expandToken(step.command, TESTS_TOKEN, selection.steps[step.name] ?? []);
 }
 
 // Kill the work a killed step left running inside its container (#26).

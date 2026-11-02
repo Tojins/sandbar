@@ -24,6 +24,7 @@ import {
   gateReuseToken,
   gateStackImagesOf,
   printedEgressReport,
+  selectionReport,
   shouldHideWorktreeGit,
 } from "./gate-run.js";
 
@@ -295,5 +296,37 @@ describe("printedEgressReport", () => {
       durationMs: 1,
     } as never);
     expect(printed).toEqual(["egress refused evil.example:443 (tls)\n"]);
+  });
+});
+
+describe("selectionReport (#266)", () => {
+  it("lists what ran, the domains, a skipped step and what was ignored", () => {
+    expect(selectionReport({
+      global: ["a.test.ts"],
+      core: [],
+      domains: { gate: ["b.test.ts"], landing: [] },
+      changed: [],
+      related: [],
+      files: ["a.test.ts", "b.test.ts"],
+      steps: { test: ["a.test.ts", "b.test.ts"], "podman-test": [] },
+      ignored: [
+        { kind: "glob", set: "domain 'landing'", glob: "src/merger.test.ts" },
+        { kind: "domain", name: "ui" },
+        { kind: "unstepped", file: "prompts/a.md" },
+      ],
+    })).toBe(
+      "\nselection: 2 test file(s), domains gate, landing\n" +
+        "  a.test.ts\n  b.test.ts\n" +
+        "skipped step 'podman-test': no selected test file matches its tests\n" +
+        "ignored: domain 'landing' glob 'src/merger.test.ts' matches no file\n" +
+        "ignored: domain 'ui' is not declared\n" +
+        "ignored: prompts/a.md matches no step's tests\n",
+    );
+  });
+
+  it("names no domains when none was reached", () => {
+    expect(selectionReport({
+      global: [], core: [], domains: {}, changed: [], related: [], files: [], steps: { test: [] }, ignored: [],
+    })).toBe("\nselection: 0 test file(s)\nskipped step 'test': no selected test file matches its tests\n");
   });
 });

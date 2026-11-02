@@ -228,6 +228,68 @@ describe("classifyStackChange", () => {
   });
 });
 
+describe("a branch that edits the test selection (#266)", () => {
+  const selecting = (over: Partial<GateStackConfig> = {}, tests = ["src/**/*.test.ts"]): GateStackConfig =>
+    config({
+      steps: [{ ...test, command: ["vitest", "{tests}"], tests }],
+      sanity: ["src/a.test.ts"],
+      ...over,
+    });
+  const selectingTip = resolve(selecting());
+  const declaration = {
+    domains: [{ name: "gate", description: "the gate", paths: ["src/gate*.ts"], sanity: ["src/gate.test.ts"] }],
+    sanity: ["src/a.test.ts", "src/b.test.ts"],
+    core: { paths: ["src/errors.ts"], sanity: ["src/errors.test.ts"] },
+  };
+
+  it.each<[string, GateStackConfig]>([
+    ["domains, sanity and core", selecting(declaration)],
+    ["the related pass", selecting({ related: { in: "app", command: ["related", "{changed}"] } })],
+    ["a step's tests", selecting({}, ["src/**/*.test.ts", "!src/**/*-podman.test.ts"])],
+  ])("is `domains` for an edit to %s, carrying the branch's sanity declaration", (_, branch) => {
+    const resolved = resolve(branch);
+    expect(classifyStackChange(PATH, selectingTip, ok(branch))).toEqual({
+      kind: "domains",
+      containers: [],
+      branch: { domains: resolved.domains, sanity: resolved.sanity, core: resolved.core },
+    });
+  });
+
+  it("names the containers whose env changed beside it", () => {
+    const branch = selecting({ ...declaration, containers: [db({ env: { TZ: "UTC" } }), app()] });
+    expect(classifyStackChange(PATH, selectingTip, ok(branch))).toMatchObject({
+      kind: "domains",
+      containers: ["db"],
+    });
+  });
+
+  it("is still `non-env` beside any other difference", () => {
+    const branch = selecting({ ...declaration, steps: [{ ...test, command: ["vitest", "--run", "{tests}"], tests: ["src/**"] }] });
+    expect(classifyStackChange(PATH, selectingTip, ok(branch))).toEqual({
+      kind: "non-env",
+      path: PATH,
+      differences: [{ where: "step 'test'", what: "command" }],
+    });
+  });
+
+  it("is in effect as the tip's stack with the branch's env laid over it", () => {
+    const tipStack: ResolvedStack = {
+      stack: selectingTip,
+      attachments: sandboxGateAttachmentsOf(selectingTip, {}),
+    };
+    const inEffect = stackInEffect(
+      PATH,
+      tipStack,
+      ok(selecting({ ...declaration, containers: [db(), app({ env: { TZ: "UTC" } })] })),
+      {},
+    );
+    expect(inEffect.classification.kind).toBe("domains");
+    expect(inEffect.stack.sanity).toEqual(["src/a.test.ts"]);
+    expect(inEffect.stack.containers[1]?.env).toEqual({ TZ: "UTC" });
+    expect(inEffect.attachments.env).toEqual({ TZ: "UTC" });
+  });
+});
+
 describe("overlayBranchEnv", () => {
   it("takes only env from the branch", () => {
     const branch = resolve(config({

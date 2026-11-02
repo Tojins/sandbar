@@ -13,6 +13,7 @@ const seams = vi.hoisted(() => ({
   finalize: vi.fn(async () => []),
   issueLabels: vi.fn(async () => [] as string[]),
   mergerStackRunGate: vi.fn(),
+  selectionPlanFor: vi.fn(async (): Promise<unknown> => null),
   stackSourceOverride: null as null | {
     current: () => Promise<unknown>;
     accepted: () => unknown;
@@ -302,6 +303,10 @@ vi.mock("./gate-stack.js", async (importOriginal) => ({
     }),
   })),
 }));
+vi.mock("./gate-selection.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./gate-selection.js")>(),
+  selectionPlanFor: seams.selectionPlanFor,
+}));
 vi.mock("./prompt.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("./prompt.js")>(), buildProjectAnchor: vi.fn(async () => "anchor"),
 }));
@@ -409,6 +414,11 @@ const flushMicrotasksUntil = async (
   throw new Error(`Timed out waiting for ${description}`);
 };
 
+const GATE_2_SELECTION = {
+  global: ["a.test.ts"], core: [], domains: {}, changed: [], related: [],
+  files: ["a.test.ts"], steps: { test: ["a.test.ts"] }, ignored: [],
+};
+
 describe("run quota orchestration (#109)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -417,6 +427,7 @@ describe("run quota orchestration (#109)", () => {
     seams.finalize.mockReset(); seams.finalize.mockResolvedValue([]);
     seams.issueLabels.mockReset(); seams.issueLabels.mockResolvedValue([]);
     seams.mergerStackRunGate.mockReset();
+    seams.selectionPlanFor.mockReset().mockResolvedValue(null);
     seams.stackSourceOverride = null;
     seams.mergerStackStop.mockReset(); seams.mergerStackStop.mockResolvedValue(undefined);
     seams.mergerWorktreeRemove.mockReset();
@@ -2042,7 +2053,9 @@ describe("run quota orchestration (#109)", () => {
           name: "test", ok: false, durationMs: 49,
           peakMemoryBytes: 5000, oomKilled: true,
         }],
+        selection: GATE_2_SELECTION,
       });
+      await options.observations.onGate("1", { ok: true, durationMs: 1, steps: [] }, "origin");
       return summary([done]);
     });
     const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
@@ -2096,6 +2109,11 @@ describe("run quota orchestration (#109)", () => {
     expect(eventsOf("container")).toContainEqual(expect.objectContaining({
       stack: "gate", name: "merger-db", peakMemoryBytes: 3000,
     }));
+    // #266: one selection beside the gate that ran it, none beside one without.
+    expect(eventsOf("gate-selection")).toEqual([
+      expect.objectContaining({ gate: "gate-2", issue: 1, ...GATE_2_SELECTION }),
+    ]);
+    expect(eventsOf("gate")).toContainEqual(expect.objectContaining({ gate: "gate-2", sync: "origin", ok: true }));
   });
 
   it("drains other-provider work, finalizes credential handoff, and exits 4", async () => {
@@ -2688,6 +2706,8 @@ describe("run quota orchestration (#109)", () => {
       ok: true, stdout: "", stderr: "", exitCode: 0, failedStep: null,
       durationMs: 7, steps: [], containerLogs: "",
     });
+    const plan = { global: ["a.test.ts"] };
+    seams.selectionPlanFor.mockResolvedValue(plan);
     seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => {
       const adapterDeps = vi.mocked(realAdapter).mock.calls[0]?.[0];
       if (adapterDeps === undefined) throw new Error("merger adapter was not created");
@@ -2707,6 +2727,9 @@ describe("run quota orchestration (#109)", () => {
       .filter((opts) => opts.stackId === "merger")
       .map((opts) => opts.spec)).toEqual([tip.stack, overlaid.stack]);
     expect(seams.mergerStackRunGate).toHaveBeenCalledOnce();
+    // #266: the merge result's selection, against the source branch.
+    expect(seams.selectionPlanFor).toHaveBeenCalledWith(inEffect[0], "/tmp/merger", "origin/main");
+    expect(seams.mergerStackRunGate).toHaveBeenCalledWith(plan);
   });
 
   it("records a rejected issue task as its terminal outcome", async () => {

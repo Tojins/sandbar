@@ -143,7 +143,7 @@ describe.runIf(available)("gate stack against real podman", () => {
           throw failure;
         },
       }));
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
 
       let failure: unknown;
       const restoreReporter = setCleanupReporter((_kind, message, cause) => {
@@ -253,7 +253,7 @@ describe.runIf(available)("gate stack against real podman", () => {
         }),
       );
 
-      const green = await stack.runGate();
+      const green = await stack.runGate(null);
       expect(green.ok).toBe(true);
       expect(green.failedStep).toBeNull();
       // The step ran against the committed tree, and `-w` put it there.
@@ -296,7 +296,7 @@ describe.runIf(available)("gate stack against real podman", () => {
 
       // A second gate replaces the attempt generation; stop tears down its
       // successor. Both records are retained and reported after the drain.
-      const second = await stack.runGate();
+      const second = await stack.runGate(null);
       expect(second.ok).toBe(true);
       expect(second.steps.filter((step) => step.name === "read-marker" || step.name === "env"))
         .toEqual(second.steps
@@ -361,7 +361,7 @@ describe.runIf(available)("gate stack against real podman", () => {
         }),
       );
 
-      const red = await retryUndelivered(() => stack.runGate(), (r) => [r.stdout]);
+      const red = await retryUndelivered(() => stack.runGate(null), (r) => [r.stdout]);
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe("boom");
       expect(red.exitCode).toBe(3);
@@ -446,7 +446,7 @@ describe.runIf(available)("gate stack against real podman", () => {
       );
 
       const red = await retryUndelivered(
-        () => stack.runGate(),
+        () => stack.runGate(null),
         (r) => [r.stdout.split("== late (runner)")[1] ?? ""],
       );
       expect(red.ok).toBe(false);
@@ -491,13 +491,13 @@ describe.runIf(available)("gate stack against real podman", () => {
           containerResources: async () => ({}),
         }),
       );
-      const green = await stack.runGate();
+      const green = await stack.runGate(null);
       expect(green.ok).toBe(true);
       expect(green.steps.find((step) => step.name === "ok"))
         .not.toHaveProperty("peakMemoryBytes");
 
       await writeFile(join(repo, "forgotten.ts"), "export const x = 1;\n");
-      const refused = await stack.runGate();
+      const refused = await stack.runGate(null);
       expect(refused.ok).toBe(false);
       expect(refused.failedStep).toBe("worktree-clean");
       expect(refused.stderr).toContain("forgotten.ts");
@@ -517,7 +517,7 @@ describe.runIf(available)("gate stack against real podman", () => {
       await rm(join(repo, "forgotten.ts"));
       await exec("mkdir", ["-p", join(repo, "out")]);
       await writeFile(join(repo, "out/build.js"), "x\n");
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
     },
     180_000,
   );
@@ -558,7 +558,7 @@ describe.runIf(available)("gate stack against real podman", () => {
           }),
         }),
       );
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
 
       const { stdout } = await exec("stat", [
         "-c",
@@ -641,7 +641,7 @@ describe.runIf(available)("gate stack against real podman", () => {
         }),
       );
 
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
 
       // `ok` twice proves nothing about the lifecycle split: a re-created
       // mariadb answers SELECT 1 just as well, and a REUSED attempt container
@@ -665,7 +665,7 @@ describe.runIf(available)("gate stack against real podman", () => {
         "CREATE TABLE persisted (id INT)",
       ]);
 
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
 
       expect(await idOf("db")).toBe(dbIdBefore);
       // …and the attempt container is a DIFFERENT container, or it would be
@@ -747,7 +747,7 @@ describe.runIf(available)("gate stack against real podman", () => {
         }),
       );
 
-      const red = await stack.runGate();
+      const red = await stack.runGate(null);
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe(`container:${cName("broken")}`);
       expect(attemptPhaseStartedAt).toBeDefined();
@@ -813,7 +813,7 @@ describe.runIf(available)("gate stack against real podman", () => {
         }),
       );
 
-      const red = await stack.runGate();
+      const red = await stack.runGate(null);
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe("browser");
       // The step ran in `runner`; the diagnosis is in `backend`.
@@ -954,7 +954,7 @@ describe.runIf(available)("gate stack against real podman", () => {
           }),
         }),
       );
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
 
       await exec(RUNTIME, ["stop", "-t", "0", cName("svc")]);
 
@@ -963,8 +963,8 @@ describe.runIf(available)("gate stack against real podman", () => {
       // would drop the issue for the cycle with no terminal, no comment and
       // no label flip — the opposite of the fresh-stack retry this throw
       // exists to trigger.
-      await expect(stack.runGate()).rejects.toThrow(ContainerBringupError);
-      await expect(stack.runGate()).rejects.toThrow(/no longer running/);
+      await expect(stack.runGate(null)).rejects.toThrow(ContainerBringupError);
+      await expect(stack.runGate(null)).rejects.toThrow(/no longer running/);
     },
     180_000,
   );
@@ -1005,7 +1005,7 @@ describe.runIf(available)("gate stack against real podman", () => {
           }),
         }),
       );
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
 
       await removeFixtureContainer(cName("svc"));
 
@@ -1014,8 +1014,8 @@ describe.runIf(available)("gate stack against real podman", () => {
       // in this stack execs into `svc`. And the prose has to say REMOVED:
       // "no longer running" sends the operator to `podman logs` for a
       // container that answers "no container with name or ID ... found".
-      await expect(stack.runGate()).rejects.toThrow(ContainerBringupError);
-      await expect(stack.runGate()).rejects.toThrow(/no longer exists/);
+      await expect(stack.runGate(null)).rejects.toThrow(ContainerBringupError);
+      await expect(stack.runGate(null)).rejects.toThrow(/no longer exists/);
     },
     180_000,
   );
@@ -1118,7 +1118,7 @@ describe.runIf(available)("gate stack against real podman", () => {
           }),
         }),
       );
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
 
       // Both containers: `issue` and `attempt` differ in lifetime, and the
       // `attempt` one is the expensive half — it is RECREATED on every gate

@@ -330,6 +330,14 @@ function resolveLabelSync(value: unknown): readonly LabelDeclaration[] {
 // `parallel` with the step before it (gate-stack.ts runs such a run of steps
 // together); the first step has no step before it to run beside.
 //
+// A stack may declare a test selection (#259): `domains`, the global `sanity`
+// set, `core` and `related`, and on each step that runs tests, `tests` globs
+// with a `{tests}` argv token (gate-selection.ts decides what it expands to).
+// Each half needs the other: a declaration no step's `tests` runs is refused,
+// and so is a `{tests}` token without `tests`. A standalone step has no
+// selection to expand, so it declares no `tests`; and a step without them runs
+// as it always did.
+//
 // This replaces the single `dbSidecar` + two fixed `gateCommands` of #20/#15.
 // The sidecar dissolved into `containers[]` the moment the pod removed the need
 // for a pinned IP: with every container sharing one namespace, the address the
@@ -585,6 +593,48 @@ export type GateStep = {
   // the next ordinary step waits for all of them. Each still needs nothing
   // the others write; sandbar cannot verify that either. Default: false.
   readonly parallel?: boolean;
+  // Globs over the test files this step runs (#259): its `{tests}` argv entry
+  // becomes one entry per selected file they match, and with none matching
+  // the step is skipped. A glob led by `!` excludes. Default: no selection,
+  // so the step runs every gate as written.
+  readonly tests?: readonly string[];
+};
+
+// The argv entries a gate expands (#259): a step's selected test files, and
+// the changed files the `related` pass is asked about.
+export const TESTS_TOKEN = "{tests}";
+export const CHANGED_TOKEN = "{changed}";
+
+// One area of the repository and the test files that guard it (#259). `paths`
+// may name any file, source or not; a change to one adds `sanity`.
+export type GateDomain = {
+  readonly name: string;
+  readonly description: string;
+  readonly paths: readonly string[];
+  readonly sanity: readonly string[];
+};
+
+// The plumbing every area imports: a change to one of its `paths` adds its
+// `sanity` and nothing else.
+export type GateCore = {
+  readonly paths: readonly string[];
+  readonly sanity: readonly string[];
+};
+
+// The import-graph pass: `command`, run in container `in` with its
+// `{changed}` entry expanded, prints test files, one repository path a line.
+export type GateRelated = {
+  readonly in: string;
+  readonly command: readonly string[];
+  // Same bound and default as a step's.
+  readonly timeoutMs?: number;
+};
+
+// What a stack declares about which sanity files a gate runs.
+export type SanityDeclaration = {
+  readonly domains: readonly GateDomain[];
+  readonly sanity: readonly string[];
+  readonly core: GateCore | null;
 };
 
 // The closed set of rules a gate step may settle (#183). `missing-tests`: a
@@ -669,6 +719,11 @@ export function effectiveImageBuildContext(image: BuiltImage): string {
 export type GateStackConfig = {
   readonly containers: readonly StackContainer[];
   readonly steps: readonly GateStep[];
+  readonly domains?: readonly GateDomain[];
+  // The global set, run on every gate.
+  readonly sanity?: readonly string[];
+  readonly core?: GateCore;
+  readonly related?: GateRelated;
 };
 
 // A `StackMount` with its `mode` decided, so `mountSpec` re-decides nothing.
@@ -710,11 +765,15 @@ export type ResolvedGateStep = {
   readonly settles: readonly SettledRule[];
   readonly standalone: boolean;
   readonly parallel: boolean;
+  readonly tests: readonly string[] | null;
 };
 
-export type ResolvedGateStack = {
+export type ResolvedGateRelated = Required<GateRelated>;
+
+export type ResolvedGateStack = SanityDeclaration & {
   readonly containers: readonly ResolvedStackContainer[];
   readonly steps: readonly ResolvedGateStep[];
+  readonly related: ResolvedGateRelated | null;
 };
 
 // The gate-runner declarations an implementer sandbox (#166) and a landing's
@@ -2231,7 +2290,7 @@ function resolveStackSource(
   env: Readonly<Record<string, string>>,
 ): ResolvedStackSource {
   if (!("path" in gateStack)) {
-    const stack = resolveGateStack(gateStack);
+    const stack = resolveGateStack(checkStackShapes(INLINE_STACK_LABEL, gateStack));
     checkSecretEnvOutsideConfigEnv(stack, env, INLINE_STACK_LABEL);
     return {
       kind: "inline",
@@ -2284,11 +2343,11 @@ type FieldShapes<T, Required extends boolean> = Readonly<Record<
   FieldShape
 >>;
 
-// The JSON types `resolveGateStack` assumes. An inline stack is a program the
-// operator wrote and runs as it stands; a stack file is text read at gate time,
-// and a wrong type in it has to be a validation message the stack source can
-// complain with, not a TypeError out of the middle of a check. Unknown keys are
-// ignored, as they are inline.
+// The JSON types `resolveGateStack` assumes, checked in either form: a stack
+// file is text read at gate time, and an inline stack is a program no compiler
+// checked (`sandbar.config.mjs` is plain JS), so a wrong type in either has to
+// be a validation message naming its label, not a TypeError out of the middle
+// of a check or a string read as a list. Unknown keys are ignored.
 const CONTAINER_REQUIRED: FieldShapes<StackContainer, true> = {
   name: [isString, "a string"],
   image: [isString, "a string"],
@@ -2334,6 +2393,31 @@ const STEP_OPTIONAL: FieldShapes<GateStep, false> = {
   settles: [isStrings, "a list of strings"],
   standalone: [isBoolean, "a boolean"],
   parallel: [isBoolean, "a boolean"],
+  tests: [isStrings, "a list of strings"],
+};
+// A stack file's test selection (#259), beside its containers and steps.
+const SELECTION_OPTIONAL: FieldShapes<GateStackConfig, false> = {
+  domains: [Array.isArray, "a list"],
+  sanity: [isStrings, "a list of strings"],
+  core: [isRecord, "an object"],
+  related: [isRecord, "an object"],
+};
+const DOMAIN_REQUIRED: FieldShapes<GateDomain, true> = {
+  name: [isString, "a string"],
+  description: [isString, "a string"],
+  paths: [isStrings, "a list of strings"],
+  sanity: [isStrings, "a list of strings"],
+};
+const CORE_REQUIRED: FieldShapes<GateCore, true> = {
+  paths: [isStrings, "a list of strings"],
+  sanity: [isStrings, "a list of strings"],
+};
+const RELATED_REQUIRED: FieldShapes<GateRelated, true> = {
+  in: [isString, "a string"],
+  command: [isStrings, "a list of strings"],
+};
+const RELATED_OPTIONAL: FieldShapes<GateRelated, false> = {
+  timeoutMs: [isNumber, "a number"],
 };
 
 function checkFieldShapes(
@@ -2358,6 +2442,31 @@ function checkFieldShapes(
   }
 }
 
+function checkStackShapes(
+  label: string,
+  stack: Readonly<Record<string, unknown>>,
+): GateStackConfig {
+  const { containers, steps, domains, sanity, core, related } = stack;
+  if (!Array.isArray(containers) || !Array.isArray(steps)) {
+    throw new SandbarError(
+      `${label}: needs 'containers' and 'steps' as lists.`,
+    );
+  }
+  containers.forEach((c, i) =>
+    checkFieldShapes(label, `containers[${i}]`, c, CONTAINER_REQUIRED, CONTAINER_OPTIONAL));
+  steps.forEach((s, i) =>
+    checkFieldShapes(label, `steps[${i}]`, s, STEP_REQUIRED, STEP_OPTIONAL));
+  checkFieldShapes(label, "the stack", stack, {}, SELECTION_OPTIONAL);
+  (domains as readonly unknown[] | undefined)?.forEach((d, i) =>
+    checkFieldShapes(label, `domains[${i}]`, d, DOMAIN_REQUIRED, {}));
+  if (core !== undefined) checkFieldShapes(label, "core", core, CORE_REQUIRED, {});
+  if (related !== undefined) {
+    checkFieldShapes(label, "related", related, RELATED_REQUIRED, RELATED_OPTIONAL);
+  }
+  // The shapes above are exactly what this type promises.
+  return { containers, steps, domains, sanity, core, related } as GateStackConfig;
+}
+
 function parseStackJson(text: string, label: string): unknown {
   try {
     return JSON.parse(text);
@@ -2369,8 +2478,8 @@ function parseStackJson(text: string, label: string): unknown {
 
 // The one validation of a stack file's text (#186), wherever it was read from:
 // the source tip inside a run, the gated tree for `sandbar gate`, the clone
-// for `pulled-images`. Only `containers` and `steps` are read — a file may
-// carry keys for its own tooling (outdoor's `images`, `anchor`, `half`,
+// for `pulled-images`. Only `containers`, `steps` and the test selection
+// (#259) are read — a file may carry keys for its own tooling (outdoor's `images`, `anchor`, `half`,
 // `comment`). Every message starts with `label`, which says where the text
 // came from.
 export function resolveStackFile(
@@ -2382,18 +2491,7 @@ export function resolveStackFile(
   if (!isRecord(parsed)) {
     throw new SandbarError(`${label}: must be a JSON object.`);
   }
-  const { containers, steps } = parsed;
-  if (!Array.isArray(containers) || !Array.isArray(steps)) {
-    throw new SandbarError(
-      `${label}: needs 'containers' and 'steps' as lists.`,
-    );
-  }
-  containers.forEach((c, i) =>
-    checkFieldShapes(label, `containers[${i}]`, c, CONTAINER_REQUIRED, CONTAINER_OPTIONAL));
-  steps.forEach((s, i) =>
-    checkFieldShapes(label, `steps[${i}]`, s, STEP_REQUIRED, STEP_OPTIONAL));
-  // The shapes above are exactly what this type promises.
-  const stack = resolveGateStack({ containers, steps } as GateStackConfig, label);
+  const stack = resolveGateStack(checkStackShapes(label, parsed), label);
   checkSecretEnvOutsideConfigEnv(stack, configEnv, label);
   return { stack, attachments: sandboxGateAttachmentsOf(stack, configEnv, label) };
 }
@@ -2482,25 +2580,9 @@ export function resolveGateStack(
         `${label}: step '${step.name}' has an empty command.`,
       );
     }
-    // The bound is a `setTimeout` sandbar owns (gate-stack.ts, `boundedPodman`),
-    // so 0, a negative, and NaN all fire on the next tick rather than meaning
-    // "no bound" — every step would be killed instantly and the gate would red
-    // on a suite that never got to run a test, every attempt, until the budget
-    // died. Infinity is the mirror: a bound that can never fire. NaN is the one
-    // that actually reaches here, from a misparsed env var.
-    const timeoutMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      throw new SandbarError(
-        `${label}: step '${step.name}' has a non-positive or ` +
-          `non-finite timeoutMs (${String(timeoutMs)}). A non-positive or NaN ` +
-          "bound fires immediately, killing every step before it can run; an " +
-          "infinite one never fires, and an unbounded step hangs the run " +
-          "holding the single-instance lock.",
-      );
-    }
-    // Checked for an inline stack too, which is a program no shape table
-    // reads: a misspelled rule would otherwise leave its prose in every prompt
-    // with nothing to say so.
+    const timeoutMs = execBound(`${label}: step '${step.name}'`, step.timeoutMs);
+    // A misspelled rule would otherwise leave its prose in every prompt with
+    // nothing to say so.
     const settles = step.settles ?? [];
     const unknown = settles.filter(
       (rule) => !(SETTLED_RULES as readonly string[]).includes(rule),
@@ -2530,6 +2612,26 @@ export function resolveGateStack(
           "so there is no step before it to run beside.",
       );
     }
+    const tests = step.tests ?? null;
+    const where = `${label}: step '${step.name}'`;
+    if (tests?.length === 0) {
+      throw new SandbarError(
+        `${where} lists no globs in 'tests'; leave it out for a step that runs as written.`,
+      );
+    }
+    if (tests !== null && standalone) {
+      throw new SandbarError(
+        `${where} is standalone and declares 'tests', but its early run has no ` +
+          `selection to expand "${TESTS_TOKEN}" into.`,
+      );
+    }
+    if ((tests !== null) !== step.command.includes(TESTS_TOKEN)) {
+      throw new SandbarError(
+        tests === null
+          ? `${where} has a "${TESTS_TOKEN}" entry in its command but declares no 'tests'.`
+          : `${where} declares 'tests' but its command has no "${TESTS_TOKEN}" entry to expand them into.`,
+      );
+    }
     steps.push({
       name: step.name,
       in: step.in,
@@ -2538,6 +2640,7 @@ export function resolveGateStack(
       settles: SETTLED_RULES.filter((rule) => settles.includes(rule)),
       standalone,
       parallel,
+      tests,
     });
   }
 
@@ -2573,6 +2676,8 @@ export function resolveGateStack(
     );
   }
 
+  const selection = resolveSelection(stack, steps, inGate, label);
+
   // Checked AFTER the reachability rule above, and deliberately: #29's own
   // reproducer trips both, and the reachability error is the one that explains
   // the reported symptom. Fixing the lifecycle first would only hand the
@@ -2607,7 +2712,96 @@ export function resolveGateStack(
     );
   }
 
-  return { containers, steps };
+  return { containers, steps, ...selection };
+}
+
+// A step's or the `related` pass's bound. It is a `setTimeout` sandbar owns
+// (gate-stack.ts, `boundedPodman`), so 0, a negative, and NaN all fire on the
+// next tick rather than meaning "no bound" — every step would be killed
+// instantly and the gate would red on a suite that never got to run a test,
+// every attempt, until the budget died. Infinity is the mirror: a bound that
+// can never fire. NaN is the one that actually reaches here, from a misparsed
+// env var.
+function execBound(where: string, declared: number | undefined): number {
+  const timeoutMs = declared ?? DEFAULT_STEP_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new SandbarError(
+      `${where} has a non-positive or ` +
+        `non-finite timeoutMs (${String(timeoutMs)}). A non-positive or NaN ` +
+        "bound fires immediately, killing every step before it can run; an " +
+        "infinite one never fires, and an unbounded step hangs the run " +
+        "holding the single-instance lock.",
+    );
+  }
+  return timeoutMs;
+}
+
+// The test selection (#259), copied field by field so the resolved shape holds
+// nothing sandbar does not read (config-digest.ts hashes it as it stands).
+function resolveSelection(
+  stack: GateStackConfig,
+  steps: readonly ResolvedGateStep[],
+  inGate: readonly ResolvedStackContainer[],
+  label: string,
+): SanityDeclaration & { readonly related: ResolvedGateRelated | null } {
+  const names = new Set<string>();
+  const domains = (stack.domains ?? []).map((d) => {
+    if (d.name.trim() === "") throw new SandbarError(`${label}: every domain needs a name.`);
+    if (names.has(d.name)) {
+      throw new SandbarError(`${label}: duplicate domain name '${d.name}'.`);
+    }
+    names.add(d.name);
+    if (d.paths.length === 0) {
+      throw new SandbarError(
+        `${label}: domain '${d.name}' lists no paths, so no change could reach it.`,
+      );
+    }
+    return { name: d.name, description: d.description, paths: d.paths, sanity: d.sanity };
+  });
+  const sanity = stack.sanity ?? [];
+  const core = stack.core === undefined
+    ? null
+    : { paths: stack.core.paths, sanity: stack.core.sanity };
+  const related = stack.related === undefined ? null : resolveRelated(stack.related, inGate, label);
+  const declared = domains.length > 0 || sanity.length > 0 || core !== null || related !== null;
+  if (declared && !steps.some((step) => step.tests !== null)) {
+    throw new SandbarError(
+      `${label}: declares a test selection, but no step declares 'tests', so ` +
+        "nothing would run what it selects.",
+    );
+  }
+  return { domains, sanity, core, related };
+}
+
+function resolveRelated(
+  related: GateRelated,
+  inGate: readonly ResolvedStackContainer[],
+  label: string,
+): ResolvedGateRelated {
+  const where = `${label}: related`;
+  const container = inGate.find((c) => c.name === related.in);
+  if (container === undefined) {
+    throw new SandbarError(
+      `${where} runs in '${related.in}', which is not a container of the gate ` +
+        `(have: ${inGate.map((c) => c.name).join(", ")}).`,
+    );
+  }
+  if (container.mountWorktree === null) {
+    throw new SandbarError(
+      `${where} runs in '${related.in}', which does not set 'mountWorktree', ` +
+        "so it cannot see the files it is asked about.",
+    );
+  }
+  if (!related.command.includes(CHANGED_TOKEN)) {
+    throw new SandbarError(
+      `${where} has no "${CHANGED_TOKEN}" entry in its command to expand the changed files into.`,
+    );
+  }
+  return {
+    in: related.in,
+    command: related.command,
+    timeoutMs: execBound(where, related.timeoutMs),
+  };
 }
 
 // A `secretEnv` key that is also a `config.env` key (#252) reaches every agent
@@ -2987,13 +3181,6 @@ function resolveStackContainer(
     throw new SandbarError(
       `${label}: container '${c.name}' sets 'sandboxEnv' without ` +
         "'inSandbox: true', so it has no sandbox copy to set it on.",
-    );
-  }
-  // A stack file's shapes were checked before this; an inline stack's never
-  // are, and this one goes on to the env file unchanged.
-  if (c.sandboxEnv !== undefined && !isStringRecord(c.sandboxEnv)) {
-    throw new SandbarError(
-      `${label}: container '${c.name}' has 'sandboxEnv' that is not an object of strings.`,
     );
   }
   for (const m of c.mounts ?? []) {

@@ -1213,12 +1213,12 @@ describe("silent implementer attempt policy (#116)", () => {
     );
   });
 
-  it("hands the implementer prompt the rules the source tip's gate stack settles (#183)", async () => {
+  it("hands the implementer prompt the rules the source tip's gate stack settles (#183), and whether it selects (#266)", async () => {
     innerLoopMocks.buildPrompt.mockClear();
     const current = vi.spyOn(inlineStackSource, "current").mockResolvedValueOnce({
       stack: {
         containers: [],
-        steps: [{ name: "tests-structure", settles: ["missing-tests"] }] as never[],
+        steps: [{ name: "tests-structure", settles: ["missing-tests"], tests: ["*.test.ts"] }] as never[],
       },
     });
     try {
@@ -1228,7 +1228,7 @@ describe("silent implementer attempt policy (#116)", () => {
       current.mockRestore();
     }
     expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
-      expect.objectContaining({ settled: new Set(["missing-tests"]) }),
+      expect.objectContaining({ settled: new Set(["missing-tests"]), gateSelects: true }),
       expect.anything(),
     );
   });
@@ -3381,6 +3381,7 @@ describe("runGate admission (#142)", () => {
     const context = (id: string, runGate: () => Promise<GateResult>) => ({
       ...issueCtx({ id, title: `Issue ${id}`, branch: `sandbar/issue-${id}` }),
       worktreePath: "/worktree",
+      base: { ref: "origin/main", chunkBranch: null },
       opts: {
         gateSemaphore,
         attemptLogger: { writeGate: vi.fn() },
@@ -3455,6 +3456,7 @@ describe("runGate admission (#142)", () => {
     const ctx = {
       ...issueCtx({ id: "153", title: "gate log", branch: "sandbar/issue-153" }),
       worktreePath: "/worktree",
+      base: { ref: "origin/main", chunkBranch: null },
       opts: {
         gateSemaphore: createGateSemaphore(undefined),
         attemptLogger: { writeGate },
@@ -3489,6 +3491,72 @@ describe("runGate admission (#142)", () => {
     });
   });
 
+  // #266: a selecting stack's gate-1 runs over the branch's diff against its
+  // seed's fork, records what it ran, and a red trace names those files.
+  it("plans a selecting stack's gate-1 from the branch's diff and records the selection", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "sandbar-gate1-selection-"));
+    const git = (...args: string[]) =>
+      promisify(execFile)("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd: repo });
+    try {
+      await git("init", "-q", "-b", "main");
+      writeFileSync(join(repo, "a.test.ts"), "a");
+      writeFileSync(join(repo, "b.test.ts"), "b");
+      await git("add", "-A");
+      await git("commit", "-qm", "seed");
+      await git("checkout", "-qb", "sandbar/issue-266");
+      writeFileSync(join(repo, "b.test.ts"), "changed");
+      await git("commit", "-qam", "work");
+
+      const step = {
+        name: "test", in: "runner", command: ["vitest", "{tests}"], timeoutMs: 1, settles: [],
+        standalone: false, parallel: false, tests: ["*.test.ts"],
+      };
+      const stack = { containers: [], steps: [step], domains: [], sanity: ["a.test.ts"], core: null, related: null };
+      const selection = {
+        global: ["a.test.ts"], core: [], domains: {}, changed: ["b.test.ts"], related: [],
+        files: ["a.test.ts", "b.test.ts"], steps: { test: ["a.test.ts", "b.test.ts"] }, ignored: [],
+      };
+      const runGateOnBound = vi.fn(async (): Promise<GateResult> => ({
+        ok: false, stdout: "boom", stderr: "", exitCode: 1, failedStep: "test",
+        durationMs: 1, steps: [], containerLogs: "", selection,
+      }));
+      const events: EventInput[] = [];
+      innerLoopMocks.branchTip.mockReset().mockResolvedValue("tip-a");
+      const ctx = {
+        ...issueCtx({ id: "266", title: "selection", branch: "sandbar/issue-266" }),
+        worktreePath: repo,
+        base: { ref: "main", chunkBranch: null },
+        opts: {
+          gateSemaphore: createGateSemaphore(undefined),
+          attemptLogger: { writeGate: vi.fn() },
+          onEvent: (event: EventInput) => { events.push(event); },
+          stackSource: { forHead: async () => ({ stack, classification: { kind: "same" } }) },
+        },
+        gateStack: { ensure: async () => ({ runGate: runGateOnBound }) },
+        reportGateStack: async () => undefined,
+        quality: { sinceImplementer: [], overrules: [], openRound: { attempt: 2, timer: () => 0, quality: null } },
+        invocationSequence: createAgentInvocationSequencer().startCycle(),
+      } as unknown as Parameters<typeof runGate>[1];
+
+      const result = await runGate(
+        { kind: "run-gate", attempt: 2, quality: { verdict: "APPROVED", rounds: 0 } },
+        ctx,
+      );
+      expect(runGateOnBound).toHaveBeenCalledWith(expect.objectContaining({
+        global: ["a.test.ts"],
+        changed: ["b.test.ts"],
+        relatedInput: ["b.test.ts"],
+      }));
+      expect(events).toContainEqual({
+        kind: "gate-selection", issue: 266, title: "selection", attempt: 2, gate: "gate-1", ...selection,
+      });
+      expect(result.gate.failureTrace)
+        .toMatch(/^\[sandbar\] this gate ran these test files:\na\.test\.ts\nb\.test\.ts\n\nboom/);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
   // #186: the stack in effect is resolved for the head being gated, so a tip
   // that moved mid-issue, or the branch's own env edit, reaches the next gate-1.
   describe("the stack in effect", () => {
@@ -3497,7 +3565,7 @@ describe("runGate admission (#142)", () => {
       durationMs: 1, steps: [], containerLogs: "",
     };
     const tipStack = { containers: [], steps: [] };
-    const laterStack = { containers: [], steps: [{ name: "later", in: "x", command: ["true"] }] };
+    const laterStack = { containers: [], steps: [{ name: "later", in: "x", command: ["true"], tests: null }] };
     const context = (forHead: ReturnType<typeof vi.fn>) => {
       const runGateOnBound = vi.fn(async () => green);
       const ensure = vi.fn(async () => ({ runGate: runGateOnBound }));
@@ -3505,6 +3573,7 @@ describe("runGate admission (#142)", () => {
       const ctx = {
         ...issueCtx({ id: "186", title: "stack", branch: "sandbar/issue-186" }),
         worktreePath: "/worktree",
+        base: { ref: "origin/main", chunkBranch: null },
         opts: {
           gateSemaphore: createGateSemaphore(undefined),
           attemptLogger: { writeGate: vi.fn() },
@@ -4631,7 +4700,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       forHead: async () => ({
         stack: {
           containers: [],
-          steps: [{ name: "tests-structure", settles: ["missing-tests"] }],
+          steps: [{ name: "tests-structure", settles: ["missing-tests"], tests: null }],
         },
         attachments: { env: {}, mounts: [] },
         classification: { kind: "same" },
@@ -4642,7 +4711,7 @@ describe("runInnerLoop context terminals (#158)", () => {
     await runInnerLoop(issue, opts);
 
     expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
-      expect.objectContaining({ attempt: 1, settled: new Set(["missing-tests"]) }),
+      expect.objectContaining({ attempt: 1, settled: new Set(["missing-tests"]), gateSelects: false }),
       expect.anything(),
     );
   });

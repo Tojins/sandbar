@@ -110,7 +110,7 @@ describe.runIf(available)(
             spec: wedgeSpec(10_000),
           }),
         );
-        expect((await stack.runGate()).ok).toBe(true);
+        expect((await stack.runGate(null)).ok).toBe(true);
         const before = await idOf("svc");
 
         // The argv podman was handed is the consumer's declared `command`
@@ -122,7 +122,7 @@ describe.runIf(available)(
         ) as { Test?: string[] };
         expect(registered.Test).toEqual(["CMD", ...WEDGE_PROBE]);
 
-        expect((await stack.runGate()).ok).toBe(true);
+        expect((await stack.runGate(null)).ok).toBe(true);
         expect(await idOf("svc")).toBe(before);
       },
       240_000,
@@ -153,12 +153,12 @@ describe.runIf(available)(
             spec: wedgeSpec(30_000),
           }),
         );
-        expect((await stack.runGate()).ok).toBe(true);
+        expect((await stack.runGate(null)).ok).toBe(true);
         const before = await idOf("svc");
 
         await wedge(repo);
         const started = performance.now();
-        const gate = stack.runGate();
+        const gate = stack.runGate(null);
         const unwedge = setTimeout(() => {
           void rm(join(repo, WEDGE)).catch(() => {});
         }, 3_000);
@@ -207,14 +207,14 @@ describe.runIf(available)(
             spec: wedgeSpec(4_000),
           }),
         );
-        expect((await stack.runGate()).ok).toBe(true);
+        expect((await stack.runGate(null)).ok).toBe(true);
         const before = await idOf("svc");
         expect(await inspectOf("svc", "{{.ImageName}}")).toBe(ALIAS);
 
         await wedge(repo);
         let caught: unknown = null;
         try {
-          await stack.runGate();
+          await stack.runGate(null);
         } catch (err) {
           caught = err;
         }
@@ -276,12 +276,12 @@ describe.runIf(available)(
             spec: wedgeSpec(10_000),
           }),
         );
-        expect((await stack.runGate()).ok).toBe(true);
+        expect((await stack.runGate(null)).ok).toBe(true);
 
         await exec(RUNTIME, ["stop", "-t", "0", cName("svc")]);
         let caught: unknown = null;
         try {
-          await stack.runGate();
+          await stack.runGate(null);
         } catch (err) {
           caught = err;
         }
@@ -292,7 +292,7 @@ describe.runIf(available)(
         expect((caught as Error).message).not.toMatch(/did not recover/);
 
         await removeFixtureContainer(cName("svc"));
-        await expect(stack.runGate()).rejects.toThrow(/no longer exists/);
+        await expect(stack.runGate(null)).rejects.toThrow(/no longer exists/);
       },
       240_000,
     );
@@ -368,7 +368,7 @@ describe.runIf(available)(
         );
         // Bringup returning is the readiness assertion; the step is what makes
         // it a claim about a REAL server rather than about the probe giving up.
-        expect((await stack.runGate()).ok).toBe(true);
+        expect((await stack.runGate(null)).ok).toBe(true);
       },
       240_000,
     );

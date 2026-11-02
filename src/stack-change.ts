@@ -4,11 +4,12 @@
 // steps — comes from the source branch, while the images built from the
 // branch's Containerfiles are part of the work under test. A branch that could
 // edit its grader could widen its own mounts or privileges, or weaken a check
-// until it passes. The one exception is container env, `env` and
+// until it passes. One exception is container env, `env` and
 // `sandboxEnv` (#256) alike: an env value widens nothing, and outdoor#576
 // needed exactly that (`TZ` on its database) — except on a container that
 // holds a `secretEnv` credential (#241), where an env value can redirect it,
-// so an env edit there is non-env.
+// so an env edit there is non-env. The other is the test selection, which a
+// branch can only grow on its own gates (below).
 //
 // So a branch's stack file is classified against the source tip's, over
 // RESOLVED stacks, so key order and a spelled-out default are not changes:
@@ -20,14 +21,22 @@
 //     field, so no branch drops its own prompts' rule prose (#183), and so
 //     is `standalone`, so no branch moves its own steps into or out of the
 //     quality pass's early run (#247), and `parallel`;
+//   - `domains` — as env-only, except that the test selection differs too
+//     (#259, #266): `domains`, `sanity`, `core`, `related` or a step's
+//     `tests`. A selection edit only adds tests to the branch's own gates,
+//     so it neither parks nor is reverted: it lands with the branch;
 //   - `non-env` — anything else, and a branch stack file that is missing or
 //     does not validate. Differences name fields, never values.
 //
 // The stack in effect is the tip's, with the branch's env laid over it only
-// when the change is env-only. It is built FROM THE TIP rather than taken from
-// the branch, so nothing but env can cross from the branch even where the
-// two would be equal. The overlay is validated again (its env must not
-// collide with `config.env`, #166); a collision is a non-env difference.
+// when the change is env-only or domains. It is built FROM THE TIP rather than
+// taken from the branch, so nothing but env can cross from the branch even
+// where the two would be equal. A domains classification carries the branch's
+// sanity declaration beside it, and gate-selection.ts plans parts 1–3 under
+// both, so the branch's gates run the union of the two sanity selections; the
+// steps' `tests` and the `related` pass stay the tip's until the edit lands.
+// The overlay is validated again (its env must not collide with
+// `config.env`, #166); a collision is a non-env difference.
 //
 // Nothing here reads git: stack-source.ts reads both files and calls
 // `stackInEffect`. What a non-env change does to the issue — gate-1 runs once
@@ -40,6 +49,7 @@ import {
   type ResolvedGateStack,
   type ResolvedStack,
   type ResolvedStackContainer,
+  type SanityDeclaration,
   sandboxGateAttachmentsOf,
 } from "./config.js";
 import { SandbarError } from "./errors.js";
@@ -60,6 +70,11 @@ export type StackChange = {
 export type StackClassification =
   | { readonly kind: "same" }
   | { readonly kind: "env-only"; readonly containers: readonly string[] }
+  | {
+      readonly kind: "domains";
+      readonly containers: readonly string[];
+      readonly branch: SanityDeclaration;
+    }
   | ({ readonly kind: "non-env" } & StackChange);
 
 // What reading the branch's stack file yielded. `invalid` carries the
@@ -163,7 +178,7 @@ export function classifyStackChange(
       (n) => `step '${n}'`,
       tip.steps,
       branch.stack.steps,
-      new Set(),
+      new Set(["tests"]),
     ),
     // Laid over a container that holds a secret, a branch's env (an upstream
     // URL, a proxy variable) could send that secret somewhere (#241).
@@ -178,8 +193,21 @@ export function classifyStackChange(
   const containers = tip.containers
     .filter((c, i) => !equal(envOf(c), envOf(branch.stack.containers[i])))
     .map((c) => c.name);
+  if (!equal(selectionOf(tip), selectionOf(branch.stack))) {
+    return { kind: "domains", containers, branch: sanityOf(branch.stack) };
+  }
   return containers.length === 0 ? { kind: "same" } : { kind: "env-only", containers };
 }
+
+const sanityOf = ({ domains, sanity, core }: ResolvedGateStack): SanityDeclaration =>
+  ({ domains, sanity, core });
+
+// Everything a domains classification covers, steps' `tests` included.
+const selectionOf = (stack: ResolvedGateStack) => ({
+  ...sanityOf(stack),
+  related: stack.related,
+  tests: stack.steps.map((step) => step.tests),
+});
 
 // The tip's stack with each container's env taken from the branch's
 // container of the same name. Every other field stays the tip's.
@@ -203,7 +231,10 @@ export function stackInEffect(
   configEnv: Readonly<Record<string, string>>,
 ): StackInEffect {
   const classification = classifyStackChange(path, tip.stack, branch);
-  if (classification.kind !== "env-only" || branch.kind !== "ok") {
+  if (
+    (classification.kind !== "env-only" && classification.kind !== "domains") ||
+    branch.kind !== "ok"
+  ) {
     return { ...tip, classification };
   }
   const stack = overlayBranchEnv(tip.stack, branch.stack);

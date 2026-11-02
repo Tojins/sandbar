@@ -366,6 +366,7 @@ import {
   createMergerWorktree,
 } from "./merger-worktree.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
+import { selectionPlanFor } from "./gate-selection.js";
 import { containerResourcesOf } from "./container-resources.js";
 import { usageFields } from "./agent-usage.js";
 import {
@@ -3182,9 +3183,15 @@ export async function run(
             sandboxImage: landingImages.agentImages.declaredTag,
             env,
             ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
+            // Its test selection (#266) is the merge result's diff against
+            // the source branch it composes onto.
             runStackGate: async () => {
-              const stack = await stackForGate2.ensure((await headStack()).stack);
-              return gateSemaphore.run(() => stack.runGate());
+              const inEffect = await headStack();
+              const stack = await stackForGate2.ensure(inEffect.stack);
+              const plan = await selectionPlanFor(
+                inEffect, mergerWorktreePath, `origin/${config.sourceBranch}`,
+              );
+              return gateSemaphore.run(() => stack.runGate(plan));
             },
             stackChange: async () => stackChangeOf((await headStack()).classification),
             gateAttachments: async () => (await headStack()).attachments,
@@ -3296,26 +3303,32 @@ export async function run(
                     reason: landingTogetherReason(request),
                   }));
                 },
-                onGate: (key, gate, sync) => {
+                onGate: async (key, gate, sync) => {
                   const issueId = key.startsWith("chunk-refresh-")
                     ? key.slice("chunk-refresh-".length)
                     : key.startsWith("chunk-")
                     ? key.slice("chunk-".length)
                     : key;
                   const planned = completedIssues.find((issue) => issue.id === issueId);
-                  return runRecord.emit({
-                    kind: "gate",
+                  const subject = {
                     gate: "gate-2",
                     ...landingSubject(issueId),
                     ...(planned ? { title: planned.title } : {}),
                     ...(sync === undefined ? {} : { sync }),
+                  } as const;
+                  await runRecord.emit({
+                    kind: "gate",
+                    ...subject,
                     ok: gate.ok,
                     durationMs: gate.durationMs,
                     ...(gate.queuedMs === undefined ? {} : { queuedMs: gate.queuedMs }),
                     steps: Object.fromEntries(
                       gate.steps.map(({ name, ...step }) => [name, step]),
                     ),
-                  }).then(() => undefined);
+                  });
+                  if (gate.selection !== undefined) {
+                    await runRecord.emit({ kind: "gate-selection", ...subject, ...gate.selection });
+                  }
                 },
                 onOutcome: recordLandingOutcome,
               },

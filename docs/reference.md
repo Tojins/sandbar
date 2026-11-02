@@ -483,8 +483,8 @@ publish no ports. Steps run in order and stop at the first failure.
 ### Stack file
 
 `gateStack: { path: "gate/stack.json" }` keeps the stack in the repository: a
-JSON object whose `containers` and `steps` have the shapes below (other
-top-level keys are ignored). A run reads it from `origin/<sourceBranch>` each
+JSON object whose `containers` and `steps` have the shapes below, beside an
+optional [test selection](#test-selection) (other top-level keys are ignored). A run reads it from `origin/<sourceBranch>` each
 time it starts a gate, so a landed change takes effect at the next gate without
 a restart. A new version that does not validate, or names an image that is not
 pulled or a mount source that does not exist, is not taken: the run keeps the
@@ -493,10 +493,14 @@ back to, so the run refuses to start. `sandbar gate` reads the file from the
 tree it gates.
 
 A branch never changes its own gate, except for container `env` (and
-`sandboxEnv`). When an issue branch changes the file, a change to containers'
-`env` or `sandboxEnv` alone applies to
+`sandboxEnv`) and the test selection. When an issue branch changes the file, a
+change to containers' `env` or `sandboxEnv` alone applies to
 that branch's gate-1 (and to its sandbox from the next one) and to the gate
-on its merge result when it lands. Any other change — mounts, images, flags,
+on its merge result when it lands. A change to `domains`, `sanity`, `core`,
+`related` or a step's `tests` (with or without an env change) neither parks
+nor is reverted: the branch's gates run the sanity files the source branch's
+selection picks together with those the branch's own picks, and the change
+lands with the branch. Any other change — mounts, images, flags,
 containers added or removed, steps — is not applied: gate-1 runs once on the
 source branch's stack, and the issue parks under `2-human-unstick` with a comment
 listing what differs and how that gate went. Land the stack change on the
@@ -539,6 +543,36 @@ loses `land`, and either gets a comment listing what differs.
 | `settles` | Rules this step checks mechanically: `"missing-tests"` (a changed production line no test covers), `"commit-ritual"`. While a step settles a rule, the agents' prompts leave out the prose that asks for it; `"missing-tests"` drops only that coverage clause, and the rule that a changed behaviour needs a test that would notice it breaking stays. Default `[]`. |
 | `standalone` | The step needs only its own container's image, env and mounts plus the worktree, read-only: no other container, no network, no earlier step, nothing the container's own process, `readiness` or `postReadyCommands` set up. The quality pass then also runs it early, in a networkless copy of its container, and hands a failure to its fixer, so a cheap lint red costs no new implementer attempt. The gate still runs it and decides. Its container must set `mountWorktree`. Default `false`; a driver older than 0.65.0 ignores it. |
 | `parallel` | The step starts together with the step before it instead of after it, so a run of `parallel` steps behind one ordinary step runs at once and the next ordinary step waits for all of them. All of them run to their end; the first red in declared order fails the gate. Each must need nothing the others write. Not on the first step. Default `false`; a driver older than 0.70.0 ignores it and runs the step in turn. |
+| `tests` | Globs over the test files this step runs; its `command` then carries a `"{tests}"` entry, which becomes one entry per [selected](#test-selection) file the globs match. A step none of whose globs match a selected file is skipped. Not on a `standalone` step. Default: none, and the step runs as written. A runner that wants the files as one argument is wrapped in a script of your own. |
+
+### Test selection
+
+A stack may choose, per gate, which whole test files its `tests` steps run.
+Without one, every step runs as written.
+
+| Key | Meaning |
+| --- | --- |
+| `sanity` | Globs over test files run on every gate (the global set). |
+| `core` | `{ paths, sanity }`: plumbing imported everywhere. A change to a file matching `paths` adds `sanity` and nothing else: no domain, even one whose paths match it, and not `related`. |
+| `domains` | `[{ name, description, paths, sanity }]`. A change to a file matching a domain's `paths` (any file, source or not) adds its `sanity`. |
+| `related` | `{ in, command, timeoutMs? }`: an import-graph pass run in container `in` (which must mount the worktree), its `"{changed}"` entry expanded to the changed files that still exist and are not core's. It prints test files on stdout, one repository path a line. A failure, a timeout or a printed path the tree does not have fails the gate at step `related`. `timeoutMs` defaults as a step's. |
+
+Gate-1 runs the union of the global set, core's set when a core file changed,
+the sets of the domains the branch's changes reach, what `related` prints, and
+the test files the branch adds or changes that a step's `tests` match.
+Changes are the branch's diff against where it forked from its base; gate-2's
+are the merge result's against the source branch; `sandbar gate`'s are the
+worktree's, uncommitted work included, against where it forked from
+`origin/<sourceBranch>`, and `--domains <a,b>` adds those domains' sets.
+A glob that matches no file, a `--domains` name the stack does not declare,
+and a selected file no step's `tests` match are ignored. Each run's
+selection — its parts, the files, the skipped steps and what was ignored —
+is a `gate-selection` event, `sandbar gate` prints it, and a red gate-1 names
+the files it ran to the next attempt.
+
+Globs are repository paths: `*` and `?` stay within one directory, `**`
+spans any number of them, and a glob led by `!` excludes what it matches from
+its list. A selection with no step declaring `tests` is refused.
 
 ### Readiness
 
@@ -654,6 +688,7 @@ in CI.
 npx sandbar gate                      # gate the current directory
 npx sandbar gate --worktree ../other  # gate another tree
 npx sandbar gate --keep               # leave the stack up
+npx sandbar gate --domains gate,ui    # also run these domains' sanity sets
 ```
 
 | Exit | Meaning |
@@ -666,6 +701,9 @@ Differences from the gate inside a run:
 
 - It tests the working tree even if it is dirty, and says so.
 - A stack file is read from that tree, not from `origin`.
+- A [test selection](#test-selection) is computed from that tree's changes
+  since it forked from `origin/<sourceBranch>`, which must resolve there,
+  and printed after the steps. There is no whole-suite flag.
 - Steps stream to the terminal.
 - `--keep` leaves the stack up, and the next run on the same tree reuses its
   `issue` containers unless their config, the tree or sandbar's version

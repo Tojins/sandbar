@@ -154,6 +154,47 @@ describe("captureAgentRun (#67)", () => {
 });
 
 describe("realAdapter gate admission (#142)", () => {
+  const adapterOver = (value: Record<string, unknown>) => realAdapter({
+    cwd: "/tmp",
+    cacheDir: "/tmp/repo.git",
+    scope: runScope("/tmp"),
+    repo: { owner: "acme", name: "app" },
+    sourceBranch: "main",
+    botName: "sandbar-bot",
+    botEmail: "bot@example.test",
+    coauthorTrailer: "Co-authored-by: Sandbar <bot@example.test>",
+    mergerAgent: "codex",
+    mergerModelId: "gpt-5.6-sol",
+    sandboxImage: "sandbox-image",
+    env: () => undefined,
+    beforeOriginWrite: async () => undefined,
+    runStackGate: async () => ({
+      value: {
+        ok: true,
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        failedStep: null,
+        durationMs: 7,
+        steps: [],
+        containerLogs: "",
+        ...value,
+      },
+    }),
+  } as Parameters<typeof realAdapter>[0]);
+
+  // #266: the selection rides out on both verdicts, for gate-2's record.
+  it("carries the gate's test selection into gate-2 observations", async () => {
+    const selection = {
+      global: ["a.test.ts"], core: [], domains: {}, changed: [], related: [],
+      files: ["a.test.ts"], steps: { test: ["a.test.ts"] }, ignored: [],
+    };
+    await expect(adapterOver({ selection }).runGate()).resolves.toMatchObject({ ok: true, selection });
+    await expect(adapterOver({ ok: false, failedStep: "test", exitCode: 1, selection }).runGate())
+      .resolves.toMatchObject({ ok: false, selection });
+    expect(await adapterOver({}).runGate()).not.toHaveProperty("selection");
+  });
+
   it("carries the shared semaphore wait into gate-2 observations", async () => {
     const adapter = realAdapter({
       cwd: "/tmp",

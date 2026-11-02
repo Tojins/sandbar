@@ -85,7 +85,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
       );
 
       const started = performance.now();
-      const red = await stack.runGate();
+      const red = await stack.runGate(null);
       // The bound is real, not just reported: the call returned near it.
       expect(performance.now() - started).toBeLessThan(60_000);
       expect(red.ok).toBe(false);
@@ -160,7 +160,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
         }),
       );
 
-      const red = await stack.runGate();
+      const red = await stack.runGate(null);
       expect(red.failedStep).toBe("first");
       expect(red.exitCode).toBe(124);
       expect(red.stdout).toContain("step 'first' was still running after 2000ms");
@@ -240,7 +240,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
       const heldBefore = await maybeIdOf("held");
       expect(heldBefore).not.toBeNull();
 
-      expect((await stack.runGate()).failedStep).toBe("hangs-in-held");
+      expect((await stack.runGate(null)).failedStep).toBe("hangs-in-held");
 
       // Recreated, not merely restarted and not left with the runaway in it:
       // a new id is what proves the reap happened, and `assertIssueContainersAlive`
@@ -265,7 +265,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
 
       // …and the stack still works, which is the point of recreating rather
       // than leaving a hole where the container was.
-      const after = await stack.runGate();
+      const after = await stack.runGate(null);
       expect(after.failedStep).toBe("hangs-in-held");
     },
     240_000,
@@ -308,7 +308,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
         }),
       );
 
-      expect((await stack.runGate()).failedStep).toBe("hangs");
+      expect((await stack.runGate(null)).failedStep).toBe("hangs");
 
       // Gone, taking `sleep 607` with it. Left alive, that process would burn
       // CPU beside the next attempt's agent run and every gate it triggers.
@@ -318,7 +318,7 @@ describe.runIf(available)("step timeouts and their reaps (#26)", () => {
 
       // …and the stack still gates: the next run recreates it, which is why
       // an `attempt` container needs no recreate here.
-      expect((await stack.runGate()).failedStep).toBe("hangs");
+      expect((await stack.runGate(null)).failedStep).toBe("hangs");
     },
     240_000,
   );
