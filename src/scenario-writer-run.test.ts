@@ -23,7 +23,7 @@ vi.mock("./prompt.js", async (importOriginal) => ({
 
 import { AgentError, AgentQuotaError, type RunOptions } from "./agent-sandbox.js";
 import type { ResolvedGateStack } from "./config.js";
-import { readGatePicks } from "./gate-selection.js";
+import { readGatePicks, writeGatePick } from "./gate-selection.js";
 import type { EventInput } from "./events.js";
 import { SandbarError } from "./errors.js";
 import { ContainerBringupError } from "./gate-stack.js";
@@ -567,6 +567,14 @@ describe("the scenario writer's gate pick (#267)", () => {
     await expect(settle(h)).resolves.toMatchObject({ kind: "written", pick: null });
     expect(mocks.buildScenarioWriterPrompt.mock.calls[0]?.[4]).toBeNull();
     expect(writerEvents(h.events)[0]).not.toHaveProperty("pick");
+    await expect(readGatePicks(h.gatePicksDir, [203])).resolves.toEqual([]);
+  });
+
+  it("removes an earlier admission's stored pick when the new run ends with none", async () => {
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([async () => ran(`${WRITTEN}${PICKED}`)]));
+    const h = harness({}, { ...seedStack, steps: [{ ...seedStack.steps[0]!, tests: null }] });
+    await writeGatePick(h.gatePicksDir, 203, pick);
+    await settle(h);
     await expect(readGatePicks(h.gatePicksDir, [203])).resolves.toEqual([]);
   });
 

@@ -296,7 +296,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
           }
         : { kind: "none", reason: parsed.reason, pick };
       if (outcome.kind === "written") await attemptLogger.writeScenarios(outcome.set);
-      if (pick !== null) await writeGatePick(config.layout.gatePicksDir, Number(issue.id), pick);
+      await writeGatePick(config.layout.gatePicksDir, Number(issue.id), pick);
       await record(invocation, "completed", {
         ...fields,
         scenarios: outcome.kind === "written" ? outcome.set.scenarios.length : 0,

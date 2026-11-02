@@ -42,9 +42,9 @@
 //
 // A pick outlives the run that made it, since its issue may land in a later
 // one: `writeGatePick` keeps each issue's latest as
-// `<stateDir>/gate-picks/<issue>.json`, and `readGatePicks` is gate-2's read.
+// `<stateDir>/gate-picks/<issue>.json` (an admission with no pick removes it), and `readGatePicks` is gate-2's read.
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -304,10 +304,14 @@ export const selects = (stack: ResolvedGateStack): boolean =>
 
 const gatePickPath = (dir: string, issue: number): string => join(dir, `${issue}.json`);
 
-// Replaces the issue's stored pick.
-export async function writeGatePick(dir: string, issue: number, pick: GatePick): Promise<void> {
-  await mkdir(dir, { recursive: true });
+// Replaces the issue's stored pick; no pick removes the earlier admission's.
+export async function writeGatePick(dir: string, issue: number, pick: GatePick | null): Promise<void> {
   const path = gatePickPath(dir, issue);
+  if (pick === null) {
+    await rm(path, { force: true });
+    return;
+  }
+  await mkdir(dir, { recursive: true });
   const incoming = `${path}.tmp-${process.pid}`;
   await writeFile(incoming, JSON.stringify(pick));
   await rename(incoming, path);
