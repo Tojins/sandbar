@@ -198,11 +198,13 @@
 // verifier. A terminal before the join aborts it in `runInnerLoop`'s finally.
 // The action that starts it has no visible phase, so it emits no `phase`
 // event; attempt 1's follows at once. A replay case's `pinnedScenarios`
-// (#240) and `pinnedGatePick` (#267) take the task's place, settled from the
-// start, `written` with a set and `none` without: no writer runs, and the
-// verifier workspace, every round and gate-1 are as if it had answered so.
+// (#240) take the task's place, settled `written` from the start: no writer
+// runs, and the verifier workspace and every round are as if it had written
+// that set.
 // Gate-1 adds the writer's pick to its selection once the task has settled
-// with one (`settledPicks`); one that runs earlier selects without it.
+// with one, and one that runs earlier selects without it (#267). A replay
+// adds its case's `pinnedGatePick` instead, or nothing, whatever a writer
+// picks.
 // With `config.databaseCopies` (#201) each sandbox cycle has a slot of the
 // run's copies (`createDbCopySlot`) for the target sibling of its stack in
 // effect at setup. Before every action the runner aligns it to that action's
@@ -315,7 +317,6 @@ import { parsePartitionCheck } from "./partition-check-parser.js";
 import { summarizeGateFailure } from "./gate.js";
 import {
   type GatePick,
-  type IssuePick,
   selectionPlanFor,
   selectionTraceLine,
   selects,
@@ -351,7 +352,6 @@ import {
   type LoopState,
   type QualityOutcome,
   type ReviewerResult,
-  type ScenarioWriterOutcome,
   type ScenarioWriterStatus,
   type Verdict,
   decideAfterTerminal,
@@ -835,9 +835,9 @@ export type InnerLoopConfig = {
   // A replay case's frozen set (#240), run by the verifier in place of a
   // written one; a run never sets it.
   readonly pinnedScenarios?: ScenarioSet;
-  // The gate pick that case's admission made beside its answer (#267); a run
-  // never sets it.
-  readonly pinnedGatePick?: GatePick;
+  // A replay case's frozen gate pick (#267), null for a case that froze none:
+  // gate-1 adds it in place of the writer's. A run never sets it.
+  readonly pinnedGatePick?: GatePick | null;
   readonly scenarioWriterAgent: AgentProviderName;
   readonly scenarioWriterModelId: string;
   // The verifier's scenario runner (#180), beside the white-box review.
@@ -1060,8 +1060,8 @@ export async function runInnerLoop(
       await opts.onEvent(event);
     },
   };
-  const scenarioWriter = config.pinnedScenarios !== undefined || config.pinnedGatePick !== undefined
-    ? pinnedScenarioWriter(config.pinnedScenarios, config.pinnedGatePick ?? null)
+  const scenarioWriter = config.pinnedScenarios !== undefined
+    ? pinnedScenarioWriter(config.pinnedScenarios)
     : config.scenarioWriter
     ? createScenarioWriterTask({
         issue,
@@ -1115,12 +1115,10 @@ export async function runInnerLoop(
   }
 }
 
-// A writer already settled on a replay case's answer: the machine never
-// starts it and runs a set in every verifier round.
-function pinnedScenarioWriter(set: ScenarioSet | undefined, pick: GatePick | null): ScenarioWriterTask {
-  const outcome: ScenarioWriterOutcome = set === undefined
-    ? { kind: "none", reason: "the replay case pins no scenario set", pick }
-    : { kind: "written", set, pick };
+// A writer already settled on a set: the machine never starts it and runs
+// the set in every verifier round.
+function pinnedScenarioWriter(set: ScenarioSet): ScenarioWriterTask {
+  const outcome = { kind: "written", set, pick: null } as const;
   return {
     status: () => ({ kind: "settled", outcome }),
     start: () => undefined,
@@ -3339,12 +3337,14 @@ export async function runSandboxAndPublish(
   return result;
 }
 
-// The scenario writer's pick as part 6 of its issue's gate-1, once it has one.
-function settledPicks(issue: number, writer: ScenarioWriterStatus): readonly IssuePick[] {
-  if (writer.kind !== "settled" || writer.outcome.kind === "failed" || writer.outcome.pick === null) {
-    return [];
-  }
-  return [{ issue, ...writer.outcome.pick }];
+// Part 6 of an issue's gate-1: a replay's pinned pick, else the scenario
+// writer's once it has settled with one.
+function gatePickOf(
+  pinned: GatePick | null | undefined,
+  writer: ScenarioWriterStatus,
+): GatePick | null {
+  if (pinned !== undefined) return pinned;
+  return writer.kind === "settled" && writer.outcome.kind !== "failed" ? writer.outcome.pick : null;
 }
 
 // Gate-1 on the head the quality pass left (#185). Serial, not beside the
@@ -3364,8 +3364,9 @@ export async function runGate(
   const inEffect = await opts.stackSource.forHead(ctx.worktreePath, head);
   await ctx.reportGateStack(inEffect);
   const stack = await gateStack.ensure(inEffect.stack);
+  const pick = gatePickOf(opts.config.pinnedGatePick, ctx.scenarioWriter?.status() ?? { kind: "off" });
   const plan = await selectionPlanFor(inEffect, ctx.worktreePath, ctx.base.ref, {
-    picks: settledPicks(Number(issue.id), ctx.scenarioWriter?.status() ?? { kind: "off" }),
+    picks: pick === null ? [] : [{ issue: Number(issue.id), ...pick }],
   });
   const admitted = await opts.gateSemaphore.run(() => stack.runGate(plan));
   const gate1 = admitted.value;

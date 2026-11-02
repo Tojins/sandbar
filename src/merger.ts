@@ -3117,14 +3117,14 @@ export async function runMergerWithAdapter(
     return finishWithChunkRefreshes(await settleLanding());
   }
 
-  // The landing pass once more over the merge result re-merged onto origin's
-  // new tip (#258), when it ran for a unit this cycle: origin's new commits
-  // (a human hotfix, typically) may change what the landing owes. Its
-  // instructions are read at that tip. Null when the push may go on.
   // Every issue the pass brings onto the source branch.
   const passIssues = (): number[] =>
     [...landsOnHead.flatMap(landUnitIssues), ...merged.map(issueNumberOf)];
 
+  // The landing pass once more over the merge result re-merged onto origin's
+  // new tip (#258), when it ran for a unit this cycle: origin's new commits
+  // (a human hotfix, typically) may change what the landing owes. Its
+  // instructions are read at that tip. Null when the push may go on.
   const syncLandingPass = async (unit: string): Promise<FollowedPush | null> => {
     if (runPass === null || !landingPassRan) return null;
     const newTip = await adapter.revParse("HEAD^2");

@@ -27,9 +27,9 @@
 // RUN drives `runInnerLoop` directly — no planner, merger, finalize or lease,
 // which is where every origin and tracker write of `run()` lives — for every
 // case × repeat, repeat-major, `--parallel` at a time. A case's pinned set
-// goes in as `pinnedScenarios` and its pick as `pinnedGatePick`, and a case
-// file that pins any set needs the providers it would with the scenario
-// writer on.
+// goes in as `pinnedScenarios` and its pick, or null, as `pinnedGatePick`, so
+// no live writer's pick reaches a replay's gate, and a case file that pins any
+// set needs the providers it would with the scenario writer on.
 //
 // THE CAPABILITY BOUNDARY is not an audit of call sites. Before anything else,
 // `guardReplayProcess` deletes the forge credentials from the process
@@ -666,7 +666,7 @@ async function prepareSession(
         egress: null,
       }),
       ...(run.case.scenarios === undefined ? {} : { pinnedScenarios: run.case.scenarios }),
-      ...(run.case.gatePick === undefined ? {} : { pinnedGatePick: run.case.gatePick }),
+      pinnedGatePick: run.case.gatePick ?? null,
     }),
   };
 }

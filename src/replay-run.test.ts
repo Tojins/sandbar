@@ -325,8 +325,9 @@ describe("replay run (#195)", SESSION_TIMEOUT, () => {
 
     await expect(replay("pinned", 2, { cases })).resolves.toBe(0);
 
+    // #267: a case with no pick pins none, so no live writer's pick is gated.
     expect(seams.loops.map((loop) => [loop.issue, loop.pinned, loop.pick])).toEqual([
-      ["7", set, gatePick], ["8", undefined, undefined], ["7", set, gatePick], ["8", undefined, undefined],
+      ["7", set, gatePick], ["8", undefined, null], ["7", set, gatePick], ["8", undefined, null],
     ]);
   });
 

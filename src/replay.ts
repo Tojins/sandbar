@@ -12,10 +12,9 @@
 // its scenario set (#240): pinned, it replaces the writer in every repeat and
 // session, so all of them are judged on the same clauses. Beside it, when
 // the writer picked one, its `gatePick` (#267), which every gate-1 of the
-// case adds; a case pinning a pick and no set settles the writer NONE. A
-// case file frozen before pinning has no `scenarios`, and its cases run the
-// writer as configured; one frozen before #267 pins no pick, and its gates
-// run parts 1–5. `parseReplayCases` is the one validation of a case file, and
+// case adds in place of a live writer's. A case file frozen before pinning
+// has no `scenarios`, and its cases run the writer as configured; one frozen
+// before #267 pins no pick, and its gates run parts 1–5. `parseReplayCases` is the one validation of a case file, and
 // lists every violation rather than the first.
 //
 // A SESSION is one `replay run`: its manifest records what was compared (the

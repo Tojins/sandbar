@@ -549,9 +549,9 @@ function renderDeclaration(declaration: SanityDeclaration): string {
   return [
     `- global sanity: ${globList(sanity)}`,
     ...(core === null ? [] : [`- core: paths ${globList(core.paths)}; sanity ${globList(core.sanity)}`]),
-    ...domains.map((domain) =>
-      `- domain \`${domain.name}\`: paths ${globList(domain.paths)}; ` +
-      `sanity ${globList(domain.sanity)}. ${domain.description}`.trimEnd()),
+    ...domains.map(({ name, description, paths, sanity }) =>
+      [`- domain \`${name}\`: paths ${globList(paths)}; sanity ${globList(sanity)}.`, description]
+        .join(" ").trimEnd()),
   ].join("\n");
 }
 

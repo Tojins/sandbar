@@ -3386,6 +3386,7 @@ describe("runGate admission (#142)", () => {
         gateSemaphore,
         attemptLogger: { writeGate: vi.fn() },
         onEvent: (event: EventInput) => events.push(event),
+        config: {},
         stackSource: {
           forHead: async () => ({ stack: { containers: [], steps: [] }, classification: { kind: "same" } }),
         },
@@ -3461,6 +3462,7 @@ describe("runGate admission (#142)", () => {
         gateSemaphore: createGateSemaphore(undefined),
         attemptLogger: { writeGate },
         onEvent: () => undefined,
+        config: {},
         stackSource: {
           forHead: async () => ({ stack: { containers: [], steps: [] }, classification: { kind: "same" } }),
         },
@@ -3530,6 +3532,7 @@ describe("runGate admission (#142)", () => {
           gateSemaphore: createGateSemaphore(undefined),
           attemptLogger: { writeGate: vi.fn() },
           onEvent: (event: EventInput) => { events.push(event); },
+          config: {},
           stackSource: { forHead: async () => ({ stack, classification: { kind: "same" } }) },
         },
         gateStack: { ensure: async () => ({ runGate: runGateOnBound }) },
@@ -3566,6 +3569,13 @@ describe("runGate admission (#142)", () => {
         picks: [{ issue: 266, ...pick }],
         picked: ["a.test.ts"],
       }));
+      // A replay adds its case's pinned pick, or none, in place of the writer's.
+      const pinned = { domains: [], tests: [{ path: "b.test.ts", reason: "frozen" }] };
+      for (const [pinnedGatePick, picks] of [[null, []], [pinned, [{ issue: 266, ...pinned }]]] as const) {
+        Object.assign(ctx.opts.config, { pinnedGatePick });
+        await runGate({ kind: "run-gate", attempt: 5, quality: { verdict: "APPROVED", rounds: 0 } }, ctx);
+        expect(runGateOnBound).toHaveBeenLastCalledWith(expect.objectContaining({ picks }));
+      }
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
@@ -3592,6 +3602,7 @@ describe("runGate admission (#142)", () => {
           gateSemaphore: createGateSemaphore(undefined),
           attemptLogger: { writeGate: vi.fn() },
           onEvent: () => undefined,
+          config: {},
           stackSource: { forHead },
         },
         gateStack: { ensure },
@@ -5025,18 +5036,6 @@ describe("runInnerLoop context terminals (#158)", () => {
       expect(events.flatMap((event) => event.kind === "phase" ? [event.phases] : [])).toEqual([
         ["anchor"], ["implementer"], ["quality"], ["gate-1"], ["review"], [],
       ]);
-    });
-
-    // #267: a case whose admission answered NONE beside a pick pins the pick
-    // alone.
-    it("settles a pinned pick with no set as NONE: no writer and no runner", async () => {
-      const pinnedGatePick = { domains: [{ name: "gate", reason: "r" }], tests: [] };
-      const { sandbox, opts } = harness(routine, { scenarioWriter: true, pinnedGatePick });
-
-      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
-      expect(innerLoopMocks.createScenarioWriterTask).not.toHaveBeenCalled();
-      expect(names(sandbox)).toContain("reviewer-158-round-1");
-      expect(names(sandbox)).not.toContain("scenario-runner-158-round-1");
     });
 
     it("creates no task when it is off", async () => {
