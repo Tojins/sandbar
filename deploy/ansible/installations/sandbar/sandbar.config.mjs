@@ -108,7 +108,7 @@ export default {
           "node", "scripts/structure/run.mjs", "missing-tests",
           "--base", "origin/main", "--git-dir", gitDir, "--podman-coverage",
         ],
-        timeoutMs: 1_500_000,
+        timeoutMs: 120_000,
         settles: ["missing-tests"],
       },
     ],

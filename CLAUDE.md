@@ -17,8 +17,8 @@ cited GitHub issue (`#N`) and the commit history.
 - `npx vitest run src/<file>.test.ts [-t "<name>"]` — one file / one test.
 - `npm run structure` — the structural checks sandbar's gate runs as steps
   (`scripts/structure/`, #183): `version`, the branch's bump, and
-  `missing-tests` (#236), every added line covered (from `coverage/`) and
-  pinned (Stryker, line deletion).
+  `missing-tests` (#236, #264), every added statement line of `src/`
+  covered (from `coverage/`), at gate-1 and again at gate-2.
 
 Node ≥ 20.6, ESM, NodeNext: imports in `src/` use `.js` even for `.ts` files.
 

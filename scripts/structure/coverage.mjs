@@ -60,9 +60,9 @@ export function readCoverage(dir, relativePath, required) {
 }
 
 // Each of `lines` of `path` a statement starts on, `{ line, state }`:
-// `covered` by a unit test, `podman` (covered only by a podman test),
-// `uncovered`, or `unknown` when `podman` is null and no unit test hits it.
-// A path absent from `unit` is null: what coverage measured is not this tree.
+// `covered` by a unit or a podman test, `uncovered`, or `unknown` when
+// `podman` is null and no unit test hits it. A path absent from `unit` is
+// null: what coverage measured is not this tree.
 export function lineCoverage(path, lines, unit, podman) {
   const unitLines = unit.get(path);
   if (unitLines === undefined) return null;
@@ -70,7 +70,7 @@ export function lineCoverage(path, lines, unit, podman) {
   return lines.filter((line) => unitLines.has(line)).map((line) => {
     if (unitLines.get(line) > 0) return { line, state: "covered" };
     if (podman === null) return { line, state: "unknown" };
-    return { line, state: (podmanLines?.get(line) ?? 0) > 0 ? "podman" : "uncovered" };
+    return { line, state: (podmanLines?.get(line) ?? 0) > 0 ? "covered" : "uncovered" };
   });
 }
 
@@ -94,13 +94,13 @@ export function uncoveredFindings(path, counted) {
 }
 
 // The coverage findings over `added` (`Map<path, number[]>`, production
-// paths only) in `dir`, and how many lines were covered, unknown and
-// podman-only. `requirePodman`: a missing podman file is an error.
+// paths only) in `dir`, and how many lines were covered and unknown.
+// `requirePodman`: a missing podman file is an error.
 export function coverageFindings(dir, added, requirePodman) {
   const findings = [];
   const unit = readCoverage(dir, UNIT_COVERAGE, true);
   const podman = readCoverage(dir, PODMAN_COVERAGE, requirePodman);
-  const counts = { covered: 0, unknown: 0, podmanOnly: 0 };
+  const counts = { covered: 0, unknown: 0 };
   for (const [path, lines] of added) {
     const counted = lineCoverage(path, lines, unit, podman);
     if (counted === null) {
@@ -111,7 +111,6 @@ export function coverageFindings(dir, added, requirePodman) {
     for (const { state } of counted) {
       if (state === "covered") counts.covered++;
       else if (state === "unknown") counts.unknown++;
-      else if (state === "podman") counts.podmanOnly++;
     }
   }
   return { findings, counts };

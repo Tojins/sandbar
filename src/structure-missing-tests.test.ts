@@ -1,10 +1,8 @@
-// The `missing-tests` structural check (#183, #236): its pure layer as tables, the
-// probe and the deletion map run for real on small trees, and the check proved
-// able to go red by running `run.mjs` over a fixture branch beside its green
-// twin, after a real coverage run.
+// The `missing-tests` structural check (#183, #236, #264): its pure layer as
+// tables, and the check proved able to go red by running `run.mjs` over a
+// fixture branch beside its green twin, after a real coverage run.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -13,18 +11,12 @@ import { StructureError } from "../scripts/structure/core.mjs";
 import {
   coverageFindings, lineCoverage, PODMAN_COVERAGE, statementHits, UNIT_COVERAGE, uncoveredFindings,
 } from "../scripts/structure/coverage.mjs";
-import { copyWorktree, deletableLines, deletionEntry, runDeletions } from "../scripts/structure/deletion.mjs";
-import {
-  lineRuns, plannedMutants, probeResult, runProbe, strykerConfig,
-} from "../scripts/structure/probe.mjs";
-import {
-  capUnits, cappedRuns, hintFinding, isLandingShape, isProduction, missingTestsSummary,
-} from "../scripts/structure/missing-tests.mjs";
+import { hintFinding, isProduction, missingTestsSummary } from "../scripts/structure/missing-tests.mjs";
 import { git, run, useFixtures } from "./structure.test-util.js";
 
 const NODE_MODULES = fileURLToPath(new URL("../node_modules", import.meta.url));
 const VITEST = join(NODE_MODULES, "vitest", "vitest.mjs");
-// Real vitest and Stryker runs, each several seconds when the suite is busy.
+// Real vitest runs, each several seconds when the suite is busy.
 const SLOW = 300_000;
 
 const { tempDir, fixtureRepo } = useFixtures();
@@ -43,18 +35,6 @@ const vitest = (dir: string, ...args: string[]) => {
   if (result.status !== 0) throw new Error(`vitest ${args.join(" ")}: ${result.stdout}${result.stderr}`);
 };
 
-// A tree in a temporary directory, with this repository's node_modules.
-const tree = async (files: Record<string, string>): Promise<string> => {
-  const dir = await tempDir();
-  for (const [path, content] of Object.entries(files)) {
-    await mkdir(join(dir, path, ".."), { recursive: true });
-    await writeFile(join(dir, path), content);
-  }
-  await symlink(NODE_MODULES, join(dir, "node_modules"));
-  await mkdir(join(dir, ".stryker-tmp", "log"), { recursive: true });
-  return dir;
-};
-
 describe("which lines the check reads", () => {
   it.each([
     ["src/run.ts", true],
@@ -66,125 +46,6 @@ describe("which lines the check reads", () => {
   ])("isProduction(%s) is %s", (path, expected) => {
     expect(isProduction(path)).toBe(expected);
   });
-
-  it.each([
-    ["deploy/ansible/installations/sandbar/sandbar.config.mjs", undefined],
-    ["deploy/ansible/installations/outdoor/files/settings.local.json", undefined],
-    ["deploy/ansible/installations/outdoor/vars.yml", undefined],
-    ["deploy/ansible/roles/sandbar/tasks/main.yml", "src/deploy-*.test.ts"],
-    ["deploy/ansible/roles/sandbar/templates/sandbar.service.j2", "src/deploy-*.test.ts"],
-    ["deploy/ansible/README.md", undefined],
-    ["src/config.ts", undefined],
-  ])("deletionEntry(%s) is %s", (path, label) => {
-    expect(deletionEntry(path)?.label).toBe(label);
-  });
-
-  it("deletes no blank or comment-only line", () => {
-    const content = ["a: 1", "", "  # why", "{# note #}", "// why", " * doc", "<!-- x -->", "b: 2"].join("\n");
-    expect(deletableLines(content, [1, 2, 3, 4, 5, 6, 7, 8])).toEqual([1, 8]);
-  });
-});
-
-// Each shape built over the `missing-tests-red` fixture: `origin/main` the
-// base, `topic` one commit on it, and `other` another branch's commit.
-describe("the landing shape", () => {
-  // A commit appending a line to `path`, when given.
-  const commit = (dir: string, name: string, path?: string) => {
-    if (path !== undefined) {
-      mkdirSync(join(dir, path, ".."), { recursive: true });
-      writeFileSync(join(dir, path), `${name}\n`, { flag: "a" });
-      git(dir, "add", path);
-    }
-    git(dir, "commit", "-q", "--allow-empty", "-m", name);
-    return git(dir, "rev-parse", "HEAD");
-  };
-  const shapes = async () => {
-    const dir = await fixtureRepo("missing-tests-red");
-    git(dir, "branch", "other", "origin/main");
-    git(dir, "checkout", "-q", "other");
-    commit(dir, "other");
-    git(dir, "checkout", "-q", "--detach", "origin/main");
-    return dir;
-  };
-  // Moves `origin/main` one commit on, as another landing would.
-  const moveBase = (dir: string) => {
-    const head = git(dir, "rev-parse", "HEAD");
-    git(dir, "checkout", "-q", "--detach", "origin/main");
-    git(dir, "update-ref", "refs/remotes/origin/main", commit(dir, "moved"));
-    git(dir, "checkout", "-q", "--detach", head);
-  };
-
-  it.each([
-    { name: "gate-2 of a cycle's first branch", landing: true, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-    } },
-    { name: "gate-2 of a cycle's second branch", landing: true, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "other");
-    } },
-    { name: "the re-gate after a push race merged the moved base in", landing: true, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "other");
-      moveBase(dir);
-      git(dir, "merge", "-q", "--no-ff", "-m", "sync", "origin/main");
-    } },
-    { name: "a member landing on a chunk cut before the base moved", landing: true, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "chunk", "topic");
-      moveBase(dir);
-      git(dir, "merge", "-q", "--no-ff", "-m", "chunk", "other");
-    } },
-    { name: "a chunk refresh", landing: true, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "chunk", "topic");
-      moveBase(dir);
-      git(dir, "merge", "-q", "--no-ff", "-m", "refresh", "origin/main");
-    } },
-    { name: "gate-1 of a branch", landing: false, build: (dir: string) => {
-      git(dir, "checkout", "-q", "topic");
-    } },
-    { name: "gate-1 of a branch that merged the base in", landing: false, build: (dir: string) => {
-      git(dir, "checkout", "-q", "topic");
-      moveBase(dir);
-      git(dir, "merge", "-q", "--no-ff", "-m", "sync", "origin/main");
-    } },
-    { name: "gate-2 after the merger synced the lockfile", landing: true, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-      commit(dir, "chore: sync dependency lockfile after merge", "package-lock.json");
-    } },
-    { name: "a later gate-2 over a lockfile sync", landing: true, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-      commit(dir, "chore: sync dependency lockfile after merge", "package-lock.json");
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "other");
-    } },
-    { name: "a merge then a commit only deleting production lines", landing: true, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-      git(dir, "rm", "-q", "src/calc.ts");
-      commit(dir, "drop");
-    } },
-    { name: "gate-1 of a branch adding no judged line", landing: false, build: (dir: string) => {
-      commit(dir, "docs", "README.md");
-    } },
-    { name: "gate-1 of a chunk member seeded from the chunk", landing: false, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "chunk", "other");
-      commit(dir, "member", "src/member.ts");
-    } },
-    { name: "the re-gate of a resolve agent's fix on a merge", landing: false, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-      commit(dir, "fix", "src/calc.ts");
-    } },
-    { name: "the re-gate of a resolve agent's fix to a mapped file", landing: false, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-      commit(dir, "fix", "deploy/app.yml");
-    } },
-    { name: "the re-gate of a resolve agent's fix after a lockfile sync", landing: false, build: (dir: string) => {
-      git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-      commit(dir, "chore: sync dependency lockfile after merge", "package-lock.json");
-      commit(dir, "fix", "src/calc.ts");
-    } },
-  ])("$name: $landing", async ({ build, landing }) => {
-    const dir = await shapes();
-    build(dir);
-    expect(isLandingShape({ dir }, "origin/main")).toBe(landing);
-  });
 });
 
 describe("hints", () => {
@@ -194,10 +55,6 @@ describe("hints", () => {
     ["/* v8 ignore next -- */", "src/x.ts:3  v8 ignore hint without a reason"],
     ["/* c8 ignore start */", "src/x.ts:3  v8 ignore hint without a reason"],
     ["/* istanbul ignore else -- unreachable */", null],
-    ["// Stryker disable next-line ConditionalExpression: equivalent, the guard repeats", null],
-    ["// Stryker disable next-line ConditionalExpression", "src/x.ts:3  Stryker disable hint without a reason"],
-    ["// Stryker disable all:", "src/x.ts:3  Stryker disable hint without a reason"],
-    ["// Stryker restore all", null],
     ["const ignore = true;", null],
   ])("%s", (text, expected) => {
     expect(hintFinding("src/x.ts", 3, text)).toBe(expected);
@@ -219,7 +76,7 @@ describe("coverage", () => {
   it("classes each changed statement line, skipping lines no statement starts on", () => {
     expect(lineCoverage("src/a.ts", [1, 3, 4, 5, 7, 9], unit, podman)).toEqual([
       { line: 1, state: "covered" },
-      { line: 4, state: "podman" },
+      { line: 4, state: "covered" },
       { line: 5, state: "uncovered" },
       { line: 7, state: "uncovered" },
       { line: 9, state: "covered" },
@@ -234,7 +91,7 @@ describe("coverage", () => {
   it("groups uncovered lines into runs only a counted, not-uncovered line breaks", () => {
     const counted = [
       { line: 3, state: "uncovered" }, { line: 5, state: "uncovered" }, { line: 6, state: "uncovered" },
-      { line: 8, state: "covered" }, { line: 9, state: "uncovered" }, { line: 12, state: "podman" },
+      { line: 8, state: "covered" }, { line: 9, state: "uncovered" }, { line: 12, state: "unknown" },
     ];
     expect(uncoveredFindings("src/a.ts", counted)).toEqual(["src/a.ts:3-6  uncovered", "src/a.ts:9  uncovered"]);
   });
@@ -262,14 +119,14 @@ describe("coverage", () => {
       files: [UNIT_COVERAGE, PODMAN_COVERAGE],
       requirePodman: true,
       findings: ["src/a.ts:2  uncovered"],
-      counts: { covered: 1, unknown: 0, podmanOnly: 1 },
+      counts: { covered: 2, unknown: 0 },
     },
     {
       name: "no podman file locally",
       files: [UNIT_COVERAGE],
       requirePodman: false,
       findings: [],
-      counts: { covered: 1, unknown: 2, podmanOnly: 0 },
+      counts: { covered: 1, unknown: 2 },
     },
   ])("$name", async ({ files, requirePodman, findings, counts }) => {
     const dir = await coverageDir(files);
@@ -326,210 +183,13 @@ describe("coverage", () => {
   });
 });
 
-describe("probe", () => {
-  it("runs consecutive lines together", () => {
-    expect(lineRuns([1, 2, 3, 7, 9, 10])).toEqual([[1, 3], [7, 7], [9, 10]]);
-    expect(lineRuns([])).toEqual([]);
-  });
-
-  it("plans the probed mutators' mutants inside the runs, none a hint disabled", async () => {
-    const content = [
-      "export const f = (a: boolean, b: string) => a && b === \"x\";",
-      "export const g = 1 + 2;",
-      "// Stryker disable next-line all: the fixture's own escape",
-      "export const h = (a: boolean) => !a;",
-      "export const i = (a?: { b: number }) => a?.b;",
-    ].join("\n");
-    const planned = await plannedMutants("src/m.ts", content, [[1, 2], [4, 5]]);
-    expect(planned.every((mutant) => mutant.path === "src/m.ts")).toBe(true);
-    // Line 2's only mutant is an ArithmeticOperator; line 4's are disabled.
-    expect(new Set(planned.map((mutant) => mutant.line))).toEqual(new Set([1, 5]));
-    expect(planned).toEqual([...planned].sort((a, b) => a.line - b.line || a.column - b.column));
-    expect(await plannedMutants("src/m.ts", content, [[3, 4]])).toEqual([]);
-  });
-
-  it("asks Stryker for the changed ranges with the probe's settings", () => {
-    expect(strykerConfig(new Map([["src/a.ts", [[3, 5], [9, 9]]], ["src/b.ts", [[1, 1]]]]))).toMatchObject({
-      testRunner: "vitest",
-      vitest: { configFile: "vitest.probe.config.ts" },
-      coverageAnalysis: "perTest",
-      mutate: ["src/a.ts:3-5", "src/a.ts:9-9", "src/b.ts:1-1"],
-      checkers: [],
-      incremental: false,
-      tempDirName: ".stryker-tmp",
-      mutator: { excludedMutations: expect.arrayContaining(["StringLiteral", "Regex", "ArithmeticOperator"]) },
-    });
-  });
-
-  it("finds each survivor and counts killed and static mutants; NoCoverage is coverage's", () => {
-    // Stryker's report: 1-based lines and columns, the end column exclusive.
-    const at = (line: number, column: number, endLine: number, endColumn: number) => ({
-      start: { line, column }, end: { line: endLine, column: endColumn },
-    });
-    const report = {
-      files: {
-        "src/b.ts": {
-          mutants: [
-            { status: "Survived", mutatorName: "BlockStatement", location: at(1, 24, 4, 2), replacement: "{}" },
-          ],
-        },
-        "src/a.ts": {
-          mutants: [
-            { status: "Survived", mutatorName: "ConditionalExpression", location: at(2, 5, 2, 24), replacement: "false" },
-            { status: "Killed", mutatorName: "EqualityOperator", location: at(2, 5, 2, 19), replacement: "exitCode === 0" },
-            { status: "Timeout", mutatorName: "BooleanLiteral", location: at(3, 1, 3, 5), replacement: "false" },
-            { status: "NoCoverage", mutatorName: "BlockStatement", location: at(3, 1, 3, 5), replacement: "{}" },
-            { status: "Ignored", static: true, mutatorName: "ArrayDeclaration", location: at(1, 1, 1, 3), replacement: "[]" },
-            { status: "Ignored", mutatorName: "StringLiteral", location: at(1, 1, 1, 3), replacement: "\"\"" },
-          ],
-        },
-      },
-    };
-    const contents = new Map([
-      ["src/a.ts", "[1]\nif (exitCode !== 0 || x) {\ntrue"],
-      ["src/b.ts", `export function long() {\n  ${"a".repeat(40)}();\n  ${"b".repeat(40)}();\n}`],
-    ]);
-    expect(probeResult(report, contents)).toEqual({
-      findings: [
-        "src/a.ts:2  survived ConditionalExpression: exitCode !== 0 || x → false",
-        `src/b.ts:1  survived BlockStatement: { ${"a".repeat(40)}(); ${"b".repeat(13)}… → {}`,
-      ],
-      killed: 2,
-      statics: 1,
-    });
-  });
-
-  it("a probe whose dry run goes red is a one-line error naming its log", { timeout: SLOW }, async () => {
-    const dir = await tree({
-      "vitest.config.ts": "export default { test: { include: [\"src/**/*.test.ts\"] } };\n",
-      "vitest.probe.config.ts": "export { default } from \"./vitest.config.ts\";\n",
-      "src/a.ts": "export const yes = (a: boolean) => a;\n",
-      "src/a.test.ts": "import { expect, it } from \"vitest\";\nimport { yes } from \"./a.js\";\nit(\"is red\", () => expect(yes(true)).toBe(false));\n",
-    });
-    const contents = new Map([["src/a.ts", await readFile(join(dir, "src/a.ts"), "utf8")]]);
-    await expect(runProbe(dir, new Map([["src/a.ts", [[1, 1]]]]), contents))
-      .rejects.toThrow(/^probe: Stryker exited 1: .*initial test run.* \(\.stryker-tmp\/log\/stryker\.log\)$/);
-  });
-
-  // A Stryker that exits 0 is a stub here: what it leaves of the report.
-  it.each([
-    ["no report is a one-line error", "", /^probe: \.stryker-tmp\/report\.json cannot be read: ENOENT: /],
-    ["a report that is not JSON is a one-line error", "require(\"node:fs\").writeFileSync(\".stryker-tmp/report.json\", \"<html>\\n502\\n\");\n",
-      /^probe: \.stryker-tmp\/report\.json is not JSON: /],
-  ])("a Stryker run that answers with %s", async (_name, stub, error) => {
-    const dir = await tempDir();
-    await mkdir(join(dir, "node_modules/@stryker-mutator/core/bin"), { recursive: true });
-    await writeFile(join(dir, "node_modules/@stryker-mutator/core/bin/stryker.js"), stub);
-    await mkdir(join(dir, ".stryker-tmp/log"), { recursive: true });
-    await expect(runProbe(dir, new Map([["src/a.ts", [[1, 1]]]]), new Map([["src/a.ts", "export const a = 1;\n"]])))
-      .rejects.toThrow(error);
-  });
-});
-
-describe("deletion", () => {
-  it("a mapped test red before any deletion is a one-line error", { timeout: SLOW }, async () => {
-    const dir = await tree({
-      "vitest.config.ts": "export default { test: { include: [\"src/**/*.test.ts\"] } };\n",
-      "deploy/app.yml": "name: app\n",
-      "src/deploy-app.test.ts": "import { expect, it } from \"vitest\";\nit(\"is red\", () => expect(1).toBe(2));\n",
-    });
-    copyWorktree(dir);
-    await expect(runDeletions(dir, [{ path: "deploy/app.yml", line: 1 }], new Map([["deploy/app.yml", "name: app\n"]])))
-      .rejects.toThrow("deletion: src/deploy-*.test.ts fail with no line deleted (.stryker-tmp/log/deletion-baseline-0.log)");
-  });
-
-  // Node's own cpSync aborts the process over a directory it may not read.
-  it.skipIf(process.getuid?.() === 0).each([
-    ["a file", "locked/x.txt", "copyfile '{dir}/locked/x.txt' -> '{dir}/.stryker-tmp/deletion/locked/x.txt'"],
-    ["a directory", "locked", "scandir '{dir}/locked'"],
-  ])("a worktree with %s it cannot read is a one-line error", async (_name, locked, syscall) => {
-    const dir = await tree({ "locked/x.txt": "secret\n" });
-    await chmod(join(dir, locked), 0);
-    try {
-      expect(() => copyWorktree(dir)).toThrow(new StructureError(
-        `deletion: the worktree cannot be copied: EACCES: permission denied, ${syscall.replaceAll("{dir}", dir)}`,
-      ));
-    } finally {
-      await chmod(join(dir, locked), 0o755);
-    }
-  });
-
-  it("copies files, directories and symlinks, and skips a FIFO as cpSync did", async () => {
-    const dir = await tree({ "deploy/app.yml": "name: app\n" });
-    await symlink("deploy/app.yml", join(dir, "app.yml"));
-    expect(spawnSync("mkfifo", [join(dir, "deploy/pipe")]).status).toBe(0);
-    copyWorktree(dir);
-    const copy = join(dir, ".stryker-tmp/deletion");
-    expect(await readFile(join(copy, "deploy/app.yml"), "utf8")).toBe("name: app\n");
-    expect(await readlink(join(copy, "app.yml"))).toBe(join(dir, "deploy/app.yml"));
-    expect(await readlink(join(copy, "node_modules"))).toBe(join(dir, "node_modules"));
-    expect(existsSync(join(copy, "deploy/pipe"))).toBe(false);
-  });
-
-  // A symlink's copy points into the worktree, and a read-only file's copy
-  // is read-only: a deletion replaces the copy's file, never writes through
-  // it. The symlink's target is read-only too, so a write through it fails.
-  it.each([
-    ["is read-only", (path: string) => chmod(path, 0o444)],
-    ["is a symlink", async (path: string) => {
-      await writeFile(join(path, "../real.yml"), "name: app\nport: 1\n", { mode: 0o444 });
-      await rm(path);
-      await symlink("real.yml", path);
-    }],
-  ])("deletes the lines of a mapped file that %s, leaving the worktree's", { timeout: SLOW }, async (_name, make) => {
-    const dir = await tree({
-      "vitest.config.ts": "export default { test: { include: [\"src/**/*.test.ts\"] } };\n",
-      "deploy/app.yml": "name: app\nport: 1\n",
-      "src/deploy-app.test.ts": "import { readFileSync } from \"node:fs\";\nimport { expect, it } from \"vitest\";\n" +
-        "it(\"names the app\", () => expect(readFileSync(\"deploy/app.yml\", \"utf8\")).toMatch(/^name: app$/m));\n",
-    });
-    await make(join(dir, "deploy/app.yml"));
-    const content = await readFile(join(dir, "deploy/app.yml"), "utf8");
-    copyWorktree(dir);
-    const units = [{ path: "deploy/app.yml", line: 1 }, { path: "deploy/app.yml", line: 2 }];
-    await expect(runDeletions(dir, units, new Map([["deploy/app.yml", content]]))).resolves.toEqual({
-      findings: ["deploy/app.yml:2  deleted, src/deploy-*.test.ts stayed green"],
-      caught: 1,
-    });
-    expect(await readFile(join(dir, "deploy/app.yml"), "utf8")).toBe(content);
-  });
-});
-
-describe("the cap", () => {
-  it("runs the first units in path and line order and counts the rest", () => {
-    const units = [
-      { path: "src/b.ts", line: 1, column: 1 },
-      { path: "deploy/x.yml", line: 4 },
-      { path: "src/a.ts", line: 9, column: 3 },
-      { path: "src/a.ts", line: 9, column: 1 },
-      { path: "src/a.ts", line: 2, column: 5 },
-    ];
-    expect(capUnits(units, 3)).toEqual({ run: [units[1], units[4], units[3]], over: 2 });
-    expect(capUnits(units, 10).over).toBe(0);
-  });
-
-  it("cuts a file's runs before its first mutant left out", () => {
-    const planned = [
-      { path: "src/a.ts", line: 2, column: 1 },
-      { path: "src/a.ts", line: 5, column: 1 },
-      { path: "src/a.ts", line: 9, column: 1 },
-    ];
-    const runs: [number, number][] = [[1, 3], [5, 7], [9, 12]];
-    expect(cappedRuns(runs, planned, planned)).toEqual(runs);
-    expect(cappedRuns(runs, planned, planned.slice(0, 2))).toEqual([[1, 3], [5, 7]]);
-    expect(cappedRuns([[1, 12]], planned, planned.slice(0, 2))).toEqual([[1, 8]]);
-  });
-});
-
 describe("summary", () => {
-  const counts = { covered: 1, unknown: 0, podmanOnly: 0, killed: 1, caught: 1, statics: 0, over: 0 };
   it.each([
-    { name: "nothing unprobed", counts, line: "missing-tests: 1 line covered, 1 mutant killed, 1 line deletion caught, 0 survived" },
+    { name: "every line known", counts: { covered: 1, unknown: 0 }, line: "missing-tests: 1 line covered, 0 uncovered" },
     {
-      name: "every kind unprobed, and unknown lines",
-      counts: { covered: 37, unknown: 3, podmanOnly: 4, killed: 52, caught: 0, statics: 2, over: 1 },
-      line: "missing-tests: 37 lines covered, 52 mutants killed, 0 line deletions caught, 0 survived " +
-        `(unprobed: 4 podman-only lines, 2 static mutants, 1 unit over the cap); 3 lines unknown without ${PODMAN_COVERAGE}`,
+      name: "unknown lines",
+      counts: { covered: 37, unknown: 3 },
+      line: `missing-tests: 37 lines covered, 0 uncovered; 3 lines unknown without ${PODMAN_COVERAGE}`,
     },
   ])("$name", ({ counts: c, line }) => {
     expect(missingTestsSummary(c)).toBe(line);
@@ -561,30 +221,19 @@ describe("run.mjs missing-tests", () => {
   // Root reads and writes past a file's mode, as the gate's runner does.
   const asRoot = process.getuid?.() === 0;
 
-  it("goes red on an uncovered line, a survivor, a green deletion and a bare hint", { timeout: SLOW }, async () => {
+  it("goes red on an uncovered line and a bare hint", { timeout: SLOW }, async () => {
     const { dir, result } = await gateRun("missing-tests-red");
     expect(result).toEqual({
       status: 1,
-      lines: [
-        "src/calc.ts:7  Stryker disable hint without a reason",
-        "src/calc.ts:9  uncovered",
-        "src/calc.ts:2  survived EqualityOperator: n > max → n >= max",
-        "deploy/app.yml:2  deleted, src/deploy-*.test.ts stayed green",
-      ],
+      lines: ["src/calc.ts:7  v8 ignore hint without a reason", "src/calc.ts:10  uncovered"],
       stderr: "",
     });
     expect(git(dir, "status", "--porcelain")).toBe("");
-    expect(existsSync(join(dir, ".stryker-tmp"))).toBe(false);
   });
 
   it("passes its green twin in one line", { timeout: SLOW }, async () => {
-    const { dir, result } = await gateRun("missing-tests-green");
-    expect(result).toEqual({
-      status: 0,
-      lines: ["missing-tests: 2 lines covered, 5 mutants killed, 2 line deletions caught, 0 survived (unprobed: 1 podman-only line)"],
-      stderr: "",
-    });
-    expect(existsSync(join(dir, ".stryker-tmp"))).toBe(false);
+    const { result } = await gateRun("missing-tests-green");
+    expect(result).toEqual({ status: 0, lines: ["missing-tests: 3 lines covered, 0 uncovered"], stderr: "" });
   });
 
   it("cannot answer without the coverage the test steps write, in one line", async () => {
@@ -621,7 +270,7 @@ describe("run.mjs missing-tests", () => {
     expect(result.lines[0]).toMatch(reason);
   });
 
-  // A file the check cannot read or write is exit 2, never a crash's exit 1,
+  // A file the check cannot read is exit 2, never a crash's exit 1,
   // which reads as a finding.
   it.each([
     ["lacks", (path: string) => rm(path), "ENOENT: no such file or directory, open"],
@@ -653,67 +302,21 @@ describe("run.mjs missing-tests", () => {
     expect(run(elsewhere, "missing-tests", "--base", "origin/main", "--git-dir", join(dir, ".git"))).toEqual({
       status: 2,
       lines: [
-        `missing-tests: deploy/app.yml cannot be read: ENOENT: no such file or directory, open '${elsewhere}/deploy/app.yml'`,
+        `missing-tests: src/calc.ts cannot be read: ENOENT: no such file or directory, open '${elsewhere}/src/calc.ts'`,
       ],
       stderr: "",
     });
   });
 
-  it("cannot answer over a production file that does not parse, in one line", async () => {
-    const dir = await fixtureRepo("missing-tests-red");
-    await writeFile(join(dir, "src/broken.ts"), "export const = 1;\n");
-    git(dir, "add", "src/broken.ts");
-    git(dir, "commit", "-q", "-m", "broken");
-    await writeCoverage(dir, "{}");
-    expect(run(dir, "missing-tests", "--base", "origin/main")).toEqual({
-      status: 2,
-      lines: ["missing-tests: probe: src/broken.ts does not parse: Unexpected token (1:13)"],
-      stderr: "",
-    });
-  });
-
-  it.skipIf(asRoot)("cannot answer when it cannot clear .stryker-tmp, in one line", async () => {
-    const dir = await fixtureRepo("missing-tests-red");
-    await writeCoverage(dir, "{}");
-    await mkdir(join(dir, ".stryker-tmp"));
-    await chmod(dir, 0o555);
-    let result: ReturnType<typeof run>;
-    try {
-      result = run(dir, "missing-tests", "--base", "origin/main");
-    } finally {
-      await chmod(dir, 0o755);
-    }
-    expectCannotAnswer(result, /^missing-tests: \.stryker-tmp cannot be cleared: EACCES\b/);
-  });
-
-  it.skipIf(asRoot).each([
-    ["a file", "locked/x.txt", /copyfile '.*\/locked\/x\.txt' /],
-    ["a directory", "locked", /scandir '.*\/locked'$/],
-  ])("cannot answer over a worktree with %s the line deletions cannot copy, in one line", async (_name, locked, syscall) => {
-    const dir = await fixtureRepo("missing-tests-red");
-    await writeCoverage(dir, "{}");
-    await mkdir(join(dir, "locked"));
-    await writeFile(join(dir, "locked/x.txt"), "secret\n");
-    await chmod(join(dir, locked), 0);
-    let result: ReturnType<typeof run>;
-    try {
-      result = run(dir, "missing-tests", "--base", "origin/main");
-    } finally {
-      await chmod(join(dir, locked), 0o755);
-    }
-    expectCannotAnswer(result, new RegExp(
-      `^missing-tests: deletion: the worktree cannot be copied: EACCES: permission denied, ${syscall.source}`,
-    ));
-    expect(existsSync(join(dir, ".stryker-tmp"))).toBe(false);
-  });
-
-  it("skips the landing shape in one line, with no coverage to read", async () => {
+  // A merge result is judged as a branch is (#264): the merger's gate-2 has
+  // no skip.
+  it("checks the landing shape as it checks a branch", async () => {
     const dir = await fixtureRepo("missing-tests-red");
     git(dir, "checkout", "-q", "main");
     git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
     expect(run(dir, "missing-tests", "--base", "origin/main")).toEqual({
-      status: 0,
-      lines: ["missing-tests: skipped, HEAD merges onto origin/main (gate-1 settled the branch)"],
+      status: 2,
+      lines: ["missing-tests: coverage/unit/coverage-final.json is missing: the test step wrote no coverage"],
       stderr: "",
     });
   });

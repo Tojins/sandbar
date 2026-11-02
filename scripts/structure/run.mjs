@@ -6,9 +6,9 @@
 //
 //   version        the branch moves `version` above its base (version.mjs),
 //                  the `version` step, which settles `commit-ritual`
-//   missing-tests  every added production line is covered and pinned by a
-//                  test (missing-tests.mjs), the `tests-structure` step,
-//                  which settles the rule it is named for
+//   missing-tests  every added production line is covered by a test
+//                  (missing-tests.mjs), the `tests-structure` step, which
+//                  settles the coverage clause of the rule it is named for
 //
 //   node scripts/structure/run.mjs [check…] [--base <ref>] [--git-dir <dir>]
 //                                  [--podman-coverage]
