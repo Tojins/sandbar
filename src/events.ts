@@ -72,10 +72,11 @@
 //
 // `gate-selection` (#266) is the test selection one gate run ran, beside its
 // `gate` event: each part (`global`, `core`, `domains` by name, the
-// branch's `changed` test files, `related`), the final `files`, each
-// selecting step's share (an empty one was skipped) and what was `ignored`.
-// Emitted only for a stack whose steps declare `tests`, and only when the
-// run got as far as deciding it. A new kind, so no bump.
+// branch's `changed` test files, `related`, and the scenario writers'
+// `picks` with their reasons and the `picked` test files, #267), the final
+// `files`, each selecting step's share (an empty one was skipped) and what
+// was `ignored`. Emitted only for a stack whose steps declare `tests`, and
+// only when the run got as far as deciding it. A new kind, so no bump.
 //
 // A gate-2 `gate` with `sync: "origin"` is a push race's re-gate of the whole
 // composition on origin's new tip (#253): one event per gate run, attributed

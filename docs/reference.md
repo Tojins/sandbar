@@ -271,7 +271,7 @@ A park it causes names the three largest files it counted.
 
 With `scenarioWriter` on, a read-only agent starts beside the first attempt
 and writes adversarial Given/When/Then scenarios for the issue: edge cases,
-hostile input, regressions and the cheapest wrong way to satisfy it. It runs in
+hostile input and the cheapest wrong way to satisfy it. It runs in
 its own container on a read-only copy of the code before the work started, and
 never sees the implementer's branch. The set lands in the run's issue log
 directory as `scenarios-<k>.json`; the implementer never sees it, and nothing
@@ -280,6 +280,13 @@ and runs it (see [Rounds](#rounds)).
 If the writer fails, that is recorded and nothing else changes. It runs once
 per admission, routed by `scenarioWriter*` and
 `promptExtensions.scenarioWriter`.
+
+When the gate stack at that commit has a [test selection](#test-selection),
+the writer is shown its sets and also picks what else the issue's gates run:
+domains and existing test files, each with a one-line reason. Its scenarios
+then cover only what no sanity set does. A pick that names a domain the stack
+does not declare, or is malformed, gets one correction; still wrong, the issue's
+gates run without a pick.
 
 ### Rounds
 
@@ -559,15 +566,21 @@ Without one, every step runs as written.
 
 Gate-1 runs the union of the global set, core's set when a core file changed,
 the sets of the domains the branch's changes reach, what `related` prints, and
-the test files the branch adds or changes that a step's `tests` match.
+the test files the branch adds or changes that a step's `tests` match. Once
+the [scenario writer](#scenario-writer) has made one, it adds the issue's
+pick: the sets of the domains it named and the test files it named; a gate-1
+that runs before the writer is done runs without it. Gate-2 adds the pick of every
+issue the merge brings, kept under the work directory's `gate-picks/` so a
+landing in a later run still has it.
 Changes are the branch's diff against where it forked from its base; gate-2's
 are the merge result's against the source branch; `sandbar gate`'s are the
 worktree's, uncommitted work included, against where it forked from
 `origin/<sourceBranch>`, and `--domains <a,b>` adds those domains' sets.
-A glob that matches no file, a `--domains` name the stack does not declare,
-and a selected file no step's `tests` match are ignored. Each run's
-selection — its parts, the files, the skipped steps and what was ignored —
-is a `gate-selection` event, `sandbar gate` prints it, and a red gate-1 names
+A glob that matches no file, a `--domains` or picked name the stack does not
+declare, a picked test file the tree lacks and a selected file no step's
+`tests` match are ignored. Each run's selection — its parts, the picks with
+their reasons, the files, the skipped steps and what was ignored — is a
+`gate-selection` event, `sandbar gate` prints it, and a red gate-1 names
 the files it ran to the next attempt.
 
 Globs are repository paths: `*` and `?` stay within one directory, `**`

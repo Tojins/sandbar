@@ -182,7 +182,7 @@ describe("renderAttemptSlot — the stack file (#186)", () => {
 describe("renderAttemptSlot — a selecting gate (#266)", () => {
   const line = "Gate-1 does not run the whole suite: it runs the global sanity tests, the " +
     "sanity sets of the domains your change reaches, the tests that import the files you " +
-    "changed, and the test files you add or change.\n\n";
+    "changed, the test files you add or change, and any picked for this issue.\n\n";
 
   it("tells attempt 1 what gate-1 runs", () => {
     expect(renderAttemptSlot({ ...implementerInputs, attempt: 1, gateSelects: true })).toContain(line);

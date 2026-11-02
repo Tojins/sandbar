@@ -49,7 +49,7 @@ turn them into proposals, and writes the report (`reflect-report.ts`) under
 `<stateDir>/reflect/`; `--no-agents` stops at the tables.
 `npm run replay` (`src/replay-cli.ts`, args in `replay-args.ts`, #195) is a third, and HUMAN-ONLY: `freeze`
 writes a case file of past issues at their seeds, each pinning the scenario
-set its original admission wrote (#240), `run` drives
+set and gate pick its original admission wrote (#240, #267), `run` drives
 `runInnerLoop` over it k times into `<workDir>/replay/sessions/<label>/` with
 no forge credential, a pinned set in the writer's place (`replay-run.ts`;
 pure layer `replay.ts`), and `report`
@@ -98,7 +98,10 @@ and the gate stack (`config.gateStack`, #24).
    (#203, `scenario-writer-run.ts`, grammar in `scenario-parser.ts`) runs once
    per admission in its own container on the read-only seed snapshot, files
    `scenarios-<k>.json` in the issue's log directory, and is joined before the
-   verifier; its failure changes nothing.
+   verifier; its failure changes nothing. When the seed's stack selects, it
+   also picks domains and test files for its issue's gates (#267): gate-1 adds
+   the pick once the writer has settled, and gate-2 the pick of each issue a
+   merge brings, stored under `<stateDir>/gate-picks/`.
 3. **Landing** — serialized, in an ephemeral worktree at `origin/<source>`
    (#10): `merger.ts`, `merger-worktree.ts`, `resolve-loop.ts` (#67),
    `version-conflict.ts` (#68, #235), `forge-verify.ts` (`mergeMode`, #22),
@@ -182,7 +185,8 @@ a written set.
   verdict is about a clean, on-branch commit (D1, #27, #127). A stack whose
   steps declare `tests` runs a selection of whole test files (#259, #266,
   `gate-selection.ts`): global, core and domain sanity sets, the `related`
-  pass (a pseudo-step in the stack) and the branch's own test files, over the
+  pass (a pseudo-step in the stack), the branch's own test files and the
+  scenario writer's pick (#267), over the
   diff gate-1 (branch vs its seed's fork), gate-2 (merge result vs source) and
   `sandbar gate` (worktree vs `origin/<source>`'s fork, `--domains`) read;
   a `gate-selection` event records it. A step's
@@ -214,7 +218,8 @@ a written set.
   anchor; +2.3k sandbox-stack, +0.2k egress, +0.6k a held copy, +0.2k a
   failed app hook, +0.2k a rerun);
   adjudicator 1.1k + the report (1.5k + 0.1k a unit ruled unit by unit); UI check 1.6k and partition
-  check 1.5k + the issue anchor; scenario writer 2.6k + the issue anchor;
+  check 1.5k + the issue anchor; scenario writer 2.5k + the issue anchor
+  (+0.8k and the seed's sets when its stack selects);
   a janitor task anchor (`prompts/janitor-task.md`, in place of the issue
   anchor) 1.0k + its scope + its prompt source;
   resolve 1.2k + anchor (0.2k for a janitor branch) + paths/trace; landing
