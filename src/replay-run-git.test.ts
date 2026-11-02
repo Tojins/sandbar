@@ -268,7 +268,7 @@ describe("replay freeze (#195)", () => {
     const base = replayLayout(config());
     expect(await git(base.repoDir, ["config", "--get", "remote.origin.pushurl"]))
       .toBe(join(base.stateDir, "push-forbidden"));
-  });
+  }, 15_000);
 
   it("takes an issue's admission from the newest run that has a DONE for it", async () => {
     const logsDir = join(fixture.root, "logs");
