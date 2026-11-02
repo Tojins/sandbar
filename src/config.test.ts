@@ -592,9 +592,27 @@ describe("a test selection (#259)", () => {
       { related: { ...declaration.related, timeoutMs: "5s" } }, /related has 'timeoutMs' that is not a number/,
     ],
     ["a step's tests that are not strings", { steps: [{ ...stack.steps[0], tests: [1] }] }, /steps\[0\] has 'tests' that is not a list of strings/],
-  ])("refuses a stack file with %s, naming the label", (_label, extra, message) => {
-    const text = JSON.stringify(selecting({ ...declaration, ...extra }));
-    expect(() => resolveStackFile(text, LABEL, {})).toThrow(new RegExp(`^${LABEL}: ${message.source}`));
+    ["a step's tests as a string", { steps: [{ ...stack.steps[0], tests: "src/**" }] }, /steps\[0\] has 'tests' that is not a list of strings/],
+    ["domains as a string", { domains: "gate" }, /the stack has 'domains' that is not a list/],
+    [
+      "a domain without a name",
+      { domains: [{ description: "the gate", paths: ["src/**"], sanity: [] }] }, /domains\[0\] needs 'name' as a string/,
+    ],
+    [
+      "a domain whose paths are a string",
+      { domains: [{ ...declaration.domains[0], paths: "src/**" }] }, /domains\[0\] needs 'paths' as a list of strings/,
+    ],
+    [
+      "a domain whose sanity is a string",
+      { domains: [{ ...declaration.domains[0], sanity: "src/a.test.ts" }] }, /domains\[0\] needs 'sanity' as a list of strings/,
+    ],
+    ["a core whose sanity is a string", { core: { paths: [], sanity: "src/a.test.ts" } }, /core needs 'sanity' as a list of strings/],
+  ])("refuses %s, inline and in a stack file, naming the label", (_label, extra, message) => {
+    const config = selecting({ ...declaration, ...extra });
+    expect(() => resolveConfig({ ...minimal, gateStack: config as unknown as GateStackConfig }))
+      .toThrow(new RegExp(`^config\\.gateStack: ${message.source}`));
+    expect(() => resolveStackFile(JSON.stringify(config), LABEL, {}))
+      .toThrow(new RegExp(`^${LABEL}: ${message.source}`));
   });
 });
 

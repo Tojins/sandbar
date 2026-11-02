@@ -2288,7 +2288,7 @@ function resolveStackSource(
   env: Readonly<Record<string, string>>,
 ): ResolvedStackSource {
   if (!("path" in gateStack)) {
-    const stack = resolveGateStack(gateStack);
+    const stack = resolveGateStack(checkStackShapes(INLINE_STACK_LABEL, gateStack));
     checkSecretEnvOutsideConfigEnv(stack, env, INLINE_STACK_LABEL);
     return {
       kind: "inline",
@@ -2341,11 +2341,11 @@ type FieldShapes<T, Required extends boolean> = Readonly<Record<
   FieldShape
 >>;
 
-// The JSON types `resolveGateStack` assumes. An inline stack is a program the
-// operator wrote and runs as it stands; a stack file is text read at gate time,
-// and a wrong type in it has to be a validation message the stack source can
-// complain with, not a TypeError out of the middle of a check. Unknown keys are
-// ignored, as they are inline.
+// The JSON types `resolveGateStack` assumes, checked in either form: a stack
+// file is text read at gate time, and an inline stack is a program no compiler
+// checked (`sandbar.config.mjs` is plain JS), so a wrong type in either has to
+// be a validation message naming its label, not a TypeError out of the middle
+// of a check or a string read as a list. Unknown keys are ignored.
 const CONTAINER_REQUIRED: FieldShapes<StackContainer, true> = {
   name: [isString, "a string"],
   image: [isString, "a string"],
@@ -2440,6 +2440,31 @@ function checkFieldShapes(
   }
 }
 
+function checkStackShapes(
+  label: string,
+  stack: Readonly<Record<string, unknown>>,
+): GateStackConfig {
+  const { containers, steps, domains, sanity, core, related } = stack;
+  if (!Array.isArray(containers) || !Array.isArray(steps)) {
+    throw new SandbarError(
+      `${label}: needs 'containers' and 'steps' as lists.`,
+    );
+  }
+  containers.forEach((c, i) =>
+    checkFieldShapes(label, `containers[${i}]`, c, CONTAINER_REQUIRED, CONTAINER_OPTIONAL));
+  steps.forEach((s, i) =>
+    checkFieldShapes(label, `steps[${i}]`, s, STEP_REQUIRED, STEP_OPTIONAL));
+  checkFieldShapes(label, "the stack", stack, {}, SELECTION_OPTIONAL);
+  (domains as readonly unknown[] | undefined)?.forEach((d, i) =>
+    checkFieldShapes(label, `domains[${i}]`, d, DOMAIN_REQUIRED, {}));
+  if (core !== undefined) checkFieldShapes(label, "core", core, CORE_REQUIRED, {});
+  if (related !== undefined) {
+    checkFieldShapes(label, "related", related, RELATED_REQUIRED, RELATED_OPTIONAL);
+  }
+  // The shapes above are exactly what this type promises.
+  return { containers, steps, domains, sanity, core, related } as GateStackConfig;
+}
+
 function parseStackJson(text: string, label: string): unknown {
   try {
     return JSON.parse(text);
@@ -2464,28 +2489,7 @@ export function resolveStackFile(
   if (!isRecord(parsed)) {
     throw new SandbarError(`${label}: must be a JSON object.`);
   }
-  const { containers, steps, domains, sanity, core, related } = parsed;
-  if (!Array.isArray(containers) || !Array.isArray(steps)) {
-    throw new SandbarError(
-      `${label}: needs 'containers' and 'steps' as lists.`,
-    );
-  }
-  containers.forEach((c, i) =>
-    checkFieldShapes(label, `containers[${i}]`, c, CONTAINER_REQUIRED, CONTAINER_OPTIONAL));
-  steps.forEach((s, i) =>
-    checkFieldShapes(label, `steps[${i}]`, s, STEP_REQUIRED, STEP_OPTIONAL));
-  checkFieldShapes(label, "the stack", parsed, {}, SELECTION_OPTIONAL);
-  (domains as readonly unknown[] | undefined)?.forEach((d, i) =>
-    checkFieldShapes(label, `domains[${i}]`, d, DOMAIN_REQUIRED, {}));
-  if (core !== undefined) checkFieldShapes(label, "core", core, CORE_REQUIRED, {});
-  if (related !== undefined) {
-    checkFieldShapes(label, "related", related, RELATED_REQUIRED, RELATED_OPTIONAL);
-  }
-  // The shapes above are exactly what this type promises.
-  const stack = resolveGateStack(
-    { containers, steps, domains, sanity, core, related } as GateStackConfig,
-    label,
-  );
+  const stack = resolveGateStack(checkStackShapes(label, parsed), label);
   checkSecretEnvOutsideConfigEnv(stack, configEnv, label);
   return { stack, attachments: sandboxGateAttachmentsOf(stack, configEnv, label) };
 }
@@ -2575,9 +2579,8 @@ export function resolveGateStack(
       );
     }
     const timeoutMs = execBound(`${label}: step '${step.name}'`, step.timeoutMs);
-    // Checked for an inline stack too, which is a program no shape table
-    // reads: a misspelled rule would otherwise leave its prose in every prompt
-    // with nothing to say so.
+    // A misspelled rule would otherwise leave its prose in every prompt with
+    // nothing to say so.
     const settles = step.settles ?? [];
     const unknown = settles.filter(
       (rule) => !(SETTLED_RULES as readonly string[]).includes(rule),
