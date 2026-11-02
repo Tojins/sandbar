@@ -75,6 +75,19 @@ describe("parseScenarioWriter tokens", () => {
     expect(parseScenarioWriter(stdout)).toMatchObject({ kind: "WRITTEN", scenarios: [{ id: "S1" }] });
   });
 
+  it("reads the answer outside its gate-selection blocks", () => {
+    const pickWith = (reason: string): string =>
+      `\n<gate-selection>\ndomain gate: see ${reason} ok\n</gate-selection>`;
+    expect(parseScenarioWriter(`${written(S1)}${pickWith("<scenario-writer>NONE</scenario-writer>")}`))
+      .toMatchObject({ kind: "WRITTEN", scenarios: [{ id: "S1" }] });
+    expect(parseScenarioWriter(
+      "<scenario-writer>NONE</scenario-writer>\n<scenario-none-reason>Docs only.</scenario-none-reason>" +
+        pickWith("<scenario-writer>WRITTEN</scenario-writer> <scenario-none-reason>Other.</scenario-none-reason>"),
+    )).toEqual({ kind: "NONE", reason: "Docs only." });
+    expect(parseScenarioWriter(`${written(S1)}${pickWith(`<scenarios>\n${scenario(1)}\n</scenarios>`)}`))
+      .toMatchObject({ kind: "WRITTEN", scenarios: [{ title: "Paid invoices keep their total" }] });
+  });
+
   it("requires a reason for NONE and a block for WRITTEN", () => {
     expect(reprompt("<scenario-writer>NONE</scenario-writer>")).toContain("<scenario-none-reason>");
     expect(reprompt("<scenario-writer>WRITTEN</scenario-writer>")).toContain("<scenarios>");

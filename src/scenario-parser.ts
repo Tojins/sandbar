@@ -36,7 +36,8 @@
 // line, an entry with no reason, a domain the seed does not declare and a
 // path an `area:` entry could not be, listing all of them. `gatePickErrors`
 // checks a pick read back as JSON, stored or pinned, as `scenarioSetErrors`
-// does a set.
+// does a set. The answer itself is read outside every `<gate-selection>`
+// block, so a token or block quoted in a reason never reaches the verdict.
 
 import type { GatePick } from "./gate-selection.js";
 import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
@@ -81,7 +82,8 @@ const NO_TOKEN =
   "`<scenario-writer>NONE</scenario-writer>` followed by a " +
   "`<scenario-none-reason>` block.";
 
-export function parseScenarioWriter(stdout: string): ScenarioWriterParseResult {
+export function parseScenarioWriter(output: string): ScenarioWriterParseResult {
+  const stdout = output.replace(temperedBlockPattern("gate-selection"), "");
   const token = lastToken(stdout, TOKEN);
   if (token === null) return { kind: "NO-SIGNAL", reprompt: NO_TOKEN };
   if (token === "NONE") {
