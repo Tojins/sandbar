@@ -303,11 +303,10 @@ export function prepass(
 }
 
 // A scenario's standing in the ledger. An id the ledger does not hold has
-// never run; `head` is the one it last ran at, and a failure's `round` the
-// one whose archive holds its evidence.
+// never run; `head` and `round` are where it last ran, and that round's
+// archive holds a failure's evidence and a pass's scripts.
 export type LedgerEntry =
-  | { readonly status: "pass" | "unverified"; readonly head: string }
-  | { readonly status: "fail"; readonly head: string; readonly round: number }
+  | { readonly status: "pass" | "fail" | "unverified"; readonly head: string; readonly round: number }
   | { readonly status: "retired" };
 
 export type ScenarioLedger = ReadonlyMap<string, LedgerEntry>;
@@ -362,9 +361,7 @@ export function advanceLedger(
   const next = new Map(ledger);
   for (const outcome of runnerOutcomes(runner)) {
     if (outcome.outcome === "unverified" && outcome.reason !== "runner") continue;
-    next.set(outcome.id, outcome.outcome === "fail"
-      ? { status: "fail", head, round }
-      : { status: outcome.outcome, head });
+    next.set(outcome.id, { status: outcome.outcome, head, round });
   }
   return next;
 }

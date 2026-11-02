@@ -127,7 +127,8 @@
 // what each ruling means for its pass. A verifier report with scenario units
 // is ruled unit by unit, and each scenario it overrules is retired from the
 // cycle's scenario ledger (#239), which the verifier selects a round's
-// scenarios from.
+// scenarios from. At DONE, that ledger and the domains in effect at the head
+// become the set's scenario records (#268, scenario-records.ts).
 //
 // The other deliberate runner-side exception is #127's off-branch repair.
 // `headMismatch` has already made the mechanical ancestry decision; when the
@@ -311,7 +312,7 @@ import type {
 import { parseVerdict } from "./verdict-parser.js";
 import { parsePartitionCheck } from "./partition-check-parser.js";
 import { summarizeGateFailure } from "./gate.js";
-import { selectionPlanFor, selectionTraceLine, selects } from "./gate-selection.js";
+import { selectionDeclarations, selectionPlanFor, selectionTraceLine, selects } from "./gate-selection.js";
 import type { GateSemaphore } from "./gate-semaphore.js";
 import {
   ContainerBringupError,
@@ -349,6 +350,7 @@ import {
   initialState,
   step,
   visiblePhases,
+  writtenSet,
 } from "./inner-loop-machine.js";
 import {
   type IssueSource,
@@ -368,6 +370,7 @@ import { type RunScope, sandboxNetworkNameFor, scopedResourcePrefix } from "./na
 import { PROMISE_COMPLETION_SIGNALS, parsePromise } from "./promise-parser.js";
 import { parseUiCheck } from "./ui-check-parser.js";
 import type { ScenarioSet } from "./scenario-parser.js";
+import { appendScenarioRecords } from "./scenario-records.js";
 import { type ScenarioWriterTask, createScenarioWriterTask } from "./scenario-writer-run.js";
 import {
   parseRulings,
@@ -1818,6 +1821,20 @@ async function runSandboxCycle(
       }
     }
 
+    const set = writtenSet(state.scenarioWriter);
+    if (action.verdict.type === "DONE" && set !== null) {
+      const head = await requireIssueTip({ worktreePath, issue }, "at DONE");
+      await appendScenarioRecords({
+        stateDir: config.layout.stateDir,
+        worktree: worktreePath,
+        sha: head,
+        set,
+        ledger: scenarioLedger.current,
+        domains: selectionDeclarations(await opts.stackSource.forHead(worktreePath, head))
+          .flatMap((d) => d.domains),
+        roundDir: (round) => verifierRoundDir({ opts, invocationSequence }, round),
+      });
+    }
     return { verdict: action.verdict, accumulatedCommits: accumulated, specGaps };
   } catch (err) {
     // After an abort every failure is the teardown's doing, so none is
@@ -2508,7 +2525,10 @@ const branchRoleInputs = (ctx: ExecuteActionCtx): ReviewerPromptInputs => ({
   ...(ctx.config.contextMdPath === undefined ? {} : { contextMdPath: ctx.config.contextMdPath }),
 });
 
-async function requireIssueTip(ctx: ExecuteActionCtx, when: string): Promise<string> {
+async function requireIssueTip(
+  ctx: Pick<ExecuteActionCtx, "worktreePath" | "issue">,
+  when: string,
+): Promise<string> {
   const tip = await branchTip(ctx.worktreePath, ctx.issue.branch);
   if (tip === null) {
     throw new SandbarError(`issue branch ${ctx.issue.branch} disappeared ${when}`);
@@ -3866,7 +3886,10 @@ export async function runVerifier(
 }
 
 // Where verifier round `round`'s evidence is archived in the run's log tree.
-const verifierRoundDir = (ctx: ExecuteActionCtx, round: number): string =>
+const verifierRoundDir = (
+  ctx: Pick<ExecuteActionCtx, "opts" | "invocationSequence">,
+  round: number,
+): string =>
   ctx.opts.attemptLogger.verifierRoundDir(ctx.invocationSequence.filename({
     role: "verifier-round",
     attempt: round,
