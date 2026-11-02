@@ -28,10 +28,10 @@
 // group, and verify keeps each finding under its `[group: …]` line.
 // Four fragments of rule prose render only while no gate step settles their
 // rule (#183, `config.ts` `settles`): `missing-tests` drops the lister's
-// uncovered-line clause and the fixer's missing-test instruction,
-// `commit-ritual` the fixer's and the implementer's per-commit ritual. The
-// settled set is the caller's, read from the stack source where the round
-// starts.
+// and the fixer's uncovered-line clause, never their behaviour-level
+// missing-test rule (#264), `commit-ritual` the fixer's and the implementer's
+// per-commit ritual. The settled set is the caller's, read from the stack
+// source where the round starts.
 // The verifier's white-box review (#180): diff stat + commits plus every
 // earlier white-box round (#88), a defect a round raised counting as addressed
 // only once it is gone from every site (#181); the lister's overrule history
@@ -171,8 +171,8 @@ const REVIEWER_CHUNK_BASE_TPL = loadTemplate("reviewer-chunk-base");
 const ADJUDICATOR_TPL = loadTemplate("adjudicator");
 const ADJUDICATOR_REPORT_TPL = loadTemplate("adjudicator-report");
 const ADJUDICATOR_UNITS_TPL = loadTemplate("adjudicator-units");
-const QUALITY_TESTS_MISSING_LISTER_TPL = loadTemplate("quality-tests-missing-lister");
-const QUALITY_TESTS_MISSING_FIXER_TPL = loadTemplate("quality-tests-missing-fixer");
+const QUALITY_TESTS_UNCOVERED_LISTER_TPL = loadTemplate("quality-tests-uncovered-lister");
+const QUALITY_TESTS_UNCOVERED_FIXER_TPL = loadTemplate("quality-tests-uncovered-fixer");
 const COMMIT_RITUAL_FIXER_TPL = loadTemplate("commit-ritual-fixer");
 const COMMIT_RITUAL_IMPLEMENTER_TPL = loadTemplate("commit-ritual-implementer");
 
@@ -1296,8 +1296,8 @@ export function renderQualityReviewSlot(inputs: QualityReviewSlotRender): string
     dimensions: projectGroup === null
       ? render(REVIEWER_QUALITY_DIMENSIONS_SANDBAR_TPL, {
           conventionsRef: conventionsRef(inputs.claudeMdPath, inputs.contextMdPath),
-          testsMissing: unlessSettled(
-            inputs.settled, "missing-tests", QUALITY_TESTS_MISSING_LISTER_TPL, " ",
+          testsUncovered: unlessSettled(
+            inputs.settled, "missing-tests", QUALITY_TESTS_UNCOVERED_LISTER_TPL, " ",
           ),
         })
       : render(REVIEWER_QUALITY_DIMENSIONS_GROUP_TPL, { groupName: projectGroup.name }),
@@ -1311,8 +1311,8 @@ export function renderQualityFixSlot(inputs: QualityFixSlotRender): string {
   return render(QUALITY_FIXER_TPL, {
     ...branchSlotVars(inputs),
     standards: renderStandards(inputs.standards, { kind: "all" }),
-    testsMissing: unlessSettled(
-      inputs.settled, "missing-tests", QUALITY_TESTS_MISSING_FIXER_TPL, " ",
+    testsUncovered: unlessSettled(
+      inputs.settled, "missing-tests", QUALITY_TESTS_UNCOVERED_FIXER_TPL, " ",
     ),
     commitRitual: unlessSettled(
       inputs.settled,

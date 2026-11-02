@@ -588,8 +588,10 @@ export type GateStep = {
 };
 
 // The closed set of rules a gate step may settle (#183). `missing-tests`: a
-// changed production line no test covers or pins. `commit-ritual`: the
-// per-commit rituals the conventions require, a version bump for one.
+// changed production line no test covers; the rule that a changed behaviour
+// needs a test that would notice it breaking is never settled (#264).
+// `commit-ritual`: the per-commit rituals the conventions require, a
+// version bump for one.
 export const SETTLED_RULES = ["missing-tests", "commit-ritual"] as const;
 export type SettledRule = (typeof SETTLED_RULES)[number];
 

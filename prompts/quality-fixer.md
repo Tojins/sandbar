@@ -23,9 +23,12 @@ and the verifier reads the branch after a green gate there.
 
 1. Read. Open the code each finding names, and read the branch's hunks around
    it with `git diff {{baseRef}}...HEAD -- <file>`.
-2. Tests. {{testsMissing}}Rewrite the tests the report says test nothing. A
-   test is bad when the test itself could be deleted and the suite would stay
-   green.
+2. Tests. Write the tests the report says are missing. A test is missing
+   when a behaviour the branch adds or changes has no test that would notice
+   it breaking; implementation detail, and glue, config and wiring the
+   suites already run, need no test of their own. {{testsUncovered}}Rewrite
+   the tests the report says test nothing. A test is bad when the test
+   itself could be deleted and the suite would stay green.
 3. Standards. Fix each violation of the coding standards above and of the
    conventions in {{conventionsRef}} that the report names. Change production
    code only to meet a standard.
