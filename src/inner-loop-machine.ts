@@ -214,6 +214,10 @@ export type ScenarioWriterStatus =
       readonly outcome: Exclude<ScenarioWriterOutcome, { readonly kind: "wrote" }>;
     };
 
+// The set the writer wrote, which the verifier runs.
+export const writtenSet = (writer: ScenarioWriterStatus): ScenarioSet | null =>
+  writer.kind === "settled" && writer.outcome.kind === "written" ? writer.outcome.set : null;
+
 export const HARD_ERROR_MAX_RETRIES = 2;
 export const REVIEWER_HARNESS_FAILURE_LIMIT = 2;
 
@@ -1411,16 +1415,9 @@ function toVerifier(state: LoopState): StepResult {
       action: { kind: "await-scenario-writer" },
     };
   }
-  const writer = state.scenarioWriter;
   return {
     state: { ...state, phase: "needs-verifier" },
-    action: {
-      kind: "run-verifier",
-      attempt: state.attempt,
-      scenarios: writer.kind === "settled" && writer.outcome.kind === "written"
-        ? writer.outcome.set
-        : null,
-    },
+    action: { kind: "run-verifier", attempt: state.attempt, scenarios: writtenSet(state.scenarioWriter) },
   };
 }
 

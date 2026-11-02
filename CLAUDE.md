@@ -92,7 +92,10 @@ and the gate stack (`config.gateStack`, #24).
    rerun only failed, unrun and touched scenarios, by a per-cycle ledger in
    `verifier.ts`, #239) → adjudicator on dispute of either pass (#167),
    unit by unit beside a scenario unit (`adjudication-parser.ts`), retiring
-   each scenario it overrules.
+   each scenario it overrules. At DONE, each written scenario's final verdict,
+   domains (derived from its `area`) and, for a pass, a copy of its runner
+   directory are appended under `<stateDir>/scenarios/`
+   (`scenario-records.ts`, #268).
    Budgets `maxQualityRounds`/`maxGateRounds`/`maxReviewRounds`. Read-only
    roles that write park the issue. Beside attempt 1, the scenario writer
    (#203, `scenario-writer-run.ts`, grammar in `scenario-parser.ts`) runs once

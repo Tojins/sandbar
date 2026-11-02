@@ -20,6 +20,7 @@ const innerLoopMocks = vi.hoisted(() => ({
   // The verifier workspace's file operations (#238), in the order they ran.
   verifierFs: [] as string[],
   runAppHook: vi.fn(async (): Promise<"ok" | "failed" | "none"> => "none"),
+  appendScenarioRecords: vi.fn(async (_args: unknown) => undefined),
   measureNetDiff: vi.fn(async (): Promise<NetDiff> => ({ chars: 0, largestFiles: [] })),
   branchIsAheadOfSeed: vi.fn(async () => false),
   ensureIssueBranch: vi.fn(async () => ({
@@ -144,6 +145,11 @@ vi.mock("./verifier-run.js", async (importOriginal) => ({
     innerLoopMocks.verifierFs.push(`restage [${from}] -> ${workspace}`);
   },
   runAppHook: innerLoopMocks.runAppHook,
+}));
+
+vi.mock("./scenario-records.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./scenario-records.js")>()),
+  appendScenarioRecords: innerLoopMocks.appendScenarioRecords,
 }));
 
 vi.mock("./db-copy.js", async (importOriginal) => ({
@@ -4943,6 +4949,87 @@ describe("runInnerLoop context terminals (#158)", () => {
       await rm(logsDir, { recursive: true, force: true });
     });
 
+    describe("the scenario records (#268)", () => {
+      const set: ScenarioSet = {
+        version: 1,
+        issue: Number(issue.id),
+        seed: { ref: "origin/main", sha: "fork-sha" },
+        writer: { provider: "claude", model: "opus", effort: null },
+        scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: ["src"], given: ["g"], when: ["w"], then: ["t"] }],
+      };
+      const tipDomain = { name: "ui", description: "ui", paths: ["src/ui/**"], sanity: [] };
+      const branchDomain = { name: "gate", description: "gate", paths: ["src/gate.ts"], sanity: [] };
+      let logsDir: string;
+      const run = (reviewer: string, overrides: Parameters<typeof harness>[1] = {}) => {
+        const { opts } = harness(async (options) => {
+          const name = options.name ?? "";
+          if (name.startsWith("scenario-runner-")) {
+            return {
+              ...approvedReview,
+              stdout: "<scenario-runner>REPORTED</scenario-runner>\n<scenario-results>\n### S1: PASS\n</scenario-results>",
+            };
+          }
+          return name.startsWith("reviewer-") ? { ...approvedReview, stdout: reviewer } : routine(options);
+        }, {
+          scenarioWriter: true,
+          scenarioRunnerAgent: "codex",
+          scenarioRunnerModelId: "runner-model",
+          layout: { repoDir: "/repo", worktreesDir: "/worktrees", logsDir, anchorCacheDir: "/anchor-cache", stateDir: "/state" },
+          ...overrides,
+        } as Parameters<typeof harness>[1]);
+        return runInnerLoop(issue, {
+          ...opts,
+          stackSource: {
+            ...opts.stackSource,
+            forHead: async () => ({
+              stack: { containers: [], steps: [], domains: [tipDomain], sanity: [], core: null },
+              attachments: { env: {}, mounts: [] },
+              classification: { kind: "domains", containers: [], branch: { domains: [branchDomain], sanity: [], core: null } },
+              tipBlob: null,
+            }),
+          } as typeof opts.stackSource,
+        });
+      };
+
+      beforeEach(() => {
+        logsDir = mkdtempSync(join(tmpdir(), "sandbar-records-"));
+        mkdirSync(join(logsDir, `issue-${issue.id}`, "verifier-workspace", "run"), { recursive: true });
+        innerLoopMocks.appendScenarioRecords.mockClear();
+        innerLoopMocks.verifierFs.length = 0;
+        innerLoopMocks.createScenarioWriterTask.mockReturnValue(
+          fakeWriter(Promise.resolve({ kind: "written", set })),
+        );
+      });
+      afterEach(async () => {
+        await rm(logsDir, { recursive: true, force: true });
+      });
+
+      it("appends them at DONE from the cycle's ledger and the domains in effect at the head", async () => {
+        await expect(run("<verdict>APPROVED</verdict>")).resolves.toMatchObject({ type: "DONE" });
+
+        expect(innerLoopMocks.appendScenarioRecords).toHaveBeenCalledTimes(1);
+        const [args] = innerLoopMocks.appendScenarioRecords.mock.calls[0] as unknown as [
+          Parameters<typeof import("./scenario-records.js").appendScenarioRecords>[0],
+        ];
+        expect(args).toMatchObject({
+          stateDir: "/state",
+          worktree: "/worktree",
+          sha: "head123",
+          set,
+          ledger: new Map([["S1", { status: "pass", head: "head123", round: 1 }]]),
+          domains: [tipDomain, branchDomain],
+        });
+        const workspace = join(logsDir, `issue-${issue.id}`, "verifier-workspace");
+        expect(innerLoopMocks.verifierFs).toContain(`archive ${workspace} -> ${args.roundDir(1)}`);
+      });
+
+      it("appends none for an issue that ends otherwise", async () => {
+        await expect(run("### Correctness\nwrong\n<verdict>CHANGES-REQUESTED</verdict>", { maxReviewRounds: 1 }))
+          .resolves.not.toMatchObject({ type: "DONE" });
+        expect(innerLoopMocks.appendScenarioRecords).not.toHaveBeenCalled();
+      });
+    });
+
     it("is aborted when the admission ends before the join", async () => {
       const writer = fakeWriter(new Promise(() => undefined));
       innerLoopMocks.createScenarioWriterTask.mockReturnValue(writer);
@@ -5013,10 +5100,12 @@ describe("runInnerLoop context terminals (#158)", () => {
       ]);
     });
 
-    it("creates no task when it is off", async () => {
+    it("creates no task when it is off, and a DONE appends no scenario record", async () => {
+      innerLoopMocks.appendScenarioRecords.mockClear();
       const { opts } = harness(routine, { scenarioWriter: false });
       await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
       expect(innerLoopMocks.createScenarioWriterTask).not.toHaveBeenCalled();
+      expect(innerLoopMocks.appendScenarioRecords).not.toHaveBeenCalled();
     });
 
     // #238: the verifier's workspace exists, empty and mounted read-write,

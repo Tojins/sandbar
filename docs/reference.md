@@ -281,6 +281,14 @@ If the writer fails, that is recorded and nothing else changes. It runs once
 per admission, routed by `scenarioWriter*` and
 `promptExtensions.scenarioWriter`.
 
+When the verifier passes an issue, each scenario of its set gets one line in
+`<stateDir>/scenarios/records.jsonl`: the issue, the branch sha, its
+Given/When/Then, the gate stack's domains whose `paths` reach its `area`, and
+its final verdict (`pass`, `fail-overruled` or `unverified`). A passed
+scenario's runner directory, scripts included, is copied to
+`<stateDir>/scenarios/issue-<n>/<sha>/S<n>/`. A parked or failed issue adds
+nothing.
+
 ### Rounds
 
 Each round after the implementer reports done:

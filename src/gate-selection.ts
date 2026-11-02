@@ -249,15 +249,21 @@ export async function selectionPlanFor(
   baseRef: string,
   namedDomains: readonly string[] = [],
 ): Promise<SelectionPlan | null> {
-  const { stack, classification } = inEffect;
+  const { stack } = inEffect;
   if (!selects(stack)) return null;
   return planSelection({
-    declarations: classification.kind === "domains" ? [stack, classification.branch] : [stack],
+    declarations: selectionDeclarations(inEffect),
     steps: stack.steps,
     ...(await readSelectionTree(worktree, baseRef)),
     namedDomains,
   });
 }
+
+// The stack in effect's declaration, and a branch's own edit after it.
+export const selectionDeclarations = (
+  { stack, classification }: Pick<StackInEffect, "stack" | "classification">,
+): readonly [SanityDeclaration, ...SanityDeclaration[]] =>
+  classification.kind === "domains" ? [stack, classification.branch] : [stack];
 
 export const selects = (stack: ResolvedGateStack): boolean =>
   stack.steps.some((step) => step.tests !== null);
