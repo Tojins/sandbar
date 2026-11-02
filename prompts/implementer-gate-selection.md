@@ -1,1 +1,1 @@
-Gate-1 does not run the whole suite: it runs the global sanity tests, the sanity sets of the domains your change reaches, the tests that import the files you changed, and the test files you add or change.
+Gate-1 does not run the whole suite: it runs the global sanity tests, the sanity sets of the domains your change reaches, the tests that import the files you changed, the test files you add or change, and any picked for this issue.

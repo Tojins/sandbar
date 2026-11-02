@@ -202,6 +202,10 @@
 // (#240) take the task's place, settled `written` from the start: no writer
 // runs, and the verifier workspace and every round are as if it had written
 // that set.
+// Gate-1 adds the writer's pick to its selection once the task has settled
+// with one, and one that runs earlier selects without it (#267). A replay
+// adds its case's `pinnedGatePick` instead, or nothing, whatever a writer
+// picks.
 // With `config.databaseCopies` (#201) each sandbox cycle has a slot of the
 // run's copies (`createDbCopySlot`) for the target sibling of its stack in
 // effect at setup. Before every action the runner aligns it to that action's
@@ -312,7 +316,13 @@ import type {
 import { parseVerdict } from "./verdict-parser.js";
 import { parsePartitionCheck } from "./partition-check-parser.js";
 import { summarizeGateFailure } from "./gate.js";
-import { selectionDeclarations, selectionPlanFor, selectionTraceLine, selects } from "./gate-selection.js";
+import {
+  type GatePick,
+  selectionDeclarations,
+  selectionPlanFor,
+  selectionTraceLine,
+  selects,
+} from "./gate-selection.js";
 import type { GateSemaphore } from "./gate-semaphore.js";
 import {
   ContainerBringupError,
@@ -344,6 +354,7 @@ import {
   type LoopState,
   type QualityOutcome,
   type ReviewerResult,
+  type ScenarioWriterStatus,
   type Verdict,
   decideAfterTerminal,
   initialAction,
@@ -828,6 +839,9 @@ export type InnerLoopConfig = {
   // A replay case's frozen set (#240), run by the verifier in place of a
   // written one; a run never sets it.
   readonly pinnedScenarios?: ScenarioSet;
+  // A replay case's frozen gate pick (#267), null for a case that froze none:
+  // gate-1 adds it in place of the writer's. A run never sets it.
+  readonly pinnedGatePick?: GatePick | null;
   readonly scenarioWriterAgent: AgentProviderName;
   readonly scenarioWriterModelId: string;
   // The verifier's scenario runner (#180), beside the white-box review.
@@ -1059,6 +1073,7 @@ export async function runInnerLoop(
         attemptLogger: opts.attemptLogger,
         onEvent: opts.onEvent,
         providerState: opts.providerState,
+        stackSource: opts.stackSource,
       })
     : null;
   try {
@@ -1107,7 +1122,7 @@ export async function runInnerLoop(
 // A writer already settled on a set: the machine never starts it and runs
 // the set in every verifier round.
 function pinnedScenarioWriter(set: ScenarioSet): ScenarioWriterTask {
-  const outcome = { kind: "written", set } as const;
+  const outcome = { kind: "written", set, pick: null } as const;
   return {
     status: () => ({ kind: "settled", outcome }),
     start: () => undefined,
@@ -3343,10 +3358,21 @@ export async function runSandboxAndPublish(
   return result;
 }
 
+// Part 6 of an issue's gate-1: a replay's pinned pick, else the scenario
+// writer's once it has settled with one.
+function gatePickOf(
+  pinned: GatePick | null | undefined,
+  writer: ScenarioWriterStatus,
+): GatePick | null {
+  if (pinned !== undefined) return pinned;
+  return writer.kind === "settled" && writer.outcome.kind !== "failed" ? writer.outcome.pick : null;
+}
+
 // Gate-1 on the head the quality pass left (#185). Serial, not beside the
 // fixer: the gate mounts the worktree the fixer writes. How the quality pass
 // ended is kept for the round's record. Its test selection (#266) is the
-// branch's diff against its seed's fork, and a red trace names what it ran.
+// branch's diff against its seed's fork, plus the scenario writer's pick once
+// it has settled with one (#267), and a red trace names what it ran.
 export async function runGate(
   action: Extract<LoopAction, { kind: "run-gate" }>,
   ctx: ExecuteActionCtx,
@@ -3359,7 +3385,10 @@ export async function runGate(
   const inEffect = await opts.stackSource.forHead(ctx.worktreePath, head);
   await ctx.reportGateStack(inEffect);
   const stack = await gateStack.ensure(inEffect.stack);
-  const plan = await selectionPlanFor(inEffect, ctx.worktreePath, ctx.base.ref);
+  const pick = gatePickOf(opts.config.pinnedGatePick, ctx.scenarioWriter?.status() ?? { kind: "off" });
+  const plan = await selectionPlanFor(inEffect, ctx.worktreePath, ctx.base.ref, {
+    picks: pick === null ? [] : [{ issue: Number(issue.id), ...pick }],
+  });
   const admitted = await opts.gateSemaphore.run(() => stack.runGate(plan));
   const gate1 = admitted.value;
   // Before the verdict is classified, for #135's reason: the re-prompt is the

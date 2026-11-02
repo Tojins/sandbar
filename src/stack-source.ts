@@ -41,6 +41,10 @@
 // `forHead` is handed, whose remote-tracking ref only has to reach the fork.
 // Landing asks the same of every merge result, at the merger worktree's HEAD.
 //
+// A SEED (`atCommit`, #267): the scenario writer picks domains from the
+// declaration at the commit its snapshot is of, read from the cache with no
+// host check. A missing or invalid file there reads as no stack.
+//
 // `sandbar gate` and `pulled-images` read the file from a tree on disk
 // (`readStackFrom`): they have no cache and are run by a human, and a CI job
 // grading its own PR is the one place a branch is meant to see its own stack.
@@ -92,6 +96,10 @@ export type StackSource = {
   // `current` returns, with the branch's env laid over it where that is all
   // the branch changed.
   readonly forHead: (worktree: string, head: string) => Promise<HeadStack>;
+  // The stack as commit `sha` of the bare cache has it, or null when its file
+  // is missing or invalid there: what a seed declares to its scenario writer
+  // (#267). Never checked against the host.
+  readonly atCommit: (sha: string) => Promise<ResolvedGateStack | null>;
 };
 
 // `tipBlob` is the accepted tip stack's blob, null for an inline stack.
@@ -189,6 +197,7 @@ export async function openStackSource(
         classification: { kind: "same" },
         tipBlob: null,
       }),
+      atCommit: async () => source.stack,
     };
   }
   const { path } = source;
@@ -275,6 +284,15 @@ export async function openStackSource(
           : stackInEffect(path, tip.resolved, branch, opts.configEnv)),
         tipBlob: tip.blob,
       };
+    },
+    atCommit: async (sha) => {
+      try {
+        const blob = await blobAt(cache, sha, path);
+        return (await readStackBlob(cache, blob, `${path} at ${sha}`, opts.configEnv)).stack;
+      } catch (err) {
+        if (!(err instanceof SandbarError)) throw err;
+        return null;
+      }
     },
   };
 }

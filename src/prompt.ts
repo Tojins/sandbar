@@ -49,7 +49,8 @@
 // The scenario writer (#203) gets the issue anchor, its adversarial contract
 // and its own prompt extension, probed in the seed snapshot it explores; no
 // project anchor, diff or branch history, because it works from the seed and
-// discovers the rest itself.
+// discovers the rest itself. When the seed's stack selects (#267), its contract
+// is followed by the seed's declaration to pick a gate selection from.
 // The verifier's scenario runner (#238) gets the project anchor, its contract
 // with what the sandbox offers this round (the sandbox-stack and egress slots
 // the implementer reads, the database copy it holds, how the
@@ -100,7 +101,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { SandbarError, isErrno, isExitCode } from "./errors.js";
-import type { PromptExtension, SettledRule } from "./config.js";
+import type { PromptExtension, SanityDeclaration, SettledRule } from "./config.js";
 import type { IssueBranchBase } from "./git-ops.js";
 import type { ReviewScope, ReviewPass } from "./inner-loop-machine.js";
 import {
@@ -149,6 +150,7 @@ const UI_CHECK_TPL = loadTemplate("ui-check");
 const PARTITION_CHECK_TPL = loadTemplate("partition-check");
 const ANCHOR_CONDENSER_TPL = loadTemplate("anchor-condenser");
 const SCENARIO_WRITER_TPL = loadTemplate("scenario-writer");
+const SCENARIO_WRITER_GATE_SELECTION_TPL = loadTemplate("scenario-writer-gate-selection");
 const SCENARIO_RUNNER_TPL = loadTemplate("scenario-runner");
 const SCENARIO_RUNNER_DB_COPY_TPL = loadTemplate("scenario-runner-db-copy");
 const REVIEWER_DB_NOTICE_TPL = loadTemplate("reviewer-db-notice");
@@ -518,16 +520,39 @@ export async function buildPartitionCheckPrompt(
 }
 
 // The scenario writer (#203). `snapshotPath` is the seed tree it reads, where
-// a path extension must resolve.
+// a path extension must resolve; `declaration` is its seed stack's when that
+// selects, and null otherwise.
 export async function buildScenarioWriterPrompt(
   issueId: string,
   anchor: IssueAnchorOptions,
   snapshotPath: string,
   extension: PromptExtension | undefined,
+  declaration: SanityDeclaration | null,
 ): Promise<string> {
   const slot = promptExtensionSlot(resolvePromptExtension(snapshotPath, extension)).trimEnd();
-  return [await buildIssueAnchor(issueId, anchor), SCENARIO_WRITER_TPL, ...(slot ? [slot] : [])]
-    .join("\n\n---\n\n");
+  return [
+    await buildIssueAnchor(issueId, anchor),
+    SCENARIO_WRITER_TPL,
+    ...(declaration === null ? [] : [
+      render(SCENARIO_WRITER_GATE_SELECTION_TPL, { declaration: renderDeclaration(declaration) }),
+    ]),
+    ...(slot ? [slot] : []),
+  ].join("\n\n---\n\n");
+}
+
+const globList = (globs: readonly string[]): string =>
+  globs.length === 0 ? "none" : globs.map((glob) => `\`${glob}\``).join(", ");
+
+// One line per set the writer can see or pick.
+function renderDeclaration(declaration: SanityDeclaration): string {
+  const { sanity, core, domains } = declaration;
+  return [
+    `- global sanity: ${globList(sanity)}`,
+    ...(core === null ? [] : [`- core: paths ${globList(core.paths)}; sanity ${globList(core.sanity)}`]),
+    ...domains.map(({ name, description, paths, sanity }) =>
+      [`- domain \`${name}\`: paths ${globList(paths)}; sanity ${globList(sanity)}.`, description]
+        .join(" ").trimEnd()),
+  ].join("\n");
 }
 
 // What the scenario runner can rely on in the sandbox this round (#238).

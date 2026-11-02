@@ -27,8 +27,21 @@
 // primitive for rerunning a scenario whose area a later change touched.
 // `scenarioSetErrors` checks a stored set read back as JSON, such as one a
 // replay case pins (#240), against the shape the grammar guarantees.
+//
+// Beside either answer, when the seed's stack selects, the writer picks part 6
+// of its issue's gate selection (#267, gate-selection.ts) in a
+// `<gate-selection>` block, the last one winning: one entry a line,
+// `domain <name>: <reason>` or `test <path>: <reason>`, and an empty block
+// picks nothing. `parseGateSelection` refuses a missing block, any other
+// line, an entry with no reason, a domain the seed does not declare and a
+// path an `area:` entry could not be, listing all of them. `gatePickErrors`
+// checks a pick read back as JSON, stored or pinned, as `scenarioSetErrors`
+// does a set. Both read the output's top-level parts (`lastTopLevel`), so a
+// token or block quoted in a reason or a scenario's clause is text, never the
+// verdict, the set or the pick.
 
-import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
+import type { GatePick } from "./gate-selection.js";
+import { lastTopLevel, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 
 export const SCENARIO_NEEDS = ["ui", "api", "sql", "integration", "cli"] as const;
 export type ScenarioNeed = (typeof SCENARIO_NEEDS)[number];
@@ -70,11 +83,19 @@ const NO_TOKEN =
   "`<scenario-writer>NONE</scenario-writer>` followed by a " +
   "`<scenario-none-reason>` block.";
 
+const answerParts = (stdout: string): Partial<Record<"token" | "scenarios" | "noneReason" | "pick", string>> =>
+  lastTopLevel(stdout, {
+    token: TOKEN,
+    scenarios: temperedBlockPattern("scenarios"),
+    noneReason: temperedBlockPattern("scenario-none-reason"),
+    pick: temperedBlockPattern("gate-selection"),
+  });
+
 export function parseScenarioWriter(stdout: string): ScenarioWriterParseResult {
-  const token = lastToken(stdout, TOKEN);
-  if (token === null) return { kind: "NO-SIGNAL", reprompt: NO_TOKEN };
+  const { token, scenarios: block, noneReason } = answerParts(stdout);
+  if (token === undefined) return { kind: "NO-SIGNAL", reprompt: NO_TOKEN };
   if (token === "NONE") {
-    const reason = lastToken(stdout, temperedBlockPattern("scenario-none-reason")) ?? "";
+    const reason = noneReason ?? "";
     return reason
       ? { kind: "NONE", reason }
       : {
@@ -83,8 +104,7 @@ export function parseScenarioWriter(stdout: string): ScenarioWriterParseResult {
             "nothing the issue changes can be observed from outside.",
         };
   }
-  const block = lastToken(stdout, temperedBlockPattern("scenarios"));
-  if (block === null) {
+  if (block === undefined) {
     return {
       kind: "NO-SIGNAL",
       reprompt: "A WRITTEN answer requires a `<scenarios>` block holding every scenario.",
@@ -151,6 +171,52 @@ function areaPathProblem(path: string): string | null {
     return `\`${path}\` has an empty, \`.\` or \`..\` segment`;
   }
   return null;
+}
+
+const PICK_LINE = /^(domain|test)\s+(\S+?):\s+(\S.*)$/;
+
+export function parseGateSelection(
+  stdout: string,
+  declared: readonly string[],
+): { readonly kind: "picked"; readonly pick: GatePick } | { readonly kind: "malformed"; readonly reprompt: string } {
+  const block = answerParts(stdout).pick;
+  if (block === undefined) {
+    return {
+      kind: "malformed",
+      reprompt: "Your answer needs a `<gate-selection>` block beside it, empty when you pick nothing.",
+    };
+  }
+  const violations: string[] = [];
+  const domains: { name: string; reason: string }[] = [];
+  const tests: { path: string; reason: string }[] = [];
+  for (const [index, line] of block.split("\n").entries()) {
+    if (line.trim() === "") continue;
+    const at = `line ${index + 1}`;
+    const entry = PICK_LINE.exec(line.trim());
+    const [, kind, subject = "", reason = ""] = entry ?? [];
+    if (kind === "domain") {
+      if (!declared.includes(subject)) {
+        violations.push(`${at}: \`${subject}\` is not a domain; pick from ${declared.join(", ") || "none"}.`);
+      }
+      domains.push({ name: subject, reason: reason.trim() });
+    } else if (kind === "test") {
+      const problem = areaPathProblem(subject);
+      if (problem !== null) violations.push(`${at}: ${problem}.`);
+      tests.push({ path: subject, reason: reason.trim() });
+    } else {
+      violations.push(`${at}: \`${line.trim()}\` is not \`domain <name>: <reason>\` or \`test <path>: <reason>\`.`);
+    }
+  }
+  return violations.length === 0
+    ? { kind: "picked", pick: { domains, tests } }
+    : {
+        kind: "malformed",
+        reprompt: [
+          "Your `<gate-selection>` block does not follow the format. Fix every point below " +
+            "and answer again with the whole block:",
+          ...violations.map((violation) => `- ${violation}`),
+        ].join("\n"),
+      };
 }
 
 function parseScenarioBlock(block: string): {
@@ -387,4 +453,19 @@ export function scenarioSetErrors(value: unknown, issue: number): readonly strin
       errors.push(...scenarioErrors(scenario, `scenarios[${i}]`, `S${i + 1}`)));
   }
   return errors;
+}
+
+const isEntryList = (value: unknown, key: "name" | "path"): boolean =>
+  Array.isArray(value) && value.every((entry: unknown) =>
+    isObject(entry) && typeof entry[key] === "string" && entry[key] !== "" &&
+    typeof entry.reason === "string" && entry.reason !== "");
+
+// Every way `value`, a pick read back as JSON (a stored one, a replay case's),
+// is not a `GatePick`.
+export function gatePickErrors(value: unknown): readonly string[] {
+  if (!isObject(value)) return ["is not an object"];
+  return [
+    ...(isEntryList(value.domains, "name") ? [] : ["domains is not a list of { name, reason }"]),
+    ...(isEntryList(value.tests, "path") ? [] : ["tests is not a list of { path, reason }"]),
+  ];
 }

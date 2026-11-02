@@ -108,6 +108,9 @@ export type RepoLayout = {
   // Read-only seed snapshots, one per issue (#203). Beside `worktreesDir`,
   // not in it: the stale-clone sweep owns everything there.
   readonly snapshotsDir: string;
+  // Each issue's latest gate pick (#267), which gate-2 reads in whichever run
+  // lands it.
+  readonly gatePicksDir: string;
 };
 
 export function repoLayout(hostCwd: string, workDir: string): RepoLayout {
@@ -122,6 +125,7 @@ export function repoLayout(hostCwd: string, workDir: string): RepoLayout {
     logsDir: join(stateDir, "logs"),
     anchorCacheDir: join(stateDir, "anchor-cache"),
     snapshotsDir: join(stateDir, "snapshots"),
+    gatePicksDir: join(stateDir, "gate-picks"),
   };
 }
 

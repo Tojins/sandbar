@@ -135,6 +135,7 @@ import type { UiCheckResult } from "./ui-check-parser.js";
 import type { PartitionCheckResult } from "./partition-check-parser.js";
 import { loadTemplate } from "./prompts.js";
 import type { ScenarioSet } from "./scenario-parser.js";
+import type { GatePick } from "./gate-selection.js";
 import type { StackChange } from "./stack-change.js";
 import {
   type ScenarioTally,
@@ -196,10 +197,12 @@ export type QualityOutcome = {
 
 // How the scenario writer's one run per admission ended (#203). `failed`
 // covers every failure that is not sandbar's own and an answer still
-// malformed after its nudge.
+// malformed after its nudge. `pick` is the gate selection it picked beside
+// its answer (#267), null when its seed's stack does not select or its block
+// stayed malformed.
 export type ScenarioWriterOutcome =
-  | { readonly kind: "written"; readonly set: ScenarioSet }
-  | { readonly kind: "none"; readonly reason: string }
+  | { readonly kind: "written"; readonly set: ScenarioSet; readonly pick: GatePick | null }
+  | { readonly kind: "none"; readonly reason: string; readonly pick: GatePick | null }
   | { readonly kind: "failed"; readonly detail: string }
   | { readonly kind: "wrote"; readonly detail: string };
 

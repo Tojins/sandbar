@@ -22,6 +22,8 @@ vi.mock("./prompt.js", async (importOriginal) => ({
 }));
 
 import { AgentError, AgentQuotaError, type RunOptions } from "./agent-sandbox.js";
+import type { ResolvedGateStack } from "./config.js";
+import { readGatePicks, writeGatePick } from "./gate-selection.js";
 import type { EventInput } from "./events.js";
 import { SandbarError } from "./errors.js";
 import { ContainerBringupError } from "./gate-stack.js";
@@ -67,15 +69,20 @@ const fakeSandbox = (steps: readonly RunStep[], changed: () => Promise<string | 
 
 const input = { imageName: "sandbox-image", seedRef: "origin/main", seedSha: "fork-sha" };
 
-const harness = (overrides: Partial<ScenarioWriterDeps["config"]> = {}) => {
+const harness = (
+  overrides: Partial<ScenarioWriterDeps["config"]> = {},
+  seedStack: ResolvedGateStack | null = null,
+) => {
   const events: EventInput[] = [];
+  const atCommit = vi.fn(async (_sha: string) => seedStack);
+  const gatePicksDir = join(tmpdir(), `scenario-writer-picks-${process.pid}-${(picksDirs += 1)}`);
   const writeScenarios = vi.fn(async () => "/logs/issue-203/scenarios-1.json");
   const writeInvocation = vi.fn(async () => undefined);
   const providerState = createRunProviderState();
   const deps = {
     issue: { id: "203", title: "Scenario writer" },
     config: {
-      layout: { repoDir: "/repo", snapshotsDir: "/work/snapshots", anchorCacheDir: "/cache" },
+      layout: { repoDir: "/repo", snapshotsDir: "/work/snapshots", anchorCacheDir: "/cache", gatePicksDir },
       issueSource: async () => ({ title: "t", body: "" }),
       repo: { owner: "o", name: "r" },
       env: {},
@@ -98,9 +105,11 @@ const harness = (overrides: Partial<ScenarioWriterDeps["config"]> = {}) => {
       events.push(event);
     },
     providerState,
+    stackSource: { atCommit },
   } as unknown as ScenarioWriterDeps;
-  return { deps, events, writeScenarios, writeInvocation, providerState };
+  return { deps, events, writeScenarios, writeInvocation, providerState, atCommit, gatePicksDir };
 };
+let picksDirs = 0;
 
 const writerEvents = (events: readonly EventInput[]) =>
   events.filter((event) => event.kind === "scenario-writer");
@@ -144,6 +153,7 @@ describe("createScenarioWriterTask (#203)", () => {
       { issueSource: deps.config.issueSource, repo: deps.config.repo, anchorCacheDir: "/cache" },
       sandbox.worktreePath,
       undefined,
+      null,
     );
     expect(writeScenarios).toHaveBeenCalledTimes(1);
     expect(writeScenarios).toHaveBeenCalledWith(
@@ -183,7 +193,7 @@ describe("createScenarioWriterTask (#203)", () => {
     const { deps, events, writeScenarios } = harness();
     const task = createScenarioWriterTask(deps);
     task.start(input);
-    await expect(task.settled()).resolves.toEqual({ kind: "none", reason: "Docs only." });
+    await expect(task.settled()).resolves.toEqual({ kind: "none", reason: "Docs only.", pick: null });
     expect(writeScenarios).not.toHaveBeenCalled();
     expect(writerEvents(events)).toMatchObject([{ result: "completed", scenarios: 0 }]);
   });
@@ -339,6 +349,7 @@ describe("createScenarioWriterTask (#203)", () => {
       expect.anything(),
       "/work/snapshots/issue-203-seed",
       extension,
+      null,
     );
   });
 
@@ -497,5 +508,121 @@ describe("createScenarioWriterTask (#203)", () => {
     expect(await readdir(logger.dir)).toEqual(["scenarios-1.json"]);
     expect(JSON.parse(await readFile(join(logger.dir, "scenarios-1.json"), "utf8")))
       .toEqual(outcome.kind === "written" ? outcome.set : null);
+  });
+});
+
+describe("the scenario writer's gate pick (#267)", () => {
+  const seedStack: ResolvedGateStack = {
+    containers: [],
+    steps: [{
+      name: "test",
+      in: "runner",
+      command: ["vitest", "{tests}"],
+      timeoutMs: 1_000,
+      settles: [],
+      standalone: false,
+      parallel: false,
+      tests: ["src/**/*.test.ts"],
+    }],
+    sanity: ["src/config.test.ts"],
+    core: null,
+    domains: [{ name: "gate", description: "The gate.", paths: ["src/gate*.ts"], sanity: ["src/gate.test.ts"] }],
+    related: null,
+  };
+  const block = (lines: string): string => `\n<gate-selection>\n${lines}\n</gate-selection>`;
+  const pick = {
+    domains: [{ name: "gate", reason: "the verdict reads the stack" }],
+    tests: [{ path: "src/lanes.test.ts", reason: "pins the lane order" }],
+  };
+  const PICKED = block("domain gate: the verdict reads the stack\ntest src/lanes.test.ts: pins the lane order");
+
+  const settle = async (h: ReturnType<typeof harness>) => {
+    const task = createScenarioWriterTask(h.deps);
+    task.start(input);
+    return task.settled();
+  };
+
+  it("shows a selecting seed's declaration, and settles, records and stores the pick", async () => {
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([async () => ran(`${WRITTEN}${PICKED}`)]));
+    const h = harness({}, seedStack);
+    await expect(settle(h)).resolves.toMatchObject({ kind: "written", pick });
+    expect(h.atCommit).toHaveBeenCalledWith("fork-sha");
+    expect(mocks.buildScenarioWriterPrompt.mock.calls[0]).toEqual([
+      "203", expect.anything(), "/work/snapshots/issue-203-seed", undefined, seedStack,
+    ]);
+    expect(writerEvents(h.events)).toMatchObject([{ result: "completed", scenarios: 1, pick }]);
+    await expect(readGatePicks(h.gatePicksDir, [203])).resolves.toEqual([{ issue: 203, ...pick }]);
+  });
+
+  it("takes a pick beside NONE", async () => {
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([async () => ran(
+      `<scenario-writer>NONE</scenario-writer>\n<scenario-none-reason>Docs only.</scenario-none-reason>${PICKED}`,
+    )]));
+    await expect(settle(harness({}, seedStack))).resolves.toEqual({ kind: "none", reason: "Docs only.", pick });
+  });
+
+  it("asks for no pick of a seed whose stack does not select", async () => {
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([async () => ran(`${WRITTEN}${PICKED}`)]));
+    const h = harness({}, { ...seedStack, steps: [{ ...seedStack.steps[0]!, tests: null }] });
+    await expect(settle(h)).resolves.toMatchObject({ kind: "written", pick: null });
+    expect(mocks.buildScenarioWriterPrompt.mock.calls[0]?.[4]).toBeNull();
+    expect(writerEvents(h.events)[0]).not.toHaveProperty("pick");
+    await expect(readGatePicks(h.gatePicksDir, [203])).resolves.toEqual([]);
+  });
+
+  it("removes an earlier admission's stored pick when the new run ends with none", async () => {
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([async () => ran(`${WRITTEN}${PICKED}`)]));
+    const h = harness({}, { ...seedStack, steps: [{ ...seedStack.steps[0]!, tests: null }] });
+    await writeGatePick(h.gatePicksDir, 203, pick);
+    await settle(h);
+    await expect(readGatePicks(h.gatePicksDir, [203])).resolves.toEqual([]);
+  });
+
+  it("removes an earlier admission's stored pick when the new run does not complete", async () => {
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([async () => {
+      throw new AgentError("Agent idle for 600 seconds");
+    }]));
+    const timedOut = harness({}, seedStack);
+    await writeGatePick(timedOut.gatePicksDir, 203, pick);
+    await expect(settle(timedOut)).resolves.toMatchObject({ kind: "failed" });
+    await expect(readGatePicks(timedOut.gatePicksDir, [203])).resolves.toEqual([]);
+
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([
+      async () => ran(`Thinking.${PICKED}`),
+      async () => ran("Still thinking."),
+    ]));
+    const unanswered = harness({}, seedStack);
+    await writeGatePick(unanswered.gatePicksDir, 203, pick);
+    await expect(settle(unanswered)).resolves.toMatchObject({ kind: "failed" });
+    await expect(readGatePicks(unanswered.gatePicksDir, [203])).resolves.toEqual([]);
+  });
+
+  it("nudges a malformed block beside a valid answer, and reads the nudge's block", async () => {
+    const sandbox = fakeSandbox([
+      async () => ran(`${WRITTEN}${block("domain ui: renders it")}`),
+      async () => ran(PICKED),
+    ]);
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(sandbox);
+    const h = harness({}, seedStack);
+    await expect(settle(h)).resolves.toMatchObject({ kind: "written", pick });
+    expect(sandbox.run.mock.calls[1]![0].prompt).toContain("`ui` is not a domain; pick from gate.");
+    expect(writerEvents(h.events).map((event) => [event.result, event.scenarios])).toEqual([
+      ["completed", undefined], ["completed", 1],
+    ]);
+  });
+
+  it("nudges both corrections at once, and leaves the pick out when the block stays bad", async () => {
+    const sandbox = fakeSandbox([
+      async () => ran("Here are my thoughts."),
+      async () => ran(WRITTEN),
+    ]);
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(sandbox);
+    const h = harness({}, seedStack);
+    await expect(settle(h)).resolves.toMatchObject({ kind: "written", pick: null });
+    const nudge = sandbox.run.mock.calls[1]![0].prompt;
+    expect(nudge).toContain("<scenario-writer>WRITTEN</scenario-writer>");
+    expect(nudge).toContain("needs a `<gate-selection>` block");
+    expect(writerEvents(h.events).at(-1)).not.toHaveProperty("pick");
+    await expect(readGatePicks(h.gatePicksDir, [203])).resolves.toEqual([]);
   });
 });

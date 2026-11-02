@@ -20,14 +20,16 @@
 // seed) and from today's issue, keeping the comments made by the cutoff — the
 // admission's time, or with no record the earliest author date on the
 // branch — and flagging a body edited after it. The set that admission's
-// scenario writer filed is pinned on the case (#240). A case with no seed
+// scenario writer filed is pinned on the case (#240), and so is the gate pick
+// it made (#267). A case with no seed
 // source fails the whole freeze; the file is written create-only.
 //
 // RUN drives `runInnerLoop` directly — no planner, merger, finalize or lease,
 // which is where every origin and tracker write of `run()` lives — for every
 // case × repeat, repeat-major, `--parallel` at a time. A case's pinned set
-// goes in as `pinnedScenarios`, and a case file that pins any set needs the
-// providers it would with the scenario writer on.
+// goes in as `pinnedScenarios` and its pick, or null, as `pinnedGatePick`, so
+// no live writer's pick reaches a replay's gate, and a case file that pins any
+// set needs the providers it would with the scenario writer on.
 //
 // THE CAPABILITY BOUNDARY is not an audit of call sites. Before anything else,
 // `guardReplayProcess` deletes the forge credentials from the process
@@ -327,6 +329,7 @@ async function freezeCase(args: {
         diff: parseNumstat(await gitStdout(repoDir, ["diff", "--numstat", merge.base, merge.tip])),
       },
       ...(scenarios === null ? {} : { scenarios }),
+      ...(admission === null || admission.gatePick === null ? {} : { gatePick: admission.gatePick }),
     },
   };
 }
@@ -663,6 +666,7 @@ async function prepareSession(
         egress: null,
       }),
       ...(run.case.scenarios === undefined ? {} : { pinnedScenarios: run.case.scenarios }),
+      pinnedGatePick: run.case.gatePick ?? null,
     }),
   };
 }

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_SCENARIOS,
   type Scenario,
+  gatePickErrors,
+  parseGateSelection,
   parseScenarioWriter,
   renderScenario,
   scenarioSetErrors,
@@ -71,6 +73,37 @@ describe("parseScenarioWriter tokens", () => {
   it("does not let a quoted opener swallow the real block", () => {
     const stdout = "I will write a `<scenarios>` block now.\n" + written(S1);
     expect(parseScenarioWriter(stdout)).toMatchObject({ kind: "WRITTEN", scenarios: [{ id: "S1" }] });
+  });
+
+  it("reads the answer outside its gate-selection blocks", () => {
+    const pickWith = (reason: string): string =>
+      `\n<gate-selection>\ndomain gate: see ${reason} ok\n</gate-selection>`;
+    expect(parseScenarioWriter(`${written(S1)}${pickWith("<scenario-writer>NONE</scenario-writer>")}`))
+      .toMatchObject({ kind: "WRITTEN", scenarios: [{ id: "S1" }] });
+    expect(parseScenarioWriter(
+      "<scenario-writer>NONE</scenario-writer>\n<scenario-none-reason>Docs only.</scenario-none-reason>" +
+        pickWith("<scenario-writer>WRITTEN</scenario-writer> <scenario-none-reason>Other.</scenario-none-reason>"),
+    )).toEqual({ kind: "NONE", reason: "Docs only." });
+    expect(parseScenarioWriter(`${written(S1)}${pickWith(`<scenarios>\n${scenario(1)}\n</scenarios>`)}`))
+      .toMatchObject({ kind: "WRITTEN", scenarios: [{ title: "Paid invoices keep their total" }] });
+  });
+
+  it("reads a scenario's clauses as text, whatever tags they quote", () => {
+    const quoting = written(S1.replace(
+      "Given an invoice with two lines",
+      "Given the writer answers `<scenario-writer>NONE</scenario-writer>` and " +
+        "`<gate-selection>\n  domain ui: example\n  </gate-selection>`",
+    ));
+    expect(parseScenarioWriter(quoting)).toMatchObject({
+      kind: "WRITTEN",
+      scenarios: [{
+        given: [
+          "the writer answers `<scenario-writer>NONE</scenario-writer>` and " +
+            "`<gate-selection> domain ui: example </gate-selection>`",
+          "the invoice is paid",
+        ],
+      }],
+    });
   });
 
   it("requires a reason for NONE and a block for WRITTEN", () => {
@@ -154,6 +187,77 @@ describe("parseScenarioWriter grammar", () => {
     expect(reprompt(written(many))).toContain(`keep the most valuable ${MAX_SCENARIOS}`);
     const most = Array.from({ length: MAX_SCENARIOS }, (_, i) => scenario(i + 1)).join("\n\n");
     expect(parseScenarioWriter(written(most))).toMatchObject({ kind: "WRITTEN" });
+  });
+});
+
+describe("parseGateSelection (#267)", () => {
+  const declared = ["gate", "planning"];
+  const block = (lines: string): string => `${written(S1)}\n<gate-selection>\n${lines}\n</gate-selection>`;
+
+  it("reads domains and test files with their reasons, the last block winning", () => {
+    const stdout = `${block("domain gate: dropped")}\n${block([
+      "domain planning: the change reorders lanes",
+      "",
+      "  test src/lanes.test.ts:   pins the lane order  ",
+    ].join("\n"))}`;
+    expect(parseGateSelection(stdout, declared)).toEqual({
+      kind: "picked",
+      pick: {
+        domains: [{ name: "planning", reason: "the change reorders lanes" }],
+        tests: [{ path: "src/lanes.test.ts", reason: "pins the lane order" }],
+      },
+    });
+  });
+
+  it("lists every way a value read back is not a pick", () => {
+    expect(gatePickErrors({ domains: [{ name: "gate", reason: "r" }], tests: [] })).toEqual([]);
+    expect(gatePickErrors([])).toEqual(["is not an object"]);
+    expect(gatePickErrors({ domains: [{ name: "", reason: "r" }], tests: "x" })).toEqual([
+      "domains is not a list of { name, reason }",
+      "tests is not a list of { path, reason }",
+    ]);
+  });
+
+  it("does not read a block a scenario quotes as the pick", () => {
+    const quoting = written(S1.replace(
+      "Given an invoice with two lines",
+      "Given the writer emits `<gate-selection>\n  domain planning: example\n  </gate-selection>`",
+    ));
+    const pick = "<gate-selection>\ndomain gate: the real pick\n</gate-selection>";
+    const real = { kind: "picked", pick: { domains: [{ name: "gate", reason: "the real pick" }], tests: [] } };
+    expect(parseGateSelection(`${pick}\n${quoting}`, declared)).toEqual(real);
+    expect(parseGateSelection(`${quoting}\n${pick}`, declared)).toEqual(real);
+  });
+
+  it("takes an empty block as picking nothing", () => {
+    expect(parseGateSelection(block(""), declared)).toEqual({ kind: "picked", pick: { domains: [], tests: [] } });
+  });
+
+  it("asks for a missing block", () => {
+    expect(parseGateSelection(written(S1), declared)).toEqual({
+      kind: "malformed",
+      reprompt: expect.stringContaining("needs a `<gate-selection>` block"),
+    });
+  });
+
+  it("lists every unknown domain, bad path and line that is no entry", () => {
+    const result = parseGateSelection(block([
+      "domain ui: renders it",
+      "test /src/a.test.ts: absolute",
+      "test src/*.test.ts: a glob",
+      "domain gate:",
+      "src/lanes.test.ts",
+    ].join("\n")), declared);
+    expect(result.kind).toBe("malformed");
+    const reprompt = result.kind === "malformed" ? result.reprompt : "";
+    expect(reprompt).toContain("line 1: `ui` is not a domain; pick from gate, planning.");
+    expect(reprompt).toContain("line 2: `/src/a.test.ts` is absolute");
+    expect(reprompt).toContain("line 3: `src/*.test.ts` holds a glob character");
+    expect(reprompt).toContain("line 4: `domain gate:` is not");
+    expect(reprompt).toContain("line 5: `src/lanes.test.ts` is not");
+    expect(parseGateSelection(block("domain gate: x"), [])).toMatchObject({
+      reprompt: expect.stringContaining("pick from none."),
+    });
   });
 });
 

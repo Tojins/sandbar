@@ -1035,6 +1035,7 @@ export async function runVerifiedLanding(
         repoSlug: opts.repoSlug,
         promptExtension: opts.promptExtension,
         preMergeSha: sha,
+        issues: opts.mergedIssues.map((issue) => Number(issue.id)),
         ...(attemptSink ? { onAttempt: attemptSink } : {}),
       },
       log,

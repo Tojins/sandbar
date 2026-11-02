@@ -366,7 +366,7 @@ import {
   createMergerWorktree,
 } from "./merger-worktree.js";
 import { createGateSemaphore } from "./gate-semaphore.js";
-import { selectionPlanFor } from "./gate-selection.js";
+import { readGatePicks, selectionPlanFor } from "./gate-selection.js";
 import { containerResourcesOf } from "./container-resources.js";
 import { usageFields } from "./agent-usage.js";
 import {
@@ -3184,12 +3184,14 @@ export async function run(
             env,
             ...(codexAuthMount === undefined ? {} : { codexAuthMount }),
             // Its test selection (#266) is the merge result's diff against
-            // the source branch it composes onto.
-            runStackGate: async () => {
+            // the source branch it composes onto, plus the stored gate picks
+            // of the issues the merge brings (#267).
+            runStackGate: async (issues) => {
               const inEffect = await headStack();
               const stack = await stackForGate2.ensure(inEffect.stack);
               const plan = await selectionPlanFor(
                 inEffect, mergerWorktreePath, `origin/${config.sourceBranch}`,
+                { picks: await readGatePicks(layout.gatePicksDir, issues) },
               );
               return gateSemaphore.run(() => stack.runGate(plan));
             },

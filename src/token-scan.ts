@@ -26,6 +26,11 @@
 // Both return a fresh global regex per call: `matchAll` requires the `g` flag
 // and a shared instance would leak `lastIndex` between parses.
 //
+// An answer of several blocks, any of which may quote the others' tags, is
+// read with `lastTopLevel`: one left-to-right scan for any of its patterns,
+// each match's payload opaque, so a token or block quoted inside another
+// block (a reason, a scenario's clause) is never read as one.
+//
 // A secret is scanned for the same way, as a literal and never a pattern:
 // `maskSecrets` masks a `secretEnv` value (#241) in the bringup errors that
 // reach a prompt, and a live egress owner's secret (#257) in its agent's
@@ -52,6 +57,24 @@ export function lastToken(stdout: string, pattern: RegExp): string | null {
   const last = matches[matches.length - 1];
   if (last === undefined) return null;
   return (last[1] ?? "").trim();
+}
+
+// The payload of each pattern's last top-level match in `stdout`, keyed as
+// `patterns` is; a key with no match is absent. Each pattern must come from
+// one of the builders above, which capture exactly one group.
+export function lastTopLevel<K extends string>(
+  stdout: string,
+  patterns: Readonly<Record<K, RegExp>>,
+): Partial<Record<K, string>> {
+  const keys = Object.keys(patterns) as K[];
+  const scan = new RegExp(keys.map((key) => patterns[key].source).join("|"), "g");
+  const last: Partial<Record<K, string>> = {};
+  for (const match of stdout.matchAll(scan)) {
+    const index = match.slice(1).findIndex((group) => group !== undefined);
+    const key = keys[index];
+    if (key !== undefined) last[key] = (match[index + 1] ?? "").trim();
+  }
+  return last;
 }
 
 // `text` with every secret value masked. Longest first, so a value that

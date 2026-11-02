@@ -18,9 +18,7 @@ Be adversarial. In order of value:
    duplicates, odd characters, dates and time zones, the oldest and the largest
    records.
 3. Hostile or malformed input at every entry point the change adds or alters.
-4. Regressions next to the change: behavior that works today and must keep
-   working.
-5. The main success path, once.
+4. The main success path, once.
 
 Every Then is observable from outside: what a user sees, what an endpoint
 returns, which rows exist. Never how the code is structured, never "works

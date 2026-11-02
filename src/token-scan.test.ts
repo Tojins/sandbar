@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
+import { lastToken, lastTopLevel, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 
 describe("literalTokenPattern", () => {
   const p = literalTokenPattern("t", ["A", "B-C"]);
@@ -42,5 +42,18 @@ describe("temperedBlockPattern", () => {
     ["<q>unclosed", null],
   ])("%j → %j", (stdout, want) => {
     expect(lastToken(stdout, p)).toBe(want);
+  });
+});
+
+describe("lastTopLevel", () => {
+  const patterns = { token: literalTokenPattern("t", ["A", "B"]), note: temperedBlockPattern("note") };
+
+  it.each([
+    ["<t>A</t> <note>x</note> <t>B</t>", { token: "B", note: "x" }],
+    ["<t>A</t> <note>see <t>B</t></note>", { token: "A", note: "see <t>B</t>" }],
+    ["`<note>` quoted <note>real</note>", { note: "real" }],
+    ["nothing", {}],
+  ])("%j → %j", (stdout, want) => {
+    expect(lastTopLevel(stdout, patterns)).toEqual(want);
   });
 });

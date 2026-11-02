@@ -187,7 +187,13 @@ describe("replay freeze (#195)", () => {
   // its writer filed when `scenarios` is given.
   async function recordedRun(
     logsDir: string,
-    opts: { readonly name?: string; readonly title?: string; readonly snapshot?: unknown; readonly scenarios?: unknown } = {},
+    opts: {
+      readonly name?: string;
+      readonly title?: string;
+      readonly snapshot?: unknown;
+      readonly scenarios?: unknown;
+      readonly pick?: unknown;
+    } = {},
   ): Promise<void> {
     const run = join(logsDir, opts.name ?? "run-2026-10-28T00-00-00-000Z");
     await mkdir(join(run, "issue-8"), { recursive: true });
@@ -200,6 +206,7 @@ describe("replay freeze (#195)", () => {
       },
       ...(opts.scenarios === undefined ? [] : [{
         kind: "scenario-writer", issue: 8, result: "completed", scenarios: 1, ts: "2026-10-28T00:00:01.500Z",
+        ...(opts.pick === undefined ? {} : { pick: opts.pick }),
       }]),
       { kind: "terminal", issue: 8, terminal: "DONE", reason: null, durationMs: 1, ts: "2026-10-28T00:00:02.000Z" },
     ];
@@ -317,6 +324,18 @@ describe("replay freeze (#195)", () => {
     const [c] = await frozenCases([8], logsDir);
 
     expect(c?.scenarios).toEqual(SET);
+    expect(c).not.toHaveProperty("gatePick");
+  });
+
+  // #267
+  it("pins the gate pick the admission's writer made beside its set", async () => {
+    const logsDir = join(fixture.root, "logs");
+    const pick = { domains: [{ name: "gate", reason: "r" }], tests: [] };
+    await recordedRun(logsDir, { scenarios: SET, pick });
+
+    const [c] = await frozenCases([8], logsDir);
+
+    expect(c?.gatePick).toEqual(pick);
   });
 
   it("refuses a filed set that is not a scenario set", async () => {

@@ -1763,6 +1763,7 @@ async function attemptMerge(
     promptExtension: deps.promptExtension,
     preMergeSha,
     target: describeMergeTarget(target),
+    issues: args.issues,
     ...(onAttempt ? { onAttempt } : {}),
     beforeGate: () => deps.onProgress?.(args.gateKey, "gate-2"),
     onGate,
@@ -1869,7 +1870,7 @@ async function attemptMerge(
   }
 
   await deps.onProgress?.(args.gateKey, "gate-2");
-  const g = await adapter.runGate();
+  const g = await adapter.runGate(args.issues);
   // On GREEN too. Until #82 gate-2 logged only on red, which is backwards for a
   // cost question — the green gates are the ones that happen every time — and
   // it left a verdict, which is an outcome, out of the log entirely (#70).
@@ -3116,6 +3117,10 @@ export async function runMergerWithAdapter(
     return finishWithChunkRefreshes(await settleLanding());
   }
 
+  // Every issue the pass brings onto the source branch.
+  const passIssues = (): number[] =>
+    [...landsOnHead.flatMap(landUnitIssues), ...merged.map(issueNumberOf)];
+
   // The landing pass once more over the merge result re-merged onto origin's
   // new tip (#258), when it ran for a unit this cycle: origin's new commits
   // (a human hotfix, typically) may change what the landing owes. Its
@@ -3137,7 +3142,7 @@ export async function runMergerWithAdapter(
         oldTip,
         newTip,
       },
-      issues: [...landsOnHead.flatMap(landUnitIssues), ...merged.map(issueNumberOf)],
+      issues: passIssues(),
     }, unit);
     if (pass.kind === "abandon") {
       return {
@@ -3205,7 +3210,7 @@ export async function runMergerWithAdapter(
         reason: "npm install failed on the merge result re-merged onto it",
       };
     }
-    const g = await adapter.runGate();
+    const g = await adapter.runGate(passIssues());
     await emit(`gate-2 synced ${formatGateFields(g)}`);
     await opts.observations.onGate(lastUnit, g, "origin");
     if (!g.ok) {
@@ -3362,7 +3367,8 @@ export type RealAdapterDeps = {
   // that is all it changed. The merger does not build the stack itself:
   // run.ts owns the stack's lifecycle for the whole merge phase, so a single
   // bringup covers every branch in the cycle until the spec in effect changes.
-  readonly runStackGate: () => Promise<AdmittedGate<GateResult>>;
+  // Its selection adds the stored gate picks of `issues` (#267).
+  readonly runStackGate: (issues: readonly number[]) => Promise<AdmittedGate<GateResult>>;
   // `MergerAdapter.stackChange`, read from the same stack source.
   readonly stackChange: () => Promise<StackChange | null>;
   // What that same stack's step containers hand the resolve container
@@ -4240,8 +4246,8 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
       }
       return { ok: true };
     },
-    async runGate() {
-      const admitted = await deps.runStackGate();
+    async runGate(issues) {
+      const admitted = await deps.runStackGate(issues);
       const r = admitted.value;
       // The timings ride out on BOTH branches (#82). A green gate-2 narrows to
       // `{ ok: true }` because there is no failure to describe, and that is

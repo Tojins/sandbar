@@ -17,6 +17,7 @@ import {
   spread,
   stripForgeCredentials,
 } from "./replay.js";
+import type { GatePick } from "./gate-selection.js";
 import type { ScenarioSet } from "./scenario-parser.js";
 import { type StatsReport, computeStats } from "./stats.js";
 import type { StatsEvent } from "./stats-record.js";
@@ -57,9 +58,15 @@ describe("parseReplayCases (#195)", () => {
     const file = caseFile([
       replayCase(1),
       replayCase(2, { issueFrom: "reconstructed", editedAfterAdmission: true, original: null, landed: null }),
-      replayCase(3, { scenarios: pinned(3) }),
+      replayCase(3, { scenarios: pinned(3), gatePick: { domains: [{ name: "gate", reason: "r" }], tests: [] } }),
     ]);
     expect(parseReplayCases(file)).toEqual({ cases: file });
+  });
+
+  it("names a pinned gate pick that is no pick (#267)", () => {
+    const gatePick = { domains: [], tests: [{ path: "a.test.ts" }] } as unknown as GatePick;
+    expect(parseReplayCases(caseFile([replayCase(1, { gatePick })])))
+      .toEqual({ errors: ["cases[0].gatePick tests is not a list of { path, reason }"] });
   });
 
   it("names a pinned set that is no set, or another issue's", () => {
@@ -242,6 +249,7 @@ describe("lastDoneAdmission (#195)", () => {
       seedSha: SEED,
       issueSnapshot: "issue-snapshot-2.json",
       scenarios: null,
+      gatePick: null,
     });
   });
 
@@ -271,6 +279,22 @@ describe("lastDoneAdmission (#195)", () => {
     ];
     expect(lastDoneAdmission("run-x", events, 7)).toMatchObject({ ts: "t4", scenarios: "scenarios-2.json" });
     expect(lastDoneAdmission("run-x", events.slice(0, 9), 7)).toMatchObject({ ts: "t3", scenarios: null });
+  });
+
+  // #267: the pick on its own admission's deciding writer event.
+  it("takes the gate pick its own admission's writer made, and no malformed one", () => {
+    const pick = { domains: [{ name: "gate", reason: "r" }], tests: [] };
+    const writer = (extra: object) => ({ kind: "scenario-writer", issue: 7, result: "completed", ...extra });
+    const events = [
+      admitted("t1"),
+      writer({ scenarios: 0, pick }),
+      terminal("DONE"),
+      admitted("t2"),
+      writer({ scenarios: 0, pick: { domains: "gate" } }),
+      terminal("DONE"),
+    ];
+    expect(lastDoneAdmission("run-x", events.slice(0, 3), 7)).toMatchObject({ gatePick: pick });
+    expect(lastDoneAdmission("run-x", events, 7)).toMatchObject({ ts: "t2", gatePick: null });
   });
 });
 

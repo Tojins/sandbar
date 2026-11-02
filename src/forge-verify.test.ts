@@ -532,6 +532,8 @@ type VerifyCalls = {
   prClosed: { number: number; comment: string }[];
   logsFetched: string[];
   agentPrompts: string[];
+  // #267: the issues each local re-gate was told the landing brings.
+  gateIssues: (readonly number[])[];
 };
 
 function makeVerify(script: VerifyScript): {
@@ -550,6 +552,7 @@ function makeVerify(script: VerifyScript): {
     prClosed: [],
     logsFetched: [],
     agentPrompts: [],
+    gateIssues: [],
   };
   let round = 0;
   let heads = 0;
@@ -643,7 +646,8 @@ function makeVerify(script: VerifyScript): {
     async npmInstall() {
       return { ok: true };
     },
-    async runGate() {
+    async runGate(issues) {
+      calls.gateIssues.push(issues);
       const green = script.gates?.[gates++] ?? true;
       return green
         ? { ok: true }
@@ -744,6 +748,7 @@ describe("runVerifiedLanding", () => {
     expect(calls.agentPrompts[0]).toContain("body of #9");
     expect(calls.agentPrompts[0]).not.toContain("body of #7");
     expect(calls.agentPrompts[0]).toContain("- #7:");
+    expect(calls.gateIssues).toEqual([[7, 9]]);
   });
 
   it("hands the merger extension through the verified-landing resolve path", async () => {

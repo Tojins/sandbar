@@ -238,17 +238,42 @@ describe("prompt anchors name their sources (#34, #38)", () => {
       anchorCacheDir: join(target, "anchor-cache"),
     };
     await writeFile(join(target, "SCENARIOS.md"), "Prefer SQL.\n");
-    const prompt = await buildScenarioWriterPrompt("1", anchor, target, { path: "SCENARIOS.md" });
+    const prompt = await buildScenarioWriterPrompt("1", anchor, target, { path: "SCENARIOS.md" }, null);
     expect(prompt).toContain("Issue #1: acme/app");
     expect(prompt).toContain("# Scenario writer");
+    expect(prompt).not.toContain("## Gate selection");
     expect(prompt).toMatch(/Read and follow @SCENARIOS\.md\.$/);
     expect(prompt).not.toContain("Last 10 commits");
     expect(prompt).not.toContain("Coding standards");
     // Probed in the snapshot it is given, not in the launch directory.
-    expect(await buildScenarioWriterPrompt("1", anchor, launchedFrom, { path: "SCENARIOS.md" }))
+    expect(await buildScenarioWriterPrompt("1", anchor, launchedFrom, { path: "SCENARIOS.md" }, null))
       .toMatch(/<scenario-none-reason>` block\.$/);
-    expect(await buildScenarioWriterPrompt("1", anchor, launchedFrom, { text: "Keep it to SQL." }))
+    expect(await buildScenarioWriterPrompt("1", anchor, launchedFrom, { text: "Keep it to SQL." }, null))
       .toMatch(/### Project prompt extension\n\nKeep it to SQL\.$/);
+  });
+
+  it("shows the scenario writer its seed's declaration to pick from, before its extension (#267)", async () => {
+    const anchor = {
+      issueSource: ghIssueSource(CONFIGURED),
+      repo: CONFIGURED,
+      anchorCacheDir: join(target, "anchor-cache"),
+    };
+    const prompt = await buildScenarioWriterPrompt("1", anchor, target, { text: "Keep it to SQL." }, {
+      sanity: ["src/config.test.ts"],
+      core: { paths: ["src/errors.ts"], sanity: [] },
+      domains: [
+        { name: "gate", description: "The gate stack.", paths: ["src/gate*.ts"], sanity: ["src/gate.test.ts"] },
+        { name: "ui", description: "", paths: ["ui/**"], sanity: [] },
+      ],
+    });
+    expect(prompt).toContain([
+      "- global sanity: `src/config.test.ts`",
+      "- core: paths `src/errors.ts`; sanity none",
+      "- domain `gate`: paths `src/gate*.ts`; sanity `src/gate.test.ts`. The gate stack.",
+      "- domain `ui`: paths `ui/**`; sanity none.",
+    ].join("\n"));
+    expect(prompt).toContain("domain <name>: <reason>\ntest <path>: <reason>\n\n---\n\n### Project prompt extension");
+    expect(prompt).not.toContain("Regressions next to the change");
   });
 
   it("assembles adjudication from both anchors and only the rejected report", async () => {

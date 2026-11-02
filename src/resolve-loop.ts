@@ -298,8 +298,9 @@ export type ResolveAdapter = {
   // this loop pays for on every recovered attempt, and it has no failure to
   // describe. Reported, never acted on — the loop's bound is
   // `RESOLVE_MAX_ATTEMPTS` and nothing here reads a duration back. So does
-  // the test selection the gate ran, for its record (#266).
-  runGate(): Promise<
+  // the test selection the gate ran, for its record (#266). `issues` are the
+  // ones whose stored gate picks it adds (#267).
+  runGate(issues: readonly number[]): Promise<
     ({ readonly ok: true } | ({ readonly ok: false } & MergerGateOutput)) &
       GateTimings & Pick<GateResult, "selection">
   >;
@@ -364,6 +365,8 @@ export type ResolveLoopDeps = {
   // Announce a re-gate before it starts, so live observers do not retain the
   // preceding merge step throughout a long conflict-resolution gate.
   readonly beforeGate?: () => void | Promise<void>;
+  // The issues the merge brings, whose gate picks each re-gate adds (#267).
+  readonly issues: readonly number[];
   readonly onGate?: (
     gate: Awaited<ReturnType<ResolveAdapter["runGate"]>>,
   ) => void | Promise<void>;
@@ -536,7 +539,7 @@ export async function runResolveLoop(
     }
 
     await deps.beforeGate?.();
-    const gate = await adapter.runGate();
+    const gate = await adapter.runGate(deps.issues);
     // The same one rendering the other three consumers use, on green and red
     // alike; the verdict-specific lines below keep their own wording.
     await log(`resolve-attempt ${attempt} gate ${formatGateFields(gate)}`);

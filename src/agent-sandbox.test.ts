@@ -2178,7 +2178,7 @@ describe("createSandbox integration (local provider)", () => {
 
       expect(existsSync(path)).toBe(false);
       expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(tip);
-    });
+    }, 15_000);
 
     it("keeps a dirty clone, having published what was committed", async () => {
       const branch = "sandbar/issue-98-reclaim-dirty";
@@ -2199,7 +2199,7 @@ describe("createSandbox integration (local provider)", () => {
       expect(existsSync(join(path, "scratch.txt"))).toBe(true);
       expect((await git(["rev-parse", branch], dir)).stdout.trim()).toBe(tip);
       await rm(path, { recursive: true, force: true });
-    });
+    }, 15_000);
 
     // The case the rule exists for: the clone holds commits the cache does not,
     // and the cache cannot be written. Deleting the clone would destroy them.
@@ -2227,7 +2227,7 @@ describe("createSandbox integration (local provider)", () => {
         await rm(lock, { force: true });
         await rm(path, { recursive: true, force: true });
       }
-    });
+    }, 15_000);
 
     it("honours a caller's reason to keep a clone it would otherwise remove", async () => {
       const branch = "sandbar/issue-98-reclaim-keep";

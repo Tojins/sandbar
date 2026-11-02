@@ -3392,6 +3392,7 @@ describe("runGate admission (#142)", () => {
         gateSemaphore,
         attemptLogger: { writeGate: vi.fn() },
         onEvent: (event: EventInput) => events.push(event),
+        config: {},
         stackSource: {
           forHead: async () => ({ stack: { containers: [], steps: [] }, classification: { kind: "same" } }),
         },
@@ -3467,6 +3468,7 @@ describe("runGate admission (#142)", () => {
         gateSemaphore: createGateSemaphore(undefined),
         attemptLogger: { writeGate },
         onEvent: () => undefined,
+        config: {},
         stackSource: {
           forHead: async () => ({ stack: { containers: [], steps: [] }, classification: { kind: "same" } }),
         },
@@ -3536,6 +3538,7 @@ describe("runGate admission (#142)", () => {
           gateSemaphore: createGateSemaphore(undefined),
           attemptLogger: { writeGate: vi.fn() },
           onEvent: (event: EventInput) => { events.push(event); },
+          config: {},
           stackSource: { forHead: async () => ({ stack, classification: { kind: "same" } }) },
         },
         gateStack: { ensure: async () => ({ runGate: runGateOnBound }) },
@@ -3552,12 +3555,33 @@ describe("runGate admission (#142)", () => {
         global: ["a.test.ts"],
         changed: ["b.test.ts"],
         relatedInput: ["b.test.ts"],
+        picks: [],
       }));
       expect(events).toContainEqual({
         kind: "gate-selection", issue: 266, title: "selection", attempt: 2, gate: "gate-1", ...selection,
       });
       expect(result.gate.failureTrace)
         .toMatch(/^\[sandbar\] this gate ran these test files:\na\.test\.ts\nb\.test\.ts\n\nboom/);
+
+      // #267: a writer still running adds nothing; once it settles, its pick.
+      const pick = { domains: [], tests: [{ path: "a.test.ts", reason: "pins the seed" }] };
+      const writer = { status: vi.fn((): ScenarioWriterStatus => ({ kind: "running" })) };
+      Object.assign(ctx, { scenarioWriter: writer });
+      await runGate({ kind: "run-gate", attempt: 3, quality: { verdict: "APPROVED", rounds: 0 } }, ctx);
+      expect(runGateOnBound).toHaveBeenLastCalledWith(expect.objectContaining({ picks: [], picked: [] }));
+      writer.status.mockReturnValue({ kind: "settled", outcome: { kind: "none", reason: "docs", pick } });
+      await runGate({ kind: "run-gate", attempt: 4, quality: { verdict: "APPROVED", rounds: 0 } }, ctx);
+      expect(runGateOnBound).toHaveBeenLastCalledWith(expect.objectContaining({
+        picks: [{ issue: 266, ...pick }],
+        picked: ["a.test.ts"],
+      }));
+      // A replay adds its case's pinned pick, or none, in place of the writer's.
+      const pinned = { domains: [], tests: [{ path: "b.test.ts", reason: "frozen" }] };
+      for (const [pinnedGatePick, picks] of [[null, []], [pinned, [{ issue: 266, ...pinned }]]] as const) {
+        Object.assign(ctx.opts.config, { pinnedGatePick });
+        await runGate({ kind: "run-gate", attempt: 5, quality: { verdict: "APPROVED", rounds: 0 } }, ctx);
+        expect(runGateOnBound).toHaveBeenLastCalledWith(expect.objectContaining({ picks }));
+      }
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
@@ -3584,6 +3608,7 @@ describe("runGate admission (#142)", () => {
           gateSemaphore: createGateSemaphore(undefined),
           attemptLogger: { writeGate: vi.fn() },
           onEvent: () => undefined,
+          config: {},
           stackSource: { forHead },
         },
         gateStack: { ensure },
