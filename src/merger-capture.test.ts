@@ -154,6 +154,7 @@ describe("captureAgentRun (#67)", () => {
 });
 
 describe("realAdapter gate admission (#142)", () => {
+  const asked: (readonly number[])[] = [];
   const adapterOver = (value: Record<string, unknown>) => realAdapter({
     cwd: "/tmp",
     cacheDir: "/tmp/repo.git",
@@ -168,19 +169,22 @@ describe("realAdapter gate admission (#142)", () => {
     sandboxImage: "sandbox-image",
     env: () => undefined,
     beforeOriginWrite: async () => undefined,
-    runStackGate: async () => ({
-      value: {
-        ok: true,
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-        failedStep: null,
-        durationMs: 7,
-        steps: [],
-        containerLogs: "",
-        ...value,
-      },
-    }),
+    runStackGate: async (issues: readonly number[]) => {
+      asked.push(issues);
+      return {
+        value: {
+          ok: true,
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+          failedStep: null,
+          durationMs: 7,
+          steps: [],
+          containerLogs: "",
+          ...value,
+        },
+      };
+    },
   } as Parameters<typeof realAdapter>[0]);
 
   // #266: the selection rides out on both verdicts, for gate-2's record.
@@ -189,10 +193,12 @@ describe("realAdapter gate admission (#142)", () => {
       global: ["a.test.ts"], core: [], domains: {}, changed: [], related: [],
       files: ["a.test.ts"], steps: { test: ["a.test.ts"] }, ignored: [],
     };
-    await expect(adapterOver({ selection }).runGate()).resolves.toMatchObject({ ok: true, selection });
-    await expect(adapterOver({ ok: false, failedStep: "test", exitCode: 1, selection }).runGate())
+    await expect(adapterOver({ selection }).runGate([7])).resolves.toMatchObject({ ok: true, selection });
+    await expect(adapterOver({ ok: false, failedStep: "test", exitCode: 1, selection }).runGate([8, 9]))
       .resolves.toMatchObject({ ok: false, selection });
-    expect(await adapterOver({}).runGate()).not.toHaveProperty("selection");
+    expect(await adapterOver({}).runGate([])).not.toHaveProperty("selection");
+    // #267: the stack gate adds the picks of the issues the merge brings.
+    expect(asked).toEqual([[7], [8, 9], []]);
   });
 
   it("carries the shared semaphore wait into gate-2 observations", async () => {

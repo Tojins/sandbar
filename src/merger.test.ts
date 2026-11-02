@@ -96,6 +96,8 @@ type Calls = {
   stackChecks: number;
   installs: number;
   gates: number;
+  // #267: the issues each gate was told the merge brings.
+  gateIssues: (readonly number[])[];
   order: string[];
   comments: { n: number; msg: string }[];
   removedLabels: { n: number; label: string }[];
@@ -208,6 +210,7 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
     stackChecks: 0,
     installs: 0,
     gates: 0,
+    gateIssues: [],
     order: [],
     comments: [],
     removedLabels: [],
@@ -374,11 +377,12 @@ function makeAdapter(script: Script): { adapter: MergerAdapter; calls: Calls } {
       calls.order.push("install");
       return { ok: r };
     },
-    async runGate() {
+    async runGate(issues) {
       const r = script.gates?.[gIdx++];
       if (r === undefined)
         throw new Error("gate called more times than scripted");
       calls.gates++;
+      calls.gateIssues.push(issues);
       calls.order.push("gate");
       return r;
     },
@@ -885,6 +889,7 @@ describe("runMergerWithAdapter — clean-merge happy paths", () => {
     expect(summary.skipped).toEqual([]);
     expect(summary.pushed).toBe(true);
     expect(calls.order).toEqual(["merge", "install", "gate"]);
+    expect(calls.gateIssues).toEqual([[42]]);
     expect(calls.agentRuns).toEqual([]);
     expect(calls.resets).toEqual([]);
     expect(calls.closes).toEqual([
@@ -970,6 +975,7 @@ describe("runMergerWithAdapter — conflict enters resolve loop", () => {
     expect(summary.merged.map((i) => i.id)).toEqual(["42"]);
     expect(summary.skipped).toEqual([]);
     expect(calls.order).toEqual(["merge", "agent", "install", "gate"]);
+    expect(calls.gateIssues).toEqual([[42]]);
     expect(calls.aborts).toBe(0);
     expect(calls.resets).toEqual([]);
     expect(calls.closes).toEqual([
@@ -1786,7 +1792,7 @@ describe("runMergerWithAdapter — push lifecycle", () => {
     pushes,
   }) => {
     const gates: Array<{ key: string; ok: boolean; sync: string | undefined }> = [];
-    const { adapter } = makeAdapter({
+    const { adapter, calls } = makeAdapter({
       merges: ["ok", "ok"],
       gates: [{ ok: true }, { ok: true }, regate],
       pushes: pushes as PushResult[],
@@ -1804,6 +1810,8 @@ describe("runMergerWithAdapter — push lifecycle", () => {
       { key: "42", ok: true, sync: undefined },
       { key: "42", ok: regate.ok, sync: "origin" },
     ]);
+    // #267: the re-gate composes every merged issue.
+    expect(calls.gateIssues).toEqual([[41], [42], [41, 42]]);
   });
 
   it("push fatal error: throws MergerError, no closes", async () => {

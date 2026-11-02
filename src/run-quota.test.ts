@@ -342,7 +342,8 @@ import {
   OriginLockHeldError,
   acquireOriginLock,
 } from "./origin-lock.js";
-import { ensureRepoCache } from "./repo-cache.js";
+import { ensureRepoCache, repoLayout } from "./repo-cache.js";
+import { writeGatePick } from "./gate-selection.js";
 import { startEventRecord } from "./events.js";
 import { beginCleanup } from "./cleanup.js";
 import { RESTART_REQUEST_FILE } from "./restart-request.js";
@@ -2711,7 +2712,7 @@ describe("run quota orchestration (#109)", () => {
     seams.merger.mockImplementation(async (batch: ReturnType<typeof issue>[]) => {
       const adapterDeps = vi.mocked(realAdapter).mock.calls[0]?.[0];
       if (adapterDeps === undefined) throw new Error("merger adapter was not created");
-      await adapterDeps.runStackGate();
+      await adapterDeps.runStackGate([12, 13]);
       await expect(adapterDeps.stackChange()).resolves.toEqual(change);
       return summary(batch);
     });
@@ -2719,7 +2720,13 @@ describe("run quota orchestration (#109)", () => {
       throw new Error(`EXIT:${code}`);
     }) as never);
 
-    await expect(run({ ...config, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    // #267: the stored picks of the issues the merge brings.
+    const cwd = await mkdtemp(join(tmpdir(), "sandbar-run-picks-"));
+    const pick = { domains: [{ name: "gate", reason: "r" }], tests: [] };
+    await writeGatePick(repoLayout(cwd, config.workDir).gatePicksDir, 12, pick);
+
+    await expect(run({ ...config, cwd, pollIntervalMs: 1 })).rejects.toThrow("EXIT:1");
+    await rm(cwd, { recursive: true, force: true });
     expect(heads).toEqual([["/tmp/merger", "HEAD"], ["/tmp/merger", "HEAD"]]);
     // Started on the tip's stack, then restarted for the merge result's env.
     expect(vi.mocked(startStack).mock.calls
@@ -2728,7 +2735,9 @@ describe("run quota orchestration (#109)", () => {
       .map((opts) => opts.spec)).toEqual([tip.stack, overlaid.stack]);
     expect(seams.mergerStackRunGate).toHaveBeenCalledOnce();
     // #266: the merge result's selection, against the source branch.
-    expect(seams.selectionPlanFor).toHaveBeenCalledWith(inEffect[0], "/tmp/merger", "origin/main");
+    expect(seams.selectionPlanFor).toHaveBeenCalledWith(inEffect[0], "/tmp/merger", "origin/main", {
+      picks: [{ issue: 12, ...pick }],
+    });
     expect(seams.mergerStackRunGate).toHaveBeenCalledWith(plan);
   });
 
@@ -2833,8 +2842,9 @@ describe("run quota orchestration (#109)", () => {
       await gate1Started.promise;
       const adapterDeps = vi.mocked(realAdapter).mock.calls[0]?.[0];
       if (adapterDeps === undefined) throw new Error("merger adapter was not created");
-      const gate2 = adapterDeps.runStackGate();
-      await Promise.resolve();
+      const gate2 = adapterDeps.runStackGate([1]);
+      // Planned, so queued behind gate-1: the plan reads the stored picks first.
+      await vi.waitFor(() => expect(seams.selectionPlanFor).toHaveBeenCalled());
       expect(starts).toEqual(["gate-1"]);
       releaseGate1.resolve();
       await expect(gate2).resolves.toEqual({ value: gateResult, queuedMs: expect.any(Number) });
