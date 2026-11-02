@@ -191,7 +191,7 @@ export default {
       {
         name: "test",
         in: "runner",
-        tests: ["src/**/*.test.ts", "!src/**/*-podman.test.ts"],
+        tests: ["src/**/*.test.ts", "!src/**/*podman.test.ts"],
         command: [
           "npx", "vitest", "run",
           "--coverage.enabled", "--coverage.reportsDirectory=coverage/unit", "{tests}",
