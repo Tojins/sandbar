@@ -79,6 +79,8 @@ describe.runIf(available)("a gate stack's test selection against real podman", (
         core: [],
         domains: {},
         changed: [],
+        picks: [],
+        picked: [],
         related: ["b.test.txt", MARKER_FILE, "x.txt"],
         files: ["a.test.txt", "b.test.txt"],
         steps: { test: ["a.test.txt", "b.test.txt"], none: [] },
