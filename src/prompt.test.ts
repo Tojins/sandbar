@@ -166,13 +166,36 @@ describe("renderAttemptSlot — the quality pass (#185)", () => {
 describe("renderAttemptSlot — the stack file (#186)", () => {
   it("names the file and the env-only rule when the stack is a file", () => {
     expect(renderAttemptSlot({ ...implementerInputs, stackFile: "gate/stack.json" })).toContain(
-      "Only container `env` changes in `gate/stack.json` take effect on your gate; " +
-        "any other change to it parks the issue for a human.\n\n",
+      "Only container `env` changes and test-selection changes (`domains`, `sanity`, " +
+        "`core`, `related`, a step's `tests`) in `gate/stack.json` take effect on your " +
+        "gate, a selection change only adding to the tests it runs; any other change to it " +
+        "parks the issue for a human.\n\n",
     );
   });
 
   it("says nothing for an inline stack", () => {
     expect(renderAttemptSlot(implementerInputs)).not.toContain("take effect on your gate");
+  });
+});
+
+// #266: attempt 1 is told in one line what a selecting gate-1 runs.
+describe("renderAttemptSlot — a selecting gate (#266)", () => {
+  const line = "Gate-1 does not run the whole suite: it runs the global sanity tests, the " +
+    "sanity sets of the domains your change reaches, the tests that import the files you " +
+    "changed, and the test files you add or change.\n\n";
+
+  it("tells attempt 1 what gate-1 runs", () => {
+    expect(renderAttemptSlot({ ...implementerInputs, attempt: 1, gateSelects: true })).toContain(line);
+  });
+
+  it("says nothing on a later attempt, or for a gate without a selection", () => {
+    for (const inputs of [
+      { ...implementerInputs, attempt: 2, gateSelects: true },
+      { ...implementerInputs, attempt: 1, gateSelects: false },
+      { ...implementerInputs, attempt: 1 },
+    ]) {
+      expect(renderAttemptSlot(inputs)).not.toContain("Gate-1 does not run the whole suite");
+    }
   });
 });
 

@@ -311,7 +311,7 @@ import type {
 import { parseVerdict } from "./verdict-parser.js";
 import { parsePartitionCheck } from "./partition-check-parser.js";
 import { summarizeGateFailure } from "./gate.js";
-import { selectionPlanFor, selectionTraceLine } from "./gate-selection.js";
+import { selectionPlanFor, selectionTraceLine, selects } from "./gate-selection.js";
 import type { GateSemaphore } from "./gate-semaphore.js";
 import {
   ContainerBringupError,
@@ -1698,6 +1698,7 @@ async function runSandboxCycle(
         ...stackFileInput(opts.stackSource),
         egressEnforced: config.egress?.policy.mode === "enforce",
         settled: settledRules(setupStack.stack),
+        gateSelects: selects(setupStack.stack),
       }, anchorOpts);
       const diff = await measureNetDiff(worktreePath, base.ref, config.sourceBranch);
       const size = contextChars(admissionPrompt, diff.chars);
@@ -2957,6 +2958,7 @@ export async function runImplementer(
   // Handed to this attempt's prompt once: the next attempt is told only about
   // what the fixer committed after this one.
   const qualityCommits = ctx.quality.sinceImplementer.splice(0);
+  const tipStack = (await opts.stackSource.current()).stack;
   const prompt = await buildPrompt(
     {
       subject: ctx.subject.prompt,
@@ -2977,7 +2979,8 @@ export async function runImplementer(
       ),
       ...stackFileInput(opts.stackSource),
       egressEnforced: config.egress?.policy.mode === "enforce",
-      settled: await tipSettledRules(opts.stackSource),
+      settled: settledRules(tipStack),
+      gateSelects: selects(tipStack),
       ...(ctx.dbCopy.kind === "held" ? { dbCopy: ctx.dbCopy } : {}),
     },
     anchorOpts,

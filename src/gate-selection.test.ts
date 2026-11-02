@@ -8,6 +8,9 @@ import {
   globMatcher,
   parseRelatedOutput,
   planSelection,
+  selectionPlanFor,
+  selectionTraceLine,
+  selects,
 } from "./gate-selection.js";
 
 const step = (name: string, tests: readonly string[] | null): ResolvedGateStep => ({
@@ -220,5 +223,31 @@ describe("expandTests", () => {
     expect(expandTests(["vitest", "run", "{tests}", "--reporter=dot"], ["a.test.ts", "b.test.ts"]))
       .toEqual(["vitest", "run", "a.test.ts", "b.test.ts", "--reporter=dot"]);
     expect(expandTests(["vitest", "{tests}x"], ["a.test.ts"])).toEqual(["vitest", "{tests}x"]);
+  });
+});
+
+describe("selectionPlanFor", () => {
+  const stack = { containers: [], steps: [step("check", null)], ...declaration, related: null };
+
+  it("reads nothing for a stack whose steps declare no tests", async () => {
+    expect(selects(stack)).toBe(false);
+    await expect(selectionPlanFor({ stack, classification: { kind: "same" } }, "/nonexistent", "main"))
+      .resolves.toBeNull();
+  });
+
+  it("is asked of a stack with a selecting step", () => {
+    expect(selects({ ...stack, steps })).toBe(true);
+  });
+});
+
+describe("selectionTraceLine", () => {
+  const selection = finishSelection(plan([]), [], steps);
+
+  it("names the files a gate ran, and says so when there were none", () => {
+    expect(selectionTraceLine(selection))
+      .toBe("[sandbar] this gate ran these test files:\nsrc/config.test.ts\n\n");
+    expect(selectionTraceLine({ ...selection, files: [] }))
+      .toBe("[sandbar] this gate's selection held no test file.\n\n");
+    expect(selectionTraceLine(undefined)).toBe("");
   });
 });

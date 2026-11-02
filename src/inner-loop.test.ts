@@ -1213,12 +1213,12 @@ describe("silent implementer attempt policy (#116)", () => {
     );
   });
 
-  it("hands the implementer prompt the rules the source tip's gate stack settles (#183)", async () => {
+  it("hands the implementer prompt the rules the source tip's gate stack settles (#183), and whether it selects (#266)", async () => {
     innerLoopMocks.buildPrompt.mockClear();
     const current = vi.spyOn(inlineStackSource, "current").mockResolvedValueOnce({
       stack: {
         containers: [],
-        steps: [{ name: "tests-structure", settles: ["missing-tests"] }] as never[],
+        steps: [{ name: "tests-structure", settles: ["missing-tests"], tests: ["*.test.ts"] }] as never[],
       },
     });
     try {
@@ -1228,7 +1228,7 @@ describe("silent implementer attempt policy (#116)", () => {
       current.mockRestore();
     }
     expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
-      expect.objectContaining({ settled: new Set(["missing-tests"]) }),
+      expect.objectContaining({ settled: new Set(["missing-tests"]), gateSelects: true }),
       expect.anything(),
     );
   });
@@ -4700,7 +4700,7 @@ describe("runInnerLoop context terminals (#158)", () => {
       forHead: async () => ({
         stack: {
           containers: [],
-          steps: [{ name: "tests-structure", settles: ["missing-tests"] }],
+          steps: [{ name: "tests-structure", settles: ["missing-tests"], tests: null }],
         },
         attachments: { env: {}, mounts: [] },
         classification: { kind: "same" },
@@ -4711,7 +4711,7 @@ describe("runInnerLoop context terminals (#158)", () => {
     await runInnerLoop(issue, opts);
 
     expect(innerLoopMocks.buildPrompt).toHaveBeenCalledWith(
-      expect.objectContaining({ attempt: 1, settled: new Set(["missing-tests"]) }),
+      expect.objectContaining({ attempt: 1, settled: new Set(["missing-tests"]), gateSelects: false }),
       expect.anything(),
     );
   });

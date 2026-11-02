@@ -1,1 +1,1 @@
-Only container `env` changes in `{{path}}` take effect on your gate; any other change to it parks the issue for a human.
+Only container `env` changes and test-selection changes (`domains`, `sanity`, `core`, `related`, a step's `tests`) in `{{path}}` take effect on your gate, a selection change only adding to the tests it runs; any other change to it parks the issue for a human.

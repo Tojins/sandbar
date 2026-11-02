@@ -153,6 +153,7 @@ const SCENARIO_RUNNER_TPL = loadTemplate("scenario-runner");
 const SCENARIO_RUNNER_DB_COPY_TPL = loadTemplate("scenario-runner-db-copy");
 const REVIEWER_DB_NOTICE_TPL = loadTemplate("reviewer-db-notice");
 const IMPLEMENTER_GATE_FAILURE_TPL = loadTemplate("implementer-gate-failure");
+const IMPLEMENTER_GATE_SELECTION_TPL = loadTemplate("implementer-gate-selection");
 const IMPLEMENTER_REVIEWER_FEEDBACK_TPL = loadTemplate("implementer-reviewer-feedback");
 const IMPLEMENTER_QUALITY_COMMITS_TPL = loadTemplate("implementer-quality-commits");
 const IMPLEMENTER_ESCALATION_TPL = loadTemplate("implementer-escalation");
@@ -359,6 +360,9 @@ export type PromptInputs = {
   // The rules a step of the gate stack in effect settles (#183): their prose
   // is left out of this attempt's pre-promise review.
   readonly settled: ReadonlySet<SettledRule>;
+  // Whether gate-1 runs a test selection (#266), which attempt 1 is told in
+  // one line; later attempts' gate traces name the files it ran.
+  readonly gateSelects?: boolean;
   // The database copy this attempt holds (#201). Absent without one: a copy
   // that is off or unavailable says nothing.
   readonly dbCopy?: DbCopyHeld;
@@ -1067,6 +1071,9 @@ export function renderAttemptSlot(inputs: AttemptSlotRender): string {
     dbCopy: section(dbCopy),
     stackFile: section(stackFile),
     egress: section(inputs.egressEnforced === true ? IMPLEMENTER_SANDBOX_EGRESS_TPL : ""),
+    gateSelection: section(
+      attempt === 1 && inputs.gateSelects === true ? IMPLEMENTER_GATE_SELECTION_TPL : "",
+    ),
     gateFailure: section(gateFailure),
     reviewerFeedback: section(reviewerFeedback),
     orchestratorNote: section(orchestratorNote),
