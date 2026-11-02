@@ -4,7 +4,8 @@ export function over(n: number, max: number): boolean {
 export function twice(n: number): number {
   return n * 2;
 }
-// Stryker disable next-line BlockStatement
+/* v8 ignore next */
+export const ZERO = 0;
 export function half(n: number): number {
   return n / 2;
 }

@@ -17,8 +17,8 @@ cited GitHub issue (`#N`) and the commit history.
 - `npx vitest run src/<file>.test.ts [-t "<name>"]` — one file / one test.
 - `npm run structure` — the structural checks sandbar's gate runs as steps
   (`scripts/structure/`, #183): `version`, the branch's bump, and
-  `missing-tests` (#236), every added line covered (from `coverage/`) and
-  pinned (Stryker, line deletion).
+  `missing-tests` (#236, #264), every added statement line of `src/`
+  covered (from `coverage/`), at gate-1 and again at gate-2.
 
 Node ≥ 20.6, ESM, NodeNext: imports in `src/` use `.js` even for `.ts` files.
 
@@ -181,7 +181,9 @@ a written set.
   verdict is about a clean, on-branch commit (D1, #27, #127). A step's
   `settles` (#183) names rules it checks mechanically; while one does, the
   implementer and quality prompts drop that rule's prose fragment
-  (`prompts/quality-tests-missing-*.md`, `prompts/commit-ritual-*.md`). A
+  (`prompts/quality-tests-uncovered-*.md`, `prompts/commit-ritual-*.md`);
+  `missing-tests` settles only the coverage clause, and the behaviour-level
+  missing-test rule renders for every consumer (#264). A
   `standalone` step (#247) also runs early for the quality fixer; gate-1
   still runs it and decides.
 - **Providers**: `agent-providers.ts` (closed set, credentials), per-role
@@ -195,9 +197,9 @@ a written set.
   `background-tasks.md`); implementer attempt slot 6.8k (2.9k of it
   `coding-standards.md`; +2.3k sandbox-stack, +1.2–1.3k gate access when
   configured, +0.2k an enforced egress allowlist, +0.6k a held database
-  copy); quality lister 5.6k for the built-in group, 2.8k + its group for a
+  copy); quality lister 5.7k for the built-in group, 2.8k + its group for a
   project group; verify 6.0k (+0.1k when the report held only gate-step
-  findings), fixer 5.4k (its report +0.2k and the output's tail per red
+  findings), fixer 5.6k (its report +0.2k and the output's tail per red
   standalone step, #247); verifier white-box 4.1k (+0.1k
   beside a held copy); scenario runner 2.1k + its scenarios (no issue
   anchor; +2.3k sandbox-stack, +0.2k egress, +0.6k a held copy, +0.2k a

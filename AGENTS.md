@@ -35,13 +35,16 @@ run. Run the test files your change reaches: `npx vitest run
 src/<file>.test.ts`, or `npx vitest related --run <changed src files>` for every
 test that imports them.
 
-Every production line a branch adds needs a test that runs it and fails
-without it: the gate's `missing-tests` check reds an added line no test
-covers, a mutant of it no test kills, or a deleted line no test misses.
-Before promising, run `npm run structure` over coverage from those same
-related tests:
+Every behaviour a branch adds or changes needs a test that would notice it
+breaking, and every production line it adds must run in some test: the
+gate's `missing-tests` check reds an added statement line no test covers,
+on the branch and again on the merge result at landing. Before promising,
+run `npm run structure` over coverage from those same related tests:
 
 ```sh
 npx vitest related --run --coverage.enabled --coverage.reportsDirectory=coverage/unit <changed src files>
 npm run structure
 ```
+
+Without `coverage/podman/` a line only a podman test runs is red there too;
+run those tests with `--coverage.reportsDirectory=coverage/podman` as well.

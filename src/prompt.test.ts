@@ -409,14 +409,14 @@ describe("rule prose a gate step settles (#183)", () => {
     {
       rule: "missing-tests",
       prompt: "lister",
-      text: "either a production line no test covers, or",
-      settledReads: "leaves the suite green: a test line whose deletion changes",
+      text: "a production line no test covers,",
+      settledReads: "A test finding names a\n   behaviour the branch adds or changes",
     },
     {
       rule: "missing-tests",
       prompt: "fixer",
-      text: "Write the tests the report says are missing.",
-      settledReads: "2. Tests. Rewrite the tests the report says test nothing.",
+      text: "no test covers needs a test that runs it.",
+      settledReads: "need no test of their own. Rewrite\n   the tests the report says test nothing.",
     },
     {
       rule: "commit-ritual",
@@ -798,10 +798,12 @@ describe("renderQualityFixSlot (#185, #187)", () => {
     expect(slot.indexOf("## Quality report")).toBeLessThan(slot.indexOf("## Adjudicator's ruling"));
   });
 
-  it("defines missing and bad tests by what the suite can detect", () => {
+  // #264: a behaviour, not every line, for every consumer.
+  it("defines missing tests by behaviour and bad tests by what the suite can detect", () => {
     const slot = renderFix();
-    expect(slot).toMatch(/production line the branch\s+changes could be deleted and the suite would stay\s+green/);
-    expect(slot).toMatch(/the test itself could be deleted and the suite would stay\s+green/);
+    expect(slot).toMatch(/A test is missing\s+when a behaviour the branch adds or changes has no test that would notice\s+it breaking/);
+    expect(slot).toMatch(/implementation detail, and glue, config and wiring the\s+suites already run, need no test of their own/);
+    expect(slot).toMatch(/the test\s+itself could be deleted and the suite would stay green/);
   });
 
   // A failing test is the one channel the fixer has for a correctness defect;
@@ -880,8 +882,10 @@ describe("renderQualityReviewSlot (#187)", () => {
     expect(renderList()).toMatch(/raise it under `### Tests`\s+as the test that would fail on it/);
   });
 
-  it("keeps the test-finding criterion", () => {
-    expect(renderList()).toMatch(/must name a line whose deletion\s+leaves the suite green/);
+  it("keeps the test-finding criterion: an untested behaviour or a test that tests nothing (#264)", () => {
+    const slot = renderList();
+    expect(slot).toMatch(/behaviour the branch adds or changes that no test would notice breaking,\s+or a test line whose deletion changes nothing/);
+    expect(slot).toMatch(/Implementation detail, and\s+glue, config and wiring the suites already run, need no test of their own/);
   });
 
   it("lists the whole branch exhaustively until a quality pass has approved a head", () => {
