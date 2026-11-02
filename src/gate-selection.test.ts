@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { ResolvedGateStep, SanityDeclaration } from "./config.js";
+import { TESTS_TOKEN, type ResolvedGateStep, type SanityDeclaration } from "./config.js";
 import {
   type ChangedFile,
-  expandTests,
+  expandToken,
   finishSelection,
   globMatcher,
   parseRelatedOutput,
@@ -226,11 +226,12 @@ describe("finishSelection", () => {
   });
 });
 
-describe("expandTests", () => {
+describe("expandToken", () => {
   it("replaces the {tests} entry with one entry per file, wherever it stands", () => {
-    expect(expandTests(["vitest", "run", "{tests}", "--reporter=dot"], ["a.test.ts", "b.test.ts"]))
-      .toEqual(["vitest", "run", "a.test.ts", "b.test.ts", "--reporter=dot"]);
-    expect(expandTests(["vitest", "{tests}x"], ["a.test.ts"])).toEqual(["vitest", "{tests}x"]);
+    expect(
+      expandToken(["vitest", "run", "{tests}", "--reporter=dot"], TESTS_TOKEN, ["a.test.ts", "b.test.ts"]),
+    ).toEqual(["vitest", "run", "a.test.ts", "b.test.ts", "--reporter=dot"]);
+    expect(expandToken(["vitest", "{tests}x"], TESTS_TOKEN, ["a.test.ts"])).toEqual(["vitest", "{tests}x"]);
   });
 });
 

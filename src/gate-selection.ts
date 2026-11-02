@@ -34,7 +34,6 @@
 // asks first, and for a stack whose steps declare no `tests` it reads nothing.
 
 import {
-  TESTS_TOKEN,
   type ResolvedGateStack,
   type ResolvedGateStep,
   type SanityDeclaration,
@@ -219,9 +218,6 @@ export function expandToken(
 ): string[] {
   return command.flatMap((arg) => (arg === token ? values : [arg]));
 }
-
-export const expandTests = (command: readonly string[], files: readonly string[]): string[] =>
-  expandToken(command, TESTS_TOKEN, files);
 
 // The tree at `worktree` and what changed in it since its fork from `baseRef`:
 // tracked and untracked files, less what the working tree deleted.

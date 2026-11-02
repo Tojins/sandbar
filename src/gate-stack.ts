@@ -149,6 +149,7 @@ import { isAbsolute, resolve as resolvePath } from "node:path";
 import { registerDisposable, reportCleanupNotice } from "./cleanup.js";
 import {
   CHANGED_TOKEN,
+  TESTS_TOKEN,
   type ResolvedGateRelated,
   type ResolvedGateStack,
   type ResolvedGateStep,
@@ -163,7 +164,6 @@ import { type GateResult, type GateStepTiming, stripAnsi } from "./gate.js";
 import {
   type GateSelection,
   type SelectionPlan,
-  expandTests,
   expandToken,
   finishSelection,
   parseRelatedOutput,
@@ -2766,7 +2766,7 @@ function stepCommand(step: ResolvedGateStep, selection: GateSelection | null): r
   if (selection === null) {
     throw new Error(`gate stack: step '${step.name}' declares tests but the gate has no selection`);
   }
-  return expandTests(step.command, selection.steps[step.name] ?? []);
+  return expandToken(step.command, TESTS_TOKEN, selection.steps[step.name] ?? []);
 }
 
 // Kill the work a killed step left running inside its container (#26).
