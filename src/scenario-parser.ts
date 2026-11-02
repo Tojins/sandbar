@@ -36,11 +36,12 @@
 // line, an entry with no reason, a domain the seed does not declare and a
 // path an `area:` entry could not be, listing all of them. `gatePickErrors`
 // checks a pick read back as JSON, stored or pinned, as `scenarioSetErrors`
-// does a set. The answer itself is read outside every `<gate-selection>`
-// block, so a token or block quoted in a reason never reaches the verdict.
+// does a set. Both read the output's top-level parts (`lastTopLevel`), so a
+// token or block quoted in a reason or a scenario's clause is text, never the
+// verdict, the set or the pick.
 
 import type { GatePick } from "./gate-selection.js";
-import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
+import { lastTopLevel, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 
 export const SCENARIO_NEEDS = ["ui", "api", "sql", "integration", "cli"] as const;
 export type ScenarioNeed = (typeof SCENARIO_NEEDS)[number];
@@ -82,12 +83,19 @@ const NO_TOKEN =
   "`<scenario-writer>NONE</scenario-writer>` followed by a " +
   "`<scenario-none-reason>` block.";
 
-export function parseScenarioWriter(output: string): ScenarioWriterParseResult {
-  const stdout = output.replace(temperedBlockPattern("gate-selection"), "");
-  const token = lastToken(stdout, TOKEN);
-  if (token === null) return { kind: "NO-SIGNAL", reprompt: NO_TOKEN };
+const answerParts = (stdout: string): Partial<Record<"token" | "scenarios" | "noneReason" | "pick", string>> =>
+  lastTopLevel(stdout, {
+    token: TOKEN,
+    scenarios: temperedBlockPattern("scenarios"),
+    noneReason: temperedBlockPattern("scenario-none-reason"),
+    pick: temperedBlockPattern("gate-selection"),
+  });
+
+export function parseScenarioWriter(stdout: string): ScenarioWriterParseResult {
+  const { token, scenarios: block, noneReason } = answerParts(stdout);
+  if (token === undefined) return { kind: "NO-SIGNAL", reprompt: NO_TOKEN };
   if (token === "NONE") {
-    const reason = lastToken(stdout, temperedBlockPattern("scenario-none-reason")) ?? "";
+    const reason = noneReason ?? "";
     return reason
       ? { kind: "NONE", reason }
       : {
@@ -96,8 +104,7 @@ export function parseScenarioWriter(output: string): ScenarioWriterParseResult {
             "nothing the issue changes can be observed from outside.",
         };
   }
-  const block = lastToken(stdout, temperedBlockPattern("scenarios"));
-  if (block === null) {
+  if (block === undefined) {
     return {
       kind: "NO-SIGNAL",
       reprompt: "A WRITTEN answer requires a `<scenarios>` block holding every scenario.",
@@ -172,8 +179,8 @@ export function parseGateSelection(
   stdout: string,
   declared: readonly string[],
 ): { readonly kind: "picked"; readonly pick: GatePick } | { readonly kind: "malformed"; readonly reprompt: string } {
-  const block = lastToken(stdout, temperedBlockPattern("gate-selection"));
-  if (block === null) {
+  const block = answerParts(stdout).pick;
+  if (block === undefined) {
     return {
       kind: "malformed",
       reprompt: "Your answer needs a `<gate-selection>` block beside it, empty when you pick nothing.",

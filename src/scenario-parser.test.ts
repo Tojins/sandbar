@@ -88,6 +88,24 @@ describe("parseScenarioWriter tokens", () => {
       .toMatchObject({ kind: "WRITTEN", scenarios: [{ title: "Paid invoices keep their total" }] });
   });
 
+  it("reads a scenario's clauses as text, whatever tags they quote", () => {
+    const quoting = written(S1.replace(
+      "Given an invoice with two lines",
+      "Given the writer answers `<scenario-writer>NONE</scenario-writer>` and " +
+        "`<gate-selection>\n  domain ui: example\n  </gate-selection>`",
+    ));
+    expect(parseScenarioWriter(quoting)).toMatchObject({
+      kind: "WRITTEN",
+      scenarios: [{
+        given: [
+          "the writer answers `<scenario-writer>NONE</scenario-writer>` and " +
+            "`<gate-selection> domain ui: example </gate-selection>`",
+          "the invoice is paid",
+        ],
+      }],
+    });
+  });
+
   it("requires a reason for NONE and a block for WRITTEN", () => {
     expect(reprompt("<scenario-writer>NONE</scenario-writer>")).toContain("<scenario-none-reason>");
     expect(reprompt("<scenario-writer>WRITTEN</scenario-writer>")).toContain("<scenarios>");
@@ -198,6 +216,17 @@ describe("parseGateSelection (#267)", () => {
       "domains is not a list of { name, reason }",
       "tests is not a list of { path, reason }",
     ]);
+  });
+
+  it("does not read a block a scenario quotes as the pick", () => {
+    const quoting = written(S1.replace(
+      "Given an invoice with two lines",
+      "Given the writer emits `<gate-selection>\n  domain planning: example\n  </gate-selection>`",
+    ));
+    const pick = "<gate-selection>\ndomain gate: the real pick\n</gate-selection>";
+    const real = { kind: "picked", pick: { domains: [{ name: "gate", reason: "the real pick" }], tests: [] } };
+    expect(parseGateSelection(`${pick}\n${quoting}`, declared)).toEqual(real);
+    expect(parseGateSelection(`${quoting}\n${pick}`, declared)).toEqual(real);
   });
 
   it("takes an empty block as picking nothing", () => {
