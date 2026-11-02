@@ -66,9 +66,9 @@
 // `gate-stack` records which gate stack an issue's gate-1 runs (#186): the
 // accepted source-tip blob (null for an inline stack), how the branch's own
 // stack file classified, and for an env-only or domains (#266) edit the
-// containers whose env the branch set. Emitted at setup and whenever the spec in effect changes; a
-// report only (#82). NEEDS-STACK-CHANGE is the terminal a stack edit beyond
-// env parks with.
+// containers whose env the branch set. Emitted at setup and whenever the spec
+// in effect changes; a report only (#82). NEEDS-STACK-CHANGE is the terminal a
+// stack edit beyond env and the test selection parks with.
 //
 // `gate-selection` (#266) is the test selection one gate run ran, beside its
 // `gate` event: each part (`global`, `core`, `domains` by name, the
