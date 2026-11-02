@@ -45,3 +45,6 @@ run `npm run structure` over coverage from those same related tests:
 npx vitest related --run --coverage.enabled --coverage.reportsDirectory=coverage/unit <changed src files>
 npm run structure
 ```
+
+Without `coverage/podman/` a line only a podman test runs is red there too;
+run those tests with `--coverage.reportsDirectory=coverage/podman` as well.

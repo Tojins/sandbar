@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { addedLines, mergeBase, withFsError } from "./core.mjs";
-import { coverageFindings, PODMAN_COVERAGE } from "./coverage.mjs";
+import { coverageFindings } from "./coverage.mjs";
 
 export function isProduction(path) {
   return /^src\/.*\.ts$/.test(path) && !/\.test(?:-util)?\.ts$/.test(path);
@@ -36,12 +36,9 @@ export function hintFinding(path, line, text) {
   return HINT.test(text) && !REASONED_HINT.test(text) ? `${path}:${line}  v8 ignore hint without a reason` : null;
 }
 
-const count = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
-
-// The success line from what coverage counted.
-export function missingTestsSummary({ covered, unknown }) {
-  return `missing-tests: ${count(covered, "line")} covered, 0 uncovered` +
-    (unknown === 0 ? "" : `; ${count(unknown, "line")} unknown without ${PODMAN_COVERAGE}`);
+// The success line from how many lines coverage counted covered.
+export function missingTestsSummary(covered) {
+  return `missing-tests: ${covered} line${covered === 1 ? "" : "s"} covered, 0 uncovered`;
 }
 
 // `options.podmanCoverage`: podman coverage is required (coverage.mjs).
@@ -58,5 +55,5 @@ export function checkMissingTests(repo, baseRef, options) {
   }
   const coverage = coverageFindings(repo.dir, production, options.podmanCoverage);
   findings.push(...coverage.findings);
-  return { findings, summary: missingTestsSummary(coverage.counts) };
+  return { findings, summary: missingTestsSummary(coverage.covered) };
 }

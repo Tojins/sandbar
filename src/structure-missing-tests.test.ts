@@ -86,9 +86,9 @@ describe("coverage", () => {
       { line: 7, state: "uncovered" },
       { line: 9, state: "covered" },
     ]);
-    expect(lineCoverage("src/a.ts", [4, 5], unit, null)).toEqual([
-      { line: 4, state: "unknown" },
-      { line: 5, state: "unknown" },
+    expect(lineCoverage("src/a.ts", [4, 5], unit, new Map())).toEqual([
+      { line: 4, state: "uncovered" },
+      { line: 5, state: "uncovered" },
     ]);
     expect(lineCoverage("src/b.ts", [1], unit, podman)).toBeNull();
   });
@@ -96,9 +96,11 @@ describe("coverage", () => {
   it("groups uncovered lines into runs only a counted, not-uncovered line breaks", () => {
     const counted = [
       { line: 3, state: "uncovered" }, { line: 5, state: "uncovered" }, { line: 6, state: "uncovered" },
-      { line: 8, state: "covered" }, { line: 9, state: "uncovered" }, { line: 12, state: "unknown" },
+      { line: 8, state: "covered" }, { line: 9, state: "uncovered" }, { line: 11, state: "covered" },
+      { line: 12, state: "uncovered" },
     ];
-    expect(uncoveredFindings("src/a.ts", counted)).toEqual(["src/a.ts:3-6  uncovered", "src/a.ts:9  uncovered"]);
+    expect(uncoveredFindings("src/a.ts", counted))
+      .toEqual(["src/a.ts:3-6  uncovered", "src/a.ts:9  uncovered", "src/a.ts:12  uncovered"]);
   });
 
   const coverageDir = async (files: string[]) => {
@@ -119,19 +121,19 @@ describe("coverage", () => {
       files: [UNIT_COVERAGE, PODMAN_COVERAGE],
       requirePodman: true,
       findings: ["src/a.ts:2  uncovered"],
-      counts: { covered: 2, unknown: 0 },
+      covered: 2,
     },
     {
       name: "no podman file locally",
       files: [UNIT_COVERAGE],
       requirePodman: false,
-      findings: [],
-      counts: { covered: 1, unknown: 2 },
+      findings: ["src/a.ts:2-3  uncovered"],
+      covered: 1,
     },
-  ])("$name", async ({ files, requirePodman, findings, counts }) => {
+  ])("$name", async ({ files, requirePodman, findings, covered }) => {
     const dir = await coverageDir(files);
     expect(coverageFindings(dir, new Map([["src/a.ts", [1, 2, 3]]]), requirePodman))
-      .toEqual({ findings, counts });
+      .toEqual({ findings, covered });
   });
 
   // Missing coverage cannot answer the check: exit 2, never a finding.
@@ -185,14 +187,10 @@ describe("coverage", () => {
 
 describe("summary", () => {
   it.each([
-    { name: "every line known", counts: { covered: 1, unknown: 0 }, line: "missing-tests: 1 line covered, 0 uncovered" },
-    {
-      name: "unknown lines",
-      counts: { covered: 37, unknown: 3 },
-      line: `missing-tests: 37 lines covered, 0 uncovered; 3 lines unknown without ${PODMAN_COVERAGE}`,
-    },
-  ])("$name", ({ counts: c, line }) => {
-    expect(missingTestsSummary(c)).toBe(line);
+    [1, "missing-tests: 1 line covered, 0 uncovered"],
+    [37, "missing-tests: 37 lines covered, 0 uncovered"],
+  ])("%i covered", (covered, line) => {
+    expect(missingTestsSummary(covered)).toBe(line);
   });
 });
 
@@ -304,6 +302,19 @@ describe("run.mjs missing-tests", () => {
       lines: [
         `missing-tests: src/calc.ts cannot be read: ENOENT: no such file or directory, open '${elsewhere}/src/calc.ts'`,
       ],
+      stderr: "",
+    });
+  });
+
+  // Without podman coverage no podman test ran, so a local run reds what the
+  // unit tests leave unhit rather than passing it (#264).
+  it("reds a line no unit test hits when no podman coverage was written", async () => {
+    const dir = await fixtureRepo("missing-tests-red");
+    const calc = join(dir, "src/calc.ts");
+    await write(dir, UNIT_COVERAGE, { [calc]: coverageFile(calc, [[2, 1], [5, 1], [8, 1], [10, 0]]) });
+    expect(run(dir, "missing-tests", "--base", "origin/main")).toEqual({
+      status: 1,
+      lines: ["src/calc.ts:7  v8 ignore hint without a reason", "src/calc.ts:10  uncovered"],
       stderr: "",
     });
   });
