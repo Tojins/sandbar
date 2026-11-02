@@ -3546,12 +3546,26 @@ describe("runGate admission (#142)", () => {
         global: ["a.test.ts"],
         changed: ["b.test.ts"],
         relatedInput: ["b.test.ts"],
+        picks: [],
       }));
       expect(events).toContainEqual({
         kind: "gate-selection", issue: 266, title: "selection", attempt: 2, gate: "gate-1", ...selection,
       });
       expect(result.gate.failureTrace)
         .toMatch(/^\[sandbar\] this gate ran these test files:\na\.test\.ts\nb\.test\.ts\n\nboom/);
+
+      // #267: a writer still running adds nothing; once it settles, its pick.
+      const pick = { domains: [], tests: [{ path: "a.test.ts", reason: "pins the seed" }] };
+      const writer = { status: vi.fn((): ScenarioWriterStatus => ({ kind: "running" })) };
+      Object.assign(ctx, { scenarioWriter: writer });
+      await runGate({ kind: "run-gate", attempt: 3, quality: { verdict: "APPROVED", rounds: 0 } }, ctx);
+      expect(runGateOnBound).toHaveBeenLastCalledWith(expect.objectContaining({ picks: [], picked: [] }));
+      writer.status.mockReturnValue({ kind: "settled", outcome: { kind: "none", reason: "docs", pick } });
+      await runGate({ kind: "run-gate", attempt: 4, quality: { verdict: "APPROVED", rounds: 0 } }, ctx);
+      expect(runGateOnBound).toHaveBeenLastCalledWith(expect.objectContaining({
+        picks: [{ issue: 266, ...pick }],
+        picked: ["a.test.ts"],
+      }));
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
@@ -5011,6 +5025,18 @@ describe("runInnerLoop context terminals (#158)", () => {
       expect(events.flatMap((event) => event.kind === "phase" ? [event.phases] : [])).toEqual([
         ["anchor"], ["implementer"], ["quality"], ["gate-1"], ["review"], [],
       ]);
+    });
+
+    // #267: a case whose admission answered NONE beside a pick pins the pick
+    // alone.
+    it("settles a pinned pick with no set as NONE: no writer and no runner", async () => {
+      const pinnedGatePick = { domains: [{ name: "gate", reason: "r" }], tests: [] };
+      const { sandbox, opts } = harness(routine, { scenarioWriter: true, pinnedGatePick });
+
+      await expect(runInnerLoop(issue, opts)).resolves.toMatchObject({ type: "DONE" });
+      expect(innerLoopMocks.createScenarioWriterTask).not.toHaveBeenCalled();
+      expect(names(sandbox)).toContain("reviewer-158-round-1");
+      expect(names(sandbox)).not.toContain("scenario-runner-158-round-1");
     });
 
     it("creates no task when it is off", async () => {

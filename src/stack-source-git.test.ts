@@ -255,6 +255,23 @@ describe("openStackSource over a stack file", () => {
 
     await expect(source.current()).rejects.toThrow(TypeError);
   });
+
+  it("reads the stack at a commit, null where the file is missing or invalid (#267)", async () => {
+    await land(JSON.stringify(stackWith({ TZ: "UTC" })));
+    const seed = (await git(repo, "rev-parse", "HEAD")).stdout.trim();
+    const source = await open();
+    await land("not json");
+    const invalid = (await git(repo, "rev-parse", "HEAD")).stdout.trim();
+    await git(repo, "rm", "-q", "gate/stack.json");
+    await git(repo, "commit", "-qm", "drop");
+    const missing = (await git(repo, "rev-parse", "HEAD")).stdout.trim();
+
+    expect(dbEnv((await source.atCommit(seed))!)).toEqual({ TZ: "UTC" });
+    await expect(source.atCommit(invalid)).resolves.toBeNull();
+    await expect(source.atCommit(missing)).resolves.toBeNull();
+    expect(hostChecks).not.toHaveBeenCalled();
+  });
+
   describe("forHead", () => {
     // Commit `text` as gate/stack.json on a branch `issue` cut from main.
     const edit = async (text: string | null): Promise<void> => {
@@ -412,6 +429,7 @@ describe("openStackSource over an inline stack", () => {
       classification: { kind: "same" },
       tipBlob: null,
     });
+    await expect(source.atCommit("seed")).resolves.toBe(inline.stack);
   });
 });
 

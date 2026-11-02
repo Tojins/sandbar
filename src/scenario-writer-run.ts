@@ -16,8 +16,16 @@
 // in the issue's log directory, which no sandbox mounts. No event, prompt or
 // park detail carries scenario text.
 //
+// When the seed's stack selects (`stackSource.atCommit`, #267), the prompt
+// shows the seed's declaration and the answer carries a `<gate-selection>`
+// block beside it: the issue's pick, part 6 of its gates' selection. A valid
+// pick rides on the outcome, which gate-1 reads, and on the deciding event,
+// which a replay case freezes, and is stored for gate-2 (`writeGatePick`).
+// A block still missing or malformed after the nudge leaves the pick out and
+// changes nothing else.
+//
 // One invocation, then at most one same-session format nudge carrying the
-// parser's correction, parsed over both outputs. Any failure that is not
+// parsers' corrections, parsed over both outputs. Any failure that is not
 // sandbar's own (an agent error or timeout, a closed provider, a size refusal,
 // podman, a writer that could not come up, a host step around the runs such
 // as the anchor's fetch or the set's file), a prompt over `maxContextChars`,
@@ -47,6 +55,7 @@ import { usageFields } from "./agent-usage.js";
 import { containerResourcesOf } from "./container-resources.js";
 import { SandbarError } from "./errors.js";
 import type { EventInput, ScenarioWriterResult } from "./events.js";
+import { selects, writeGatePick } from "./gate-selection.js";
 import { ContainerBringupError } from "./gate-stack.js";
 import {
   type InnerLoopConfig,
@@ -60,7 +69,7 @@ import {
 import type { ScenarioWriterOutcome, ScenarioWriterStatus } from "./inner-loop-machine.js";
 import { scopedResourcePrefix } from "./naming.js";
 import { buildScenarioWriterPrompt } from "./prompt.js";
-import { type ScenarioSet, parseScenarioWriter } from "./scenario-parser.js";
+import { parseGateSelection, parseScenarioWriter } from "./scenario-parser.js";
 import { startTimer } from "./timing.js";
 
 export type ScenarioWriterInput = {
@@ -94,7 +103,7 @@ export type ScenarioWriterDeps = {
     | "scenarioWriterModelId"
     | "scenarioWriterEffort"
   >;
-} & Pick<InnerLoopOptions, "attemptLogger" | "onEvent" | "providerState">;
+} & Pick<InnerLoopOptions, "attemptLogger" | "onEvent" | "providerState" | "stackSource">;
 
 // How the task ended: an outcome, or an error sandbar did not expect, which
 // the join rethrows.
@@ -118,7 +127,7 @@ const sandbarsOwn = (err: unknown): boolean =>
   err instanceof SandbarError && !(err instanceof ContainerBringupError);
 
 export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWriterTask {
-  const { issue, config, attemptLogger, onEvent, providerState } = deps;
+  const { issue, config, attemptLogger, onEvent, providerState, stackSource } = deps;
   const agent = config.scenarioWriterAgent;
   const model = config.scenarioWriterModelId;
   const effort = config.scenarioWriterEffort;
@@ -136,7 +145,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
 
   type Fields = Pick<
     Extract<EventInput, { kind: "scenario-writer" }>,
-    "durationMs" | "endedBy" | "transcript" | "maxGapMs" | "scenarios" | "usage"
+    "durationMs" | "endedBy" | "transcript" | "maxGapMs" | "scenarios" | "pick" | "usage"
   > & ReturnType<typeof agentPartialContainerResources>;
   const record = async (invocation: number, result: ScenarioWriterResult, fields: Fields) => {
     await onEvent({
@@ -204,11 +213,14 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
     open: SeedSnapshotSandbox,
     input: ScenarioWriterInput,
   ): Promise<ScenarioWriterOutcome> {
+    const seedStack = await stackSource.atCommit(input.seedSha);
+    const declaration = seedStack !== null && selects(seedStack) ? seedStack : null;
     const prompt = await buildScenarioWriterPrompt(
       issue.id,
       issueAnchorOptionsOf(config),
       open.worktreePath,
       config.promptExtensions?.scenarioWriter,
+      declaration,
     );
     if (prompt.length > config.maxContextChars) {
       await record(1, "input-too-large", {});
@@ -253,28 +265,44 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
       // The nudge's reply may only finish what the first run said.
       stdout = `${stdout}\n${run.stdout}`;
       const parsed = parseScenarioWriter(stdout);
-      if (parsed.kind === "WRITTEN") {
-        const set: ScenarioSet = {
-          version: 1,
-          issue: Number(issue.id),
-          seed: { ref: input.seedRef, sha: input.seedSha },
-          writer: { provider: agent, model, effort: effort ?? null },
-          scenarios: parsed.scenarios,
-        };
-        await attemptLogger.writeScenarios(set);
-        await record(invocation, "completed", { ...fields, scenarios: set.scenarios.length });
-        return { kind: "written", set };
+      const selection = declaration === null
+        ? null
+        : parseGateSelection(stdout, declaration.domains.map((domain) => domain.name));
+      const reprompts = [
+        ...(parsed.kind === "NO-SIGNAL" ? [parsed.reprompt] : []),
+        ...(selection?.kind === "malformed" ? [selection.reprompt] : []),
+      ];
+      if (invocation === 1 && reprompts.length > 0) {
+        await record(invocation, "completed", fields);
+        next = reprompts.join("\n\n");
+        continue;
       }
-      if (parsed.kind === "NONE") {
-        await record(invocation, "completed", { ...fields, scenarios: 0 });
-        return { kind: "none", reason: parsed.reason };
-      }
-      if (invocation === 2) {
+      if (parsed.kind === "NO-SIGNAL") {
         await record(invocation, "failed", fields);
         return failed(`no valid answer after the format nudge:\n${parsed.reprompt}`);
       }
-      await record(invocation, "completed", fields);
-      next = parsed.reprompt;
+      const pick = selection?.kind === "picked" ? selection.pick : null;
+      const outcome: ScenarioWriterOutcome = parsed.kind === "WRITTEN"
+        ? {
+            kind: "written",
+            set: {
+              version: 1,
+              issue: Number(issue.id),
+              seed: { ref: input.seedRef, sha: input.seedSha },
+              writer: { provider: agent, model, effort: effort ?? null },
+              scenarios: parsed.scenarios,
+            },
+            pick,
+          }
+        : { kind: "none", reason: parsed.reason, pick };
+      if (outcome.kind === "written") await attemptLogger.writeScenarios(outcome.set);
+      if (pick !== null) await writeGatePick(config.layout.gatePicksDir, Number(issue.id), pick);
+      await record(invocation, "completed", {
+        ...fields,
+        scenarios: outcome.kind === "written" ? outcome.set.scenarios.length : 0,
+        ...(pick === null ? {} : { pick }),
+      });
+      return outcome;
     }
     throw new Error("unreachable scenario writer invocation count");
   }
