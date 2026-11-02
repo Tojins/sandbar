@@ -41,7 +41,7 @@ export function missingTestsSummary(covered) {
   return `missing-tests: ${covered} line${covered === 1 ? "" : "s"} covered, 0 uncovered`;
 }
 
-// `options.podmanCoverage`: podman coverage is required (coverage.mjs).
+// `options.podmanCoverage`: coverage is read as the gate's (coverage.mjs).
 export function checkMissingTests(repo, baseRef, options) {
   const production = new Map([...addedLines(repo, mergeBase(repo, baseRef))].filter(([path]) => isProduction(path)));
 

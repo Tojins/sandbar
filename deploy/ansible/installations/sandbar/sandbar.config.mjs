@@ -69,6 +69,10 @@ export default {
       // rebuild and side by side: the unit suite is CPU-bound, the podman
       // suite mostly waits on podman.
       { name: "build", in: "runner", command: ["npm", "run", "build"] },
+      // A suite the selection skips writes no coverage, and `tests-structure`
+      // reads its absent file as that (scripts/structure/coverage.mjs), so no
+      // earlier gate's file may still be there.
+      { name: "clean-coverage", in: "runner", command: ["rm", "-rf", "coverage"] },
       {
         name: "version",
         in: "runner",

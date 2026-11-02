@@ -79,18 +79,22 @@ describe("coverage", () => {
   });
 
   it("classes each changed statement line, skipping lines no statement starts on", () => {
-    expect(lineCoverage("src/a.ts", [1, 3, 4, 5, 7, 9], unit, podman)).toEqual([
+    expect(lineCoverage("src/a.ts", [1, 3, 4, 5, 7, 9], [unit, podman])).toEqual([
       { line: 1, state: "covered" },
       { line: 4, state: "covered" },
       { line: 5, state: "uncovered" },
       { line: 7, state: "uncovered" },
       { line: 9, state: "covered" },
     ]);
-    expect(lineCoverage("src/a.ts", [4, 5], unit, new Map())).toEqual([
+    expect(lineCoverage("src/a.ts", [4, 5], [unit, new Map()])).toEqual([
       { line: 4, state: "uncovered" },
       { line: 5, state: "uncovered" },
     ]);
-    expect(lineCoverage("src/b.ts", [1], unit, podman)).toBeNull();
+    expect(lineCoverage("src/a.ts", [2, 4], [new Map(), podman])).toEqual([
+      { line: 2, state: "uncovered" },
+      { line: 4, state: "covered" },
+    ]);
+    expect(lineCoverage("src/b.ts", [1], [unit, podman])).toBeNull();
   });
 
   it("groups uncovered lines into runs only a counted, not-uncovered line breaks", () => {
@@ -119,31 +123,58 @@ describe("coverage", () => {
     {
       name: "both files, the gate",
       files: [UNIT_COVERAGE, PODMAN_COVERAGE],
-      requirePodman: true,
+      inGate: true,
       findings: ["src/a.ts:2  uncovered"],
       covered: 2,
     },
     {
       name: "no podman file locally",
       files: [UNIT_COVERAGE],
-      requirePodman: false,
+      inGate: false,
       findings: ["src/a.ts:2-3  uncovered"],
       covered: 1,
     },
-  ])("$name", async ({ files, requirePodman, findings, covered }) => {
+    // The gate cleared coverage/ first, so an absent file is a skipped suite.
+    {
+      name: "no podman file in the gate",
+      files: [UNIT_COVERAGE],
+      inGate: true,
+      findings: ["src/a.ts:2-3  uncovered"],
+      covered: 1,
+    },
+    {
+      name: "no unit file in the gate",
+      files: [PODMAN_COVERAGE],
+      inGate: true,
+      findings: ["src/a.ts:1-2  uncovered"],
+      covered: 1,
+    },
+    {
+      name: "no file in the gate",
+      files: [],
+      inGate: true,
+      findings: ["src/a.ts  absent from every coverage file"],
+      covered: 0,
+    },
+  ])("$name", async ({ files, inGate, findings, covered }) => {
     const dir = await coverageDir(files);
-    expect(coverageFindings(dir, new Map([["src/a.ts", [1, 2, 3]]]), requirePodman))
+    expect(coverageFindings(dir, new Map([["src/a.ts", [1, 2, 3]]]), inGate))
       .toEqual({ findings, covered });
   });
 
-  // Missing coverage cannot answer the check: exit 2, never a finding.
-  it.each([
-    { name: "no podman file in the gate", files: [UNIT_COVERAGE], requirePodman: true, missing: PODMAN_COVERAGE },
-    { name: "no unit file", files: [PODMAN_COVERAGE], requirePodman: false, missing: UNIT_COVERAGE },
-  ])("$name is an error", async ({ files, requirePodman, missing }) => {
-    const dir = await coverageDir(files);
-    expect(() => coverageFindings(dir, new Map([["src/a.ts", [1, 2, 3]]]), requirePodman))
-      .toThrow(new StructureError(`${missing} is missing: the test step wrote no coverage`));
+  // Outside the gate nothing cleared coverage/, so a missing unit file
+  // cannot answer the check: exit 2, never a finding.
+  it("no unit file locally is an error", async () => {
+    const dir = await coverageDir([PODMAN_COVERAGE]);
+    expect(() => coverageFindings(dir, new Map([["src/a.ts", [1, 2, 3]]]), false))
+      .toThrow(new StructureError(`${UNIT_COVERAGE} is missing: the test step wrote no coverage`));
+  });
+
+  it("a podman file that is not istanbul coverage is an error in the gate", async () => {
+    const dir = await tempDir();
+    await write(dir, PODMAN_COVERAGE, { a: 1 });
+    expect(() => coverageFindings(dir, new Map(), true))
+      .toThrow(new StructureError(`${PODMAN_COVERAGE} is not istanbul coverage`));
   });
 
   it("a coverage file that is not JSON is an error", async () => {
@@ -181,7 +212,7 @@ describe("coverage", () => {
     const dir = await tempDir();
     await write(dir, UNIT_COVERAGE, {});
     expect(coverageFindings(dir, new Map([["src/new.ts", [1]]]), false).findings)
-      .toEqual([`src/new.ts  absent from ${UNIT_COVERAGE}`]);
+      .toEqual(["src/new.ts  absent from every coverage file"]);
   });
 });
 
@@ -234,9 +265,9 @@ describe("run.mjs missing-tests", () => {
     expect(result).toEqual({ status: 0, lines: ["missing-tests: 3 lines covered, 0 uncovered"], stderr: "" });
   });
 
-  it("cannot answer without the coverage the test steps write, in one line", async () => {
+  it("cannot answer locally without the coverage the test steps write, in one line", async () => {
     const dir = await fixtureRepo("missing-tests-red");
-    expect(run(dir, "missing-tests", "--base", "origin/main", "--podman-coverage")).toEqual({
+    expect(run(dir, "missing-tests", "--base", "origin/main")).toEqual({
       status: 2,
       lines: ["missing-tests: coverage/unit/coverage-final.json is missing: the test step wrote no coverage"],
       stderr: "",
@@ -315,6 +346,17 @@ describe("run.mjs missing-tests", () => {
     expect(run(dir, "missing-tests", "--base", "origin/main")).toEqual({
       status: 1,
       lines: ["src/calc.ts:7  v8 ignore hint without a reason", "src/calc.ts:10  uncovered"],
+      stderr: "",
+    });
+  });
+
+  // In the gate both suites' steps were skipped, so nothing hit the line
+  // (#269).
+  it("reds an added file no coverage measured when the gate skipped both suites", async () => {
+    const dir = await fixtureRepo("missing-tests-red");
+    expect(run(dir, "missing-tests", "--base", "origin/main", "--podman-coverage")).toEqual({
+      status: 1,
+      lines: ["src/calc.ts:7  v8 ignore hint without a reason", "src/calc.ts  absent from every coverage file"],
       stderr: "",
     });
   });

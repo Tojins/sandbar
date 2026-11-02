@@ -3,13 +3,15 @@
 // shape, as `@vitest/coverage-v8` writes it): `coverage/unit/` from `test`,
 // `coverage/podman/` from `podman-test`.
 //
-// A changed line counts when a statement starts on it, and is covered when
-// either file hits one of those statements. A missing unit file cannot
-// answer the check, and neither can a missing podman file where it is
-// required (`--podman-coverage`, the gate), nor a file that cannot be read,
-// is not JSON or is not istanbul's shape: `StructureError`, exit 2.
-// Elsewhere, a local `npm run structure`, the podman file may be absent:
-// no podman test ran, so a line no unit test hits is uncovered (#264).
+// A changed line counts when a statement starts on it in a file that
+// measured its path, and is covered when either file hits one of those
+// statements. In the gate (`--podman-coverage`) a step removes `coverage/`
+// before the suites run, so an absent file is a suite whose step the test
+// selection skipped (#259, #269): empty coverage, and a line no other suite
+// hits is uncovered. Elsewhere, a local `npm run structure`, the
+// podman file may be absent too (no podman test ran, #264), but a missing
+// unit file cannot answer the check: `StructureError`, exit 2. Nor, anywhere,
+// can a file that cannot be read, is not JSON or is not istanbul's shape.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -60,15 +62,14 @@ export function readCoverage(dir, relativePath, required) {
 }
 
 // Each of `lines` of `path` a statement starts on, `{ line, state }`:
-// `covered` by a unit or a podman test, or `uncovered`. A path absent from
-// `unit` is null: what coverage measured is not this tree.
-export function lineCoverage(path, lines, unit, podman) {
-  const unitLines = unit.get(path);
-  if (unitLines === undefined) return null;
-  const podmanLines = podman.get(path);
-  return lines.filter((line) => unitLines.has(line)).map((line) => ({
+// `covered` by a test of one of `suites`, or `uncovered`. A path no suite
+// measured is null: what coverage measured is not this tree.
+export function lineCoverage(path, lines, suites) {
+  const measured = suites.flatMap((suite) => suite.get(path) ?? []);
+  if (measured.length === 0) return null;
+  return lines.filter((line) => measured.some((hits) => hits.has(line))).map((line) => ({
     line,
-    state: unitLines.get(line) > 0 || (podmanLines?.get(line) ?? 0) > 0 ? "covered" : "uncovered",
+    state: measured.some((hits) => (hits.get(line) ?? 0) > 0) ? "covered" : "uncovered",
   }));
 }
 
@@ -92,17 +93,16 @@ export function uncoveredFindings(path, counted) {
 }
 
 // The coverage findings over `added` (`Map<path, number[]>`, production
-// paths only) in `dir`, and how many lines were covered. `requirePodman`:
-// a missing podman file is an error.
-export function coverageFindings(dir, added, requirePodman) {
+// paths only) in `dir`, and how many lines were covered. `inGate`: a
+// missing unit file is a skipped suite, not an error.
+export function coverageFindings(dir, added, inGate) {
   const findings = [];
-  const unit = readCoverage(dir, UNIT_COVERAGE, true);
-  const podman = readCoverage(dir, PODMAN_COVERAGE, requirePodman);
+  const suites = [readCoverage(dir, UNIT_COVERAGE, !inGate), readCoverage(dir, PODMAN_COVERAGE, false)];
   let covered = 0;
   for (const [path, lines] of added) {
-    const counted = lineCoverage(path, lines, unit, podman);
+    const counted = lineCoverage(path, lines, suites);
     if (counted === null) {
-      findings.push(`${path}  absent from ${UNIT_COVERAGE}`);
+      findings.push(`${path}  absent from every coverage file`);
       continue;
     }
     findings.push(...uncoveredFindings(path, counted));
