@@ -30,6 +30,11 @@ const coverageFile = (path: string, statements: [number, number][]) => ({
   s: Object.fromEntries(statements.map(([, hits], i) => [i, hits])),
 });
 
+const write = async (dir: string, path: string, files: Record<string, unknown>) => {
+  await mkdir(join(dir, path, ".."), { recursive: true });
+  await writeFile(join(dir, path), JSON.stringify(files));
+};
+
 const vitest = (dir: string, ...args: string[]) => {
   const result = spawnSync(process.execPath, [VITEST, "run", ...args], { cwd: dir, encoding: "utf8" });
   if (result.status !== 0) throw new Error(`vitest ${args.join(" ")}: ${result.stdout}${result.stderr}`);
@@ -95,11 +100,6 @@ describe("coverage", () => {
     ];
     expect(uncoveredFindings("src/a.ts", counted)).toEqual(["src/a.ts:3-6  uncovered", "src/a.ts:9  uncovered"]);
   });
-
-  const write = async (dir: string, path: string, files: Record<string, unknown>) => {
-    await mkdir(join(dir, path, ".."), { recursive: true });
-    await writeFile(join(dir, path), JSON.stringify(files));
-  };
 
   const coverageDir = async (files: string[]) => {
     const dir = await tempDir();
@@ -314,9 +314,12 @@ describe("run.mjs missing-tests", () => {
     const dir = await fixtureRepo("missing-tests-red");
     git(dir, "checkout", "-q", "main");
     git(dir, "merge", "-q", "--no-ff", "-m", "land", "topic");
-    expect(run(dir, "missing-tests", "--base", "origin/main")).toEqual({
-      status: 2,
-      lines: ["missing-tests: coverage/unit/coverage-final.json is missing: the test step wrote no coverage"],
+    const calc = join(dir, "src/calc.ts");
+    await write(dir, UNIT_COVERAGE, { [calc]: coverageFile(calc, [[2, 1], [5, 0], [8, 1], [10, 0]]) });
+    await write(dir, PODMAN_COVERAGE, { [calc]: coverageFile(calc, [[5, 3], [10, 0]]) });
+    expect(run(dir, "missing-tests", "--base", "origin/main", "--podman-coverage")).toEqual({
+      status: 1,
+      lines: ["src/calc.ts:7  v8 ignore hint without a reason", "src/calc.ts:10  uncovered"],
       stderr: "",
     });
   });
