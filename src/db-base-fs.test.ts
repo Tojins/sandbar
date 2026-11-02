@@ -1,63 +1,29 @@
 // The nightly base's filesystem half against a real tmpdir (#201): the
-// `current` swap, the sweep, the lock and the refusals that come before any
-// container. Plain `rm`/`du` stand in for `podman unshare`, since nothing here
-// is subuid-owned; db-base-podman.test.ts runs the import itself.
+// `current` swap, the sweep, the lock and the job's no-ops before any
+// container; db-base-fs-room.test.ts has its room checks and
+// db-base-podman.test.ts runs the import itself.
 
-import { execFile } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { lstat, mkdir, readFile, readlink, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import lockfile from "proper-lockfile";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { assertDatabaseCopiesTarget, resolveDatabaseCopies, resolveGateStack } from "./config.js";
 import {
-  type DbBaseJobOptions,
-  type UsernsRun,
   createDbBaseWatch,
-  dbBaseLayout,
   importRunArgs,
   publishBase,
   readImportStatus,
-  runDbBaseJob,
   sweepBases,
 } from "./db-base.js";
-import { type BaseMeta, type ImportStatus, SUPERSEDED_GRACE_MS, importSpaceNeeded } from "./db-copy-policy.js";
+import { dropDump, job, layout, makeBase, meta, plainFs, root, useDbBaseRoot } from "./db-base-fs.test-util.js";
+import { type BaseMeta, type ImportStatus, SUPERSEDED_GRACE_MS } from "./db-copy-policy.js";
 import type { EventInput } from "./events.js";
 
-const exec = promisify(execFile);
-const plainFs: UsernsRun = async ([command, ...args]) => (await exec(command!, args)).stdout;
-
-const meta = (id: string, over: Partial<BaseMeta> = {}): BaseMeta => ({
-  id,
-  dump: { name: "app.sql.gz", size: 1, mtimeMs: 1, ino: 1 },
-  specToken: "t",
-  database: "app",
-  image: "docker.io/library/mariadb:10.11",
-  importedAt: "2026-10-27T03:00:00.000Z",
-  durationMs: 1,
-  baseBytes: 1,
-  ...over,
-});
-
-let root: string;
-let layout: ReturnType<typeof dbBaseLayout>;
 const readMeta = async (id: string) =>
   JSON.parse(await readFile(join(layout.bases, `${id}.json`), "utf8")) as BaseMeta;
-const makeBase = async (m: BaseMeta | null, id = m?.id) => {
-  await mkdir(join(layout.bases, id!, "mysql"), { recursive: true });
-  if (m !== null) await writeFile(join(layout.bases, `${id}.json`), JSON.stringify(m));
-};
 
-beforeEach(async () => {
-  root = await realpath(await mkdtemp(join(tmpdir(), "sandbar-db-base-")));
-  layout = dbBaseLayout(root);
-  await mkdir(layout.bases);
-});
-afterEach(async () => {
-  await rm(root, { recursive: true, force: true });
-});
+useDbBaseRoot();
 
 describe("importRunArgs", () => {
   it("runs the target's server on the new base alone, offline, with the import args last", () => {
@@ -153,44 +119,6 @@ describe("sweepBases", () => {
 });
 
 describe("runDbBaseJob before any container", () => {
-  const target = assertDatabaseCopiesTarget(
-    resolveGateStack({
-      containers: [
-        {
-          name: "db",
-          image: "docker.io/library/mariadb:10.11",
-          inSandbox: true,
-          readiness: { kind: "healthcheck", command: ["healthcheck.sh"] },
-        },
-        { name: "runner", image: "localhost/runner", mountWorktree: "/w", hold: true },
-      ],
-      steps: [{ name: "s", in: "runner", command: ["true"] }],
-    }),
-    resolveDatabaseCopies({ dump: "/d", root: "/r", container: "db", database: "app" })!,
-  );
-  const job = (over: Partial<DbBaseJobOptions> = {}) => {
-    const lines: string[] = [];
-    const result = runDbBaseJob({
-      cfg: resolveDatabaseCopies({
-        dump: join(root, "drop/app-latest.sql.gz"),
-        root,
-        container: "db",
-        database: "app",
-      })!,
-      target,
-      force: false,
-      log: (line) => lines.push(line),
-      userns: plainFs,
-      freeBytes: async () => 0n,
-      ...over,
-    });
-    return { result, lines };
-  };
-  const dropDump = async () => {
-    await mkdir(join(root, "drop"), { recursive: true });
-    await writeFile(join(root, "drop/app-latest.sql.gz"), "not even gzip");
-  };
-
   it("is a no-op while another job holds the lock", async () => {
     await dropDump();
     await writeFile(layout.lock, "");
@@ -201,40 +129,6 @@ describe("runDbBaseJob before any container", () => {
       await release();
     }
     expect(await readImportStatus(layout)).toBeNull();
-  });
-
-  it("refuses an import the volume has no room for, and does not retry that dump without --force", async () => {
-    await dropDump();
-    const current = meta("b20261027T030000000Z");
-    await makeBase(current);
-    await publishBase(layout, current, null, new Date());
-
-    const first = job();
-    await expect(first.result).resolves.toBe("import-failed");
-    const status = await readImportStatus(layout);
-    expect(status).toMatchObject({ outcome: "import-failed", detail: "insufficient-space" });
-    expect(first.lines).toEqual([
-      expect.stringMatching(/^db-base: importing app-latest\.sql\.gz as b\d{8}T\d{9}Z failed: insufficient-space$/),
-    ]);
-    // Nothing was created, and current stands.
-    expect((await readdir(layout.bases)).sort()).toEqual([current.id, `${current.id}.json`]);
-    expect(await readlink(layout.current)).toBe(`bases/${current.id}`);
-
-    await expect(job().result).resolves.toBe("up-to-date");
-    await expect(job({ force: true }).result).resolves.toBe("import-failed");
-    expect((await readImportStatus(layout))!.attempt).not.toBe(status!.attempt);
-  });
-
-  it("sizes the room needed from the current base, not from the dump", async () => {
-    await dropDump();
-    const current = meta("b20261027T030000000Z", { baseBytes: 1_000_000_000 });
-    await makeBase(current);
-    await publishBase(layout, current, null, new Date());
-    const needed = importSpaceNeeded(current.baseBytes, 13);
-    // Room for a base grown from the dump alone, but not one the size of the last.
-    expect(needed).toBeGreaterThan(importSpaceNeeded(null, 13));
-    await expect(job({ freeBytes: async () => needed - 1n }).result).resolves.toBe("import-failed");
-    expect(await readImportStatus(layout)).toMatchObject({ detail: "insufficient-space" });
   });
 
   it("does nothing while the drop is empty", async () => {
