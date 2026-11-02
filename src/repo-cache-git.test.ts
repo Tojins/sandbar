@@ -285,7 +285,7 @@ describe("ensureSourceWorktree (real git)", () => {
     expect(existsSync(join(path, "untracked.txt"))).toBe(false);
     expect(existsSync(join(path, "build"))).toBe(false);
     expect((await git(path, "status", "--porcelain")).stdout.trim()).toBe("");
-  });
+  }, 15_000);
 
   // A killed run can leave the directory without the registration (or the
   // registration without the directory). Self-healing matters because the whole

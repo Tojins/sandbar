@@ -16,12 +16,118 @@ const usesCodex = Object.entries(routing).some(
   ([field, provider]) => field.endsWith("Agent") && provider === "codex",
 );
 
+// The gate's test selection (#259 spec 8, #269): every non-test file of
+// `src/` is core's or some domain's. What a sanity test may cost is
+// AGENTS.md's rule (spec 7).
+const src = (...names) => names.map((name) => `src/${name}.ts`);
+const tests = (...names) => names.map((name) => `src/${name}.test.ts`);
+const coreModules = [
+  "errors", "config", "naming", "timing", "events", "repo-ref", "runtime",
+  "container-resources", "token-scan",
+];
+const domains = [
+  {
+    name: "planning",
+    description: "which issues run, in which lanes and chunks",
+    paths: src("plan-resolver", "lanes", "chunks", "chunk-follow-up", "chunk-reconcile", "label-sync", "forge-rate-limit"),
+    sanity: tests("plan-resolver", "plan-resolver-git", "chunks", "chunk-reconcile-git"),
+  },
+  {
+    name: "inner-loop",
+    description: "one issue's sandbox run: its roles, prompts and agents",
+    paths: [
+      ...src("inner-loop*", "prompt", "prompts", "issue-anchor", "standards-groups", "*-parser",
+        "agent-run-end", "agent-providers", "env", "env-file", "codex-auth", "git-ops"),
+      "!src/scenario-*", "!src/adjudication-parser.ts",
+      "prompts/**",
+      "!prompts/scenario-*", "!prompts/adjudicator*", "!prompts/reviewer*", "!prompts/resolve-*",
+      "!prompts/landing-pass*", "!prompts/implementer-sandbox-egress.md", "!prompts/janitor-task.md",
+      "!prompts/*db-copy*", "!prompts/reflect-*",
+    ],
+    sanity: tests("inner-loop-machine", "inner-loop", "prompt"),
+  },
+  {
+    name: "verifier",
+    description: "the verifier's review, scenarios and adjudication",
+    paths: [
+      ...src("verifier*", "reviewer-run", "scenario-*", "adjudication-parser"),
+      "prompts/scenario-*", "prompts/adjudicator*", "prompts/reviewer*",
+    ],
+    sanity: tests("verifier", "verifier-run", "scenario-writer-run", "scenario-parser"),
+  },
+  {
+    name: "landing",
+    description: "merging onto the source branch, resolving, finalising",
+    paths: [
+      ...src("merger*", "resolve-loop", "version-conflict", "forge-*", "chunk-land", "chunk-pr",
+        "landing-*", "finalize*", "push-result", "origin-lock"),
+      "prompts/resolve-*", "prompts/landing-pass*", "sandbar-resolve-hook.mjs",
+    ],
+    sanity: tests("merger", "chunk-land", "gh-argv", "finalize-git"),
+  },
+  {
+    name: "gate",
+    description: "the gate stack, its steps and their test selection",
+    paths: [...src("gate*", "sandbox-stack", "stack-source", "stack-change", "standalone-steps"), "Containerfile"],
+    sanity: tests("gate-run", "stack-source-git", "stack-change", "standalone-steps-run"),
+  },
+  {
+    name: "sandbox",
+    description: "issue clones, containers and images",
+    paths: src("agent-sandbox", "containers", "image-*", "ensure-images", "agent-tools", "repo-cache", "preflight"),
+    sanity: tests("agent-sandbox-snapshot", "repo-cache-git", "preflight", "containers"),
+  },
+  {
+    name: "config-cli",
+    description: "the bin, the library entry and identity",
+    paths: [
+      ...src("config-digest", "cli", "index", "version", "requires-sandbar", "driver-identity", "canonical-json"),
+      "sandbar.config.example.mjs", "package.json",
+    ],
+    sanity: tests("config", "cli", "cli-resolve-hook"),
+  },
+  {
+    name: "egress",
+    description: "the egress allowlist and its proxy",
+    paths: [...src("egress*"), "prompts/implementer-sandbox-egress.md"],
+    sanity: tests("egress-policy", "egress-proxy-server", "run-egress"),
+  },
+  {
+    name: "daemon",
+    description: "the pool, its exits, locks, janitor and deploy",
+    paths: [
+      ...src("run", "scheduler", "exit-conditions", "restart-request", "disk-space", "cleanup", "lock",
+        "keepawake", "deploy-watch", "logs", "janitor*"),
+      "prompts/janitor-task.md", "deploy/**",
+    ],
+    sanity: tests("run-terminal", "run-quota", "scheduler", "janitor-plan", "deploy-unit"),
+  },
+  {
+    name: "events-ui-stats",
+    description: "the run's projection, the UI and the scorecard",
+    paths: [...src("run-state", "ui-server", "agent-usage", "stats*"), "src/__fixtures__/stats/**", "ui/**"],
+    sanity: tests("run-state", "ui-server", "stats", "stats-cli"),
+  },
+  {
+    name: "db-copies",
+    description: "the database base import and per-issue copies",
+    paths: [...src("db-base", "db-copy", "db-copy-policy"), "prompts/*db-copy*", "prompts/reviewer-db-notice.md"],
+    sanity: tests("db-copy-policy", "db-copy", "db-base-fs", "cli-db-base"),
+  },
+  {
+    name: "tooling",
+    description: "reflect, replay and the repo's scripts",
+    paths: [...src("reflect*", "replay*"), "src/__fixtures__/reflect/**", "scripts/**", "prompts/reflect-*"],
+    sanity: tests("reflect-git", "reflect-cli", "reflect-mine", "replay"),
+  },
+];
+
 export default {
   cwd,
   ghOwner: "Tojins",
   ghRepo: "sandbar",
   developers: ["Tojins"],
-  requiresSandbar: "0.70.0",
+  requiresSandbar: "0.71.2",
   botName: "sandbar",
   botEmail: "demanthomas+sandbar@gmail.com",
   contextMdPath: "AGENTS.md",
@@ -69,6 +175,10 @@ export default {
       // rebuild and side by side: the unit suite is CPU-bound, the podman
       // suite mostly waits on podman.
       { name: "build", in: "runner", command: ["npm", "run", "build"] },
+      // A suite the selection skips writes no coverage, and `tests-structure`
+      // reads its absent file as that (scripts/structure/coverage.mjs), so no
+      // earlier gate's file may still be there.
+      { name: "clean-coverage", in: "runner", command: ["rm", "-rf", "coverage"] },
       {
         name: "version",
         in: "runner",
@@ -81,9 +191,10 @@ export default {
       {
         name: "test",
         in: "runner",
+        tests: ["src/**/*.test.ts", "!src/**/*podman.test.ts"],
         command: [
-          "npx", "vitest", "run", "--exclude", "**/*-podman.test.ts",
-          "--coverage.enabled", "--coverage.reportsDirectory=coverage/unit",
+          "npx", "vitest", "run",
+          "--coverage.enabled", "--coverage.reportsDirectory=coverage/unit", "{tests}",
         ],
         timeoutMs: 900_000,
       },
@@ -91,13 +202,15 @@ export default {
         name: "podman-test",
         in: "runner",
         parallel: true,
+        tests: [
+          "src/**/*podman.test.ts",
+          "!src/gate-stack-hostpodman.test.ts",
+          "!src/sandbox-stack-podman.test.ts",
+          "!src/container-resources-podman.test.ts",
+        ],
         command: [
-          "npx", "vitest", "run", "podman.test.ts",
-          "--exclude", "src/gate-stack-hostpodman.test.ts",
-          "--exclude", "src/sandbox-stack-podman.test.ts",
-          "--exclude", "src/container-resources-podman.test.ts",
-          "--maxWorkers", "8",
-          "--coverage.enabled", "--coverage.reportsDirectory=coverage/podman",
+          "npx", "vitest", "run", "--maxWorkers", "8",
+          "--coverage.enabled", "--coverage.reportsDirectory=coverage/podman", "{tests}",
         ],
         timeoutMs: 1_800_000,
       },
@@ -112,6 +225,13 @@ export default {
         settles: ["missing-tests"],
       },
     ],
+    sanity: tests(
+      "config", "cli", "inner-loop-machine", "run-terminal", "cli-resolve-hook", "issue-create-site",
+      "replay-boundary", "error-swallow-ratchet", "test-clock", "prompts",
+    ),
+    core: { paths: src(...coreModules), sanity: tests(...coreModules) },
+    domains,
+    related: { in: "runner", command: ["node", "scripts/related-tests.mjs", "{changed}"] },
   },
   images: [
     { tag: image, containerfile: "Containerfile", rebuildOn: ["Containerfile"] },

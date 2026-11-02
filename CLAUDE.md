@@ -245,6 +245,10 @@ credentials live in the sandbar user's `~/installation/`; the source is
 `Sandbar-Restart: now` trailer on a commit that must not wait (a revert, a
 loop fix). `mergeMode` stays `direct`. To exercise
 unlanded code: `npm run build && node dist/cli.js --config <path>`.
+Its own gate runs a test selection (#269): the global sanity set, core and
+twelve domains its config declares, `related` as `scripts/related-tests.mjs`.
+A step clears `coverage/` before the suites, so `missing-tests` reads a
+skipped suite's absent report as empty coverage.
 
 - One coherent deliverable per issue; split into a `## Blocked by` chain only
   when it won't fit `maxContextChars`, never merely because it is large.

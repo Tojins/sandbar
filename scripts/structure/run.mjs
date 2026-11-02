@@ -15,8 +15,9 @@
 //
 // No check named runs every check; `--base` defaults to `origin/main`. The
 // repository is the working directory, or `--git-dir` (core.mjs).
-// `--podman-coverage`: `missing-tests` requires the podman tests' coverage,
-// as the gate, whose `podman-test` step writes it, does (coverage.mjs).
+// `--podman-coverage`: `missing-tests` reads coverage as the gate's, whose
+// steps clear `coverage/` before the suites run: an absent file is a suite
+// whose step was skipped, empty coverage (coverage.mjs).
 //
 // Output is compact, because a red reaches the implementer as a gate trace
 // and every line of it is context paid for: a red check prints one line per
