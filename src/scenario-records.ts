@@ -45,8 +45,6 @@ export type ScenarioRecord = {
   readonly scripts: string | null;
 };
 
-export const scenarioRecordsDir = (stateDir: string): string => join(stateDir, "scenarios");
-
 export function finalVerdict(entry: LedgerEntry | undefined): ScenarioVerdict {
   if (entry?.status === "pass") return "pass";
   if (entry?.status === "retired") return "fail-overruled";
@@ -86,7 +84,7 @@ export async function appendScenarioRecords(args: {
   readonly roundDir: (round: number) => string;
 }): Promise<void> {
   const { worktree, sha, set, ledger, domains, roundDir } = args;
-  const dir = scenarioRecordsDir(args.stateDir);
+  const dir = join(args.stateDir, "scenarios");
   const files = (await gitStdout(worktree, ["ls-tree", "-r", "--name-only", "-z", sha]))
     .split("\0")
     .filter((file) => file !== "");
