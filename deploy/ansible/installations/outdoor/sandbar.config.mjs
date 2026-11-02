@@ -74,9 +74,11 @@ export default {
   // integrations the app reaches for real from a sandbox, as outdoor's source
   // names them: Mews demo (configDev.php), the Peppol directory
   // (peppolDirectory.php), VIES and the other GET-only registries
-  // (vatRegisters.php; HMRC at dev's sandbox host), and adfinity live for the
-  // recording proxy sibling (Tojins/outdoor#785), whose tenant host is a
-  // secret, hence the suffix.
+  // (vatRegisters.php; HMRC at dev's sandbox host). Adfinity live has no
+  // sandbox, so it is `secretAllow` (#257): only the recording proxy sibling,
+  // a `secretEnv` container, reaches it through the egress proxy's
+  // authenticated CONNECT, never the agent (Tojins/outdoor#785, #849). Its
+  // tenant host is a secret, hence the suffix.
   egress: {
     mode: "enforce",
     allow: [
@@ -92,8 +94,8 @@ export default {
       "recherche-entreprises.api.gouv.fr",
       "test-api.service.hmrc.gov.uk",
       "kbopub.economie.fgov.be",
-      "*.adfinity.app",
     ],
+    secretAllow: ["*.adfinity.app"],
   },
 
   // The gate images from stack.json, plus the agent's own. The sandbox image
