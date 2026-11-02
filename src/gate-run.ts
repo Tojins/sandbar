@@ -23,6 +23,11 @@
 //     `scripts/gate.sh` did. The grader boundary is a run's, not this
 //     command's.
 //
+// A stack whose steps declare `tests` runs the selection floor (#266) over
+// the worktree's changes since its fork from `origin/<sourceBranch>`,
+// uncommitted ones included, and `--domains` adds domains' sanity sets; there
+// is no whole-suite flag. What it selected is printed after the steps.
+//
 // Step timings and final lifecycle-container lines include any cgroup peak and
 // OOMKilled evidence collected at their teardown boundary (#141).
 //
@@ -77,6 +82,7 @@ import { type EgressReport, ensureEgressImage, ownerEgress } from "./egress.js";
 import { type EgressRefusal, egressDestination } from "./egress-policy.js";
 import { SandbarError, faultDetail, isExitCode } from "./errors.js";
 import { formatGateSteps, summarizeGateFailure } from "./gate.js";
+import { type GateSelection, selectionPlanFor } from "./gate-selection.js";
 import { durationField } from "./timing.js";
 import {
   ContainerBringupError,
@@ -143,6 +149,8 @@ export type GateCommandOptions = {
   // Leave the stack up afterwards, so a red can be poked at — and so the next
   // invocation has something to reuse.
   readonly keep: boolean;
+  // Domains whose sanity sets run whatever the worktree changed (#266).
+  readonly domains: readonly string[];
   // Injectable so the reporting can be asserted without a terminal.
   readonly out?: (text: string) => void;
   readonly err?: (text: string) => void;
@@ -640,7 +648,16 @@ async function gate(
     );
   }
 
-  const result = await stack.runGate();
+  // The selection floor over the worktree's changes since its fork from the
+  // source branch, uncommitted ones included (#266).
+  const plan = await selectionPlanFor(
+    { stack: spec, classification: { kind: "same" } },
+    worktreePath,
+    `origin/${config.sourceBranch}`,
+    opts.domains,
+  );
+  const result = await stack.runGate(plan);
+  if (result.selection !== undefined) out(selectionReport(result.selection));
 
   // PRINTED, unlike the other three consumers of these timings (#82). This
   // command suspends the lock and the log tree (#45), so if the split is not on
@@ -676,6 +693,27 @@ async function gate(
   if (opts.keep) out(keptStackNotice(stack));
 
   return result.ok ? GATE_EXIT_GREEN : GATE_EXIT_RED;
+}
+
+// What a selecting gate ran (#266), printed after its steps' output.
+export function selectionReport(selection: GateSelection): string {
+  const domains = Object.keys(selection.domains);
+  const ignored = selection.ignored.map((i) =>
+    i.kind === "glob"
+      ? `${i.set} glob '${i.glob}' matches no file`
+      : i.kind === "domain"
+      ? `domain '${i.name}' is not declared`
+      : `${i.file} matches no step's tests`);
+  return (
+    `\nselection: ${selection.files.length} test file(s)` +
+    (domains.length > 0 ? `, domains ${domains.join(", ")}` : "") +
+    `\n${selection.files.map((f) => `  ${f}\n`).join("")}` +
+    Object.entries(selection.steps)
+      .filter(([, files]) => files.length === 0)
+      .map(([step]) => `skipped step '${step}': no selected test file matches its tests\n`)
+      .join("") +
+    ignored.map((line) => `ignored: ${line}\n`).join("")
+  );
 }
 
 export function printedEgressReport(err: (text: string) => void): EgressReport {

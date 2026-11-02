@@ -4250,6 +4250,7 @@ export function realAdapter(deps: RealAdapterDeps): MergerAdapter {
         durationMs: r.durationMs,
         steps: r.steps,
         ...(admitted.queuedMs === undefined ? {} : { queuedMs: admitted.queuedMs }),
+        ...(r.selection === undefined ? {} : { selection: r.selection }),
       };
       if (r.ok) return { ok: true, ...timings };
       return {

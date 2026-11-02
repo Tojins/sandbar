@@ -329,11 +329,11 @@ describe.runIf(available)("egress proxy against real podman", () => {
       expect(await probe(app, "get", "https://allowed.test/")).toBe("200 upstream https allowed.test");
       expect(await probe(app, "connect", "1.1.1.1", "443")).toMatch(/^ERROR (ENETUNREACH|EHOSTUNREACH)$/);
 
-      const red = await stack.runGate();
+      const red = await stack.runGate(null);
       expect(red.ok).toBe(false);
       expect(red.containerLogs).toMatch(/^\negress refused during this run: blocked\.test\n/);
       // A refusal an earlier run sighted first is still named in this one's trace.
-      expect((await stack.runGate()).containerLogs).toMatch(/^\negress refused during this run: blocked\.test\n/);
+      expect((await stack.runGate(null)).containerLogs).toMatch(/^\negress refused during this run: blocked\.test\n/);
       expect(events.filter((e) => e.kind === "egress-refused")).toEqual([
         { kind: "egress-refused", stack: "gate", host: "blocked.test", port: null, via: "dns", enforced: true },
       ]);

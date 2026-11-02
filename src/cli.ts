@@ -20,10 +20,10 @@
 // The four constraints, written down so they are decisions and not drift:
 //   - EXACTLY ONE flag that carries configuration: `--config`. Every flag that
 //     duplicates a config field creates a second source of truth. (`--help`,
-//     `--version`, `gate`'s `--worktree`/`--keep` (#45), `ui`'s `--port`
-//     (#138) and `db-base`'s `--force` (#201) duplicate nothing — the
-//     latter flags name what a standalone invocation has to be told and the
-//     config has no opinion about.)
+//     `--version`, `gate`'s `--worktree`/`--keep` (#45) and `--domains`
+//     (#266), `ui`'s `--port` (#138) and `db-base`'s `--force` (#201)
+//     duplicate nothing — the latter flags name what a standalone invocation
+//     has to be told and the config has no opinion about.)
 //   - NO config search up the directory tree. `./sandbar.config.mjs` or an
 //     explicit path — an ambiguous "which config did it find" is a run against
 //     the wrong repo.
@@ -95,7 +95,7 @@ const LABELS_SUBCOMMAND = "labels";
 const LABELS_SYNC = "sync";
 
 const USAGE = `Usage: sandbar [--config <path>]
-       sandbar gate [--config <path>] [--worktree <path>] [--keep]
+       sandbar gate [--config <path>] [--worktree <path>] [--keep] [--domains <a,b>]
        sandbar ui [--config <path>] [--port <n>]
        sandbar pulled-images [--config <path>]
        sandbar config-digest [--config <path>]
@@ -114,8 +114,10 @@ record for post-mortem browsing; \`--port\` overrides uiPort for this standalone
 host only. \`sandbar gate\` runs config.gateStack
 against one worktree and nothing else — no tracker, no agents, no lock — and
 exits 0 green, 1 red, 2 if it could not reach a verdict; a stack file
-(\`gateStack: { path }\`) is read from that worktree. It is what a laptop and
-a CI job run, so the gate has one implementation. \`sandbar pulled-images\`
+(\`gateStack: { path }\`) is read from that worktree. A stack whose steps
+declare \`tests\` runs the selection for the worktree's changes since its fork
+from origin/<sourceBranch>. It is what a laptop and a CI job run, so the gate
+has one implementation. \`sandbar pulled-images\`
 prints, one per line, the images the gate stack runs that config.images does
 not build — the ones a run refuses to start without and never pulls itself; a
 stack file is read from the config's cwd. \`sandbar config-digest\` prints a
@@ -135,6 +137,7 @@ nothing.
   --keep            Leave the stack up afterwards, to inspect a red gate. The
                     next \`sandbar gate\` over the same worktree then reuses its
                     issue-lifecycle containers instead of recreating them.
+  --domains <a,b>   Also run these domains' sanity sets, whatever changed.
   --force           Import even a dump that was already attempted.
 
 Everything else is configured in that file — see the RunConfig type.`;
@@ -151,6 +154,7 @@ export type ParsedArgs =
       readonly configPath: string;
       readonly worktree: string;
       readonly keep: boolean;
+      readonly domains: readonly string[];
     }
   | { readonly kind: "help" }
   | { readonly kind: "version" };
@@ -181,6 +185,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   let worktree: string | null = null;
   let port: number | null = null;
   let keep = false;
+  const domains: string[] = [];
   let force = false;
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
@@ -231,7 +236,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     // Gate-only flags are rejected on the run path by NAME rather than falling
     // through to "unrecognised": `sandbar --keep` is someone who meant
     // `sandbar gate --keep`, and telling them so beats a usage dump.
-    if (arg === "--worktree" || arg.startsWith("--worktree=") || arg === "--keep") {
+    if (
+      arg === "--worktree" || arg.startsWith("--worktree=") || arg === "--keep" ||
+      arg === "--domains" || arg.startsWith("--domains=")
+    ) {
       if (!isGate) {
         throw new SandbarError(
           `'${arg}' is a \`sandbar gate\` flag; a run has no stack of its own ` +
@@ -241,6 +249,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       if (arg === "--keep") {
         keep = true;
+        continue;
+      }
+      if (arg === "--domains" || arg.startsWith("--domains=")) {
+        const value = arg === "--domains" ? rest[++i] : arg.slice("--domains=".length);
+        const names = value?.startsWith("-") ? [] : (value ?? "").split(",").filter((n) => n !== "");
+        if (names.length === 0) {
+          throw new SandbarError(`--domains needs a comma-separated list of domain names.\n\n${USAGE}`);
+        }
+        domains.push(...names);
         continue;
       }
       if (arg === "--worktree") {
@@ -273,6 +290,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         configPath: resolvedConfigPath,
         worktree: worktree ?? ".",
         keep,
+        domains,
       }
     : { kind: "run", configPath: resolvedConfigPath };
 }
@@ -428,6 +446,7 @@ export async function main(
     return await runGateCommand(config, {
       worktree: parsed.worktree,
       keep: parsed.keep,
+      domains: parsed.domains,
     });
   }
   // `run()` owns its own exit codes and calls `process.exit` for anything

@@ -104,7 +104,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         }),
       );
 
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
       // Exactly the two containers' images — this stack's own, and only its
       // own (#46).
       expect([...(askedFor ?? [])]).toEqual([IMAGE]);
@@ -114,12 +114,12 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
       // A second gate run with the same (empty) map must NOT churn it — the
       // whole value of `lifecycle: "issue"` is that a database keeps its
       // state across attempts.
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
       expect(await inspectOf("held", "{{.Id}}")).toBe(idBefore);
 
       // Now the branch changes what the image is built from.
       swap = new Map([[IMAGE, ALIAS]]);
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
       const idAfter = await inspectOf("held", "{{.Id}}");
       expect(idAfter).not.toBe(idBefore);
       expect(await inspectOf("held", "{{.ImageName}}")).toBe(ALIAS);
@@ -128,7 +128,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
       // …and it settles: a further run with the SAME map recreates nothing,
       // which is the bookkeeping that keeps a per-branch image from
       // restarting the stack on every attempt.
-      expect((await stack.runGate()).ok).toBe(true);
+      expect((await stack.runGate(null)).ok).toBe(true);
       expect(await inspectOf("held", "{{.Id}}")).toBe(idAfter);
     },
     300_000,
@@ -195,7 +195,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
           ])
         ).stdout.trim();
 
-      expect((await stack.runGate()).failedStep).toBe("hangs-in-held");
+      expect((await stack.runGate(null)).failedStep).toBe("hangs-in-held");
       // Recreated by the reap — and on the variant. `ok`-only, or an
       // id-only, assertion passes with the bug present.
       expect(await imageNameOf("held")).toBe(ALIAS);
@@ -203,7 +203,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
       // …and the next gate run does not see it as stale (the map is
       // unchanged), which is exactly why getting the reap wrong would never
       // self-correct.
-      expect((await stack.runGate()).failedStep).toBe("hangs-in-held");
+      expect((await stack.runGate(null)).failedStep).toBe("hangs-in-held");
       expect(await imageNameOf("held")).toBe(ALIAS);
     },
     300_000,
@@ -274,7 +274,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         }),
       );
 
-      const first = await stack.runGate();
+      const first = await stack.runGate(null);
       expect(first.ok).toBe(false);
       expect(first.failedStep).toBe(`container:${cName("held")}`);
       expect(issuePhaseStartedAt).toBeDefined();
@@ -295,7 +295,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
       await expect(
         exec(RUNTIME, ["inspect", "--format", "{{.Id}}", cName("held")]),
       ).rejects.toThrow();
-      const second = await stack.runGate();
+      const second = await stack.runGate(null);
       expect(second.ok).toBe(false);
       expect(second.failedStep).toBe(`container:${cName("held")}`);
     },
@@ -347,7 +347,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
         }),
       );
 
-      const red = await stack.runGate();
+      const red = await stack.runGate(null);
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe("image:app");
       // The build's own output is the diagnosis and has to survive into the
@@ -401,7 +401,7 @@ describe.runIf(available)("per-branch images between gate runs (#37)", () => {
       );
 
       await writeFile(join(repo, "uncommitted.txt"), "x\n");
-      expect((await stack.runGate()).failedStep).toBe("worktree-clean");
+      expect((await stack.runGate(null)).failedStep).toBe("worktree-clean");
       expect(asked).toBe(0);
     },
     180_000,

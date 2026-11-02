@@ -65,10 +65,17 @@
 //
 // `gate-stack` records which gate stack an issue's gate-1 runs (#186): the
 // accepted source-tip blob (null for an inline stack), how the branch's own
-// stack file classified, and for an env-only edit the containers whose env the
-// branch set. Emitted at setup and whenever the spec in effect changes; a
+// stack file classified, and for an env-only or domains (#266) edit the
+// containers whose env the branch set. Emitted at setup and whenever the spec in effect changes; a
 // report only (#82). NEEDS-STACK-CHANGE is the terminal a stack edit beyond
 // env parks with.
+//
+// `gate-selection` (#266) is the test selection one gate run ran, beside its
+// `gate` event: each part (`global`, `core`, `domains` by name, the
+// branch's `changed` test files, `related`), the final `files`, each
+// selecting step's share (an empty one was skipped) and what was `ignored`.
+// Emitted only for a stack whose steps declare `tests`, and only when the
+// run got as far as deciding it. A new kind, so no bump.
 //
 // A gate-2 `gate` with `sync: "origin"` is a push race's re-gate of the whole
 // composition on origin's new tip (#253): one event per gate run, attributed
@@ -188,6 +195,7 @@ import type { DbBaseEvent, DbCopyEvent } from "./db-copy-policy.js";
 import type { DeployEvent } from "./deploy-watch.js";
 import type { ExitTag } from "./exit-conditions.js";
 import type { FinalizeAction, FinalizeInput } from "./finalize.js";
+import type { GateSelection } from "./gate-selection.js";
 import type { IssueBranchOriginSync, QualityResidue } from "./git-ops.js";
 import type { QualityOutcome, Verdict } from "./inner-loop-machine.js";
 import type { JanitorOutcome } from "./janitor-plan.js";
@@ -552,6 +560,8 @@ export type EventInput =
   | (EventSubject & { readonly kind: "gate-stack"; readonly gate: "gate-1"; readonly tipBlob: string | null; readonly classification: StackClassification["kind"]; readonly containers?: readonly string[] })
   | (EventSubject & { readonly kind: "gate"; readonly attempt: number; readonly gate: "gate-1"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
   | (EventSubject & { readonly kind: "gate"; readonly gate: "gate-2"; readonly sync?: "origin"; readonly ok: boolean; readonly durationMs: number; readonly queuedMs?: number; readonly steps?: Readonly<Record<string, GateStepEvent>> })
+  | (EventSubject & GateSelection & { readonly kind: "gate-selection"; readonly attempt: number; readonly gate: "gate-1" })
+  | (EventSubject & GateSelection & { readonly kind: "gate-selection"; readonly gate: "gate-2"; readonly sync?: "origin" })
   | (EventSubject & ContainerResources & QualityReviewEvent & { readonly kind: "quality-review"; readonly attempt: number; readonly round: number; readonly invocation: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })
   | (EventSubject & StandaloneStepEvent & { readonly kind: "standalone-step" })
   | (EventSubject & ContainerResources & QualityPassEvent & { readonly kind: "quality-pass"; readonly attempt: number; readonly round: number; readonly provider: string; readonly model: string; readonly effort: string | null; readonly durationMs: number; readonly endedBy?: AgentRunEndedBy; readonly transcript?: string; readonly maxGapMs?: number; readonly usage?: UsageFields })

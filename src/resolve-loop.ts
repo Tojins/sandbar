@@ -72,6 +72,7 @@
 
 import { SandbarError } from "./errors.js";
 import {
+  type GateResult,
   type GateTimings,
   formatGateFields,
   summarizeGateFailure,
@@ -296,10 +297,11 @@ export type ResolveAdapter = {
   // The timings ride out on both branches (#82): a green re-gate is the one
   // this loop pays for on every recovered attempt, and it has no failure to
   // describe. Reported, never acted on — the loop's bound is
-  // `RESOLVE_MAX_ATTEMPTS` and nothing here reads a duration back.
+  // `RESOLVE_MAX_ATTEMPTS` and nothing here reads a duration back. So does
+  // the test selection the gate ran, for its record (#266).
   runGate(): Promise<
     ({ readonly ok: true } | ({ readonly ok: false } & MergerGateOutput)) &
-      GateTimings
+      GateTimings & Pick<GateResult, "selection">
   >;
   getIssueBody(issueId: string): Promise<string>;
   getHeadSha(): Promise<string>;

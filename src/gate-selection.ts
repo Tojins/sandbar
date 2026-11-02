@@ -30,10 +30,17 @@
 //
 // `readSelectionTree` is the one adapter: the gated tree's files and its diff
 // against the fork from a base ref, working tree included, so `sandbar gate`
-// over uncommitted work selects for it.
+// over uncommitted work selects for it. `selectionPlanFor` is what every gate
+// asks first, and for a stack whose steps declare no `tests` it reads nothing.
 
-import { TESTS_TOKEN, type ResolvedGateStep, type SanityDeclaration } from "./config.js";
+import {
+  TESTS_TOKEN,
+  type ResolvedGateStack,
+  type ResolvedGateStep,
+  type SanityDeclaration,
+} from "./config.js";
 import { gitStdout } from "./git-ops.js";
+import type { StackInEffect } from "./stack-change.js";
 
 export type ChangedFile = {
   readonly path: string;
@@ -206,6 +213,14 @@ export function finishSelection(
   };
 }
 
+// What a red gate's trace leads with: the test files the gate ran (#266).
+export function selectionTraceLine(selection: GateSelection | undefined): string {
+  if (selection === undefined) return "";
+  return selection.files.length === 0
+    ? "[sandbar] this gate's selection held no test file.\n\n"
+    : `[sandbar] this gate ran these test files:\n${selection.files.join("\n")}\n\n`;
+}
+
 // `command` with each `token` entry replaced by `values`, one entry each.
 export function expandToken(
   command: readonly string[],
@@ -239,3 +254,24 @@ export async function readSelectionTree(
   const files = sortedUnion(cached, untracked).filter((f) => changed.get(f)?.deleted !== true);
   return { changed: [...changed.values()], files };
 }
+
+// The plan for one gate of the stack in effect over the tree at `worktree`,
+// diffed against its fork from `baseRef`, or null when no step selects.
+export async function selectionPlanFor(
+  inEffect: Pick<StackInEffect, "stack" | "classification">,
+  worktree: string,
+  baseRef: string,
+  namedDomains: readonly string[] = [],
+): Promise<SelectionPlan | null> {
+  const { stack, classification } = inEffect;
+  if (!selects(stack)) return null;
+  return planSelection({
+    declarations: classification.kind === "domains" ? [stack, classification.branch] : [stack],
+    steps: stack.steps,
+    ...(await readSelectionTree(worktree, baseRef)),
+    namedDomains,
+  });
+}
+
+export const selects = (stack: ResolvedGateStack): boolean =>
+  stack.steps.some((step) => step.tests !== null);

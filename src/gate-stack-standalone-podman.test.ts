@@ -124,7 +124,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
         allowDirtyWorktree: true,
       });
       expect(first.reused).toEqual([]);
-      expect((await first.runGate()).ok).toBe(true);
+      expect((await first.runGate(null)).ok).toBe(true);
       const dbId = await idOf("db");
       const seeded = await seededValue();
       expect(dbId).not.toBeNull();
@@ -154,7 +154,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       expect(await seededValue()).toBe(seeded);
       // And it still gates: the `attempt` container is recreated as always,
       // so an adopted stack is not a half-built one.
-      expect((await second.runGate()).ok).toBe(true);
+      expect((await second.runGate(null)).ok).toBe(true);
       await second.stop();
 
       // A different token is a config the running container no longer answers
@@ -237,7 +237,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
         worktreePath: repo,
         spec: spec(),
       });
-      const red = await refusing.runGate();
+      const red = await refusing.runGate(null);
       expect(red.ok).toBe(false);
       expect(red.failedStep).toBe("worktree-clean");
       expect(red.stderr).toContain("extra.txt");
@@ -250,7 +250,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
         spec: spec("uncommitted"),
         allowDirtyWorktree: true,
       });
-      const green = await allowing.runGate();
+      const green = await allowing.runGate(null);
       // The step itself requires the UNCOMMITTED bytes. Its green verdict is
       // the proof, without making this test depend on podman also returning a
       // successful exec's stdout under concurrent load.
@@ -298,7 +298,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       });
       const result = await retryUndelivered(() => {
         chunks.length = 0;
-        return stack.runGate();
+        return stack.runGate(null);
       }, (r) => [r.stdout]);
       await stack.stop();
 
@@ -456,7 +456,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // recreates whatever the branch moved (#37), which is what leaves an
       // adopted container running something its config does not name.
       const first = await start(variantA);
-      expect((await first.runGate()).ok).toBe(true);
+      expect((await first.runGate(null)).ok).toBe(true);
       const dbId = await idOf("db");
       const seeded = await readNonEmptyFile("db", "/seeded");
       expect(dbId).not.toBeNull();
@@ -466,7 +466,7 @@ describe.runIf(available)("standalone gate accommodations (#45)", () => {
       // image by its other tag.
       const second = await start(variantB);
       expect(second.reused).toEqual(["db"]);
-      expect((await second.runGate()).ok).toBe(true);
+      expect((await second.runGate(null)).ok).toBe(true);
       expect(await idOf("db")).toBe(dbId);
       // The id alone would be satisfied by podman handing an identical one
       // back; the seed is what says the container was never recreated.

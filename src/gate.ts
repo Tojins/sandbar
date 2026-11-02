@@ -35,6 +35,7 @@
 // uninformative timeout cascades to the root failure + a count and a hint, so
 // an environment/setup failure doesn't read as N independent flaky tests.
 
+import type { GateSelection } from "./gate-selection.js";
 import { durationField } from "./timing.js";
 import {
   formatContainerResources,
@@ -55,13 +56,15 @@ export type GateResult = {
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
-  // Names the step from the consumer's `gateStack.steps`, or one of three
+  // Names the step from the consumer's `gateStack.steps`, or one of four
   // sandbar-owned pseudo-steps: `worktree-clean` (the tree held uncommitted
   // changes, so no verdict about a commit was possible), `container:<name>` (an
   // attempt-lifecycle container failed to come up, which is the branch's fault —
-  // see gate-stack.ts) and `image:<tag>` (an image the branch is a `rebuildOn`
-  // input of would not build from this worktree, #37 — the branch's fault for
-  // the same reason). `null` only when ok.
+  // see gate-stack.ts), `related` (the selection's import-graph pass failed,
+  // or printed a path the tree does not have, #266) and `image:<tag>` (an
+  // image the branch is a `rebuildOn` input of would not build from this
+  // worktree, #37 — the branch's fault for the same reason). `null` only when
+  // ok.
   readonly failedStep: string | null;
   // Wall time for the whole run, sandbar-owned pre-step phases included (#82).
   readonly durationMs: number;
@@ -87,6 +90,9 @@ export type GateResult = {
   // exactly the shape it looks for. Callers summarize the step output, then
   // append this.
   readonly containerLogs: string;
+  // The test selection the steps ran over (#266). Absent when no step declares
+  // `tests`, and when the gate stopped before the `related` pass decided it.
+  readonly selection?: GateSelection;
 };
 
 // The `steps=` value: `check:1120,test:6640,podman-test:88600`, in execution

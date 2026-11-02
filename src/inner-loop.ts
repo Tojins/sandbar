@@ -311,6 +311,7 @@ import type {
 import { parseVerdict } from "./verdict-parser.js";
 import { parsePartitionCheck } from "./partition-check-parser.js";
 import { summarizeGateFailure } from "./gate.js";
+import { selectionPlanFor, selectionTraceLine } from "./gate-selection.js";
 import type { GateSemaphore } from "./gate-semaphore.js";
 import {
   ContainerBringupError,
@@ -966,9 +967,7 @@ function gateStackReporter(
       gate: "gate-1",
       tipBlob,
       classification: classification.kind,
-      ...(classification.kind === "env-only"
-        ? { containers: classification.containers }
-        : {}),
+      ...("containers" in classification ? { containers: classification.containers } : {}),
     });
   };
 }
@@ -3323,7 +3322,8 @@ export async function runSandboxAndPublish(
 
 // Gate-1 on the head the quality pass left (#185). Serial, not beside the
 // fixer: the gate mounts the worktree the fixer writes. How the quality pass
-// ended is kept for the round's record.
+// ended is kept for the round's record. Its test selection (#266) is the
+// branch's diff against its seed's fork, and a red trace names what it ran.
 export async function runGate(
   action: Extract<LoopAction, { kind: "run-gate" }>,
   ctx: ExecuteActionCtx,
@@ -3336,7 +3336,8 @@ export async function runGate(
   const inEffect = await opts.stackSource.forHead(ctx.worktreePath, head);
   await ctx.reportGateStack(inEffect);
   const stack = await gateStack.ensure(inEffect.stack);
-  const admitted = await opts.gateSemaphore.run(() => stack.runGate());
+  const plan = await selectionPlanFor(inEffect, ctx.worktreePath, ctx.base.ref);
+  const admitted = await opts.gateSemaphore.run(() => stack.runGate(plan));
   const gate1 = admitted.value;
   // Before the verdict is classified, for #135's reason: the re-prompt is the
   // only other reader of this output, and a green gate has no re-prompt at all
@@ -3362,6 +3363,15 @@ export async function runGate(
     ...(admitted.queuedMs === undefined ? {} : { queuedMs: admitted.queuedMs }),
     steps: Object.fromEntries(gate1.steps.map(({ name, ...step }) => [name, step])),
   });
+  if (gate1.selection !== undefined) {
+    await opts.onEvent({
+      kind: "gate-selection",
+      ...ctx.subject.event,
+      attempt: action.attempt,
+      gate: "gate-1",
+      ...gate1.selection,
+    });
+  }
   const { classification } = inEffect;
   return {
     kind: "gate-result",
@@ -3375,7 +3385,8 @@ export async function runGate(
       // signature, and a service log is full of them (see GateResult.containerLogs).
       failureTrace: gate1.ok
         ? ""
-        : summarizeGateFailure(`${gate1.stdout}\n${gate1.stderr}`, FAILURE_TAIL_LINES) +
+        : selectionTraceLine(gate1.selection) +
+          summarizeGateFailure(`${gate1.stdout}\n${gate1.stderr}`, FAILURE_TAIL_LINES) +
           gate1.containerLogs,
     },
   };

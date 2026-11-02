@@ -73,19 +73,36 @@ describe("parseArgs: the gate subcommand", () => {
       configPath: "sandbar.config.mjs",
       worktree: ".",
       keep: false,
+      domains: [],
     });
   });
 
   it("takes --config, --worktree in both spellings, and --keep", () => {
     expect(parseArgs(["gate", "--config", "o.mjs", "--worktree", "/w", "--keep"])).toEqual(
-      { kind: "gate", configPath: "o.mjs", worktree: "/w", keep: true },
+      { kind: "gate", configPath: "o.mjs", worktree: "/w", keep: true, domains: [] },
     );
     expect(parseArgs(["gate", "--config=o.mjs", "--worktree=/w"])).toEqual({
       kind: "gate",
       configPath: "o.mjs",
       worktree: "/w",
       keep: false,
+      domains: [],
     });
+  });
+
+  // #266: domains whose sanity sets run whatever changed.
+  it("takes --domains in both spellings, repeated, as one list", () => {
+    expect(parseArgs(["gate", "--domains", "gate,landing", "--domains=,ui,"])).toMatchObject({
+      kind: "gate",
+      domains: ["gate", "landing", "ui"],
+    });
+  });
+
+  it("refuses --domains with no names, or with a flag as its value", () => {
+    for (const argv of [["--domains"], ["--domains", "--keep"], ["--domains="], ["--domains=,"]]) {
+      expect(() => parseArgs(["gate", ...argv])).toThrow(/--domains needs a comma-separated list/);
+    }
+    expect(() => parseArgs(["--domains", "gate"])).toThrow(/is a `sandbar gate` flag/);
   });
 
   // The subcommand is first-position only. Accepted anywhere, `sandbar --config

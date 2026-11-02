@@ -51,7 +51,7 @@ describe.runIf(available)("bindStack against real podman", () => {
       // worktree it mounts is removed.
       hold({ stop: () => bound.stop() } as Stack);
 
-      expect((await (await bound.ensure(specWith("1"))).runGate()).ok).toBe(true);
+      expect((await (await bound.ensure(specWith("1"))).runGate(null)).ok).toBe(true);
       const dbBefore = await idOf("db");
 
       // The same spec, rebuilt from scratch: equal by token, so nothing moves.
@@ -65,7 +65,7 @@ describe.runIf(available)("bindStack against real podman", () => {
       // back exit 0 with its stdout lost, which reds this test on nothing.
       const env = await inspectOf("db", "{{range .Config.Env}}{{println .}}{{end}}");
       expect(env.split("\n")).toContain("STACK_VERSION=2");
-      expect((await restarted.runGate()).ok).toBe(true);
+      expect((await restarted.runGate(null)).ok).toBe(true);
     },
     300_000,
   );
