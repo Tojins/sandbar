@@ -578,6 +578,25 @@ describe("the scenario writer's gate pick (#267)", () => {
     await expect(readGatePicks(h.gatePicksDir, [203])).resolves.toEqual([]);
   });
 
+  it("removes an earlier admission's stored pick when the new run does not complete", async () => {
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([async () => {
+      throw new AgentError("Agent idle for 600 seconds");
+    }]));
+    const timedOut = harness({}, seedStack);
+    await writeGatePick(timedOut.gatePicksDir, 203, pick);
+    await expect(settle(timedOut)).resolves.toMatchObject({ kind: "failed" });
+    await expect(readGatePicks(timedOut.gatePicksDir, [203])).resolves.toEqual([]);
+
+    mocks.createSeedSnapshotSandbox.mockResolvedValue(fakeSandbox([
+      async () => ran(`Thinking.${PICKED}`),
+      async () => ran("Still thinking."),
+    ]));
+    const unanswered = harness({}, seedStack);
+    await writeGatePick(unanswered.gatePicksDir, 203, pick);
+    await expect(settle(unanswered)).resolves.toMatchObject({ kind: "failed" });
+    await expect(readGatePicks(unanswered.gatePicksDir, [203])).resolves.toEqual([]);
+  });
+
   it("nudges a malformed block beside a valid answer, and reads the nudge's block", async () => {
     const sandbox = fakeSandbox([
       async () => ran(`${WRITTEN}${block("domain ui: renders it")}`),

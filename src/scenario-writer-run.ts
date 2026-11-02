@@ -21,6 +21,8 @@
 // block beside it: the issue's pick, part 6 of its gates' selection. A valid
 // pick rides on the outcome, which gate-1 reads, and on the deciding event,
 // which a replay case freezes, and is stored for gate-2 (`writeGatePick`).
+// The task's start removes the issue's stored pick, so only a run of this
+// admission that completes leaves one.
 // A block still missing or malformed after the nudge leaves the pick out and
 // changes nothing else.
 //
@@ -296,7 +298,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
           }
         : { kind: "none", reason: parsed.reason, pick };
       if (outcome.kind === "written") await attemptLogger.writeScenarios(outcome.set);
-      await writeGatePick(config.layout.gatePicksDir, Number(issue.id), pick);
+      if (pick !== null) await writeGatePick(config.layout.gatePicksDir, Number(issue.id), pick);
       await record(invocation, "completed", {
         ...fields,
         scenarios: outcome.kind === "written" ? outcome.set.scenarios.length : 0,
@@ -309,6 +311,7 @@ export function createScenarioWriterTask(deps: ScenarioWriterDeps): ScenarioWrit
 
   async function write(input: ScenarioWriterInput): Promise<ScenarioWriterOutcome> {
     try {
+      await writeGatePick(config.layout.gatePicksDir, Number(issue.id), null);
       const open = await createSeedSnapshotSandbox({
         layout: config.layout,
         issueId: issue.id,
