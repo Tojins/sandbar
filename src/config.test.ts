@@ -469,6 +469,135 @@ describe("a parallel step", () => {
   });
 });
 
+describe("a test selection (#259)", () => {
+  const LABEL = "gate/stack.json at origin/main";
+  const stack = minimal.gateStack as GateStackConfig;
+  const selecting = (extra: Record<string, unknown>, test: Record<string, unknown> = {}) => ({
+    ...stack,
+    steps: stack.steps.map((s) =>
+      s.name === "test"
+        ? { ...s, command: ["npx", "vitest", "run", "{tests}"], tests: ["src/**/*.test.ts"], ...test }
+        : s),
+    ...extra,
+  });
+  const declaration = {
+    sanity: ["src/config.test.ts"],
+    core: { paths: ["src/errors.ts"], sanity: ["src/errors.test.ts"] },
+    domains: [{ name: "gate", description: "the gate", paths: ["src/gate*.ts"], sanity: ["src/gate.test.ts"] }],
+    related: { in: "app", command: ["scripts/related", "{changed}"] },
+  };
+  const both = (config: Record<string, unknown>) => [
+    () => resolveConfig({ ...minimal, gateStack: config as unknown as GateStackConfig }),
+    () => resolveStackFile(JSON.stringify(config), LABEL, {}),
+  ];
+
+  it("declares none by default, inline or in a stack file", () => {
+    const none = { domains: [], sanity: [], core: null, related: null };
+    expect(inlineStack(resolveConfig(minimal)).stack).toMatchObject(none);
+    expect(resolveStackFile(JSON.stringify(stack), LABEL, {}).stack).toMatchObject(none);
+    expect(inlineStack(resolveConfig(minimal)).stack.steps.map((s) => s.tests)).toEqual([null, null]);
+  });
+
+  it("resolves a declaration inline and from a stack file alike, field by field", () => {
+    const config = selecting({
+      ...declaration,
+      domains: [{ ...declaration.domains[0], owner: "ops" }],
+    });
+    const expected = {
+      sanity: ["src/config.test.ts"],
+      core: { paths: ["src/errors.ts"], sanity: ["src/errors.test.ts"] },
+      domains: [{ name: "gate", description: "the gate", paths: ["src/gate*.ts"], sanity: ["src/gate.test.ts"] }],
+      related: { in: "app", command: ["scripts/related", "{changed}"], timeoutMs: 900_000 },
+    };
+    const inline = inlineStack(resolveConfig({ ...minimal, gateStack: config as unknown as GateStackConfig })).stack;
+    expect(inline).toMatchObject(expected);
+    expect(inline.domains[0]).not.toHaveProperty("owner");
+    expect(inline.steps.map((s) => s.tests)).toEqual([null, ["src/**/*.test.ts"]]);
+    expect(resolveStackFile(JSON.stringify(config), LABEL, {}).stack).toEqual(inline);
+  });
+
+  it("takes a related bound", () => {
+    const config = selecting({ related: { ...declaration.related, timeoutMs: 5_000 } });
+    expect(resolveStackFile(JSON.stringify(config), LABEL, {}).stack.related?.timeoutMs).toBe(5_000);
+  });
+
+  it.each<[string, Record<string, unknown>, Record<string, unknown>, RegExp]>([
+    ["a step with an empty tests", {}, { tests: [] }, /step 'test' lists no globs in 'tests'/],
+    [
+      "a standalone step with tests",
+      {}, { standalone: true }, /step 'test' is standalone and declares 'tests'/,
+    ],
+    [
+      "tests without a {tests} entry",
+      {}, { command: ["npx", "vitest", "run"] }, /step 'test' declares 'tests' but its command has no "\{tests\}" entry/,
+    ],
+    [
+      "a {tests} entry without tests",
+      {}, { tests: undefined }, /step 'test' has a "\{tests\}" entry in its command but declares no 'tests'/,
+    ],
+    ["a nameless domain", { domains: [{ ...declaration.domains[0], name: " " }] }, {}, /every domain needs a name/],
+    [
+      "two domains of one name",
+      { domains: [declaration.domains[0], declaration.domains[0]] }, {}, /duplicate domain name 'gate'/,
+    ],
+    [
+      "a domain with no paths",
+      { domains: [{ ...declaration.domains[0], paths: [] }] }, {}, /domain 'gate' lists no paths/,
+    ],
+    [
+      "related in an unknown container",
+      { related: { ...declaration.related, in: "web" } }, {}, /related runs in 'web', which is not a container of the gate \(have: db, app\)/,
+    ],
+    [
+      "related in a container that does not mount the worktree",
+      { related: { ...declaration.related, in: "db" } }, {}, /related runs in 'db', which does not set 'mountWorktree'/,
+    ],
+    [
+      "related without a {changed} entry",
+      { related: { ...declaration.related, command: ["scripts/related"] } }, {}, /related has no "\{changed\}" entry/,
+    ],
+    [
+      "a non-positive related bound",
+      { related: { ...declaration.related, timeoutMs: 0 } }, {}, /related has a non-positive or non-finite timeoutMs \(0\)/,
+    ],
+  ])("refuses %s, inline and in a stack file", (_label, extra, test, message) => {
+    for (const resolve of both(selecting(extra, test))) expect(resolve).toThrow(message);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["a global sanity set", { sanity: declaration.sanity }],
+    ["a core", { core: declaration.core }],
+    ["a domain", { domains: declaration.domains }],
+    ["a related pass", { related: declaration.related }],
+  ])("refuses %s that no step's tests would run", (_label, extra) => {
+    const config = { ...stack, ...extra };
+    for (const resolve of both(config)) {
+      expect(resolve).toThrow(/declares a test selection, but no step declares 'tests'/);
+    }
+  });
+
+  it.each<[string, Record<string, unknown>, RegExp]>([
+    ["domains that are not a list", { domains: {} }, /the stack has 'domains' that is not a list/],
+    ["a sanity that is not a list of strings", { sanity: "src/a.test.ts" }, /the stack has 'sanity' that is not a list of strings/],
+    ["a core that is not an object", { core: [] }, /the stack has 'core' that is not an object/],
+    ["a related that is not an object", { related: "x" }, /the stack has 'related' that is not an object/],
+    [
+      "a domain without a description",
+      { domains: [{ name: "gate", paths: ["src/**"], sanity: [] }] }, /domains\[0\] needs 'description' as a string/,
+    ],
+    ["a core without paths", { core: { sanity: [] } }, /core needs 'paths' as a list of strings/],
+    ["a related without a command", { related: { in: "app" } }, /related needs 'command' as a list of strings/],
+    [
+      "a related bound that is not a number",
+      { related: { ...declaration.related, timeoutMs: "5s" } }, /related has 'timeoutMs' that is not a number/,
+    ],
+    ["a step's tests that are not strings", { steps: [{ ...stack.steps[0], tests: [1] }] }, /steps\[0\] has 'tests' that is not a list of strings/],
+  ])("refuses a stack file with %s, naming the label", (_label, extra, message) => {
+    const text = JSON.stringify(selecting({ ...declaration, ...extra }));
+    expect(() => resolveStackFile(text, LABEL, {})).toThrow(new RegExp(`^${LABEL}: ${message.source}`));
+  });
+});
+
 describe("resolveCopyToWorktree (#147)", () => {
   const cwd = "/consumer/checkout";
 
