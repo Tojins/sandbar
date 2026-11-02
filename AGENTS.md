@@ -29,11 +29,18 @@ move for.
 
 ## Run the tests your change reaches, not the suite
 
-Gate-1 runs the whole suite, unit and podman, and the structural checks on
-every attempt, so a whole `npm test` of your own repeats it at ten minutes a
-run. Run the test files your change reaches: `npx vitest run
-src/<file>.test.ts`, or `npx vitest related --run <changed src files>` for every
-test that imports them.
+Gate-1 runs the structural checks and a selection of whole test files on
+every attempt, not the whole suite: the global sanity set, core's set when a
+core file changed, the sets of the domains the branch's changes reach, the
+tests whose imports reach a changed file (`scripts/related-tests.mjs`), and
+the test files the branch adds or changes (`gateStack` in
+`deploy/ansible/installations/sandbar/sandbar.config.mjs`, #259). A whole
+`npm test` of your own runs far more, at ten minutes a run. Run the test files
+your change reaches: `npx vitest run src/<file>.test.ts`, or `npx vitest
+related --run <changed src files>` for every test that imports them.
+
+A test in a file of a `sanity` set stays under 500 ms in an idle unit run and
+needs no podman; a slower one moves to a file of its own.
 
 Every behaviour a branch adds or changes needs a test that would notice it
 breaking, and every production line it adds must run in some test: the
