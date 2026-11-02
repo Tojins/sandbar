@@ -2592,18 +2592,11 @@ async function runStackGate(
   if (plan !== null) {
     let related: readonly string[] = [];
     if (ctx.spec.related !== null && plan.relatedInput.length > 0) {
-      const run = await runStep(relatedStep(ctx.spec.related, plan.relatedInput), ctx, null);
-      const parsed = boundedOk(run.r) ? parseRelatedOutput(run.r.stdout, plan.tree) : null;
-      if (parsed !== null && "missing" in parsed) {
-        const note = `\n[sandbar] the related pass printed path(s) that are not files of ` +
-          `the gated tree, so its selection cannot be trusted:\n${parsed.missing.join("\n")}\n`;
-        const failed = { ...run, r: { ...run.r, exitCode: 1 }, timing: { ...run.timing, ok: false } };
-        record([failed]);
-        stderr += note;
-        return red([failed], failed, undefined);
-      }
+      const ran = await runStep(relatedStep(ctx.spec.related, plan.relatedInput), ctx, null);
+      const parsed = boundedOk(ran.r) ? parseRelatedOutput(ran.r.stdout, plan.tree) : null;
+      const run = parsed !== null && "missing" in parsed ? untrusted(ran, parsed.missing) : ran;
       record([run]);
-      if (parsed === null) return red([run], run, undefined);
+      if (parsed === null || "missing" in parsed) return red([run], run, undefined);
       related = parsed.files;
     }
     selection = finishSelection(plan, related, ctx.spec.steps);
@@ -2637,6 +2630,18 @@ async function runStackGate(
     steps,
     containerLogs: "",
     ...(selection === undefined ? {} : { selection }),
+  };
+}
+
+// A `related` pass that exited 0 but printed paths the tree does not have:
+// a red, since a selection built on them could leave out what it must run.
+function untrusted(run: StepRun, missing: readonly string[]): StepRun {
+  return {
+    ...run,
+    r: { ...run.r, exitCode: 1 },
+    note: `\n[sandbar] the related pass printed path(s) that are not files of the ` +
+      `gated tree, so its selection cannot be trusted:\n${missing.join("\n")}\n`,
+    timing: { ...run.timing, ok: false },
   };
 }
 
@@ -2679,7 +2684,8 @@ type StepRun = {
   readonly containerName: string;
   readonly banner: string;
   readonly r: BoundedResult;
-  // Why the step was killed, after its output; empty for an exit of its own.
+  // Why the step was killed or its output refused, after its output; empty
+  // for an exit of its own.
   readonly note: string;
   readonly timing: GateStepTiming;
 };

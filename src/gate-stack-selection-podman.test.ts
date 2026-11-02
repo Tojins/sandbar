@@ -113,7 +113,7 @@ describe.runIf(available)("a gate stack's test selection against real podman", (
         (g) => [g.stdout],
       );
       expect(red).toMatchObject({ ok: false, failedStep: "related", exitCode: 1 });
-      expect(red.stderr).toContain("not files of the gated tree, so its selection cannot be trusted:\ngone.test.txt");
+      expect(red.stdout).toContain("not files of the gated tree, so its selection cannot be trusted:\ngone.test.txt");
       expect(red.steps.at(-1)).toMatchObject({ name: "related", ok: false });
       expect(red).not.toHaveProperty("selection");
 

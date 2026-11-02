@@ -74,26 +74,15 @@ export type GateSelection = Omit<SelectionPlan, "relatedInput" | "tree"> & {
   readonly steps: Readonly<Record<string, readonly string[]>>;
 };
 
+const GLOB_TOKEN = /\*\*\/|\*\*|\*|\?|[.+^${}()|[\]\\]/g;
+
 function globRegExp(glob: string): RegExp {
-  let source = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob.charAt(i);
-    if (c === "*" && glob.charAt(i + 1) === "*") {
-      i++;
-      if (glob.charAt(i + 1) === "/") {
-        i++;
-        source += "(?:.*/)?";
-      } else {
-        source += ".*";
-      }
-    } else if (c === "*") {
-      source += "[^/]*";
-    } else if (c === "?") {
-      source += "[^/]";
-    } else {
-      source += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-    }
-  }
+  const source = glob.replace(GLOB_TOKEN, (token) =>
+    token === "**/" ? "(?:.*/)?"
+    : token === "**" ? ".*"
+    : token === "*" ? "[^/]*"
+    : token === "?" ? "[^/]"
+    : `\\${token}`);
   return new RegExp(`^${source}$`);
 }
 
@@ -165,14 +154,15 @@ export function planSelection(args: {
   }
 
   const present = changed.filter((c) => !c.deleted).map((c) => c.path);
-  const isTest = globMatcher(args.steps.flatMap((s) => s.tests ?? []));
-  const isCore = isCoreUnder(declarations[0]);
+  // Step by step, so one step's exclusions do not hide another's files.
+  const stepMatchers = args.steps.flatMap((s) => (s.tests === null ? [] : [globMatcher(s.tests)]));
+  const isCoreInEffect = isCoreUnder(declarations[0]);
   return {
     global,
     core,
     domains,
-    changed: present.filter(isTest),
-    relatedInput: present.filter((path) => !isCore(path)),
+    changed: present.filter((path) => stepMatchers.some((matches) => matches(path))),
+    relatedInput: present.filter((path) => !isCoreInEffect(path)),
     ignored: [...ignored.values()],
     tree: new Set(files),
   };

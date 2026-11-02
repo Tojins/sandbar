@@ -79,6 +79,13 @@ describe("globMatcher", () => {
     [["src/gate?.ts"], "src/gate.ts", false],
     [["src/a.ts"], "src/a+ts", false],
     [["src/a.ts"], "src/aXts", false],
+    // Every other regular-expression character is a literal.
+    [["src/a(b|c).ts"], "src/a(b|c).ts", true],
+    [["src/a(b|c).ts"], "src/ab.ts", false],
+    [["src/[ab].ts"], "src/a.ts", false],
+    [["src/a{1}$^\\.ts"], "src/a{1}$^\\.ts", true],
+    [["src/a{1}.ts"], "src/a.ts", false],
+    [["^src/a.ts"], "src/a.ts", false],
     [["Containerfile"], "Containerfile", true],
     [["Containerfile"], "sub/Containerfile", false],
     [["src/**/*.test.ts", "!src/**/*-podman.test.ts"], "src/gate-podman.test.ts", false],
@@ -119,9 +126,10 @@ describe("planSelection", () => {
   });
 
   it("adds the changed files a step's tests match, never a deleted one", () => {
-    const p = plan(changedOf("src/lanes.test.ts", "-src/gate.test.ts", "src/lanes.ts"));
-    expect(p.changed).toEqual(["src/lanes.test.ts"]);
-    expect(p.relatedInput).toEqual(["src/lanes.test.ts", "src/lanes.ts"]);
+    const p = plan(changedOf("src/lanes.test.ts", "-src/gate.test.ts", "src/lanes.ts", "src/gate-stack-podman.test.ts"));
+    // The podman file is one step's own, though the other step excludes it.
+    expect(p.changed).toEqual(["src/lanes.test.ts", "src/gate-stack-podman.test.ts"]);
+    expect(p.relatedInput).toEqual(["src/lanes.test.ts", "src/lanes.ts", "src/gate-stack-podman.test.ts"]);
   });
 
   it("adds a domain named by hand and records one the stack does not declare", () => {
