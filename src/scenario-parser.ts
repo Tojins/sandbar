@@ -34,7 +34,9 @@
 // `domain <name>: <reason>` or `test <path>: <reason>`, and an empty block
 // picks nothing. `parseGateSelection` refuses a missing block, any other
 // line, an entry with no reason, a domain the seed does not declare and a
-// path an `area:` entry could not be, listing all of them.
+// path an `area:` entry could not be, listing all of them. `gatePickErrors`
+// checks a pick read back as JSON, stored or pinned, as `scenarioSetErrors`
+// does a set.
 
 import type { GatePick } from "./gate-selection.js";
 import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
@@ -442,4 +444,19 @@ export function scenarioSetErrors(value: unknown, issue: number): readonly strin
       errors.push(...scenarioErrors(scenario, `scenarios[${i}]`, `S${i + 1}`)));
   }
   return errors;
+}
+
+const isEntryList = (value: unknown, key: "name" | "path"): boolean =>
+  Array.isArray(value) && value.every((entry: unknown) =>
+    isObject(entry) && typeof entry[key] === "string" && entry[key] !== "" &&
+    typeof entry.reason === "string" && entry.reason !== "");
+
+// Every way `value`, a pick read back as JSON (a stored one, a replay case's),
+// is not a `GatePick`.
+export function gatePickErrors(value: unknown): readonly string[] {
+  if (!isObject(value)) return ["is not an object"];
+  return [
+    ...(isEntryList(value.domains, "name") ? [] : ["domains is not a list of { name, reason }"]),
+    ...(isEntryList(value.tests, "path") ? [] : ["tests is not a list of { path, reason }"]),
+  ];
 }

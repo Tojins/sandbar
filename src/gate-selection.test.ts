@@ -9,7 +9,6 @@ import {
   type IssuePick,
   expandToken,
   finishSelection,
-  gatePickErrors,
   globMatcher,
   parseRelatedOutput,
   planSelection,
@@ -318,12 +317,4 @@ describe("the stored gate picks (#267)", () => {
     await expect(readGatePicks(dir, [9])).rejects.toThrow("domains is not a list of { name, reason }");
   });
 
-  it("lists every way a value is not a pick", () => {
-    expect(gatePickErrors(pick)).toEqual([]);
-    expect(gatePickErrors([])).toEqual(["is not an object"]);
-    expect(gatePickErrors({ domains: [{ name: "", reason: "r" }], tests: "x" })).toEqual([
-      "domains is not a list of { name, reason }",
-      "tests is not a list of { path, reason }",
-    ]);
-  });
 });

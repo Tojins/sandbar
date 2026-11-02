@@ -10,9 +10,12 @@
 // cutoff, flagged when the body was edited after it), pointers to the
 // original run and its landing, and, when that admission's writer wrote one,
 // its scenario set (#240): pinned, it replaces the writer in every repeat and
-// session, so all of them are judged on the same clauses. A case file frozen
-// before pinning has no `scenarios`, and its cases run the writer as
-// configured. `parseReplayCases` is the one validation of a case file, and
+// session, so all of them are judged on the same clauses. Beside it, when
+// the writer picked one, its `gatePick` (#267), which every gate-1 of the
+// case adds; a case pinning a pick and no set settles the writer NONE. A
+// case file frozen before pinning has no `scenarios`, and its cases run the
+// writer as configured; one frozen before #267 pins no pick, and its gates
+// run parts 1–5. `parseReplayCases` is the one validation of a case file, and
 // lists every violation rather than the first.
 //
 // A SESSION is one `replay run`: its manifest records what was compared (the
@@ -38,7 +41,8 @@
 
 import { type IssueComment, type IssueJson, issueJsonErrors } from "./issue-anchor.js";
 import type { Terminal } from "./inner-loop.js";
-import { type ScenarioSet, scenarioSetErrors } from "./scenario-parser.js";
+import type { GatePick } from "./gate-selection.js";
+import { type ScenarioSet, gatePickErrors, scenarioSetErrors } from "./scenario-parser.js";
 import type { ScenarioOutcomeRecord } from "./events.js";
 import {
   type Cell,
@@ -77,6 +81,7 @@ export type ReplayCase = CaseText & {
     readonly diff: DiffSize;
   } | null;
   readonly scenarios?: ScenarioSet;
+  readonly gatePick?: GatePick;
 };
 
 export type ReplayCases = {
@@ -195,6 +200,9 @@ function caseErrors(value: unknown, at: string, seen: Set<number>): readonly str
   if (c.scenarios !== undefined && typeof issue === "number") {
     errors.push(...scenarioSetErrors(c.scenarios, issue).map((error) => `${at}.scenarios ${error}`));
   }
+  if (c.gatePick !== undefined) {
+    errors.push(...gatePickErrors(c.gatePick).map((error) => `${at}.gatePick ${error}`));
+  }
   return errors;
 }
 
@@ -277,13 +285,16 @@ export type RecordedAdmission = {
   readonly issueSnapshot: string | null;
   // The `scenarios-<k>.json` its writer filed, when it wrote a set.
   readonly scenarios: string | null;
+  // The gate pick its writer made (#267), off the deciding event.
+  readonly gatePick: GatePick | null;
 };
 
 // The admission behind an issue's last DONE in one run's events, or null when
 // the run has none. Records are read version-blind (`parseEventLines`), so
 // every field is checked rather than trusted. The issue's k-th
 // `scenario-writer` event with a non-empty set in the run is its
-// `scenarios-<k>.json`: the logger numbers only written sets, per issue.
+// `scenarios-<k>.json`: the logger numbers only written sets, per issue. A
+// `pick` on an admission's `scenario-writer` event is its gate pick.
 export function lastDoneAdmission(
   run: string,
   events: readonly Json[],
@@ -292,13 +303,19 @@ export function lastDoneAdmission(
   let admitted: Json | null = null;
   let written = 0;
   let scenarios: string | null = null;
+  let gatePick: GatePick | null = null;
   let done: Json | null = null;
   let doneScenarios: string | null = null;
+  let doneGatePick: GatePick | null = null;
   for (const event of events) {
     if (event.issue !== issue) continue;
     if (event.kind === "admitted") {
       admitted = event;
       scenarios = null;
+      gatePick = null;
+    }
+    if (event.kind === "scenario-writer" && event.pick !== undefined && gatePickErrors(event.pick).length === 0) {
+      gatePick = event.pick as GatePick;
     }
     if (event.kind === "scenario-writer" && typeof event.scenarios === "number" && event.scenarios > 0) {
       written += 1;
@@ -307,6 +324,7 @@ export function lastDoneAdmission(
     if (event.kind === "terminal" && event.terminal === "DONE" && admitted !== null) {
       done = admitted;
       doneScenarios = scenarios;
+      doneGatePick = gatePick;
     }
   }
   if (done === null || typeof done.ts !== "string" || typeof done.title !== "string") return null;
@@ -317,6 +335,7 @@ export function lastDoneAdmission(
     seedSha: typeof done.seedSha === "string" ? done.seedSha : null,
     issueSnapshot: typeof done.issueSnapshot === "string" ? done.issueSnapshot : null,
     scenarios: doneScenarios,
+    gatePick: doneGatePick,
   };
 }
 

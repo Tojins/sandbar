@@ -54,6 +54,7 @@ import {
 } from "./config.js";
 import { isErrno } from "./errors.js";
 import { gitStdout } from "./git-ops.js";
+import { gatePickErrors } from "./scenario-parser.js";
 import type { StackInEffect } from "./stack-change.js";
 
 export type ChangedFile = {
@@ -300,23 +301,6 @@ export async function selectionPlanFor(
 
 export const selects = (stack: ResolvedGateStack): boolean =>
   stack.steps.some((step) => step.tests !== null);
-
-const isObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const isEntryList = (value: unknown, key: "name" | "path"): boolean =>
-  Array.isArray(value) && value.every((entry: unknown) =>
-    isObject(entry) && typeof entry[key] === "string" && entry[key] !== "" &&
-    typeof entry.reason === "string" && entry.reason !== "");
-
-// Every way `value`, a pick read back as JSON, is not a `GatePick`.
-export function gatePickErrors(value: unknown): readonly string[] {
-  if (!isObject(value)) return ["is not an object"];
-  return [
-    ...(isEntryList(value.domains, "name") ? [] : ["domains is not a list of { name, reason }"]),
-    ...(isEntryList(value.tests, "path") ? [] : ["tests is not a list of { path, reason }"]),
-  ];
-}
 
 const gatePickPath = (dir: string, issue: number): string => join(dir, `${issue}.json`);
 

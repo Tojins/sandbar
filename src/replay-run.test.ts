@@ -21,6 +21,7 @@ const seams = vi.hoisted(() => ({
     readonly env: Record<string, string>;
     readonly issueTitle: unknown;
     readonly pinned: unknown;
+    readonly pick: unknown;
   }[],
   // Issues whose loop rejects, and how many loops run at once.
   rejects: new Set<string>(),
@@ -100,6 +101,7 @@ vi.mock("./inner-loop.js", async (importOriginal) => ({
       env: opts.config.env,
       issueTitle: (await opts.config.issueSource(issue.id)).title,
       pinned: opts.config.pinnedScenarios,
+      pick: opts.config.pinnedGatePick,
     });
     if (seams.rejects.has(issue.id)) throw new Error(`loop #${issue.id} exploded`);
     seams.maxActive = Math.max(seams.maxActive, ++seams.active);
@@ -316,12 +318,15 @@ describe("replay run (#195)", SESSION_TIMEOUT, () => {
       writer: { provider: "claude", model: "m", effort: null },
       scenarios: [{ id: "S1", title: "t", needs: ["cli"], area: [], given: ["g"], when: ["w"], then: ["t"] }],
     };
-    const cases = await casesFile(caseFileOf({ cases: [{ ...replayCase(7), scenarios: set }, replayCase(8)] }));
+    const gatePick = { domains: [{ name: "gate", reason: "r" }], tests: [] };
+    const cases = await casesFile(caseFileOf({
+      cases: [{ ...replayCase(7), scenarios: set, gatePick }, replayCase(8)],
+    }));
 
     await expect(replay("pinned", 2, { cases })).resolves.toBe(0);
 
-    expect(seams.loops.map((loop) => [loop.issue, loop.pinned])).toEqual([
-      ["7", set], ["8", undefined], ["7", set], ["8", undefined],
+    expect(seams.loops.map((loop) => [loop.issue, loop.pinned, loop.pick])).toEqual([
+      ["7", set, gatePick], ["8", undefined, undefined], ["7", set, gatePick], ["8", undefined, undefined],
     ]);
   });
 

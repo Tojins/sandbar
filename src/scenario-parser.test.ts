@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_SCENARIOS,
   type Scenario,
+  gatePickErrors,
   parseGateSelection,
   parseScenarioWriter,
   renderScenario,
@@ -175,6 +176,15 @@ describe("parseGateSelection (#267)", () => {
         tests: [{ path: "src/lanes.test.ts", reason: "pins the lane order" }],
       },
     });
+  });
+
+  it("lists every way a value read back is not a pick", () => {
+    expect(gatePickErrors({ domains: [{ name: "gate", reason: "r" }], tests: [] })).toEqual([]);
+    expect(gatePickErrors([])).toEqual(["is not an object"]);
+    expect(gatePickErrors({ domains: [{ name: "", reason: "r" }], tests: "x" })).toEqual([
+      "domains is not a list of { name, reason }",
+      "tests is not a list of { path, reason }",
+    ]);
   });
 
   it("takes an empty block as picking nothing", () => {
