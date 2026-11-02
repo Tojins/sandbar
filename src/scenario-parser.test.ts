@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_SCENARIOS,
   type Scenario,
+  parseGateSelection,
   parseScenarioWriter,
   renderScenario,
   scenarioSetErrors,
@@ -154,6 +155,57 @@ describe("parseScenarioWriter grammar", () => {
     expect(reprompt(written(many))).toContain(`keep the most valuable ${MAX_SCENARIOS}`);
     const most = Array.from({ length: MAX_SCENARIOS }, (_, i) => scenario(i + 1)).join("\n\n");
     expect(parseScenarioWriter(written(most))).toMatchObject({ kind: "WRITTEN" });
+  });
+});
+
+describe("parseGateSelection (#267)", () => {
+  const declared = ["gate", "planning"];
+  const block = (lines: string): string => `${written(S1)}\n<gate-selection>\n${lines}\n</gate-selection>`;
+
+  it("reads domains and test files with their reasons, the last block winning", () => {
+    const stdout = `${block("domain gate: dropped")}\n${block([
+      "domain planning: the change reorders lanes",
+      "",
+      "  test src/lanes.test.ts:   pins the lane order  ",
+    ].join("\n"))}`;
+    expect(parseGateSelection(stdout, declared)).toEqual({
+      kind: "picked",
+      pick: {
+        domains: [{ name: "planning", reason: "the change reorders lanes" }],
+        tests: [{ path: "src/lanes.test.ts", reason: "pins the lane order" }],
+      },
+    });
+  });
+
+  it("takes an empty block as picking nothing", () => {
+    expect(parseGateSelection(block(""), declared)).toEqual({ kind: "picked", pick: { domains: [], tests: [] } });
+  });
+
+  it("asks for a missing block", () => {
+    expect(parseGateSelection(written(S1), declared)).toEqual({
+      kind: "malformed",
+      reprompt: expect.stringContaining("needs a `<gate-selection>` block"),
+    });
+  });
+
+  it("lists every unknown domain, bad path and line that is no entry", () => {
+    const result = parseGateSelection(block([
+      "domain ui: renders it",
+      "test /src/a.test.ts: absolute",
+      "test src/*.test.ts: a glob",
+      "domain gate:",
+      "src/lanes.test.ts",
+    ].join("\n")), declared);
+    expect(result.kind).toBe("malformed");
+    const reprompt = result.kind === "malformed" ? result.reprompt : "";
+    expect(reprompt).toContain("line 1: `ui` is not a domain; pick from gate, planning.");
+    expect(reprompt).toContain("line 2: `/src/a.test.ts` is absolute");
+    expect(reprompt).toContain("line 3: `src/*.test.ts` holds a glob character");
+    expect(reprompt).toContain("line 4: `domain gate:` is not");
+    expect(reprompt).toContain("line 5: `src/lanes.test.ts` is not");
+    expect(parseGateSelection(block("domain gate: x"), [])).toMatchObject({
+      reprompt: expect.stringContaining("pick from none."),
+    });
   });
 });
 

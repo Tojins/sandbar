@@ -654,7 +654,7 @@ async function gate(
     { stack: spec, classification: { kind: "same" } },
     worktreePath,
     `origin/${config.sourceBranch}`,
-    opts.domains,
+    { namedDomains: opts.domains },
   );
   const result = await stack.runGate(plan);
   if (result.selection !== undefined) out(selectionReport(result.selection));

@@ -27,7 +27,16 @@
 // primitive for rerunning a scenario whose area a later change touched.
 // `scenarioSetErrors` checks a stored set read back as JSON, such as one a
 // replay case pins (#240), against the shape the grammar guarantees.
+//
+// Beside either answer, when the seed's stack selects, the writer picks part 6
+// of its issue's gate selection (#267, gate-selection.ts) in a
+// `<gate-selection>` block, the last one winning: one entry a line,
+// `domain <name>: <reason>` or `test <path>: <reason>`, and an empty block
+// picks nothing. `parseGateSelection` refuses a missing block, any other
+// line, an entry with no reason, a domain the seed does not declare and a
+// path an `area:` entry could not be, listing all of them.
 
+import type { GatePick } from "./gate-selection.js";
 import { lastToken, literalTokenPattern, temperedBlockPattern } from "./token-scan.js";
 
 export const SCENARIO_NEEDS = ["ui", "api", "sql", "integration", "cli"] as const;
@@ -151,6 +160,52 @@ function areaPathProblem(path: string): string | null {
     return `\`${path}\` has an empty, \`.\` or \`..\` segment`;
   }
   return null;
+}
+
+const PICK_LINE = /^(domain|test)\s+(\S+?):\s+(\S.*)$/;
+
+export function parseGateSelection(
+  stdout: string,
+  declared: readonly string[],
+): { readonly kind: "picked"; readonly pick: GatePick } | { readonly kind: "malformed"; readonly reprompt: string } {
+  const block = lastToken(stdout, temperedBlockPattern("gate-selection"));
+  if (block === null) {
+    return {
+      kind: "malformed",
+      reprompt: "Your answer needs a `<gate-selection>` block beside it, empty when you pick nothing.",
+    };
+  }
+  const violations: string[] = [];
+  const domains: { name: string; reason: string }[] = [];
+  const tests: { path: string; reason: string }[] = [];
+  for (const [index, line] of block.split("\n").entries()) {
+    if (line.trim() === "") continue;
+    const at = `line ${index + 1}`;
+    const entry = PICK_LINE.exec(line.trim());
+    const [, kind, subject = "", reason = ""] = entry ?? [];
+    if (kind === "domain") {
+      if (!declared.includes(subject)) {
+        violations.push(`${at}: \`${subject}\` is not a domain; pick from ${declared.join(", ") || "none"}.`);
+      }
+      domains.push({ name: subject, reason: reason.trim() });
+    } else if (kind === "test") {
+      const problem = areaPathProblem(subject);
+      if (problem !== null) violations.push(`${at}: ${problem}.`);
+      tests.push({ path: subject, reason: reason.trim() });
+    } else {
+      violations.push(`${at}: \`${line.trim()}\` is not \`domain <name>: <reason>\` or \`test <path>: <reason>\`.`);
+    }
+  }
+  return violations.length === 0
+    ? { kind: "picked", pick: { domains, tests } }
+    : {
+        kind: "malformed",
+        reprompt: [
+          "Your `<gate-selection>` block does not follow the format. Fix every point below " +
+            "and answer again with the whole block:",
+          ...violations.map((violation) => `- ${violation}`),
+        ].join("\n"),
+      };
 }
 
 function parseScenarioBlock(block: string): {

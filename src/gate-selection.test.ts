@@ -1,16 +1,23 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { TESTS_TOKEN, type ResolvedGateStep, type SanityDeclaration } from "./config.js";
 import {
   type ChangedFile,
+  type IssuePick,
   expandToken,
   finishSelection,
+  gatePickErrors,
   globMatcher,
   parseRelatedOutput,
   planSelection,
+  readGatePicks,
   selectionPlanFor,
   selectionTraceLine,
   selects,
+  writeGatePick,
 } from "./gate-selection.js";
 
 const step = (name: string, tests: readonly string[] | null): ResolvedGateStep => ({
@@ -59,13 +66,18 @@ const changedOf = (...paths: string[]): ChangedFile[] =>
 
 const plan = (
   changed: readonly ChangedFile[],
-  extra: { declarations?: readonly [SanityDeclaration, ...SanityDeclaration[]]; namedDomains?: string[] } = {},
+  extra: {
+    declarations?: readonly [SanityDeclaration, ...SanityDeclaration[]];
+    namedDomains?: string[];
+    picks?: IssuePick[];
+  } = {},
 ) => planSelection({
   declarations: extra.declarations ?? [declaration],
   steps,
   changed,
   files,
   namedDomains: extra.namedDomains ?? [],
+  picks: extra.picks ?? [],
 });
 
 describe("globMatcher", () => {
@@ -175,6 +187,30 @@ describe("planSelection", () => {
     expect(p.relatedInput).toEqual(["src/lanes.ts"]);
   });
 
+  it("adds a writer's picked domains and test files, and records what the tree lacks (#267)", () => {
+    const picks: IssuePick[] = [
+      {
+        issue: 267,
+        domains: [{ name: "planning", reason: "lanes order the queue" }],
+        tests: [
+          { path: "src/gate.test.ts", reason: "pins the gate's verdict" },
+          { path: "src/gone.test.ts", reason: "was here at the seed" },
+        ],
+      },
+      { issue: 268, domains: [{ name: "ui", reason: "renders it" }], tests: [] },
+    ];
+    // A core change reaches no domain by path; a picked one is still added.
+    const p = plan(changedOf("src/errors.ts"), { picks });
+    expect(p.domains).toEqual({ planning: ["src/lanes.test.ts"] });
+    expect(p.picked).toEqual(["src/gate.test.ts"]);
+    expect(p.picks).toEqual(picks);
+    expect(p.ignored).toEqual([
+      { kind: "domain", name: "ui" },
+      { kind: "glob", set: "issue #267", glob: "src/gone.test.ts" },
+    ]);
+    expect(finishSelection(p, [], steps).files).toContain("src/gate.test.ts");
+  });
+
   it("selects nothing beyond the global set without a core or domains", () => {
     const p = plan(changedOf("src/gate.ts"), { declarations: [{ sanity: [], core: null, domains: [] }] });
     expect(p).toMatchObject({ global: [], core: [], domains: {}, relatedInput: ["src/gate.ts"] });
@@ -204,6 +240,8 @@ describe("finishSelection", () => {
       core: ["src/errors.test.ts"],
       domains: { gate: ["src/gate-stack-podman.test.ts", "src/gate.test.ts"] },
       changed: ["src/lanes.test.ts"],
+      picks: [],
+      picked: [],
       related: ["src/lanes.test.ts", "prompts/a.md"],
       files: [
         "src/config.test.ts",
@@ -258,5 +296,34 @@ describe("selectionTraceLine", () => {
     expect(selectionTraceLine({ ...selection, files: [] }))
       .toBe("[sandbar] this gate's selection held no test file.\n\n");
     expect(selectionTraceLine(undefined)).toBe("");
+  });
+});
+
+describe("the stored gate picks (#267)", () => {
+  const pick = {
+    domains: [{ name: "gate", reason: "the stack starts differently" }],
+    tests: [{ path: "src/gate.test.ts", reason: "pins the verdict" }],
+  };
+
+  it("keeps each issue's latest pick, and reads those of the issues that have one", async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), "gate-picks-")), "gate-picks");
+    await writeGatePick(dir, 7, { domains: [], tests: [] });
+    await writeGatePick(dir, 7, pick);
+    await expect(readGatePicks(dir, [7, 8])).resolves.toEqual([{ issue: 7, ...pick }]);
+  });
+
+  it("refuses a stored pick that is not one", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "gate-picks-"));
+    await writeFile(join(dir, "9.json"), JSON.stringify({ domains: [{ name: "gate" }], tests: [] }));
+    await expect(readGatePicks(dir, [9])).rejects.toThrow("domains is not a list of { name, reason }");
+  });
+
+  it("lists every way a value is not a pick", () => {
+    expect(gatePickErrors(pick)).toEqual([]);
+    expect(gatePickErrors([])).toEqual(["is not an object"]);
+    expect(gatePickErrors({ domains: [{ name: "", reason: "r" }], tests: "x" })).toEqual([
+      "domains is not a list of { name, reason }",
+      "tests is not a list of { path, reason }",
+    ]);
   });
 });

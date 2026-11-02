@@ -1,5 +1,6 @@
-// Which test files a gate runs (#259, #266): the selection floor, parts 1–5 of
-// the spec, over a stack's declaration (config.ts) and a diff.
+// Which test files a gate runs (#259, #266, #267): parts 1–6 of the spec, over
+// a stack's declaration (config.ts), a diff and the scenario writers' picks.
+// Parts 1–5 are the floor every gate runs.
 //
 //   1. the global `sanity` set;
 //   2. `core.sanity`, when a changed file matches `core.paths`. A core file
@@ -11,11 +12,17 @@
 //      there and are not core's. It runs inside the stack (gate-stack.ts), so
 //      `planSelection` stops before it and `finishSelection` takes its output;
 //   5. the changed files some step's `tests` match: the branch's own tests,
-//      for this gate only.
+//      for this gate only;
+//   6. the scenario writer's pick (#267, scenario-writer-run.ts): the
+//      `sanity` of each domain it named and the test files it named, each
+//      with its one-line reason. Gate-1 adds its issue's once the writer is
+//      done, gate-2 the stored pick of every issue in the land unit, and
+//      `sandbar gate` none.
 //
 // Resolved at gate time against the gated tree: a sanity glob that matches no
-// file there, or a domain named by hand that the stack does not declare, is
-// ignored and recorded, never an error. So is a selected file that no step's
+// file there, or a domain named by hand or picked that the stack does not
+// declare, is ignored and recorded, never an error; so is a picked test file
+// the tree does not have. So is a selected file that no step's
 // `tests` match, since nothing would run it. Each step's `{tests}` becomes the
 // selected files its `tests` match, and a step left with none is skipped.
 //
@@ -32,12 +39,20 @@
 // against the fork from a base ref, working tree included, so `sandbar gate`
 // over uncommitted work selects for it. `selectionPlanFor` is what every gate
 // asks first, and for a stack whose steps declare no `tests` it reads nothing.
+//
+// A pick outlives the run that made it, since its issue may land in a later
+// one: `writeGatePick` keeps each issue's latest as
+// `<stateDir>/gate-picks/<issue>.json`, and `readGatePicks` is gate-2's read.
+
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import {
   type ResolvedGateStack,
   type ResolvedGateStep,
   type SanityDeclaration,
 } from "./config.js";
+import { isErrno } from "./errors.js";
 import { gitStdout } from "./git-ops.js";
 import type { StackInEffect } from "./stack-change.js";
 
@@ -46,19 +61,32 @@ export type ChangedFile = {
   readonly deleted: boolean;
 };
 
+// Part 6 for one issue: what its scenario writer named, and why.
+export type GatePick = {
+  readonly domains: readonly { readonly name: string; readonly reason: string }[];
+  readonly tests: readonly { readonly path: string; readonly reason: string }[];
+};
+
+export type IssuePick = GatePick & { readonly issue: number };
+
 // What a gate left out, and why. `set` names where a glob was declared:
-// `sanity`, `core` or `domain '<name>'`.
+// `sanity`, `core`, `domain '<name>'`, or `issue #<n>` for the test files
+// that issue's writer picked.
 export type SelectionIgnored =
   | { readonly kind: "glob"; readonly set: string; readonly glob: string }
   | { readonly kind: "domain"; readonly name: string }
   | { readonly kind: "unstepped"; readonly file: string };
 
-// Parts 1–3 and 5, and what part 4 is to be asked.
+// Parts 1–3, 5 and 6, and what part 4 is to be asked. A picked domain's set
+// is in `domains`; `picked` is the picked test files the tree has, and
+// `picks` what was picked, reasons and all.
 export type SelectionPlan = {
   readonly global: readonly string[];
   readonly core: readonly string[];
   readonly domains: Readonly<Record<string, readonly string[]>>;
   readonly changed: readonly string[];
+  readonly picks: readonly IssuePick[];
+  readonly picked: readonly string[];
   readonly relatedInput: readonly string[];
   readonly ignored: readonly SelectionIgnored[];
   // The gated tree's files, which a `related` path has to be one of.
@@ -112,8 +140,13 @@ export function planSelection(args: {
   readonly changed: readonly ChangedFile[];
   readonly files: readonly string[];
   readonly namedDomains: readonly string[];
+  readonly picks: readonly IssuePick[];
 }): SelectionPlan {
-  const { declarations, changed, files, namedDomains } = args;
+  const { declarations, changed, files, picks } = args;
+  const namedDomains = [
+    ...args.namedDomains,
+    ...picks.flatMap((pick) => pick.domains.map((domain) => domain.name)),
+  ];
   const ignored = new Map<string, SelectionIgnored>();
   const ignore = (entry: SelectionIgnored) => ignored.set(JSON.stringify(entry), entry);
   const sanityFiles = (set: string, globs: readonly string[]): string[] => {
@@ -161,6 +194,11 @@ export function planSelection(args: {
     core,
     domains,
     changed: present.filter((path) => stepMatchers.some((matches) => matches(path))),
+    picks,
+    // A picked path holds no glob character (scenario-parser.ts), so as a
+    // glob it matches itself alone.
+    picked: sortedUnion(...picks.map((pick) =>
+      sanityFiles(`issue #${pick.issue}`, pick.tests.map((test) => test.path)))),
     relatedInput: present.filter((path) => !isCoreInEffect(path)),
     ignored: [...ignored.values()],
     tree: new Set(files),
@@ -185,7 +223,7 @@ export function finishSelection(
 ): GateSelection {
   const { relatedInput: _input, tree: _tree, ...parts } = plan;
   const selected = sortedUnion(
-    plan.global, plan.core, ...Object.values(plan.domains), plan.changed, related,
+    plan.global, plan.core, ...Object.values(plan.domains), plan.changed, plan.picked, related,
   );
   const stepFiles = Object.fromEntries(steps.flatMap((step) =>
     step.tests === null ? [] : [[step.name, selected.filter(globMatcher(step.tests))]]));
@@ -247,7 +285,7 @@ export async function selectionPlanFor(
   inEffect: Pick<StackInEffect, "stack" | "classification">,
   worktree: string,
   baseRef: string,
-  namedDomains: readonly string[] = [],
+  added: { readonly namedDomains?: readonly string[]; readonly picks?: readonly IssuePick[] } = {},
 ): Promise<SelectionPlan | null> {
   const { stack, classification } = inEffect;
   if (!selects(stack)) return null;
@@ -255,9 +293,60 @@ export async function selectionPlanFor(
     declarations: classification.kind === "domains" ? [stack, classification.branch] : [stack],
     steps: stack.steps,
     ...(await readSelectionTree(worktree, baseRef)),
-    namedDomains,
+    namedDomains: added.namedDomains ?? [],
+    picks: added.picks ?? [],
   });
 }
 
 export const selects = (stack: ResolvedGateStack): boolean =>
   stack.steps.some((step) => step.tests !== null);
+
+const isObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isEntryList = (value: unknown, key: "name" | "path"): boolean =>
+  Array.isArray(value) && value.every((entry: unknown) =>
+    isObject(entry) && typeof entry[key] === "string" && entry[key] !== "" &&
+    typeof entry.reason === "string" && entry.reason !== "");
+
+// Every way `value`, a pick read back as JSON, is not a `GatePick`.
+export function gatePickErrors(value: unknown): readonly string[] {
+  if (!isObject(value)) return ["is not an object"];
+  return [
+    ...(isEntryList(value.domains, "name") ? [] : ["domains is not a list of { name, reason }"]),
+    ...(isEntryList(value.tests, "path") ? [] : ["tests is not a list of { path, reason }"]),
+  ];
+}
+
+const gatePickPath = (dir: string, issue: number): string => join(dir, `${issue}.json`);
+
+// Replaces the issue's stored pick.
+export async function writeGatePick(dir: string, issue: number, pick: GatePick): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  const path = gatePickPath(dir, issue);
+  const incoming = `${path}.tmp-${process.pid}`;
+  await writeFile(incoming, JSON.stringify(pick));
+  await rename(incoming, path);
+}
+
+// The stored pick of each of `issues` that has one.
+export async function readGatePicks(
+  dir: string,
+  issues: readonly number[],
+): Promise<readonly IssuePick[]> {
+  const read = async (issue: number): Promise<IssuePick[]> => {
+    const path = gatePickPath(dir, issue);
+    let text: string;
+    try {
+      text = await readFile(path, "utf8");
+    } catch (err) {
+      if (isErrno(err, "ENOENT")) return [];
+      throw err;
+    }
+    const value: unknown = JSON.parse(text);
+    const errors = gatePickErrors(value);
+    if (errors.length > 0) throw new Error(`${path}: ${errors.join("; ")}`);
+    return [{ issue, ...(value as GatePick) }];
+  };
+  return (await Promise.all(issues.map(read))).flat();
+}

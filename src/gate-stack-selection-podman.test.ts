@@ -56,6 +56,7 @@ const planFor = (spec: ReturnType<typeof stackWith>) => planSelection({
   changed: [{ path: "x.txt", deleted: false }],
   files: ["a.test.txt", "b.test.txt", "x.txt", MARKER_FILE],
   namedDomains: [],
+  picks: [],
 });
 
 describe.runIf(available)("a gate stack's test selection against real podman", () => {
