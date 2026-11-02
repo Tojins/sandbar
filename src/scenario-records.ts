@@ -7,9 +7,9 @@
 // it passed at, the Given/When/Then, the scenario's domains and its final
 // verdict. A parked or failed issue writes nothing, and nothing follows the
 // branch to its landing. The verdict is read off the cycle's scenario ledger
-// (verifier.ts): `pass` for a scenario whose last runner verdict was PASS,
-// `fail-overruled` for one an adjudicator retired, and `unverified` for every
-// other, including a failure whose rerun went unverified. A pass's directory
+// (verifier.ts): `pass` for a scenario whose last selection the runner
+// passed, `fail-overruled` for one an adjudicator retired, and `unverified`
+// for every other, including a pass or a failure whose rerun went unverified. A pass's directory
 // from the round that passed it, as `archiveRun` left it, holds the runner's
 // scripts; it is copied to `issue-<n>/<sha>/S<n>/` beside the file before
 // the records are appended, so no record names a directory that is not

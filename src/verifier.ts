@@ -45,8 +45,9 @@
 // longer contains counts as touching everything. A failed scenario's rerun is
 // told to check the analogous sites too, beside its evidence from the round
 // that failed it, which the ledger names. Only the runner's own verdicts
-// advance the ledger: a pre-pass or harness UNVERIFIED leaves a scenario as it
-// was. A scenario an adjudicator overrules is retired and never runs again,
+// advance the ledger: a pre-pass or harness UNVERIFIED leaves a scenario at
+// the head it last ran at, and a pass it held there becomes unverified, so a
+// pass in the ledger is always its last selection's runner PASS. A scenario an adjudicator overrules is retired and never runs again,
 // so a wrong scenario cannot fail every later round.
 
 import type { RejectingPass } from "./events.js";
@@ -350,8 +351,9 @@ export function selectScenarios(
 }
 
 // The ledger after round `round` at `head`: each scenario the runner itself
-// reported PASS, FAIL or UNVERIFIED stands there, and every other one is as
-// it was.
+// reported PASS, FAIL or UNVERIFIED stands there; a pass the host settled
+// unverified is one no more, at the head it ran at; every other one is as it
+// was.
 export function advanceLedger(
   ledger: ScenarioLedger,
   head: string,
@@ -360,8 +362,12 @@ export function advanceLedger(
 ): ScenarioLedger {
   const next = new Map(ledger);
   for (const outcome of runnerOutcomes(runner)) {
-    if (outcome.outcome === "unverified" && outcome.reason !== "runner") continue;
-    next.set(outcome.id, { status: outcome.outcome, head, round });
+    const entry = next.get(outcome.id);
+    if (outcome.outcome !== "unverified" || outcome.reason === "runner") {
+      next.set(outcome.id, { status: outcome.outcome, head, round });
+    } else if (entry?.status === "pass") {
+      next.set(outcome.id, { ...entry, status: "unverified" });
+    }
   }
   return next;
 }

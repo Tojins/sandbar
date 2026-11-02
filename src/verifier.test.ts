@@ -359,7 +359,7 @@ describe("the scenario ledger (#239)", () => {
     ));
     expect(after).toEqual(new Map<string, LedgerEntry>([
       ["S1", { status: "pass", head: "h2", round: 2 }],
-      ["S4", { status: "pass", head: "h1", round: 1 }],
+      ["S4", { status: "unverified", head: "h1", round: 1 }],
       ["S5", { status: "retired" }],
       ["S2", { status: "fail", head: "h2", round: 2 }],
       ["S3", { status: "unverified", head: "h2", round: 2 }],
@@ -375,6 +375,25 @@ describe("the scenario ledger (#239)", () => {
     };
     expect(advanceLedger(before, "h2", 2, failed)).toEqual(before);
     expect(advanceLedger(before, "h2", 2, { kind: "wrote", detail: "x" })).toEqual(before);
+  });
+
+  it("takes back a pass whose rerun the host settled unverified, keeping its head", () => {
+    const before: ScenarioLedger = new Map<string, LedgerEntry>([
+      ["S1", { status: "pass", head: "h1", round: 1 }],
+      ["S2", { status: "pass", head: "h1", round: 1 }],
+    ]);
+    const failed: RunnerResult = {
+      kind: "failed",
+      outcomes: [{ id: "S1", outcome: "unverified", reason: "runner-failed" }],
+    };
+    const prepassed: RunnerResult = {
+      kind: "not-run",
+      prepass: [{ id: "S2", outcome: "unverified", reason: "app-hook-failed" }],
+    };
+    expect(advanceLedger(advanceLedger(before, "h2", 2, failed), "h2", 2, prepassed)).toEqual(new Map([
+      ["S1", { status: "unverified", head: "h1", round: 1 }],
+      ["S2", { status: "unverified", head: "h1", round: 1 }],
+    ]));
   });
 
   it("retires overruled scenarios for good", () => {
