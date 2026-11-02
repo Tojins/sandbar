@@ -17,8 +17,8 @@ const usesCodex = Object.entries(routing).some(
 );
 
 // The gate's test selection (#259 spec 8, #269): every non-test file of
-// `src/` is core's or some domain's. A sanity test stays under 500 ms in an
-// idle unit run and needs no podman (spec 7), a rule kept by hand.
+// `src/` is core's or some domain's. What a sanity test may cost is
+// AGENTS.md's rule (spec 7).
 const src = (...names) => names.map((name) => `src/${name}.ts`);
 const tests = (...names) => names.map((name) => `src/${name}.test.ts`);
 const coreModules = [
